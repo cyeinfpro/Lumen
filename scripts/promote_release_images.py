@@ -375,7 +375,37 @@ class GitHubReleaseSource:
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or result.returncode
             raise PromotionError(f"failed to list published GitHub releases: {detail}")
-        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        tags = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if tags:
+            return tags
+
+        # GitHub's REST release collection can transiently return an empty
+        # 200 response while its pagination metadata still advertises releases.
+        # The CLI release list uses GraphQL and avoids that stale REST edge cache.
+        fallback = self._command.run(
+            [
+                "release",
+                "list",
+                "--repo",
+                self._repository,
+                "--limit",
+                "1000",
+                "--json",
+                "tagName,isDraft",
+                "--jq",
+                ".[] | select(.isDraft == false) | .tagName",
+            ]
+        )
+        if fallback.returncode != 0:
+            detail = (
+                fallback.stderr.strip()
+                or fallback.stdout.strip()
+                or fallback.returncode
+            )
+            raise PromotionError(
+                f"failed to list published GitHub releases via fallback: {detail}"
+            )
+        return [line.strip() for line in fallback.stdout.splitlines() if line.strip()]
 
     def release_manifest_digests(self, tag: str) -> dict[str, str]:
         result = self._command.run(
