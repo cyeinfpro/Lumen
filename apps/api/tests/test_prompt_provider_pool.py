@@ -683,6 +683,8 @@ async def test_prompt_runtime_is_owned_and_drained_by_router_lifespan() -> None:
 def test_video_prompt_enhance_body_uses_media_content() -> None:
     from app.routes import prompts
 
+    assert prompts._ENHANCE_ATTEMPTS[0].model == "gpt-5.6-sol"  # noqa: SLF001
+
     content = [
         {"type": "input_text", "text": "视频提示词"},
         {"type": "input_image", "image_url": "https://example.com/ref.png"},
@@ -1266,7 +1268,7 @@ async def test_prompt_enhance_uses_legacy_env_when_providers_absent(
 
 
 @pytest.mark.asyncio
-async def test_prompt_enhance_falls_back_to_gpt54_low(
+async def test_prompt_enhance_falls_back_to_gpt56_terra_low(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.routes import prompts
@@ -1300,8 +1302,8 @@ async def test_prompt_enhance_falls_back_to_gpt54_low(
         'data: {"text": "better prompt"}\n\n',
         "data: [DONE]\n\n",
     ]
-    assert client.calls[0]["json"]["model"] == "gpt-5.5"
-    assert client.calls[1]["json"]["model"] == "gpt-5.4"
+    assert client.calls[0]["json"]["model"] == "gpt-5.6-sol"
+    assert client.calls[1]["json"]["model"] == "gpt-5.6-terra"
     assert client.calls[1]["json"]["reasoning"] == {"effort": "low"}
     assert client.calls[1]["json"]["service_tier"] == "priority"
 
@@ -1381,7 +1383,7 @@ async def test_prompt_enhance_fallback_can_drop_priority_tier(
         'data: {"text": "clean prompt"}\n\n',
         "data: [DONE]\n\n",
     ]
-    assert client.calls[2]["json"]["model"] == "gpt-5.4"
+    assert client.calls[2]["json"]["model"] == "gpt-5.5"
     assert client.calls[2]["json"]["reasoning"] == {"effort": "low"}
     assert "service_tier" not in client.calls[2]["json"]
 
@@ -1566,7 +1568,7 @@ async def test_prompt_enhance_retries_response_failed_before_text(
         'data: {"text": "fallback prompt"}\n\n',
         "data: [DONE]\n\n",
     ]
-    assert client.calls[1]["json"]["model"] == "gpt-5.4"
+    assert client.calls[1]["json"]["model"] == "gpt-5.6-terra"
 
 
 @pytest.mark.asyncio
@@ -3235,7 +3237,11 @@ async def test_prompt_enhance_billing_preauthorizes_before_stream(
     assert out is not None
     assert db.committed is True
     assert out.hold_amount_micro == 10_000
-    assert {item["model"] for item in calls["snapshots"]} == {"gpt-5.4", "gpt-5.5"}
+    assert {item["model"] for item in calls["snapshots"]} == {
+        "gpt-5.5",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+    }
     assert all(item["rate_multiplier_x10000"] == 10_000 for item in calls["breakdowns"])
     assert calls["hold"]["ref_type"] == "prompt_enhance"
     assert calls["hold"]["ref_id"] == out.request_id

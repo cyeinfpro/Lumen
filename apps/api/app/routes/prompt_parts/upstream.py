@@ -38,15 +38,15 @@ class EnhanceAttempt:
 
 
 ENHANCE_ATTEMPTS = (
-    EnhanceAttempt(name="primary", model="gpt-5.5", reasoning_effort="low"),
+    EnhanceAttempt(name="primary", model="gpt-5.6-sol", reasoning_effort="low"),
     EnhanceAttempt(
-        name="fallback-gpt-5.4-low",
-        model="gpt-5.4",
+        name="fallback-gpt-5.6-terra-low",
+        model="gpt-5.6-terra",
         reasoning_effort="low",
     ),
     EnhanceAttempt(
-        name="fallback-gpt-5.4-low-standard",
-        model="gpt-5.4",
+        name="fallback-gpt-5.5-low-standard",
+        model="gpt-5.5",
         reasoning_effort="low",
         service_tier=None,
     ),

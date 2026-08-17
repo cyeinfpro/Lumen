@@ -174,7 +174,7 @@ class PricingRulesUpdateIn(BaseModel):
 
 
 class PricingImportIn(BaseModel):
-    content: str = Field(min_length=1, max_length=100_000)
+    content: str = Field(default="", max_length=100_000)
     rate: float = Field(default=1.0, gt=0, le=100)
 
 

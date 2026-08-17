@@ -23,6 +23,10 @@ MODEL_INPUT_BUDGETS = immutable_mapping(
         "gpt-5.4": 200_000,
         "gpt-5.4-mini": 200_000,
         "gpt-5.5": 200_000,
+        "gpt-5.6-sol": 200_000,
+        "gpt-5.6-terra": 200_000,
+        "gpt-5.6-luna": 200_000,
+        "gpt-5.6": 200_000,
     }
 )
 
@@ -37,7 +41,7 @@ def get_input_budget(model_slug: str | None) -> int:
         return FALLBACK_INPUT_TOKEN_BUDGET
     if model_slug in MODEL_INPUT_BUDGETS:
         return MODEL_INPUT_BUDGETS[model_slug]
-    if model_slug.startswith(("gpt-5.4-", "gpt-5.5-")):
+    if model_slug.startswith(("gpt-5.4-", "gpt-5.5-", "gpt-5.6-")):
         return CONTEXT_INPUT_TOKEN_BUDGET
     return FALLBACK_INPUT_TOKEN_BUDGET
 

@@ -7,6 +7,7 @@ import hashlib
 import io
 import logging
 import math
+from pathlib import Path
 import warnings
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -173,6 +174,22 @@ def _inspect_generated_image_sync(raw_image: bytes) -> _GeneratedImageInspection
             height=pil.size[1],
             has_transparency=_image_has_transparency(pil),
         )
+
+
+def validate_generated_image_file_sync(
+    path: str | Path,
+    *,
+    expected_size: int | None = None,
+) -> None:
+    """Validate a staged upstream image without accepting metadata alone."""
+    image_path = Path(path)
+    actual_size = image_path.stat().st_size
+    if expected_size is not None and actual_size != int(expected_size):
+        raise ValueError(
+            f"staged image size does not match response metadata: "
+            f"{actual_size} != {expected_size}"
+        )
+    _inspect_generated_image_sync(image_path.read_bytes())
 
 
 def _compute_blurhash(img: PILImage.Image) -> str | None:

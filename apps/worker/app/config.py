@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     # 显式 fixed_size 走 lumen_core.sizing.validate_explicit_size 独立校验。
     upstream_pixel_budget: int = 1572864
     upstream_global_concurrency: int = 4
-    upstream_default_model: str = "gpt-5.5"
+    upstream_default_model: str = "gpt-5.6-sol"
     # 图像主路径偏好（覆盖 t2i + i2i），可被 system_settings 覆盖。
     image_primary_route: str = "responses"
     image_channel: str = Field(default="auto", alias="IMAGE_CHANNEL")

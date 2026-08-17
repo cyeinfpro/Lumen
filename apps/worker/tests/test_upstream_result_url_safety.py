@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 from typing import Any
 
 import pytest
+from PIL import Image as PILImage
 
 from app.upstream_parts import upstream_impl as upstream
 from app.upstream_parts import StagedImageFile, cleanup_owned_generated_payload
@@ -15,6 +17,12 @@ from lumen_core.url_security import (
 
 TEST_UPSTREAM_RUNTIME = upstream.build_image_upstream_runtime()
 TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
+
+
+def _png_bytes() -> bytes:
+    buffer = io.BytesIO()
+    PILImage.new("RGB", (4, 3), (20, 40, 60)).save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 @pytest.mark.asyncio
@@ -182,5 +190,78 @@ async def test_result_download_reports_final_redirect_http_status(
         )
 
     assert excinfo.value.status_code == 404
-    assert excinfo.value.error_code == "upstream_error"
+    assert excinfo.value.error_code == "no_image_returned"
     assert excinfo.value.payload["final_url"] == "https://cdn.example/missing.png"
+
+
+@pytest.mark.asyncio
+async def test_result_download_accepts_valid_image_body_with_soft_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = _png_bytes()
+
+    async def soft_missing(
+        url: str,
+        **kwargs: Any,
+    ) -> PublicHttpStagedDownload:
+        destination = kwargs["destination"]
+        destination.write_bytes(raw)
+        return PublicHttpStagedDownload(
+            url=url,
+            status_code=404,
+            headers={"content-type": "image/png"},
+            path=destination,
+            size=len(raw),
+            sha256=upstream.hashlib.sha256(raw).hexdigest(),
+        )
+
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.infrastructure,
+        "download_public_http_url_to_file",
+        soft_missing,
+    )
+
+    result = await TEST_UPSTREAM_SERVICES.direct.fetch_image_url_as_bytes(
+        "https://cdn.example/soft-404.png"
+    )
+
+    assert isinstance(result, StagedImageFile)
+    assert result.path.read_bytes() == raw
+    cleanup_owned_generated_payload(result)
+    assert not result.path.exists()
+
+
+@pytest.mark.asyncio
+async def test_result_download_rejects_soft_404_non_image_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = b'{"error":"not found"}'
+
+    async def soft_missing(
+        url: str,
+        **kwargs: Any,
+    ) -> PublicHttpStagedDownload:
+        destination = kwargs["destination"]
+        destination.write_bytes(raw)
+        return PublicHttpStagedDownload(
+            url=url,
+            status_code=404,
+            headers={"content-type": "image/png"},
+            path=destination,
+            size=len(raw),
+            sha256=upstream.hashlib.sha256(raw).hexdigest(),
+        )
+
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.infrastructure,
+        "download_public_http_url_to_file",
+        soft_missing,
+    )
+
+    with pytest.raises(upstream.UpstreamError) as excinfo:
+        await TEST_UPSTREAM_SERVICES.direct.fetch_image_url_as_bytes(
+            "https://cdn.example/soft-404.html"
+        )
+
+    assert excinfo.value.status_code == 404
+    assert excinfo.value.error_code == "no_image_returned"

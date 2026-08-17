@@ -313,8 +313,8 @@ export const SETTING_META: Record<string, SettingMeta> = {
     summary: "用户没有指定模型时，默认使用这个模型 ID。",
     kind: "model",
     icon: Bot,
-    defaultValue: "gpt-5.5",
-    recommended: "建议填写稳定可用的主模型。",
+    defaultValue: "gpt-5.6-sol",
+    recommended: "默认使用 GPT-5.6 Sol；供应商不支持时再改为兼容型号。",
     keywords: ["model", "default", "模型"],
   },
   [GENERATION_FAST_DEFAULT_KEY]: {
