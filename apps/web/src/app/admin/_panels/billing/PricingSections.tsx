@@ -654,7 +654,7 @@ export function ModelPricingSection({
         <div>
           <p className="type-card-title">对话模型定价</p>
           <p className="type-body-sm text-[var(--fg-2)]">
-            可直接编辑当前模型，也可以粘贴 OpenAI 价目批量导入。
+            可直接编辑当前模型；留空导入时使用内置 OpenAI 官方标准价目。
           </p>
         </div>
         <Button
@@ -678,7 +678,7 @@ export function ModelPricingSection({
             value={form.priceFile}
             onChange={(event) => form.setPriceFile(event.target.value)}
             rows={5}
-            placeholder="- model: gpt-5.5&#10;  input_usd_per_1m: 5.00&#10;  output_usd_per_1m: 15.00"
+            placeholder="- model: gpt-5.6-sol&#10;  input_usd_per_1m: 5.00&#10;  output_usd_per_1m: 30.00"
             className="w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] p-3 type-body-sm outline-none focus:border-[var(--accent)]/50"
           />
         </label>

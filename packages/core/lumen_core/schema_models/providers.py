@@ -338,7 +338,11 @@ class ApiSupplierTemplateIn(BaseModel):
         default_factory=_default_byok_purposes, min_length=1
     )
     validation_model: str = Field(default="gpt-5.4", min_length=1, max_length=64)
-    default_chat_model: str = Field(default="gpt-5.4", min_length=1, max_length=64)
+    default_chat_model: str = Field(
+        default="gpt-5.6-sol",
+        min_length=1,
+        max_length=64,
+    )
     # review #12：默认 None，由 admin 显式选填；不在 schema 写默认 image 模型，
     # 避免误把 chat-only supplier 当成支持 image 任务。
     default_image_model: str | None = Field(default=None, max_length=128)

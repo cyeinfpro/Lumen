@@ -352,9 +352,10 @@ EXPLICIT_ALIGN = 16
 # 上游模型标识（/v1/images/* 系列接口使用）
 UPSTREAM_MODEL = "gpt-image-2"
 # Chat / vision completion 默认模型（/v1/responses 系列接口使用）。
-DEFAULT_CHAT_MODEL = "gpt-5.5"
+DEFAULT_CHAT_MODEL = "gpt-5.6-sol"
 # 生图（/v1/responses + image_generation 工具）的 reasoning 主模型。
-# 聊天走 5.5，但图像链路实测 5.4 更稳；默认同时带 reasoning.effort=high 与 service_tier=priority。
+# 聊天走 5.6 Sol，但图像链路实测 5.4 更稳；默认同时带
+# reasoning.effort=high 与 service_tier=priority。
 DEFAULT_IMAGE_RESPONSES_MODEL = "gpt-5.4"
 DEFAULT_IMAGE_RESPONSES_MODEL_FAST = "gpt-5.4-mini"
 # 重试 backoff（秒）— DESIGN §6.4

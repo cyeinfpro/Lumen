@@ -20,6 +20,7 @@ from ..provider_runtime.upstream_services import (
     UpstreamServices,
     resolve_image_upstream_services,
 )
+from .. import image_artifacts
 from .delivery_evidence import transport_error_proves_undelivered
 from .direct_generation_responses import (
     DirectGenerationStreamCall,
@@ -245,11 +246,35 @@ async def _fetch_image_url_as_bytes(
         response_headers=response.headers,
     )
     if not 200 <= response.status_code < 300:
+        if response.status_code == 404 and response.size > 0:
+            try:
+                image_artifacts.validate_generated_image_file_sync(
+                    response.path,
+                    expected_size=response.size,
+                )
+            except (OSError, ValueError):
+                pass
+            else:
+                services.infrastructure.logger.warning(
+                    "image result accepted soft status status=%s bytes=%s trace_id=%s",
+                    response.status_code,
+                    response.size,
+                    context.trace_id,
+                )
+                return StagedImageFile(
+                    path=response.path,
+                    size=response.size,
+                    sha256=response.sha256,
+                    owned=True,
+                )
         destination.unlink(missing_ok=True)
         raise services.infrastructure.UpstreamError(
             f"image url download http {response.status_code}",
             status_code=response.status_code,
-            error_code=services.infrastructure.EC.UPSTREAM_ERROR.value,
+            # The Images POST already returned a response. A failed result URL
+            # is therefore terminal for this dispatch and must not trigger a
+            # second billable generation through the Responses fallback.
+            error_code=services.infrastructure.EC.NO_IMAGE_RETURNED.value,
             payload={
                 "url": image_url,
                 "final_url": response.url,

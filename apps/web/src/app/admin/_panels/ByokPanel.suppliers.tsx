@@ -372,7 +372,7 @@ function SupplierForm({
               hint="该供应商下用户对话的默认 model"
               value={draft.default_chat_model}
               onChange={(value) => set({ default_chat_model: value })}
-              placeholder="gpt-5.4"
+              placeholder="gpt-5.6-sol"
             />
             <FieldText
               label="快速对话模型"

@@ -37,6 +37,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert  # noqa: E402
 
 from lumen_core import billing as billing_core  # noqa: E402
 from lumen_core.models import PricingRule, new_uuid7  # noqa: E402
+from lumen_core.openai_pricing import openai_standard_price_rows  # noqa: E402
 
 
 def _parse_price_rows(content: str) -> list[dict[str, Any]]:
@@ -99,6 +100,8 @@ async def main_async(args: argparse.Namespace) -> int:
         return 2
     content = Path(args.file).read_text(encoding="utf-8")
     rows = _parse_price_rows(content)
+    if not rows:
+        rows = openai_standard_price_rows()
     values: list[dict[str, Any]] = []
     seen_keys: set[tuple[str, str]] = set()
     for row in rows:

@@ -208,7 +208,10 @@ class ApiSupplierTemplate(Base, TimestampMixin, SoftDeleteMixin):
         String(64), nullable=False, default="gpt-5.4", server_default="gpt-5.4"
     )
     default_chat_model: Mapped[str] = mapped_column(
-        String(64), nullable=False, default="gpt-5.4", server_default="gpt-5.4"
+        String(64),
+        nullable=False,
+        default="gpt-5.6-sol",
+        server_default="gpt-5.6-sol",
     )
     # review #12：image 任务用 default_chat_model 在 chat-only supplier 上会错配。
     # 显式独立列；nullable=True 因为并非所有 supplier 都支持 image 生成，

@@ -180,6 +180,7 @@ def test_get_input_budget_uses_tested_model_budget_and_conservative_fallback():
     assert get_input_budget("gpt-5.4") == CONTEXT_INPUT_TOKEN_BUDGET
     assert get_input_budget("gpt-5.4-mini") == CONTEXT_INPUT_TOKEN_BUDGET
     assert get_input_budget("gpt-5.5-2026-05-01") == CONTEXT_INPUT_TOKEN_BUDGET
+    assert get_input_budget("gpt-5.6-sol") == CONTEXT_INPUT_TOKEN_BUDGET
     assert get_input_budget("unknown-model") == FALLBACK_INPUT_TOKEN_BUDGET
     assert get_input_budget(None) == FALLBACK_INPUT_TOKEN_BUDGET
     assert FALLBACK_INPUT_TOKEN_BUDGET < CONTEXT_INPUT_TOKEN_BUDGET

@@ -199,10 +199,10 @@ export function SettingsPanel() {
     const defaultModel = effectiveValue(
       itemByKey.get("upstream.default_model"),
       ops["upstream.default_model"],
-      "gpt-5.5",
+      "gpt-5.6-sol",
     );
     return {
-      defaultModelLabel: defaultModel || "gpt-5.5",
+      defaultModelLabel: defaultModel || "gpt-5.6-sol",
       engineLabel: engineChoiceLabel(imageEngine),
       channelLabel:
         normalizeImageChannel(imageChannel) === "auto"

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
 from lumen_core.models import PricingRule, new_uuid7
+from lumen_core.openai_pricing import openai_standard_price_rows
 from lumen_core.schemas import (
     AdminPricingBulkIn,
     PricingImportIn,
@@ -292,6 +293,8 @@ async def admin_import_openai_pricing(
     services = build_billing_services()
     queries = services.queries
     rows = queries.parse_price_rows(body.content)
+    if not rows:
+        rows = openai_standard_price_rows()
     items = []
     for row in rows:
         model = str(row.get("model") or "").strip()
