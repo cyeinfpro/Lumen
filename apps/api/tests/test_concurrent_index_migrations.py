@@ -50,6 +50,7 @@ STORAGE_RETRY_REVISION = "0063_storage_apply_retry_fence"
 TELEGRAM_TERMINAL_GUARD_REVISION = "0064_tg_effect_terminal_guard"
 SEEDANCE_25_REVISION = "0065_seedance_25_defaults"
 SEEDANCE_DURATION_ONLINE_REVISION = "0066_seedance_duration_online"
+SEEDANCE_25_1080P_REVISION = "0067_seedance_25_1080p"
 
 
 @dataclass(frozen=True)
@@ -566,6 +567,7 @@ def test_repair_revision_remains_in_the_single_head_chain() -> None:
     telegram_terminal_guard = scripts.get_revision(TELEGRAM_TERMINAL_GUARD_REVISION)
     seedance_25 = scripts.get_revision(SEEDANCE_25_REVISION)
     seedance_duration_online = scripts.get_revision(SEEDANCE_DURATION_ONLINE_REVISION)
+    seedance_25_1080p = scripts.get_revision(SEEDANCE_25_1080P_REVISION)
 
     assert repair is not None
     assert repair.down_revision == "0056_outbox_due_index"
@@ -587,7 +589,9 @@ def test_repair_revision_remains_in_the_single_head_chain() -> None:
     assert seedance_25.down_revision == TELEGRAM_TERMINAL_GUARD_REVISION
     assert seedance_duration_online is not None
     assert seedance_duration_online.down_revision == SEEDANCE_25_REVISION
-    assert scripts.get_heads() == [SEEDANCE_DURATION_ONLINE_REVISION]
+    assert seedance_25_1080p is not None
+    assert seedance_25_1080p.down_revision == SEEDANCE_DURATION_ONLINE_REVISION
+    assert scripts.get_heads() == [SEEDANCE_25_1080P_REVISION]
 
 
 @pytest.mark.parametrize(
