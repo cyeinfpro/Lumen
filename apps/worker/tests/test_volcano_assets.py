@@ -352,7 +352,7 @@ async def test_worker_asset_quota_failure_is_retryable(
 
 
 @pytest.mark.asyncio
-async def test_worker_defers_when_actual_create_qpm_is_full(
+async def test_worker_queues_when_local_create_slot_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.tasks import volcano_asset_orchestrator as volcano_assets
@@ -401,7 +401,8 @@ async def test_worker_defers_when_actual_create_qpm_is_full(
     assert result["status"] == "deferred"
     stored = redis.operation()
     assert stored["status"] == "queued"
-    assert stored["progress_stage"] == "waiting_rate_limit"
+    assert stored["progress_stage"] == "waiting_submit_slot"
+    assert stored["error"]["code"] == "volcano_asset_create_queued"
     assert stored["retry_after_seconds"] == 5
     assert redis.enqueued
     assert released == []

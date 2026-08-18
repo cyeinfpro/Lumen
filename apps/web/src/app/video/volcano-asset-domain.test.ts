@@ -96,6 +96,14 @@ test("volcano operation stages explain automatic recovery", () => {
     domain.volcanoOperationStageMessage("recovery_queued"),
     "任务已由后台自愈接管",
   );
+  assert.equal(
+    domain.volcanoOperationStageMessage("waiting_submit_slot"),
+    "已进入火山提交队列，按额度自动发送",
+  );
+  assert.equal(
+    domain.volcanoOperationStageMessage("waiting_rate_limit"),
+    "火山上游限流，后台自动重试",
+  );
 });
 
 function uploadFixture(
