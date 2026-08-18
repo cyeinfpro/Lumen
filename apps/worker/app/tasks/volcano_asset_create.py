@@ -604,10 +604,12 @@ async def _wait_for_submit_slot(
             now_ms=int(time.time() * 1000),
         )
     except runtime.VolcanoAssetCreateRateLimited as exc:
-        await runtime._defer_for_rate_limit(
+        # This is local admission scheduling: CreateAsset has not been sent.
+        # Keep it distinct from an actual upstream HTTP 429.
+        await runtime._defer_for_submit_slot(
             state.persistence,
             state.operation,
-            exc,
+            retry_after_seconds=max(1, (exc.retry_after_ms + 999) // 1000),
         )
         state.deferred = True
         await _release_submit_lock(state)
