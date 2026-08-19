@@ -125,6 +125,12 @@ def decode_inline_image_base64(
     if len(raw) > max_encoded_chars:
         raise ValueError("inline image base64 exceeds size limit")
 
+    remainder = len(raw) % 4
+    if remainder == 1:
+        raise ValueError("inline image contains invalid base64")
+    if remainder:
+        raw += "=" * (4 - remainder)
+
     padding = len(raw) - len(raw.rstrip("="))
     estimated_size = (len(raw) // 4) * 3 - min(padding, 2)
     if estimated_size > max_bytes:

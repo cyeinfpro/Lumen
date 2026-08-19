@@ -48,6 +48,51 @@ class ExtractImageResults(Protocol):
     ) -> list[ImageResult]: ...
 
 
+async def _image_payload_from_url(
+    image_url: str,
+    *,
+    status_code: int,
+    payload: dict[str, Any],
+    fetch_image_url_as_bytes: FetchImageUrlPayload,
+    upstream_error_type: UpstreamErrorType,
+    bad_response_error_code: str,
+    proxy_url: str | None,
+    max_image_bytes: int,
+    allowed_http_result_hosts: Collection[str],
+) -> GeneratedPayload:
+    if image_url.lstrip()[:5].lower() == "data:":
+        try:
+            return decode_inline_image_base64(
+                image_url,
+                max_bytes=max_image_bytes,
+            )
+        except (TypeError, ValueError) as exc:
+            raise upstream_error_type(
+                f"upstream returned invalid image data URL: {exc}",
+                status_code=status_code,
+                error_code=bad_response_error_code,
+                payload=payload,
+            ) from exc
+
+    try:
+        validate_remote_image_url(
+            image_url,
+            allowed_http_hosts=allowed_http_result_hosts,
+        )
+    except ValueError as exc:
+        raise upstream_error_type(
+            f"upstream returned unsafe image URL: {exc}",
+            status_code=status_code,
+            error_code=bad_response_error_code,
+            payload=payload,
+        ) from exc
+    downloaded = await fetch_image_url_as_bytes(
+        image_url,
+        proxy_url=proxy_url,
+    )
+    return coerce_generated_payload(downloaded)
+
+
 async def _extract_image_results(
     payload: Any,
     status_code: int,
@@ -104,23 +149,17 @@ async def _extract_image_results(
             image_url = item.get("url")
             if not isinstance(image_url, str) or not image_url:
                 continue
-            try:
-                validate_remote_image_url(
-                    image_url,
-                    allowed_http_hosts=allowed_http_result_hosts,
-                )
-            except ValueError as exc:
-                raise upstream_error_type(
-                    f"upstream returned unsafe image URL: {exc}",
-                    status_code=status_code,
-                    error_code=bad_response_error_code,
-                    payload=payload,
-                ) from exc
-            downloaded = await fetch_image_url_as_bytes(
+            image_payload = await _image_payload_from_url(
                 image_url,
+                status_code=status_code,
+                payload=payload,
+                fetch_image_url_as_bytes=fetch_image_url_as_bytes,
+                upstream_error_type=upstream_error_type,
+                bad_response_error_code=bad_response_error_code,
                 proxy_url=proxy_url,
+                max_image_bytes=max_image_bytes,
+                allowed_http_result_hosts=allowed_http_result_hosts,
             )
-            image_payload = coerce_generated_payload(downloaded)
 
         payload_bytes = generated_payload_size(image_payload)
         if payload_bytes is not None:

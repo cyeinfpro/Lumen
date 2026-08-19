@@ -104,8 +104,30 @@ def test_inline_base64_is_decoded_to_bytes_with_data_url_and_whitespace() -> Non
     assert payload == InlineImageBytes(b"decoded-image")
 
 
+@pytest.mark.parametrize("raw", [b"a", b"ab"])
+def test_inline_base64_repairs_missing_trailing_padding(raw: bytes) -> None:
+    encoded = base64.b64encode(raw).decode("ascii").rstrip("=")
+
+    assert decode_inline_image_base64(encoded) == InlineImageBytes(raw)
+
+
+def test_inline_base64_rejects_unrecoverable_length_and_invalid_characters() -> None:
+    with pytest.raises(ValueError, match="invalid base64"):
+        decode_inline_image_base64("A")
+
+    with pytest.raises(ValueError, match="invalid base64"):
+        decode_inline_image_base64("YWJ!")
+
+
 def test_inline_base64_rejects_estimated_output_over_limit() -> None:
     encoded = base64.b64encode(b"12345").decode("ascii")
+
+    with pytest.raises(ValueError, match="size limit"):
+        decode_inline_image_base64(encoded, max_bytes=4)
+
+
+def test_unpadded_inline_base64_still_enforces_decoded_size_limit() -> None:
+    encoded = base64.b64encode(b"12345").decode("ascii").rstrip("=")
 
     with pytest.raises(ValueError, match="size limit"):
         decode_inline_image_base64(encoded, max_bytes=4)
