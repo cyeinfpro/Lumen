@@ -74,6 +74,36 @@ async def test_extract_image_results_accepts_all_b64_results() -> None:
 
 
 @pytest.mark.asyncio
+async def test_extract_image_results_accepts_unpadded_b64_result() -> None:
+    raw = b"image-with-pad"
+    padded = base64.b64encode(raw).decode("ascii")
+    assert padded.endswith("=")
+
+    assert await direct_images._extract_image_results(
+        {"data": [{"b64_json": padded.rstrip("=")}]},
+        200,
+        fetch_image_url_as_bytes=_unexpected_fetch,
+        upstream_error_type=InjectedUpstreamError,
+        bad_response_error_code="bad-response",
+        no_image_returned_error_code="no-image",
+    ) == [(InlineImageBytes(raw), None)]
+
+
+@pytest.mark.asyncio
+async def test_extract_image_results_accepts_inline_data_url_in_url_field() -> None:
+    encoded = base64.b64encode(b"inline-url-image").decode("ascii").rstrip("=")
+
+    assert await direct_images._extract_image_results(
+        {"data": [{"url": f"  data:image/png;base64,{encoded}  "}]},
+        200,
+        fetch_image_url_as_bytes=_unexpected_fetch,
+        upstream_error_type=InjectedUpstreamError,
+        bad_response_error_code="bad-response",
+        no_image_returned_error_code="no-image",
+    ) == [(InlineImageBytes(b"inline-url-image"), None)]
+
+
+@pytest.mark.asyncio
 async def test_extract_image_results_downloads_urls_with_injected_fetcher() -> None:
     seen: list[tuple[str, str | None]] = []
 
@@ -160,6 +190,22 @@ async def test_extract_image_results_rejects_invalid_inline_base64() -> None:
 
     assert exc_info.value.error_code == "bad-response"
     assert "invalid image base64" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_extract_image_results_rejects_invalid_inline_data_url() -> None:
+    with pytest.raises(InjectedUpstreamError) as exc_info:
+        await direct_images._extract_image_results(
+            {"data": [{"url": "data:image/png;base64,not-valid-base64!"}]},
+            200,
+            fetch_image_url_as_bytes=_unexpected_fetch,
+            upstream_error_type=InjectedUpstreamError,
+            bad_response_error_code="bad-response",
+            no_image_returned_error_code="no-image",
+        )
+
+    assert exc_info.value.error_code == "bad-response"
+    assert "invalid image data URL" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
