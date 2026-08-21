@@ -35,19 +35,7 @@ class AddImageOutputOptions(Protocol):
     ) -> None: ...
 
 
-class TransparentMatteUpstreamOptions(Protocol):
-    def __call__(
-        self,
-        *,
-        prompt: str,
-        output_format: str | None,
-        background: str | None,
-    ) -> tuple[str, str | None, str | None]: ...
-
-
 NormalizeImageString = Callable[[str | None], str]
-IsTransparentImageRequest = Callable[[str | None], bool]
-AppendTransparentMattePrompt = Callable[[str], str]
 StableSortTools = Callable[[list[Any]], list[Any]]
 NormalizeReferenceImage = Callable[[bytes], tuple[bytes, str]]
 ApplyRetryCacheBusters = Callable[[dict[str, Any], int, str, str], None]
@@ -83,7 +71,6 @@ class ImageRequestPolicy:
     default_image_output_compression: int
     default_image_background: str
     default_image_moderation: str
-    transparent_matte_prompt_note: str
     partial_images_max_pixels: int
     image_job_retention_days: int
 
@@ -97,14 +84,7 @@ class ImageOutputOptionsHooks:
 
 
 @dataclass(frozen=True)
-class TransparentMatteHooks:
-    is_transparent_image_request: IsTransparentImageRequest
-    append_transparent_matte_prompt: AppendTransparentMattePrompt
-
-
-@dataclass(frozen=True)
 class ImageJobBodyHooks:
-    transparent_matte_upstream_options: TransparentMatteUpstreamOptions
     normalize_image_quality: NormalizeImageString
     add_image_output_options: AddImageOutputOptions
 
@@ -112,7 +92,6 @@ class ImageJobBodyHooks:
 @dataclass(frozen=True)
 class ResponsesImageBodyHooks:
     normalize_image_quality: NormalizeImageString
-    transparent_matte_upstream_options: TransparentMatteUpstreamOptions
     add_image_output_options: AddImageOutputOptions
     parse_size_pixels: ParseSizePixels
     normalize_reference_image: NormalizeReferenceImage
@@ -338,7 +317,7 @@ def _add_image_output_options(
 ) -> None:
     bg = hooks.normalize_image_background(background)
     fmt = hooks.normalize_image_output_format(output_format)
-    if bg == "transparent":
+    if bg == "transparent" and fmt == "jpeg":
         fmt = "png"
     body["output_format"] = fmt
     compression = hooks.normalize_image_output_compression(
@@ -349,44 +328,6 @@ def _add_image_output_options(
         body["output_compression"] = compression
     body["background"] = bg
     body["moderation"] = hooks.normalize_image_moderation(moderation)
-
-
-def _is_transparent_image_request(
-    background: str | None,
-    *,
-    normalize_image_background: NormalizeImageString,
-) -> bool:
-    return normalize_image_background(background) == "transparent"
-
-
-def _append_transparent_matte_prompt(
-    prompt: str,
-    *,
-    policy: ImageRequestPolicy,
-) -> str:
-    prompt_stripped = prompt.rstrip()
-    note = policy.transparent_matte_prompt_note
-    if note in prompt_stripped:
-        return prompt_stripped
-    if not prompt_stripped:
-        return note
-    return f"{prompt_stripped}\n\n{note}"
-
-
-def _transparent_matte_upstream_options(
-    *,
-    prompt: str,
-    output_format: str | None,
-    background: str | None,
-    hooks: TransparentMatteHooks,
-) -> tuple[str, str | None, str | None]:
-    if not hooks.is_transparent_image_request(background):
-        return prompt, output_format, background
-    return (
-        hooks.append_transparent_matte_prompt(prompt),
-        "png",
-        "opaque",
-    )
 
 
 def _stable_sort_tools(tools: list[Any]) -> list[Any]:
@@ -425,25 +366,18 @@ def _image_job_body_base(
     hooks: ImageJobBodyHooks,
 ) -> dict[str, Any]:
     assert policy.upstream_model, "model must be set"
-    prompt_for_upstream, output_format_for_upstream, background_for_upstream = (
-        hooks.transparent_matte_upstream_options(
-            prompt=prompt,
-            output_format=output_format,
-            background=background,
-        )
-    )
     body: dict[str, Any] = {
         "model": policy.upstream_model,
-        "prompt": prompt_for_upstream,
+        "prompt": prompt,
         "size": size,
         "quality": hooks.normalize_image_quality(quality),
         "n": n,
     }
     hooks.add_image_output_options(
         body,
-        output_format=output_format_for_upstream,
+        output_format=output_format,
         output_compression=output_compression,
-        background=background_for_upstream,
+        background=background,
         moderation=moderation,
     )
     return body
@@ -478,13 +412,6 @@ def _build_responses_image_body(
     image_model = request.model or policy.default_responses_model
     assert image_model, "model must be set"
     image_quality = hooks.normalize_image_quality(request.quality)
-    prompt_for_upstream, output_format_for_upstream, background_for_upstream = (
-        hooks.transparent_matte_upstream_options(
-            prompt=request.prompt,
-            output_format=request.output_format,
-            background=request.background,
-        )
-    )
     tool: dict[str, Any] = {
         "type": "image_generation",
         "model": policy.upstream_model,
@@ -494,9 +421,9 @@ def _build_responses_image_body(
     }
     hooks.add_image_output_options(
         tool,
-        output_format=output_format_for_upstream,
+        output_format=request.output_format,
         output_compression=request.output_compression,
-        background=background_for_upstream,
+        background=request.background,
         moderation=request.moderation,
     )
     pixels = hooks.parse_size_pixels(request.size)
@@ -508,7 +435,7 @@ def _build_responses_image_body(
         tool["partial_images"] = 3
 
     content: list[dict[str, Any]] = [
-        {"type": "input_text", "text": prompt_for_upstream}
+        {"type": "input_text", "text": request.prompt}
     ]
     if request.action == "edit":
         if request.image_urls:

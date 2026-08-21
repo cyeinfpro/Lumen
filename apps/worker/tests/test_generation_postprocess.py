@@ -11,9 +11,6 @@ from typing import Any
 import pytest
 from PIL import Image as PILImage
 
-from lumen_core.constants import GenerationErrorCode as EC
-
-from app.background_removal import TransparentPipelineFailure
 from app.provider_runtime.errors import UpstreamError
 from app.tasks.generation_parts import composition_support as support
 from app.tasks.generation_parts import image_artifact_contracts as artifacts
@@ -53,8 +50,6 @@ async def test_postprocess_generated_image_inline_builds_variants() -> None:
 
     result = await support.postprocess_raw_generated_image(
         raw,
-        prompt="test image",
-        transparent_requested=False,
         mode="inline",
         runtime=postprocess_runtime,
     )
@@ -78,8 +73,6 @@ async def test_postprocess_generated_image_rejects_invalid_bytes() -> None:
     with pytest.raises(UpstreamError, match="pillow could not decode"):
         await support.postprocess_raw_generated_image(
             b"not an image",
-            prompt="bad",
-            transparent_requested=False,
             mode="inline",
             runtime=postprocess_runtime,
         )
@@ -332,19 +325,8 @@ async def test_raw_postprocess_uses_late_bound_support_hooks(
         thumb=variants.thumb,
     )
 
-    def inspect(
-        _raw_image: bytes,
-    ) -> artifacts.GeneratedImageInspection:
-        return artifacts.GeneratedImageInspection("PNG", 1, 1, False)
-
     def sha256(_raw_image: bytes) -> str:
         return "sha"
-
-    async def transparent_request(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("transparent hook should not run by support probe")
-
-    def sanitize(payload: dict[str, Any]) -> dict[str, Any]:
-        return payload
 
     async def process_variants(
         _raw_image: bytes,
@@ -364,20 +346,12 @@ async def test_raw_postprocess_uses_late_bound_support_hooks(
     async def extracted(
         raw_image: bytes,
         *,
-        prompt: str,
-        transparent_requested: bool,
         mode: str | None,
         hooks: postprocess.GeneratedImagePostprocessHooks,
     ) -> artifacts.PostprocessedGeneratedImage:
         assert raw_image == raw
-        assert prompt == "prompt"
-        assert transparent_requested is True
         assert mode == "inline"
-        assert hooks.inspect_generated_image_sync is inspect
         assert hooks.sha256 is sha256
-        assert hooks.process_transparent_request is transparent_request
-        assert hooks.transparent_pipeline_failure_type is TransparentPipelineFailure
-        assert hooks.sanitize_transparent_qc_payload is sanitize
         variant_result, variant_mode = await hooks.postprocess_image_variants(
             raw_image,
             mode=mode,
@@ -386,25 +360,9 @@ async def test_raw_postprocess_uses_late_bound_support_hooks(
         assert variant_mode == "inline"
         assert hooks.compute_blurhash is compute_blurhash
         assert hooks.image_decode_upstream_error is decode_error
-        assert hooks.upstream_error_type is UpstreamError
-        assert hooks.bad_response_error_code == EC.BAD_RESPONSE.value
-        assert (
-            hooks.generated_image_inspection_type is artifacts.GeneratedImageInspection
-        )
         return expected
 
-    monkeypatch.setattr(support.artifacts, "inspect_generated_image_sync", inspect)
     monkeypatch.setattr(support.artifacts, "sha256", sha256)
-    monkeypatch.setattr(
-        support,
-        "process_transparent_request",
-        transparent_request,
-    )
-    monkeypatch.setattr(
-        support,
-        "sanitize_transparent_qc_payload",
-        sanitize,
-    )
     monkeypatch.setattr(
         support,
         "postprocess_image_variants",
@@ -416,8 +374,6 @@ async def test_raw_postprocess_uses_late_bound_support_hooks(
 
     result = await support.postprocess_raw_generated_image(
         raw,
-        prompt="prompt",
-        transparent_requested=True,
         mode="inline",
         runtime=postprocess_runtime,
     )

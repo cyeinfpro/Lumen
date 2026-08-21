@@ -135,7 +135,6 @@ def request_provider(upstream_request: dict[str, Any] | None) -> str | None:
         "provider",
         "upstream_provider",
         "selected_provider",
-        "transparent_pipeline_provider",
     ):
         provider = json_str(upstream_request, key)
         if provider and provider not in {"dual_race", "dual_race_bonus"}:
@@ -434,8 +433,6 @@ def safe_upstream_details(upstream_request: dict[str, Any] | None) -> dict[str, 
         "size_bucket",
         "cost_class",
         "source",
-        "transparent_alpha_recovered",
-        "transparent_pipeline_provider",
         "upstream_route",
         "web_search",
         "workflow_step_key",

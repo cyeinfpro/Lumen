@@ -246,8 +246,8 @@ def test_image_params_support_render_and_output_options():
     )
 
     assert params.render_quality == "medium"
-    assert params.output_format == "png"
-    assert params.output_compression is None
+    assert params.output_format == "webp"
+    assert params.output_compression == 88
     assert params.background == "transparent"
     assert params.moderation == "low"
     assert ImageParamsIn().quality == "4k"
@@ -257,6 +257,13 @@ def test_image_params_support_render_and_output_options():
     assert ImageParamsIn(count=10).count == 10
     assert ImageParamsIn().output_format is None
     assert ImageParamsIn().fast is None
+    jpeg_transparent = ImageParamsIn(
+        output_format="jpeg",
+        output_compression=88,
+        background="transparent",
+    )
+    assert jpeg_transparent.output_format == "png"
+    assert jpeg_transparent.output_compression is None
 
     for kwargs in (
         {"background": "checkerboard"},

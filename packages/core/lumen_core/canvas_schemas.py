@@ -164,7 +164,7 @@ class ImageGenerateNodeConfig(_StrictModel):
 
     @model_validator(mode="after")
     def normalize_transparent_output(self) -> "ImageGenerateNodeConfig":
-        if self.background == "transparent":
+        if self.background == "transparent" and self.output_format == "jpeg":
             self.output_format = "png"
             self.output_compression = None
         return self

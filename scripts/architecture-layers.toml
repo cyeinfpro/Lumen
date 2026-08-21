@@ -43,7 +43,6 @@ name = "worker-lower-to-tasks"
 package = "worker"
 sources = [
   "app.services",
-  "app.background_removal",
   "app.upstream_parts",
   "app.video_upstream_parts",
   "app.upstream_clients",

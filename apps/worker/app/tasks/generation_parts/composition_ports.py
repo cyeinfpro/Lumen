@@ -537,8 +537,6 @@ class DefaultGenerationProvider:
         self,
         raw_image: bytes,
         *,
-        prompt: str,
-        transparent_requested: bool,
         mode: str | None = None,
     ) -> PostprocessedGeneratedImage:
         from .composition_support import postprocess_raw_generated_image
@@ -549,8 +547,6 @@ class DefaultGenerationProvider:
             raise TypeError("invalid image postprocess runtime")
         return await postprocess_raw_generated_image(
             raw_image,
-            prompt=prompt,
-            transparent_requested=transparent_requested,
             mode=mode,
             runtime=runtime,
         )

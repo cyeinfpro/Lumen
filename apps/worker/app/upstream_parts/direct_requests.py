@@ -542,25 +542,18 @@ async def _direct_generate_image_once(
     # Model 显式 pin：UPSTREAM_MODEL 来自 lumen_core.constants（lumen-core wheel 里固化）。
     # 加 runtime assert 防止未来改动把 model 字段隐式置空 / fallback 到上游默认。
     assert services.infrastructure.UPSTREAM_MODEL, "model must be set"
-    prompt_for_upstream, output_format_for_upstream, background_for_upstream = (
-        services.core.transparent_matte_upstream_options(
-            prompt=prompt,
-            output_format=output_format,
-            background=background,
-        )
-    )
     body: dict[str, Any] = {
         "model": services.infrastructure.UPSTREAM_MODEL,
-        "prompt": prompt_for_upstream,
+        "prompt": prompt,
         "size": size,
         "n": n,
         "quality": services.core.normalize_image_quality(quality),
     }
     services.core.add_image_output_options(
         body,
-        output_format=output_format_for_upstream,
+        output_format=output_format,
         output_compression=output_compression,
-        background=background_for_upstream,
+        background=background,
         moderation=moderation,
     )
     if streaming_override:
@@ -739,15 +732,10 @@ async def _direct_edit_image_once(
     context = ensure_image_request_context(request.request_context)
     url = services.requests.image_edits_url(base_url_override)
     assert services.infrastructure.UPSTREAM_MODEL, "model must be set"
-    prompt_for_upstream, output_format_for_upstream, background_for_upstream = (
-        services.core.transparent_matte_upstream_options(
-            prompt=prompt,
-            output_format=output_format,
-            background=background,
-        )
-    )
-    bg = services.core.normalize_image_background(background_for_upstream)
-    fmt = services.core.normalize_image_output_format(output_format_for_upstream)
+    bg = services.core.normalize_image_background(background)
+    fmt = services.core.normalize_image_output_format(output_format)
+    if bg == "transparent" and fmt == "jpeg":
+        fmt = "png"
     compression = services.core.normalize_image_output_compression(
         output_compression, output_format=fmt
     )
@@ -756,7 +744,7 @@ async def _direct_edit_image_once(
 
     data: dict[str, str] = {
         "model": services.infrastructure.UPSTREAM_MODEL,
-        "prompt": prompt_for_upstream,
+        "prompt": prompt,
         "size": size,
         "n": str(n),
         "quality": quality_normalized,

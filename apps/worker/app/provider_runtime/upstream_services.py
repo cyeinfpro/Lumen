@@ -51,8 +51,7 @@ _CORE_BINDING_NAMES = tuple(
     REFERENCE_CACHE_MAX_ENTRIES REFERENCE_CACHE_TTL_S REFERENCE_PUSH_TIMEOUT_S
     RETRY_HTTPX_EXC RETRY_STATUS SAFETY_POLICY_ERROR_MARKERS SSE_MAX_BYTES
     SSE_MAX_LINES SSE_MAX_LINE_BYTES TEXT_STREAM_INTERRUPTED_ERROR_CODE
-    TRANSPARENT_MATTE_PROMPT_NOTE add_image_output_options
-    append_transparent_matte_prompt apply_retry_cache_busters
+    add_image_output_options apply_retry_cache_busters
     attach_image_idempotency_key auth_headers b64_value_if_str client
     client_timeout_config configure_pil_max_image_pixels
     extract_image_b64_from_payload extract_image_billable_count
@@ -60,7 +59,7 @@ _CORE_BINDING_NAMES = tuple(
     extract_response_revised_prompt has_explicit_image_dispatch_setting
     image_file_fingerprints image_idempotency_key image_request_policy
     images_client images_client_timeout_config generate_trace_id
-    is_transparent_image_request is_responses_error_terminal
+    is_responses_error_terminal
     is_responses_success_terminal json_dumps_stable log_upstream_call
     normalize_image_background normalize_image_moderation
     normalize_image_output_compression normalize_image_output_format
@@ -69,7 +68,7 @@ _CORE_BINDING_NAMES = tuple(
     record_usage resolve_image_channel resolve_image_engine
     resolve_legacy_image_primary_route resolve_runtime runtime_parts
     runtime_provider_name stable_sort_tools summarize_upstream_error_detail
-    transparent_matte_upstream_options validate_responses_body
+    validate_responses_body
     with_error_context resolve_db resolve_image_primary_route responses_call
     tempfile
     """.split()
@@ -116,18 +115,18 @@ _MODULE_BINDINGS = (
 _RUNTIME_BINDINGS = MappingProxyType({
     "core": tuple(
         """
-        add_image_output_options append_transparent_matte_prompt
-        apply_retry_cache_busters attach_image_idempotency_key auth_headers
+        add_image_output_options apply_retry_cache_busters
+        attach_image_idempotency_key auth_headers
         b64_value_if_str extract_image_b64_from_payload
         extract_image_billable_count extract_image_result extract_image_results
         extract_response_image_b64 extract_response_revised_prompt
         has_explicit_image_dispatch_setting image_file_fingerprints
-        image_idempotency_key image_request_policy is_transparent_image_request
+        image_idempotency_key image_request_policy
         json_dumps_stable normalize_image_background normalize_image_moderation
         normalize_image_output_compression normalize_image_output_format
         normalize_image_quality resolve_image_channel resolve_image_engine
         resolve_image_primary_route resolve_legacy_image_primary_route
-        responses_call transparent_matte_upstream_options
+        responses_call
         """.split()
     ),
     "direct": tuple(
@@ -209,7 +208,6 @@ _RUNTIME_BINDINGS = MappingProxyType({
 
 _REQUEST_SERVICE_EXPORTS = (
     "add_image_output_options",
-    "append_transparent_matte_prompt",
     "apply_retry_cache_busters",
     "attach_image_idempotency_key",
     "build_responses_image_body",
@@ -217,7 +215,6 @@ _REQUEST_SERVICE_EXPORTS = (
     "image_idempotency_key",
     "image_job_body_base",
     "image_job_payload",
-    "is_transparent_image_request",
     "json_dumps_stable",
     "normalize_image_background",
     "normalize_image_moderation",
@@ -225,7 +222,6 @@ _REQUEST_SERVICE_EXPORTS = (
     "normalize_image_output_format",
     "normalize_image_quality",
     "parse_size_pixels",
-    "transparent_matte_upstream_options",
     "wrap_inpaint_prompt",
 )
 

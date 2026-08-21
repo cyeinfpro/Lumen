@@ -65,11 +65,9 @@ def image_request_policy(
         default_image_output_compression=core.DEFAULT_IMAGE_OUTPUT_COMPRESSION,
         default_image_background=core.DEFAULT_IMAGE_BACKGROUND,
         default_image_moderation=core.DEFAULT_IMAGE_MODERATION,
-        transparent_matte_prompt_note=core.TRANSPARENT_MATTE_PROMPT_NOTE,
         partial_images_max_pixels=core.PARTIAL_IMAGES_MAX_PIXELS,
         image_job_retention_days=core.IMAGE_JOB_RETENTION_DAYS,
     )
-
 
 def normalize_image_quality(
     value: str | None,
@@ -156,50 +154,5 @@ def add_image_output_options(
                 services.core.normalize_image_output_compression
             ),
             normalize_image_moderation=services.core.normalize_image_moderation,
-        ),
-    )
-
-
-def is_transparent_image_request(
-    background: str | None,
-    *,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> bool:
-    services = runtime_services(runtime)
-    return services.requests.is_transparent_image_request(
-        background,
-        normalize_image_background=services.core.normalize_image_background,
-    )
-
-
-def append_transparent_matte_prompt(
-    prompt: str,
-    *,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> str:
-    services = runtime_services(runtime)
-    return services.requests.append_transparent_matte_prompt(
-        prompt,
-        policy=services.core.image_request_policy(),
-    )
-
-
-def transparent_matte_upstream_options(
-    *,
-    prompt: str,
-    output_format: str | None,
-    background: str | None,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> tuple[str, str | None, str | None]:
-    services = runtime_services(runtime)
-    return services.requests.transparent_matte_upstream_options(
-        prompt=prompt,
-        output_format=output_format,
-        background=background,
-        hooks=upstream_image_requests.TransparentMatteHooks(
-            is_transparent_image_request=(services.core.is_transparent_image_request),
-            append_transparent_matte_prompt=(
-                services.core.append_transparent_matte_prompt
-            ),
         ),
     )

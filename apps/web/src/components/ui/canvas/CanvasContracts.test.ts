@@ -295,6 +295,7 @@ test("canvas video auto selection aggregates compatible capabilities", () => {
 });
 
 test("canvas media and text editors preserve shared limits and fallbacks", () => {
+  match(nodeConfigEditorSource, /value === "jpeg"/);
   match(nodeConfigEditorSource, /output_format: value, background: "opaque"/);
   match(nodeConfigEditorSource, /CANVAS_NOTE_MAX_CHARS/);
   match(nodesSource, /CANVAS_NOTE_MAX_CHARS/);

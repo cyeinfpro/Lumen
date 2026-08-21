@@ -170,7 +170,7 @@ function ImageOutputParameters({
         label="背景"
         value={String(node.config.background ?? "auto")}
         options={IMAGE_BACKGROUND_OPTIONS}
-        onChange={(value) => patch(imageBackgroundPatch(value))}
+        onChange={(value) => patch(imageBackgroundPatch(value, outputFormat))}
       />
       {outputFormat === "png" ? null : (
         <ImageCompressionControls compression={compression} patch={patch} />
@@ -237,8 +237,14 @@ function numericConfigValue(value: unknown): number | null {
   return typeof value === "number" ? value : null;
 }
 
-function imageBackgroundPatch(value: string): Record<string, unknown> {
+function imageBackgroundPatch(
+  value: string,
+  outputFormat: string,
+): Record<string, unknown> {
   if (value === "transparent") {
+    if (outputFormat !== "jpeg") {
+      return { background: value };
+    }
     return {
       background: value,
       output_format: "png",

@@ -80,9 +80,6 @@ class BonusImageArtifact:
     preview_size: tuple[int, int]
     thumb_bytes: bytes
     thumb_size: tuple[int, int]
-    transparent_alpha_recovered: bool
-    transparent_qc_payload: dict[str, Any] | None
-    transparent_provider: str | None
     image_metadata: dict[str, Any]
     billing_meta: dict[str, Any]
     key_orig: str
@@ -147,13 +144,7 @@ async def _postprocess_bonus_image(
     raw_image: bytes,
 ) -> Any | None:
     try:
-        return await context.services.provider.postprocess(
-            raw_image,
-            prompt=context.prompt,
-            transparent_requested=(
-                context.image_request_options.get("background") == "transparent"
-            ),
-        )
+        return await context.services.provider.postprocess(raw_image)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "%s pillow decode failed parent=%s err=%r",
@@ -227,9 +218,6 @@ def _build_bonus_artifact(
         preview_size=processed.preview.size,
         thumb_bytes=processed.thumb.bytes,
         thumb_size=processed.thumb.size,
-        transparent_alpha_recovered=processed.transparent_alpha_recovered,
-        transparent_qc_payload=processed.transparent_qc_payload,
-        transparent_provider=processed.transparent_provider,
         image_metadata={**model_metadata, **billing_meta},
         billing_meta=billing_meta,
         key_orig=(f"u/{context.user_id}/g/{bonus_generation_id}/orig.{extension}"),

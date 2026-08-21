@@ -18,16 +18,11 @@ from lumen_core.constants import (
     GenerationErrorCode as EC,
 )
 
-from ...background_removal import (
-    TransparentPipelineFailure,
-    process_transparent_request,
-)
 from ...provider_runtime.errors import UpstreamError
 from ...provider_runtime.upstream_services import ImageUpstreamRuntime
 from . import image_artifact_contracts as artifacts
 from . import postprocess
 from . import references
-from .retry_state import sanitize_transparent_qc_payload
 from .runtime import ImagePostprocessRuntime
 
 
@@ -125,22 +120,14 @@ def image_decode_upstream_error(exc: Exception) -> UpstreamError:
 async def postprocess_raw_generated_image(
     raw_image: bytes,
     *,
-    prompt: str,
-    transparent_requested: bool,
     mode: str | None = None,
     runtime: ImagePostprocessRuntime,
 ) -> artifacts.PostprocessedGeneratedImage:
     return await postprocess._postprocess_raw_generated_image(
         raw_image,
-        prompt=prompt,
-        transparent_requested=transparent_requested,
         mode=mode,
         hooks=postprocess.GeneratedImagePostprocessHooks(
-            inspect_generated_image_sync=artifacts.inspect_generated_image_sync,
             sha256=artifacts.sha256,
-            process_transparent_request=process_transparent_request,
-            transparent_pipeline_failure_type=TransparentPipelineFailure,
-            sanitize_transparent_qc_payload=sanitize_transparent_qc_payload,
             postprocess_image_variants=lambda image, *, mode=None: (
                 postprocess_image_variants(
                     image,
@@ -150,9 +137,6 @@ async def postprocess_raw_generated_image(
             ),
             compute_blurhash=artifacts.compute_blurhash,
             image_decode_upstream_error=image_decode_upstream_error,
-            upstream_error_type=UpstreamError,
-            bad_response_error_code=EC.BAD_RESPONSE.value,
-            generated_image_inspection_type=artifacts.GeneratedImageInspection,
         ),
     )
 

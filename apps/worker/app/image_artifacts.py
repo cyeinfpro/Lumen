@@ -62,9 +62,6 @@ class _PostprocessedGeneratedImage:
     display: _VariantPayload
     preview: _VariantPayload
     thumb: _VariantPayload
-    transparent_alpha_recovered: bool = False
-    transparent_qc_payload: dict[str, Any] | None = None
-    transparent_provider: str | None = None
     engine: str = "pil"
     executor_mode: str = "inline"
 

@@ -55,7 +55,6 @@ from .retry_state import (
     maybe_requeue_stale_generation_attempt,
     retry_delay_seconds,
     retry_not_before_ttl,
-    safe_generation_error_details,
 )
 from .run_state import GenerationRunState
 from .services import RunGenerationDeps
@@ -234,7 +233,7 @@ async def _build_failure(
         runtime_byok_error,
         g,
     )
-    error_details = safe_generation_error_details(exc)
+    error_details: dict[str, Any] = {}
     safe_summary = safe_generation_error_summary(
         code=str(error_code) if error_code else None,
         message=error_message,
