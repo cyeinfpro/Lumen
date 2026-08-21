@@ -29,7 +29,7 @@
       "status": "active"
     },
     {
-      "caller_count": 39,
+      "caller_count": 37,
       "owner": "core",
       "path": "packages/core/lumen_core/providers.py",
       "retirement_condition": "All external and internal callers import providers_parts contracts directly or receive a typed provider runtime through composition.",
