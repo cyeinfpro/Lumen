@@ -32,7 +32,6 @@ const CODE_TITLE: Record<string, string> = {
   network_error: "网络异常",
   upstream_timeout: "服务繁忙",
   direct_image_result_unknown: "生图结果未确认",
-  transparent_output_missing_alpha: "上游未返回真实透明图",
   rate_limited: "操作过于频繁",
   unauthorized: "登录已过期",
   forbidden: "没有访问权限",
@@ -81,8 +80,6 @@ const CODE_DESC: Record<string, string> = {
   upstream_timeout: "上游响应超时，稍后再试",
   direct_image_result_unknown:
     "图片请求等待超时，但上游可能仍在生成；系统已停止自动重试以避免重复扣费",
-  transparent_output_missing_alpha:
-    "当前上游返回的图片没有 Alpha 通道；请关闭透明底，或更换支持透明参数的上游",
   rate_limited: "请求过于频繁，稍后重试",
   unauthorized: "重新登录后继续操作",
   forbidden: "你没有权限访问该资源",
@@ -123,7 +120,6 @@ const CODE_ACTION: Record<string, ErrorAction> = {
   network_error: "retry",
   upstream_timeout: "retry",
   direct_image_result_unknown: "wait",
-  transparent_output_missing_alpha: "back",
   rate_limited: "wait",
   unauthorized: "login",
   forbidden: "back",
