@@ -573,7 +573,10 @@ SUPPORTED_SETTINGS: tuple[SettingSpec, ...] = (
     ),
     SettingSpec(
         key="image.output_format",
-        description="默认生图输出格式。jpeg 体积更小；png 更接近无损画质。透明背景请求仍会强制使用 png。",
+        description=(
+            "默认生图输出格式。jpeg 体积更小；png 更接近无损画质。"
+            "透明背景原生支持 png/webp；默认 jpeg 时会自动改用 png。"
+        ),
         sensitive=False,
         parser=str,
         env_fallback="IMAGE_OUTPUT_FORMAT",

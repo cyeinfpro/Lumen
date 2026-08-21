@@ -150,8 +150,6 @@ class GenerationProviderService(Protocol):
         self,
         raw_image: bytes,
         *,
-        prompt: str,
-        transparent_requested: bool,
         mode: str | None = None,
     ) -> PostprocessedGeneratedImage: ...
 

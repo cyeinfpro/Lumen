@@ -121,16 +121,13 @@ from .observability_helpers import (
 )
 from .request_options import (
     add_image_output_options as _add_image_output_options,
-    append_transparent_matte_prompt as _append_transparent_matte_prompt,
     image_request_policy as _image_request_policy,
-    is_transparent_image_request as _is_transparent_image_request,
     normalize_image_background as _normalize_image_background,
     normalize_image_moderation as _normalize_image_moderation,
     normalize_image_output_compression as _normalize_image_output_compression,
     normalize_image_output_format as _normalize_image_output_format,
     normalize_image_quality as _normalize_image_quality,
     summarize_upstream_error_detail as _summarize_upstream_error_detail,
-    transparent_matte_upstream_options as _transparent_matte_upstream_options,
 )
 from .response_helpers import (
     b64_value_if_str as _b64_value_if_str,
@@ -412,13 +409,6 @@ _IMAGE_JOB_RETENTION_DAYS = 1
 _IMAGE_JOB_POLL_INTERVAL_S = 3.0
 _IMAGE_JOB_TIMEOUT_S = 1200.0
 _IMAGE_JOB_DOWNLOAD_MAX_BYTES = _MAX_NORMALIZED_IMAGE_BYTES
-_TRANSPARENT_MATTE_PROMPT_NOTE = (
-    "The final image will be post-processed into a transparent PNG. Render the "
-    "subject isolated on a perfectly flat, high-contrast, single-color matte "
-    "background that does not appear in the subject. Keep the entire outer "
-    "border the same matte color and keep the subject fully inside the canvas. "
-    "No shadows, reflections, texture, gradients, or background objects."
-)
 _LOG_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _LOG_BEARER_RE = re.compile(r"Bearer\s+[A-Za-z0-9._~+/=\-]+", re.IGNORECASE)
 _LOG_API_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_\-]{6,}\b")
@@ -864,9 +854,7 @@ def build_image_upstream_runtime() -> ImageUpstreamRuntime:
             _SSE_MAX_LINES,
             _SSE_MAX_LINE_BYTES,
             _TEXT_STREAM_INTERRUPTED_ERROR_CODE,
-            _TRANSPARENT_MATTE_PROMPT_NOTE,
             _add_image_output_options,
-            _append_transparent_matte_prompt,
             _apply_retry_cache_busters,
             _attach_image_idempotency_key,
             _auth_headers,
@@ -887,7 +875,6 @@ def build_image_upstream_runtime() -> ImageUpstreamRuntime:
             _images_client,
             _images_client_timeout_config,
             _generate_trace_id,
-            _is_transparent_image_request,
             _is_responses_error_terminal,
             _is_responses_success_terminal,
             _json_dumps_stable,
@@ -912,7 +899,6 @@ def build_image_upstream_runtime() -> ImageUpstreamRuntime:
             _runtime_provider_name,
             _stable_sort_tools,
             _summarize_upstream_error_detail,
-            _transparent_matte_upstream_options,
             _validate_responses_body,
             _with_error_context,
             resolve_db,

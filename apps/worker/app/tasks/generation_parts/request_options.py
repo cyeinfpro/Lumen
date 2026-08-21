@@ -179,7 +179,7 @@ def image_request_options(
         IMAGE_BACKGROUND_VALUES,
         "auto",
     )
-    if background == "transparent":
+    if background == "transparent" and output_format == "jpeg":
         output_format = "png"
     options: dict[str, Any] = {
         "fast": fast_mode,

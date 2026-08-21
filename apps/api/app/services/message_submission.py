@@ -210,14 +210,6 @@ def _resolve_image_background(
     return background
 
 
-def _transparent_background_prompt_suffix() -> str:
-    return (
-        "\n\nRender the subject as a clean cutout on a true transparent alpha "
-        "background. Do not paint a white, gray, checkerboard, wall, floor, or "
-        "studio backdrop."
-    )
-
-
 def image_upstream_request(
     image_params: ImageParamsIn,
     resolved_size: ResolvedSize,
@@ -236,7 +228,7 @@ def image_upstream_request(
         else DEFAULT_IMAGE_OUTPUT_FORMAT
     )
     output_format_source = "request" if output_format_is_explicit else "system_default"
-    if background == "transparent":
+    if background == "transparent" and output_format == "jpeg":
         output_format = "png"
         output_format_source = "transparent_background"
     upstream_request: dict[str, Any] = {
@@ -600,9 +592,6 @@ async def _create_generation_tasks(
             command.credential_pin.default_image_model
             or command.credential_pin.default_chat_model
         )
-    if base_upstream_request.get("background") == "transparent":
-        prompt_full += _transparent_background_prompt_suffix()
-
     batch = GenerationBatch(
         requested_count=requested_count,
         action=action,

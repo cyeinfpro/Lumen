@@ -232,7 +232,10 @@ function imageFormatPatch(value: string): Record<string, unknown> {
   if (value === "png") {
     return { output_format: value, output_compression: null };
   }
-  return { output_format: value, background: "opaque" };
+  if (value === "jpeg") {
+    return { output_format: value, background: "opaque" };
+  }
+  return { output_format: value };
 }
 
 function NoteConfig({

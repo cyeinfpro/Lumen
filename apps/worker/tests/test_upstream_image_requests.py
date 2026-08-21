@@ -38,7 +38,6 @@ _POLICY = image_requests.ImageRequestPolicy(
     default_image_output_compression=100,
     default_image_background="auto",
     default_image_moderation="low",
-    transparent_matte_prompt_note="TEST TRANSPARENT MATTE NOTE",
     partial_images_max_pixels=1_400_000,
     image_job_retention_days=1,
 )
@@ -131,29 +130,6 @@ def _output_hooks(
     )
 
 
-def _transparent_hooks(
-    policy: image_requests.ImageRequestPolicy,
-) -> image_requests.TransparentMatteHooks:
-    def is_transparent(background: str | None) -> bool:
-        return image_requests._is_transparent_image_request(
-            background,
-            normalize_image_background=lambda value: (
-                image_requests._normalize_image_background(value, policy=policy)
-            ),
-        )
-
-    def append_note(prompt: str) -> str:
-        return image_requests._append_transparent_matte_prompt(
-            prompt,
-            policy=policy,
-        )
-
-    return image_requests.TransparentMatteHooks(
-        is_transparent_image_request=is_transparent,
-        append_transparent_matte_prompt=append_note,
-    )
-
-
 def _add_output_options(
     policy: image_requests.ImageRequestPolicy,
 ) -> image_requests.AddImageOutputOptions:
@@ -179,27 +155,6 @@ def _add_output_options(
     return add
 
 
-def _transparent_options(
-    policy: image_requests.ImageRequestPolicy,
-) -> image_requests.TransparentMatteUpstreamOptions:
-    hooks = _transparent_hooks(policy)
-
-    def options(
-        *,
-        prompt: str,
-        output_format: str | None,
-        background: str | None,
-    ) -> tuple[str, str | None, str | None]:
-        return image_requests._transparent_matte_upstream_options(
-            prompt=prompt,
-            output_format=output_format,
-            background=background,
-            hooks=hooks,
-        )
-
-    return options
-
-
 def _response_hooks(
     policy: image_requests.ImageRequestPolicy,
     *,
@@ -214,7 +169,6 @@ def _response_hooks(
 
     return image_requests.ResponsesImageBodyHooks(
         normalize_image_quality=normalize_quality,
-        transparent_matte_upstream_options=_transparent_options(policy),
         add_image_output_options=_add_output_options(policy),
         parse_size_pixels=image_requests._parse_size_pixels,
         normalize_reference_image=(
@@ -325,25 +279,26 @@ def test_pure_normalization_output_options_and_transparency() -> None:
         hooks=_output_hooks(policy),
     )
     assert body == {
-        "output_format": "png",
+        "output_format": "webp",
+        "output_compression": 15,
         "background": "transparent",
         "moderation": "low",
     }
 
-    prompt, output_format, background = (
-        image_requests._transparent_matte_upstream_options(
-            prompt="isolated product  ",
-            output_format="webp",
-            background="transparent",
-            hooks=_transparent_hooks(policy),
-        )
+    jpeg_body: dict[str, Any] = {}
+    image_requests._add_image_output_options(
+        jpeg_body,
+        output_format="jpeg",
+        output_compression=15,
+        background="transparent",
+        moderation=None,
+        hooks=_output_hooks(policy),
     )
-    assert prompt == "isolated product\n\nTEST TRANSPARENT MATTE NOTE"
-    assert output_format == "png"
-    assert background == "opaque"
-    assert (
-        image_requests._append_transparent_matte_prompt(prompt, policy=policy) == prompt
-    )
+    assert jpeg_body == {
+        "output_format": "png",
+        "background": "transparent",
+        "moderation": "low",
+    }
 
 
 def test_pure_generate_body_and_partial_image_thresholds() -> None:
@@ -459,16 +414,15 @@ def test_pure_image_job_body_payload_retention_and_transport() -> None:
         moderation="auto",
         policy=policy,
         hooks=image_requests.ImageJobBodyHooks(
-            transparent_matte_upstream_options=_transparent_options(policy),
             normalize_image_quality=normalize_quality,
             add_image_output_options=_add_output_options(policy),
         ),
     )
     assert body["model"] == "gpt-image-test"
-    assert body["prompt"].endswith("TEST TRANSPARENT MATTE NOTE")
-    assert body["output_format"] == "png"
-    assert "output_compression" not in body
-    assert body["background"] == "opaque"
+    assert body["prompt"] == "product badge"
+    assert body["output_format"] == "webp"
+    assert body["output_compression"] == 80
+    assert body["background"] == "transparent"
 
     payload = image_requests._image_job_payload(
         request_type="edits",
@@ -634,9 +588,6 @@ def test_facades_read_current_policy_globals_per_call(
     monkeypatch.setattr(
         TEST_UPSTREAM_SERVICES.core, "DEFAULT_IMAGE_OUTPUT_COMPRESSION", 42
     )
-    monkeypatch.setattr(
-        TEST_UPSTREAM_SERVICES.core, "TRANSPARENT_MATTE_PROMPT_NOTE", "PATCHED NOTE"
-    )
     monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "IMAGE_JOB_RETENTION_DAYS", 9)
     monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "PARTIAL_IMAGES_MAX_PIXELS", 1)
 
@@ -647,9 +598,6 @@ def test_facades_read_current_policy_globals_per_call(
             output_format="jpeg",
         )
         == 42
-    )
-    assert TEST_UPSTREAM_SERVICES.core.append_transparent_matte_prompt("prompt") == (
-        "prompt\n\nPATCHED NOTE"
     )
     assert (
         TEST_UPSTREAM_SERVICES.image_jobs.image_job_payload(
@@ -694,16 +642,6 @@ def test_facade_builder_uses_monkeypatched_helpers_in_order(
     def normalize_quality(_value: str | None) -> str:
         events.append("quality")
         return "low"
-
-    def matte_options(
-        *,
-        prompt: str,
-        output_format: str | None,
-        background: str | None,
-    ) -> tuple[str, str | None, str | None]:
-        _ = output_format, background
-        events.append("matte")
-        return f"{prompt}|matte", "webp", "opaque"
 
     def add_output(
         body: dict[str, Any],
@@ -753,11 +691,6 @@ def test_facade_builder_uses_monkeypatched_helpers_in_order(
         TEST_UPSTREAM_SERVICES.core, "normalize_image_quality", normalize_quality
     )
     monkeypatch.setattr(
-        TEST_UPSTREAM_SERVICES.core,
-        "transparent_matte_upstream_options",
-        matte_options,
-    )
-    monkeypatch.setattr(
         TEST_UPSTREAM_SERVICES.core, "add_image_output_options", add_output
     )
     monkeypatch.setattr(
@@ -790,7 +723,6 @@ def test_facade_builder_uses_monkeypatched_helpers_in_order(
 
     assert events == [
         "quality",
-        "matte",
         "output",
         "pixels",
         "reference",
@@ -799,7 +731,7 @@ def test_facade_builder_uses_monkeypatched_helpers_in_order(
         "validate",
     ]
     assert body["tools"][0]["quality"] == "low"
-    assert body["input"][0]["content"][0]["text"] == "edit|matte"
+    assert body["input"][0]["content"][0]["text"] == "edit"
     assert body["input"][0]["content"][1]["image_url"] == (
         "data:image/webp;base64,bm9ybWFsaXplZA=="
     )

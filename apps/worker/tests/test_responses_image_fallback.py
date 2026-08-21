@@ -1659,22 +1659,6 @@ async def test_edit_image_can_use_image_jobs_route(
     }
 
 
-def test_transparent_background_converts_to_matte_upstream_options() -> None:
-    prompt, output_format, background = (
-        TEST_UPSTREAM_SERVICES.core.transparent_matte_upstream_options(
-            prompt="clean product badge",
-            output_format="webp",
-            background="transparent",
-        )
-    )
-
-    assert prompt.startswith("clean product badge")
-    assert "transparent PNG" in prompt
-    assert "single-color matte background" in prompt
-    assert output_format == "png"
-    assert background == "opaque"
-
-
 @pytest.mark.asyncio
 async def test_image_route_control_plane_unavailable_makes_zero_upstream_calls(
     monkeypatch: pytest.MonkeyPatch,
@@ -1785,7 +1769,7 @@ async def test_invalid_legacy_primary_route_fails_closed(
 
 
 @pytest.mark.asyncio
-async def test_responses_transparent_background_uses_matte_png_request(
+async def test_responses_transparent_background_uses_native_webp_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = DummyClient()
@@ -1819,17 +1803,15 @@ async def test_responses_transparent_background_uses_matte_png_request(
     assert len(client.streams) == 1
     stream_body = client.streams[0]["json"]
     tool = stream_body["tools"][0]
-    assert tool["background"] == "opaque"
-    assert tool["output_format"] == "png"
-    assert "output_compression" not in tool
+    assert tool["background"] == "transparent"
+    assert tool["output_format"] == "webp"
+    assert tool["output_compression"] == 90
     prompt_text = stream_body["input"][0]["content"][0]["text"]
-    assert prompt_text.startswith("clean product badge")
-    assert "transparent PNG" in prompt_text
-    assert "single-color matte background" in prompt_text
+    assert prompt_text == "clean product badge"
 
 
 @pytest.mark.asyncio
-async def test_direct_transparent_background_uses_matte_png_request(
+async def test_direct_transparent_background_uses_native_webp_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = SuccessfulDirectClient()
@@ -1868,16 +1850,14 @@ async def test_direct_transparent_background_uses_matte_png_request(
 
     assert len(client.posts) == 1
     body = client.posts[0]["json"]
-    assert body["background"] == "opaque"
-    assert body["output_format"] == "png"
-    assert "output_compression" not in body
-    assert body["prompt"].startswith("clean product badge")
-    assert "transparent PNG" in body["prompt"]
-    assert "single-color matte background" in body["prompt"]
+    assert body["background"] == "transparent"
+    assert body["output_format"] == "webp"
+    assert body["output_compression"] == 90
+    assert body["prompt"] == "clean product badge"
 
 
 @pytest.mark.asyncio
-async def test_direct_edit_transparent_background_uses_matte_png_request(
+async def test_direct_edit_transparent_background_uses_native_webp_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
@@ -1907,12 +1887,10 @@ async def test_direct_edit_transparent_background_uses_matte_png_request(
     )
 
     data = captured["data"]
-    assert data["background"] == "opaque"
-    assert data["output_format"] == "png"
-    assert "output_compression" not in data
-    assert data["prompt"].startswith("clean product badge")
-    assert "transparent PNG" in data["prompt"]
-    assert "single-color matte background" in data["prompt"]
+    assert data["background"] == "transparent"
+    assert data["output_format"] == "webp"
+    assert data["output_compression"] == "90"
+    assert data["prompt"] == "clean product badge"
 
 
 @pytest.mark.asyncio

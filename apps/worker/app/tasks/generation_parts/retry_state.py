@@ -793,66 +793,6 @@ def classify_exception(
     return RetryDecision(False, f"unhandled {type(exc).__name__}")
 
 
-def safe_generation_error_details(exc: BaseException) -> dict[str, Any]:
-    payload = getattr(exc, "payload", None)
-    if not isinstance(payload, dict):
-        return {}
-    details: dict[str, Any] = {}
-    transparent_qc = payload.get("transparent_qc")
-    if isinstance(transparent_qc, dict):
-        sanitized_qc = sanitize_transparent_qc_payload(transparent_qc)
-        if sanitized_qc:
-            details["transparent_qc"] = sanitized_qc
-    transparent_provider = payload.get("transparent_provider")
-    if isinstance(transparent_provider, str) and transparent_provider:
-        details["transparent_provider"] = transparent_provider[:128]
-    return details
-
-
-def sanitize_transparent_qc_payload(
-    payload: dict[str, Any],
-) -> dict[str, Any]:
-    output: dict[str, Any] = {}
-
-    passed = payload.get("passed")
-    if isinstance(passed, bool):
-        output["passed"] = passed
-
-    for key in ("score", "alpha_coverage", "largest_component_ratio"):
-        value = payload.get(key)
-        if isinstance(value, (int, float)) and math.isfinite(float(value)):
-            output[key] = round(float(value), 4)
-
-    border_alpha_max = payload.get("border_alpha_max")
-    if isinstance(border_alpha_max, (int, float)) and math.isfinite(
-        float(border_alpha_max)
-    ):
-        output["border_alpha_max"] = max(
-            0,
-            min(255, int(border_alpha_max)),
-        )
-
-    bbox = payload.get("foreground_bbox")
-    if (
-        isinstance(bbox, (list, tuple))
-        and len(bbox) == 4
-        and all(
-            isinstance(value, (int, float)) and math.isfinite(float(value))
-            for value in bbox
-        )
-    ):
-        output["foreground_bbox"] = [max(0, int(value)) for value in bbox]
-    elif bbox is None and "foreground_bbox" in payload:
-        output["foreground_bbox"] = None
-
-    for key in ("failure_reasons", "warnings"):
-        raw_items = payload.get(key)
-        if isinstance(raw_items, list):
-            output[key] = [str(item)[:160] for item in raw_items[:20]]
-
-    return output
-
-
 def decide_moderation_retry_upgrade(
     *,
     base_decision: Any,

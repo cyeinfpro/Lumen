@@ -674,17 +674,11 @@ def _apply_bonus_optional_fields(
         "actual_route": context.upstream_actual_route,
         "actual_source": context.upstream_actual_source,
         "actual_endpoint": context.upstream_actual_endpoint,
-        "transparent_qc": artifact.transparent_qc_payload,
-        "transparent_pipeline_provider": artifact.transparent_provider,
         "revised_prompt": context.revised_prompt,
     }
     for key, value in optional.items():
         if value is not None:
             request[key] = value
-    if artifact.transparent_alpha_recovered:
-        request["transparent_alpha_recovered"] = True
-
-
 def _add_bonus_rows(
     session: Any,
     context: BonusGenerationContext,

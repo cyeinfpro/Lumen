@@ -98,9 +98,6 @@ class GeneratedArtifact:
     preview_size: tuple[int, int]
     thumb_bytes: bytes
     thumb_size: tuple[int, int]
-    transparent_alpha_recovered: bool
-    transparent_qc_payload: dict[str, Any] | None
-    transparent_provider: str | None
     model_metadata: dict[str, Any]
     effective_params: dict[str, Any]
     image_metadata: dict[str, Any]
@@ -220,15 +217,8 @@ async def _postprocess_generated_image(
     started = time.monotonic()
     raw_image = _decode_upstream_result(state.b64_result, g)
     _raise_if_sha_echo(state, raw_image, g)
-    transparent_requested = (
-        state.image_request_options.get("background") == "transparent"
-    )
     processed = await await_with_lease_guard(
-        g.provider.postprocess(
-            raw_image,
-            prompt=state.prompt,
-            transparent_requested=transparent_requested,
-        ),
+        g.provider.postprocess(raw_image),
         state.lease_lost,
         redis=state.redis,
         task_id=state.task_id,
@@ -345,9 +335,6 @@ def _build_artifact(
         preview_size=processed.preview.size,
         thumb_bytes=processed.thumb.bytes,
         thumb_size=processed.thumb.size,
-        transparent_alpha_recovered=processed.transparent_alpha_recovered,
-        transparent_qc_payload=processed.transparent_qc_payload,
-        transparent_provider=processed.transparent_provider,
         model_metadata=model_metadata,
         effective_params=effective_params,
         image_metadata=image_metadata,
@@ -728,15 +715,11 @@ def _apply_optional_success_fields(
         "actual_route": state.actual_upstream_route,
         "actual_source": state.actual_upstream_source,
         "actual_endpoint": state.actual_upstream_endpoint,
-        "transparent_qc": artifact.transparent_qc_payload,
-        "transparent_pipeline_provider": artifact.transparent_provider,
         "revised_prompt": state.revised_prompt,
     }
     for key, value in optional_fields.items():
         if value is not None:
             upstream_request[key] = value
-    if artifact.transparent_alpha_recovered:
-        upstream_request["transparent_alpha_recovered"] = True
     upstream_request.update(state.image_job_meta)
 
 

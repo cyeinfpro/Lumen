@@ -2837,7 +2837,7 @@ async def test_explicit_fast_false_overrides_system_default(
 
 
 @pytest.mark.asyncio
-async def test_image_prompt_transparent_background_forces_png(
+async def test_image_prompt_transparent_background_preserves_native_webp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
@@ -2877,10 +2877,10 @@ async def test_image_prompt_transparent_background_forces_png(
 
     gen = next(item for item in db.added if item.__class__.__name__ == "Generation")
     assert gen.upstream_request["background"] == "transparent"
-    assert gen.upstream_request["output_format"] == "png"
-    assert gen.upstream_request["output_format_source"] == "transparent_background"
+    assert gen.upstream_request["output_format"] == "webp"
+    assert gen.upstream_request["output_format_source"] == "request"
     assert "output_compression" not in gen.upstream_request
-    assert "true transparent alpha background" in gen.prompt
+    assert gen.prompt == "做一个透明底的产品照片"
 
 
 @pytest.mark.asyncio

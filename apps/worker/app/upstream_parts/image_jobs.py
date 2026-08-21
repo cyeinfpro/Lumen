@@ -116,7 +116,6 @@ def _image_job_body_base(
         moderation=moderation,
         policy=services.core.image_request_policy(),
         hooks=services.infrastructure.upstream_image_requests.ImageJobBodyHooks(
-            transparent_matte_upstream_options=services.core.transparent_matte_upstream_options,
             normalize_image_quality=services.core.normalize_image_quality,
             add_image_output_options=services.core.add_image_output_options,
         ),
@@ -168,7 +167,6 @@ def _build_responses_image_body(
         policy=services.core.image_request_policy(),
         hooks=services.infrastructure.upstream_image_requests.ResponsesImageBodyHooks(
             normalize_image_quality=services.core.normalize_image_quality,
-            transparent_matte_upstream_options=services.core.transparent_matte_upstream_options,
             add_image_output_options=services.core.add_image_output_options,
             parse_size_pixels=services.requests.parse_size_pixels,
             normalize_reference_image=services.references.normalize_reference_image,

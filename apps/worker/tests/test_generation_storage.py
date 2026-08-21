@@ -39,9 +39,6 @@ from app.artifact_commit import (
     ArtifactCommitNotAdopted,
     ArtifactCommitOutcomeUnknown,
 )
-from app.background_removal.local_chroma import (
-    recover_solid_background_transparency,
-)
 from app.config import settings
 from app.provider_runtime.errors import UpstreamError
 from app import runtime_settings
@@ -610,54 +607,25 @@ def test_generation_blurhash_skips_tiny_images(monkeypatch: pytest.MonkeyPatch) 
     assert image_artifact_contracts.compute_blurhash(tiny) is None  # noqa: SLF001
 
 
-def test_recover_solid_background_transparency_from_opaque_image() -> None:
-    src = PILImage.new("RGB", (24, 24), (255, 255, 255))
-    for x in range(6, 18):
-        for y in range(6, 18):
-            src.putpixel((x, y), (200, 20, 30))
-
-    recovered = recover_solid_background_transparency(src)
-
-    assert recovered is not None
-    try:
-        assert recovered.mode == "RGBA"
-        assert recovered.getpixel((0, 0))[3] == 0
-        assert recovered.getpixel((12, 12))[3] == 255
-    finally:
-        recovered.close()
-
-
-def test_recover_solid_background_transparency_preserves_interior_matte_color() -> None:
-    src = PILImage.new("RGB", (32, 32), (255, 0, 255))
-    for x in range(6, 26):
-        for y in range(6, 26):
-            src.putpixel((x, y), (20, 80, 200))
-    for x in range(12, 20):
-        for y in range(12, 20):
-            src.putpixel((x, y), (255, 0, 255))
-
-    recovered = recover_solid_background_transparency(src)
-
-    assert recovered is not None
-    try:
-        assert recovered.getpixel((0, 0))[3] == 0
-        assert recovered.getpixel((16, 16))[3] == 255
-    finally:
-        recovered.close()
-
-
-def test_recover_solid_background_transparency_rejects_noisy_edges() -> None:
-    src = PILImage.new("RGB", (24, 24), (255, 255, 255))
-    for x in range(24):
-        src.putpixel((x, 0), (0, 0, 0) if x % 2 else (255, 255, 255))
-
-    assert recover_solid_background_transparency(src) is None
-
-
-def test_image_request_options_force_png_for_transparent_background() -> None:
+def test_image_request_options_preserve_native_transparent_webp() -> None:
     options = request_options.image_request_options(
         {
             "output_format": "webp",
+            "output_compression": 90,
+            "background": "transparent",
+        },
+        size="1024x1024",
+    )
+
+    assert options["background"] == "transparent"
+    assert options["output_format"] == "webp"
+    assert options["output_compression"] == 90
+
+
+def test_image_request_options_replace_transparent_jpeg_with_png() -> None:
+    options = request_options.image_request_options(
+        {
+            "output_format": "jpeg",
             "output_compression": 90,
             "background": "transparent",
         },
@@ -720,42 +688,6 @@ def test_retry_backoff_grows_after_configured_table() -> None:
     assert retry_state.base_retry_backoff_seconds(first_tail_attempt) == (
         RETRY_BACKOFF_SECONDS[-1] * 2
     )
-
-
-def test_safe_generation_error_details_keeps_transparent_context_only() -> None:
-    exc = UpstreamError(
-        "transparent material pipeline failed",
-        error_code=EC.BAD_RESPONSE.value,
-        payload={
-            "transparent_qc": {
-                "passed": False,
-                "score": 0.123456,
-                "failure_reasons": ["alpha_all_opaque"],
-                "warnings": ["connectivity_skipped"],
-                "foreground_bbox": [1.2, 2.8, 30, 40],
-                "alpha_coverage": 0.99999,
-                "border_alpha_max": 512,
-                "largest_component_ratio": 0.77777,
-                "prompt": "do-not-expose",
-            },
-            "transparent_provider": "rembg-local",
-            "raw": "do-not-expose",
-        },
-    )
-
-    assert retry_state.safe_generation_error_details(exc) == {
-        "transparent_qc": {
-            "passed": False,
-            "score": 0.1235,
-            "alpha_coverage": 1.0,
-            "largest_component_ratio": 0.7778,
-            "border_alpha_max": 255,
-            "foreground_bbox": [1, 2, 30, 40],
-            "failure_reasons": ["alpha_all_opaque"],
-            "warnings": ["connectivity_skipped"],
-        },
-        "transparent_provider": "rembg-local",
-    }
 
 
 def test_primary_input_image_id_must_be_in_input_image_ids() -> None:
