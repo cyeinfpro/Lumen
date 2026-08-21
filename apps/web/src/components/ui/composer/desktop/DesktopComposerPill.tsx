@@ -93,12 +93,8 @@ export function DesktopComposerPill({
   const setAspectRatio = useChatStore((s) => s.setAspectRatio);
   const count = useChatStore((s) => s.composer.params.count ?? 1);
   const setImageCount = useChatStore((s) => s.setImageCount);
-  const transparentBackground = useChatStore(
-    (s) => s.composer.params.background === "transparent",
-  );
-  const setTransparentBackground = useChatStore(
-    (s) => s.setTransparentBackground,
-  );
+  const transparentBackground = useChatStore((s) => s.composer.params.background === "transparent");
+  const setTransparentBackground = useChatStore((s) => s.setTransparentBackground);
   const reasoningEffort = useChatStore((s) => s.composer.reasoningEffort);
   const setReasoningEffort = useChatStore((s) => s.setReasoningEffort);
   const fast = useChatStore((s) => s.composer.fast);
@@ -120,16 +116,13 @@ export function DesktopComposerPill({
   const setRenderQuality = useChatStore((s) => s.setRenderQuality);
   const composerError = useChatStore((s) => s.composerError);
   const setComposerError = useChatStore((s) => s.setComposerError);
-
   const [expanded, setExpanded] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [shutterBurst, setShutterBurst] = useState(false);
-  const [draggingAttachmentId, setDraggingAttachmentId] = useState<string | null>(
-    null,
-  );
+  const [draggingAttachmentId, setDraggingAttachmentId] = useState<string | null>(null);
   const { haptic } = useHaptic();
   const promptEnhancement = usePromptEnhancementCandidate({
     currentText: text,
