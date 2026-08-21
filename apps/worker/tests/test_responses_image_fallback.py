@@ -1161,8 +1161,9 @@ def test_explicit_responses_model_does_not_force_image_options() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fake_transparent_image2_result_fails_without_responses_fallback(
+async def test_fake_transparent_image2_result_is_returned_without_responses_fallback(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     request = _image_request(background="transparent", output_format="png")
     route = ImageProviderRoute(
@@ -1184,12 +1185,11 @@ async def test_fake_transparent_image2_result_fails_without_responses_fallback(
     monkeypatch.setattr(image_dispatch, "_run_direct_image2_once", opaque_direct)
     monkeypatch.setattr(image_dispatch, "_run_responses_once", responses_must_not_run)
 
-    with pytest.raises(upstream.UpstreamError) as exc_info:
-        await image_dispatch._run_image2_with_responses_fallback(request, route)
+    result = await image_dispatch._run_image2_with_responses_fallback(request, route)
 
-    assert exc_info.value.error_code == "transparent_output_missing_alpha"
-    assert exc_info.value.payload["reason"] == "transparent_output_missing_alpha"
+    assert result == [(InlineImageBytes(TINY_PNG), None)]
     assert responses_calls == 0
+    assert "transparent request returned opaque image; accepting result" in caplog.text
 
 
 def test_retry_attempt_injects_cache_busters() -> None:

@@ -158,7 +158,6 @@ class GenerationErrorCode(StrEnum):
     MISSING_INPUT_IMAGES = "missing_input_images"
     REFERENCE_IMAGE_TOO_LARGE = "reference_image_too_large"
     DIRECT_IMAGE_RESULT_UNKNOWN = "direct_image_result_unknown"
-    TRANSPARENT_OUTPUT_MISSING_ALPHA = "transparent_output_missing_alpha"
     # image-job sidecar 的 `uncertain` 终态：上游已回 2xx 但本地未能交付图片，
     # 上游是否计费不可知。与 direct 版一样按 terminal 处理（重试可能二次扣费）。
     IMAGE_JOB_RESULT_UNKNOWN = "image_job_result_unknown"
