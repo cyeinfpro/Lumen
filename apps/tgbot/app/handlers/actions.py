@@ -40,7 +40,6 @@ def _payload_from_gen(
         "count": 1,
         "resolution": resolution_from_size(gen.get("size_requested") or ""),
         "output_format": gen.get("output_format") or "jpeg",
-        "fast": bool(gen.get("fast", False)),
         "attachment_image_ids": list(attachment_ids or []),
     }
 
@@ -185,7 +184,6 @@ async def on_iter_start(cb: CallbackQuery, state: FSMContext, api: LumenApi) -> 
         source_size_requested=gen.get("size_requested") or "",
         source_render_quality=gen.get("render_quality") or "high",
         source_output_format=gen.get("output_format") or "jpeg",
-        source_fast=bool(gen.get("fast", False)),
     )
     await msg.answer(
         "✏️ 迭代模式：发送你的修改指令（例如「换成蓝色背景」「让头发更长」）。\n"
@@ -234,7 +232,6 @@ async def on_iter_prompt(message: Message, state: FSMContext, api: LumenApi) -> 
             str(data.get("source_size_requested") or "")
         ),
         "output_format": data.get("source_output_format") or "jpeg",
-        "fast": bool(data.get("source_fast", False)),
         "attachment_image_ids": [image_id],
     }
     payload = await resolve_or_stage_generation(state, candidate)

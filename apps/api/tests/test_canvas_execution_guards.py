@@ -71,7 +71,6 @@ def _graph() -> dict:
                     "quality": "1k",
                     "render_quality": "medium",
                     "count": 1,
-                    "fast": True,
                     "output_format": "webp",
                     "background": "auto",
                     "moderation": "low",
@@ -614,7 +613,7 @@ async def test_special_image_nodes_use_existing_generation_pipeline(
     assert captured["metadata"]["attachment_roles"] == expected_roles
     if node_type == "image_upscale":
         assert captured["image_params"].quality == "2k"
-        assert captured["image_params"].fast is True
+        assert "fast" not in captured["image_params"].model_dump()
 
 
 @pytest.mark.asyncio

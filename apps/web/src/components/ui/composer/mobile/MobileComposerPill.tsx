@@ -96,6 +96,12 @@ export function MobileComposerPill({
   const setAspectRatio = useChatStore((s) => s.setAspectRatio);
   const count = useChatStore((s) => s.composer.params.count ?? 1);
   const setImageCount = useChatStore((s) => s.setImageCount);
+  const transparentBackground = useChatStore(
+    (s) => s.composer.params.background === "transparent",
+  );
+  const setTransparentBackground = useChatStore(
+    (s) => s.setTransparentBackground,
+  );
   const reasoningEffort = useChatStore((s) => s.composer.reasoningEffort);
   const setReasoningEffort = useChatStore((s) => s.setReasoningEffort);
   const fast = useChatStore((s) => s.composer.fast);
@@ -353,6 +359,7 @@ export function MobileComposerPill({
     quality,
     renderQuality,
     fast,
+    transparentBackground,
     maskActive: inpaint.maskActive,
     costLabel: costEstimate.label,
     costWarning: costEstimate.warning,
@@ -670,6 +677,7 @@ export function MobileComposerPill({
         codeInterpreter={codeInterpreter}
         imageGeneration={imageGeneration}
         fast={fast}
+        transparentBackground={transparentBackground}
         inpaint={inpaint}
         onCloseAttachmentMenu={() => setAttachmentMenuId(null)}
         onInsertMention={insertImageMention}
@@ -691,6 +699,7 @@ export function MobileComposerPill({
         onCodeInterpreterChange={setCodeInterpreter}
         onImageGenerationChange={setImageGeneration}
         onFastChange={setFast}
+        onTransparentBackgroundChange={setTransparentBackground}
       />
     </>
   );

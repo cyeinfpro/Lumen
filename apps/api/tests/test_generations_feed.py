@@ -26,7 +26,6 @@ def test_generation_prompt_search_escapes_like_wildcards() -> None:
         user_id="user-1",
         ratio=None,
         has_ref=False,
-        fast=False,
         q=term,
     )
     compiled = stmt.compile(dialect=postgresql.dialect())
@@ -42,7 +41,6 @@ def test_generation_feed_filters_out_deleted_or_archived_conversations() -> None
         user_id="user-1",
         ratio=None,
         has_ref=False,
-        fast=False,
         q=None,
     )
     rendered = str(
@@ -97,33 +95,6 @@ async def test_generation_feed_first_image_query_is_scoped_to_feed_user() -> Non
     assert images == {}
 
 
-def test_generation_feed_fast_filter_accepts_legacy_true_values() -> None:
-    stmt = generations._apply_filters(
-        select(Generation),
-        user_id="user-1",
-        ratio=None,
-        has_ref=False,
-        fast=True,
-        q=None,
-    )
-    rendered = str(
-        stmt.compile(
-            dialect=postgresql.dialect(),
-            compile_kwargs={"literal_binds": True},
-        )
-    )
-
-    assert (
-        "lower((generations.upstream_request ->> 'fast')) IN ('true', '1')" in rendered
-    )
-
-
-def test_generation_feed_output_treats_string_false_fast_as_disabled() -> None:
-    assert generations._bool_option("false") is False
-    assert generations._bool_option("0") is False
-    assert generations._bool_option("true") is True
-
-
 def test_generation_feed_cursor_carries_total_and_filter_signature_for_next_page() -> (
     None
 ):
@@ -132,7 +103,6 @@ def test_generation_feed_cursor_carries_total_and_filter_signature_for_next_page
         user_id="user-1",
         ratio="1:1",
         has_ref=True,
-        fast=False,
         q="cat",
         visible_after=None,
     )

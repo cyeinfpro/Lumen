@@ -32,6 +32,7 @@ test("image params clamp output compression without mutating defaults", () => {
     },
   );
   assert.equal(DEFAULT_PARAMS.output_compression, undefined);
+  assert.equal(DEFAULT_PARAMS.background, "opaque");
 });
 
 test("render quality normalization uses the high-quality fallback", () => {

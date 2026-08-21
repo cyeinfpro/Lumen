@@ -59,6 +59,7 @@ _TERMINAL_ERROR_CODES: frozenset[str] = frozenset(
         EC.REFERENCE_MISSING.value,
         EC.MISSING_INPUT_IMAGES.value,
         EC.REFERENCE_IMAGE_TOO_LARGE.value,
+        EC.TRANSPARENT_OUTPUT_MISSING_ALPHA.value,
         # 安全审核拒绝——OpenAI 明确拒图/拒 prompt,重试也是拒。
         # 调用方仍可通过 is_moderation_block + provider 上下文做"换号再试"。
         *_MODERATION_ERROR_CODES,

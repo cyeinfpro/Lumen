@@ -39,7 +39,6 @@ class GenerateIn(BaseModel):
     count: int = Field(default=1, ge=1, le=16)
     resolution: Literal["1k", "2k", "4k"] = "2k"
     output_format: Literal["png", "jpeg", "webp"] = "jpeg"
-    fast: bool = False
     attachment_image_ids: list[str] = Field(
         default_factory=list, max_length=MAX_MESSAGE_ATTACHMENTS
     )
@@ -75,7 +74,6 @@ class GenerationStatusOut(BaseModel):
     size_requested: str
     render_quality: str = "medium"
     output_format: str = "jpeg"
-    fast: bool = False
     web_url: str | None = None
     edit_url: str | None = None
     project_url: str | None = None

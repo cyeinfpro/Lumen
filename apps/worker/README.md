@@ -33,8 +33,8 @@ fallback 读取，方便平滑迁移；API 启动时会把旧值 backfill 到
 
 生成参数从 `Generation.upstream_request` 读取：`render_quality` 映射到上游
 `quality`，`output_format/output_compression/background/moderation` 同时透传给 direct
-Image API 和 responses image tool。Fast 只把 responses 生图主模型切到 5.4 mini；
-关闭 Fast 时使用默认 5.4，不改渲染质量。
+Image API 和 responses image tool。图片生成固定使用标准 Responses 模型；聊天 Fast
+不会影响图片任务。
 默认输出格式由系统设置决定；JPEG/WebP 支持 `output_compression`。透明背景通过
 OpenAI 原生 `background=transparent` 请求，使用 PNG 或 WebP 保留 alpha；若请求
 JPEG，Lumen 会自动改用 PNG。

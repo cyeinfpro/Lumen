@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, Zap } from "lucide-react";
+import { ChevronDown, Layers2 } from "lucide-react";
 import { useRef, useState } from "react";
 
 import { Button, Select } from "@/components/ui/primitives";
@@ -43,8 +43,8 @@ export function ComposerExecutionControls({
   onQualityChange,
   renderQuality,
   onRenderQualityChange,
-  fast,
-  onFastChange,
+  transparentBackground,
+  onTransparentBackgroundChange,
   attachmentCount,
   costLabel,
   costWarning,
@@ -60,8 +60,8 @@ export function ComposerExecutionControls({
   onQualityChange: (value: Quality) => void;
   renderQuality: RenderQualityChoice;
   onRenderQualityChange: (value: RenderQualityChoice) => void;
-  fast: boolean;
-  onFastChange: (value: boolean) => void;
+  transparentBackground: boolean;
+  onTransparentBackgroundChange: (value: boolean) => void;
   attachmentCount: number;
   costLabel?: string | null;
   costWarning?: boolean;
@@ -79,8 +79,8 @@ export function ComposerExecutionControls({
         onQualityChange={onQualityChange}
         renderQuality={renderQuality}
         onRenderQualityChange={onRenderQualityChange}
-        fast={fast}
-        onFastChange={onFastChange}
+        transparentBackground={transparentBackground}
+        onTransparentBackgroundChange={onTransparentBackgroundChange}
         attachmentCount={attachmentCount}
         costLabel={costLabel}
         costWarning={costWarning}
@@ -101,8 +101,8 @@ function ImageQuickSettingsBar({
   onQualityChange,
   renderQuality,
   onRenderQualityChange,
-  fast,
-  onFastChange,
+  transparentBackground,
+  onTransparentBackgroundChange,
   attachmentCount,
   costLabel,
   costWarning,
@@ -116,8 +116,8 @@ function ImageQuickSettingsBar({
   onQualityChange: (value: Quality) => void;
   renderQuality: RenderQualityChoice;
   onRenderQualityChange: (value: RenderQualityChoice) => void;
-  fast: boolean;
-  onFastChange: (value: boolean) => void;
+  transparentBackground: boolean;
+  onTransparentBackgroundChange: (value: boolean) => void;
   attachmentCount: number;
   costLabel?: string | null;
   costWarning?: boolean;
@@ -192,25 +192,26 @@ function ImageQuickSettingsBar({
         <Button
           variant="outline"
           size="sm"
-          aria-pressed={fast}
-          aria-label={fast ? "关闭 Fast" : "开启 Fast"}
-          title="Fast"
-          onClick={() => onFastChange(!fast)}
+          aria-pressed={transparentBackground}
+          aria-label={transparentBackground ? "关闭透明底" : "开启透明底"}
+          title="透明底"
+          onClick={() =>
+            onTransparentBackgroundChange(!transparentBackground)
+          }
           className={cn(
-            "h-8 shrink-0 px-2",
-            fast
+            "h-8 w-[82px] shrink-0 px-2",
+            transparentBackground
               ? "border-accent-border bg-accent-soft text-accent"
               : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:text-[var(--fg-0)]",
           )}
           leftIcon={
-            <Zap
+            <Layers2
               className="h-3.5 w-3.5"
-              fill={fast ? "currentColor" : "none"}
               aria-hidden
             />
           }
         >
-          Fast
+          透明底
         </Button>
 
         {attachmentCount > 0 && (

@@ -279,7 +279,7 @@ test("chat store delegates composer, task recovery, and pure reducer boundaries"
   match(store, /export type \{ ReasoningEffort \} from "\.\/chat\/types"/);
   match(store, /\.\.\.createComposerActions\(set, get,/);
   match(store, /\.\.\.createConversationActions\(set, get\)/);
-  match(store, /\.\.\.createGenerationActions\(set, get,/);
+  match(store, /\.\.\.createGenerationActions\(set, get\)/);
   match(store, /\.\.\.createTaskRecoveryActions\(set, get,/);
   match(composer, /export function createComposerActions\(/);
   match(
@@ -461,7 +461,10 @@ test("desktop image composer keeps high-frequency settings inline", () => {
   match(quickSettings, /<AspectRatioPicker/);
   match(quickSettings, /ariaLabel="输出尺寸"/);
   match(quickSettings, /ariaLabel="生成质量"/);
-  match(quickSettings, /aria-label=\{fast \? "关闭 Fast" : "开启 Fast"\}/);
+  match(
+    quickSettings,
+    /aria-label=\{transparentBackground \? "关闭透明底" : "开启透明底"\}/,
+  );
 });
 
 test("mobile image composer exposes one summary entry and advanced settings", () => {

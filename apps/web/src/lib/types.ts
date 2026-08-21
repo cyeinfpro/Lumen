@@ -33,7 +33,6 @@ export interface ImageParams {
   fixed_size?: string; // "WxH"
   quality?: Quality;
   count?: number;
-  fast?: boolean;
   render_quality?: RenderQuality;
   output_format?: ImageOutputFormat;
   output_compression?: number;

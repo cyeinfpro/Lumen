@@ -152,7 +152,6 @@ def _generation_payload(
         "count": params["count"],
         "resolution": params["resolution"],
         "output_format": params["output_format"],
-        "fast": bool(params.get("fast")),
     }
 
 

@@ -15,7 +15,6 @@ from lumen_core.arq_jobs import arq_job_id
 from lumen_core.constants import (
     DEFAULT_CHAT_MODEL,
     DEFAULT_IMAGE_RESPONSES_MODEL,
-    DEFAULT_IMAGE_RESPONSES_MODEL_FAST,
     EV_COMP_QUEUED,
     EV_CONV_MSG_APPENDED,
     EV_GEN_QUEUED,
@@ -168,15 +167,6 @@ async def resolve_fast_default(
     return True
 
 
-def image_params_with_fast_default(
-    image_params: ImageParamsIn,
-    fast_default: bool,
-) -> ImageParamsIn:
-    if image_params.fast is not None:
-        return image_params
-    return image_params.model_copy(update={"fast": fast_default})
-
-
 def chat_params_with_fast_default(
     chat_params: ChatParamsIn,
     fast_default: bool,
@@ -232,12 +222,7 @@ def image_upstream_request(
         output_format = "png"
         output_format_source = "transparent_background"
     upstream_request: dict[str, Any] = {
-        "fast": bool(image_params.fast),
-        "responses_model": (
-            DEFAULT_IMAGE_RESPONSES_MODEL_FAST
-            if image_params.fast
-            else DEFAULT_IMAGE_RESPONSES_MODEL
-        ),
+        "responses_model": DEFAULT_IMAGE_RESPONSES_MODEL,
         "render_quality": render_quality,
         "output_format": output_format,
         "output_format_source": output_format_source,

@@ -205,12 +205,12 @@ test("specialized image presets remain distinct from base defaults", () => {
   );
 
   assert.deepEqual(
-    [base.config.size, base.config.quality, base.config.fast],
-    ["2K", "2k", true],
+    [base.config.size, base.config.quality],
+    ["2K", "2k"],
   );
   assert.deepEqual(
-    [redraw.config.size, redraw.config.quality, redraw.config.fast],
-    ["4K", "4k", false],
+    [redraw.config.size, redraw.config.quality],
+    ["4K", "4k"],
   );
   assert.deepEqual(
     [

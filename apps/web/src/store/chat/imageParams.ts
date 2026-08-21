@@ -9,6 +9,7 @@ export const DEFAULT_PARAMS: ImageParams = {
   quality: "4k",
   render_quality: "high",
   count: 1,
+  background: "opaque",
 };
 
 const IMAGE_COUNT_MIN = 1;

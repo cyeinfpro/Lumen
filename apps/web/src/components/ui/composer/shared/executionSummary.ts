@@ -62,7 +62,7 @@ function imageExecutionParts(input: {
   aspect: AspectRatio;
   quality: Quality;
   renderQuality: RenderQualityChoice;
-  fast: boolean;
+  transparentBackground: boolean;
 }): string[] {
   const count = Math.max(1, Math.min(16, input.outputCount || 1));
   const parts = [
@@ -70,8 +70,8 @@ function imageExecutionParts(input: {
     input.aspect,
     QUALITY_LABELS[input.quality],
     RENDER_QUALITY_LABELS[input.renderQuality],
-    input.fast ? "Fast" : "标准",
   ];
+  if (input.transparentBackground) parts.push("透明底");
   if (input.attachmentCount > 0) parts.push(`${input.attachmentCount} 张参考`);
   return parts;
 }
@@ -108,6 +108,7 @@ export function buildComposerExecutionSummary(input: {
   quality: Quality;
   renderQuality: RenderQualityChoice;
   fast: boolean;
+  transparentBackground: boolean;
   maskActive: boolean;
   costLabel?: string | null;
   costWarning?: boolean;

@@ -16,7 +16,6 @@ from app.routes import messages
 from lumen_core.byok_retention import ByokRetentionPolicy
 from lumen_core.constants import (
     DEFAULT_IMAGE_RESPONSES_MODEL,
-    DEFAULT_IMAGE_RESPONSES_MODEL_FAST,
     MAX_PROMPT_CHARS,
 )
 from lumen_core.pricing import CostBreakdown
@@ -289,7 +288,6 @@ def _silent_body(**overrides: Any) -> messages.SilentGenerationIn:
             fixed_size="1792x1024",
             quality="2k",
             count=1,
-            fast=True,
             render_quality="high",
             background="auto",
             moderation="low",
@@ -361,21 +359,7 @@ def test_image_upstream_request_uses_explicit_render_quality_for_4k() -> None:
     assert medium["responses_model"] == DEFAULT_IMAGE_RESPONSES_MODEL
     assert "output_compression" not in medium
 
-    fast = messages._image_upstream_request(  # noqa: SLF001
-        ImageParamsIn(
-            aspect_ratio="16:9",
-            size_mode="fixed",
-            fixed_size="3840x2160",
-            fast=True,
-            render_quality="high",
-            output_compression=95,
-        ),
-        resolved,
-        prompt="make a 4k landscape fast",
-    )
-    assert fast["render_quality"] == "high"
-    assert fast["responses_model"] == DEFAULT_IMAGE_RESPONSES_MODEL_FAST
-    assert fast["output_compression"] == 95
+    assert "fast" not in medium
 
 
 def test_image_upstream_request_records_billing_tier_from_quality() -> None:
@@ -1092,7 +1076,6 @@ def test_silent_generation_request_hash_is_stable_and_covers_request_fields() ->
             fixed_size="1792x1024",
             quality="2k",
             count=2,
-            fast=True,
             render_quality="high",
             output_format="jpeg",
             output_compression=90,
@@ -2219,7 +2202,6 @@ async def test_post_message_pins_image_task_to_active_user_api_credential(
                 aspect_ratio="1:1",
                 size_mode="fixed",
                 fixed_size="1024x1024",
-                fast=False,
             ),
         ),
         _user(),  # type: ignore[arg-type]
@@ -2302,7 +2284,6 @@ async def test_post_message_image_task_uses_supplier_default_image_model(
                 aspect_ratio="1:1",
                 size_mode="fixed",
                 fixed_size="1024x1024",
-                fast=False,
             ),
         ),
         _user(),  # type: ignore[arg-type]
@@ -2536,7 +2517,6 @@ async def test_post_message_persists_image_render_options(
                 size_mode="fixed",
                 fixed_size="2048x1152",
                 count=10,
-                fast=False,
                 render_quality="medium",
                 output_format="webp",
                 output_compression=88,
@@ -2552,7 +2532,6 @@ async def test_post_message_persists_image_render_options(
     assert len(gens) == 10
     assert out.generation_ids == [gen.id for gen in gens]
     expected = {
-        "fast": False,
         "responses_model": DEFAULT_IMAGE_RESPONSES_MODEL,
         "render_quality": "medium",
         "output_format": "webp",
@@ -2727,7 +2706,7 @@ async def test_image_output_format_system_setting_is_default(
 
 
 @pytest.mark.asyncio
-async def test_fast_default_applies_when_client_omits_fast(
+async def test_fast_default_only_applies_to_chat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
@@ -2783,12 +2762,12 @@ async def test_fast_default_applies_when_client_omits_fast(
     gen = next(
         item for item in image_db.added if item.__class__.__name__ == "Generation"
     )
-    assert gen.upstream_request["fast"] is True
-    assert gen.upstream_request["responses_model"] == DEFAULT_IMAGE_RESPONSES_MODEL_FAST
+    assert "fast" not in gen.upstream_request
+    assert gen.upstream_request["responses_model"] == DEFAULT_IMAGE_RESPONSES_MODEL
 
 
 @pytest.mark.asyncio
-async def test_explicit_fast_false_overrides_system_default(
+async def test_legacy_image_fast_field_is_ignored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
@@ -2820,11 +2799,13 @@ async def test_explicit_fast_false_overrides_system_default(
             idempotency_key="idem-fast-explicit-off",
             text="make an image",
             intent="text_to_image",
-            image_params=ImageParamsIn(
-                aspect_ratio="1:1",
-                size_mode="fixed",
-                fixed_size="1024x1024",
-                fast=False,
+            image_params=ImageParamsIn.model_validate(
+                {
+                    "aspect_ratio": "1:1",
+                    "size_mode": "fixed",
+                    "fixed_size": "1024x1024",
+                    "fast": False,
+                }
             ),
         ),
         _wallet_user(),  # type: ignore[arg-type]
@@ -2832,7 +2813,7 @@ async def test_explicit_fast_false_overrides_system_default(
     )
 
     gen = next(item for item in db.added if item.__class__.__name__ == "Generation")
-    assert gen.upstream_request["fast"] is False
+    assert "fast" not in gen.upstream_request
     assert gen.upstream_request["responses_model"] == DEFAULT_IMAGE_RESPONSES_MODEL
 
 

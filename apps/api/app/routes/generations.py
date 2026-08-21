@@ -7,7 +7,6 @@ DESIGN §6.7：
         limit: int = 30        # 1..100
         ratio: str | None      # "1:1" | "16:9" | "9:16" | "4:5" | "3:4" | "21:9"
         has_ref: bool = False
-        fast: bool = False
         q: str | None          # 简易 prompt LIKE 匹配（本轮不做全文索引）
 
 返回当前登录用户、status=succeeded、所属会话未删除且未归档的 generation，
@@ -43,7 +42,6 @@ from lumen_core.models import (
     ImageVariantClaim,
     Message,
 )
-from lumen_core.providers import parse_provider_bool
 
 from ..db import get_db
 from ..deps import CurrentUser
@@ -76,13 +74,6 @@ _ALLOWED_RATIOS = frozenset(
 )
 
 
-def _bool_option(value: object, default: bool = False) -> bool:
-    try:
-        return parse_provider_bool(value, default=default)
-    except ValueError:
-        return default
-
-
 # ---------- Schemas ----------
 
 
@@ -112,7 +103,6 @@ class GenerationFeedItem(BaseModel):
     prompt: str
     aspect_ratio: str
     has_ref: bool
-    fast: bool
     quality: str | None = None
     output_format: str | None = None
     size_actual: str
@@ -141,7 +131,6 @@ def _feed_filter_signature(
     user_id: str,
     ratio: str | None,
     has_ref: bool,
-    fast: bool,
     q: str | None,
     visible_after: datetime | None,
 ) -> str:
@@ -151,7 +140,6 @@ def _feed_filter_signature(
         "runtime": "docker",
         "ratio": ratio or "",
         "has_ref": bool(has_ref),
-        "fast": bool(fast),
         "q": (q or "").strip(),
         "visible_after": (
             visible_after.astimezone(timezone.utc).isoformat()
@@ -257,7 +245,6 @@ def _apply_filters(
     user_id: str,
     ratio: str | None,
     has_ref: bool,
-    fast: bool,
     q: str | None,
     visible_after: datetime | None = None,
 ) -> Select:  # type: ignore[type-arg]
@@ -295,11 +282,6 @@ def _apply_filters(
             )
         )
 
-    if fast:
-        stmt = stmt.where(
-            func.lower(Generation.upstream_request["fast"].astext).in_(("true", "1"))
-        )
-
     if q:
         # 简易 prompt LIKE 匹配；大小写不敏感。
         q_escaped = _escape_like_pattern(q.strip())
@@ -329,7 +311,6 @@ async def _generation_feed_total(
     user_id: str,
     ratio: str | None,
     has_ref: bool,
-    fast: bool,
     q: str | None,
     visible_after: datetime | None,
 ) -> int:
@@ -341,7 +322,6 @@ async def _generation_feed_total(
         user_id=user_id,
         ratio=ratio,
         has_ref=has_ref,
-        fast=fast,
         q=q,
         visible_after=visible_after,
     )
@@ -357,7 +337,6 @@ async def _generation_feed_page(
     user_id: str,
     ratio: str | None,
     has_ref: bool,
-    fast: bool,
     q: str | None,
     visible_after: datetime | None,
     cursor_ts: datetime | None,
@@ -370,7 +349,6 @@ async def _generation_feed_page(
         user_id=user_id,
         ratio=ratio,
         has_ref=has_ref,
-        fast=fast,
         q=q,
         visible_after=visible_after,
     )
@@ -556,7 +534,6 @@ def _feed_item(
             generation.primary_input_image_id
             or (generation.input_image_ids and len(generation.input_image_ids) > 0)
         ),
-        fast=_bool_option(upstream_request.get("fast"), False),
         quality=quality if isinstance(quality, str) else None,
         output_format=output_format if isinstance(output_format, str) else None,
         size_actual=f"{image.width}x{image.height}",
@@ -612,7 +589,6 @@ async def list_generation_feed(
     limit: int = Query(default=30, ge=1, le=100),
     ratio: str | None = None,
     has_ref: bool = False,
-    fast: bool = False,
     q: str | None = None,
 ) -> GenerationFeedOut:
     if ratio is not None and ratio not in _ALLOWED_RATIOS:
@@ -631,7 +607,6 @@ async def list_generation_feed(
         user_id=user.id,
         ratio=ratio,
         has_ref=has_ref,
-        fast=fast,
         q=q,
         visible_after=visible_after,
     )
@@ -650,7 +625,6 @@ async def list_generation_feed(
         user_id=user.id,
         ratio=ratio,
         has_ref=has_ref,
-        fast=fast,
         q=q,
         visible_after=visible_after,
     )
@@ -661,7 +635,6 @@ async def list_generation_feed(
         user_id=user.id,
         ratio=ratio,
         has_ref=has_ref,
-        fast=fast,
         q=q,
         visible_after=visible_after,
         cursor_ts=cur_ts,

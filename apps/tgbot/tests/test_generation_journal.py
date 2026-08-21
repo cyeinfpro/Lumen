@@ -113,7 +113,6 @@ def _payload(prompt: str = "cat") -> dict[str, object]:
         "count": 1,
         "resolution": "2k",
         "output_format": "jpeg",
-        "fast": False,
     }
 
 

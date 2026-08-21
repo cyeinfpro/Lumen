@@ -165,7 +165,7 @@ export function StreamNeverState() {
       tone="accent"
       eyebrow="素材流为空"
       title="还没有作品进入素材库"
-      description="生成完成后的图片会自动沉淀到这里。之后可以按比例、参考图、Fast 模式筛选，也可以批量选择并创建分享链接。"
+      description="生成完成后的图片会自动沉淀到这里。之后可以按比例、参考图筛选，也可以批量选择并创建分享链接。"
       primaryAction={
         <button
           type="button"

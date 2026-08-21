@@ -77,8 +77,6 @@ class SilentGenerationRuntime:
     byok_image_visible_filter: Callable[..., Awaitable[Any | None]]
     get_spec: Callable[[str], Any]
     get_setting: Callable[..., Awaitable[Any]]
-    resolve_fast_default: Callable[[AsyncSession], Awaitable[bool]]
-    image_params_with_fast_default: Callable[..., Any]
     create_assistant_task: Callable[..., Awaitable[Any]]
     await_post_commit_publishes: Callable[..., Awaitable[None]]
     publish_message_appended: Callable[..., Awaitable[None]]
@@ -333,11 +331,7 @@ async def create_silent_generation(
         raw_default_format = await runtime.get_setting(db, spec)
         if raw_default_format in runtime.image_output_format_values:
             default_image_output_format = raw_default_format
-    fast_default = await runtime.resolve_fast_default(db)
-    image_params = runtime.image_params_with_fast_default(
-        body.image_params,
-        fast_default,
-    )
+    image_params = body.image_params
     try:
         snapshot = await lock_active_user_snapshot(
             db,

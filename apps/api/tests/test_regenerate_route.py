@@ -240,32 +240,6 @@ async def test_image_params_from_target_does_not_inherit_old_default_jpeg() -> N
 
 
 @pytest.mark.asyncio
-async def test_image_params_from_target_treats_string_false_fast_as_disabled() -> None:
-    gen = Generation(
-        id="gen-old",
-        message_id="assistant-old",
-        user_id="user-1",
-        action=GenerationAction.GENERATE.value,
-        prompt="old prompt",
-        size_requested="2048x2048",
-        aspect_ratio="1:1",
-        input_image_ids=[],
-        status=GenerationStatus.SUCCEEDED.value,
-        idempotency_key="old-idem",
-        upstream_request={"fast": "false"},
-    )
-    db = _Db([_Result(all_values=[gen])])
-
-    out = await regenerate._image_params_from_target(
-        db,  # type: ignore[arg-type]
-        user_id="user-1",
-        conv_id="conv-1",
-        target_msg_id="assistant-old",
-    )
-
-    assert out.fast is False
-
-
 @pytest.mark.asyncio
 async def test_image_params_from_target_preserves_explicit_format() -> None:
     gen = Generation(

@@ -346,7 +346,6 @@ async def _image_params_from_target(
                     {"1k", "2k", "4k"},
                     None,
                 ),
-                "fast": _bool_option(upstream_request.get("fast"), False),
                 "render_quality": _str_option(
                     upstream_request.get("render_quality"),
                     _IMAGE_RENDER_QUALITY_VALUES,

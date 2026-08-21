@@ -35,7 +35,6 @@ def poster_image_params(
         count=count,
         render_quality="high",
         final_quality=final_quality,
-        fast=False,
     )
 
 

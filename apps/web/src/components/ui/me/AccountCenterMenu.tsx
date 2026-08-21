@@ -112,11 +112,11 @@ export function AccountCenterMenu({
               }
             />
           }
-          label="Fast 模式"
+          label="聊天 Fast"
           toggle={{
             checked: fast,
             onChange: onFastChange,
-            ariaLabel: "Fast 模式",
+            ariaLabel: "聊天 Fast",
           }}
           grouped
           last

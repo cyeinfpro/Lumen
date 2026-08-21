@@ -27,12 +27,6 @@ function hasText(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function formatBooleanMode(value: boolean | undefined): string | null {
-  if (value === true) return "快速";
-  if (value === false) return "标准";
-  return null;
-}
-
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
@@ -504,7 +498,6 @@ function buildGenerationRows(item: LightboxItem): LightboxMetadataRow[] {
     optionalRow("压缩", outputCompression),
     optionalRow("背景", background),
     optionalRow("审核", moderation),
-    optionalRow("模式", formatBooleanMode(item.fast)),
     optionalRow("模型", model),
   ]);
 }

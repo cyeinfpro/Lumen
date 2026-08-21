@@ -35,7 +35,6 @@ export function generationToLightboxItem(
     quality: item.quality ?? undefined,
     mime: item.image.mime ?? mimeFromOutputFormat(item.output_format),
     type: item.output_format ? `requested/${item.output_format}` : undefined,
-    fast: item.fast,
     created_at: item.created_at,
     revised_prompt: item.revised_prompt ?? null,
     requested_params: item.requested_params ?? null,

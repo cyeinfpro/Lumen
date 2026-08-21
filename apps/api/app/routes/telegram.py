@@ -105,7 +105,6 @@ router_bot = APIRouter()
 router_bot.include_router(_telegram_delivery_router)
 _aspect_ratio_to_size = _telegram_image_options.aspect_ratio_to_size
 _align_pair = _telegram_image_options.align_pair
-_bool_option = _telegram_runtime_values.bool_option
 _get_setting_str = _telegram_runtime_values.get_setting_str
 _get_setting_int = _telegram_runtime_values.get_setting_int
 
@@ -615,7 +614,6 @@ async def create_generation(
         size_mode="fixed",
         fixed_size=fixed_size,
         count=body.count,
-        fast=body.fast,
         render_quality=body.render_quality,
         output_format=body.output_format,
     )
@@ -705,7 +703,6 @@ async def get_generation(
         size_requested=gen.size_requested,
         render_quality=str(upstream.get("render_quality") or "medium"),
         output_format=str(upstream.get("output_format") or "jpeg"),
-        fast=_bool_option(upstream.get("fast"), False),
         web_url=web_url,
         edit_url=edit_url,
         project_url=project_url,

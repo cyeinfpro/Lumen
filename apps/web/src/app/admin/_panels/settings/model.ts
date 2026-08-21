@@ -319,14 +319,14 @@ export const SETTING_META: Record<string, SettingMeta> = {
   },
   [GENERATION_FAST_DEFAULT_KEY]: {
     group: "upstream",
-    title: "快速模式默认开启",
-    summary: "控制全站新对话和新生图的快速模式初始状态。",
-    detail: "全站默认值，用户可临时切换",
+    title: "聊天 Fast 默认开启",
+    summary: "控制新对话的 Fast 初始状态，不影响图片生成。",
+    detail: "聊天默认值，用户可临时切换",
     kind: "toggle",
     icon: Zap,
     defaultValue: "1",
     recommended: "这是管理员设定的全站默认值，不是个人偏好。",
-    keywords: ["fast", "default", "chat", "image", "默认", "快速"],
+    keywords: ["fast", "default", "chat", "默认", "快速"],
   },
   "upstream.global_concurrency": {
     group: "upstream",

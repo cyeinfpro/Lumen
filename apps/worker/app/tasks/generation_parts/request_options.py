@@ -4,9 +4,7 @@ from typing import Any
 
 from lumen_core.constants import (
     DEFAULT_IMAGE_RESPONSES_MODEL,
-    DEFAULT_IMAGE_RESPONSES_MODEL_FAST,
 )
-from lumen_core.providers import parse_provider_bool
 from lumen_core.sizing import validate_explicit_size
 
 
@@ -89,6 +87,25 @@ def prompt_with_aspect_ratio_constraint(prompt: str, aspect_ratio: str) -> str:
     return f"{normalized_prompt}{constraint}"
 
 
+_NATIVE_TRANSPARENCY_CONSTRAINT = (
+    "Transparency constraint: return genuine transparency in the image alpha "
+    "channel. Do not draw a checkerboard, white, gray, colored, studio, wall, "
+    "floor, or other visible background."
+)
+
+
+def prompt_with_native_transparency_constraint(
+    prompt: str,
+    background: str | None,
+) -> str:
+    if background != "transparent":
+        return prompt
+    normalized_prompt = prompt.rstrip()
+    if _NATIVE_TRANSPARENCY_CONSTRAINT in normalized_prompt:
+        return normalized_prompt
+    return f"{normalized_prompt}\n\n{_NATIVE_TRANSPARENCY_CONSTRAINT}"
+
+
 def primary_input_image_id_valid(
     primary_input_image_id: str | None,
     input_image_ids: list[str],
@@ -140,15 +157,6 @@ def request_responses_model(upstream_request: dict[str, Any]) -> str:
     value = upstream_request.get("responses_model")
     if isinstance(value, str) and value.strip():
         return value.strip()
-    try:
-        fast = parse_provider_bool(
-            upstream_request.get("fast"),
-            default=False,
-        )
-    except ValueError:
-        fast = False
-    if fast:
-        return DEFAULT_IMAGE_RESPONSES_MODEL_FAST
     return DEFAULT_IMAGE_RESPONSES_MODEL
 
 
@@ -158,12 +166,6 @@ def image_request_options(
     size: str,
 ) -> dict[str, Any]:
     request = upstream_request if isinstance(upstream_request, dict) else {}
-    try:
-        fast_mode = parse_provider_bool(
-            request.get("fast"), default=False
-        )
-    except ValueError:
-        fast_mode = False
     render_quality = request_render_quality(
         request, size=size
     )
@@ -182,7 +184,6 @@ def image_request_options(
     if background == "transparent" and output_format == "jpeg":
         output_format = "png"
     options: dict[str, Any] = {
-        "fast": fast_mode,
         "responses_model": request_responses_model(
             request
         ),

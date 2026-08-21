@@ -45,7 +45,6 @@ export function buildStreamFeedQuery(
   if (cursor) p.set("cursor", cursor);
   if (filters.ratio) p.set("ratio", filters.ratio);
   if (filters.has_ref) p.set("has_ref", "1");
-  if (filters.fast) p.set("fast", "1");
   const q = normalizeStreamSearchQuery(filters.q);
   if (q) p.set("q", q);
   return p.toString();
@@ -56,7 +55,6 @@ export function normalizeStreamFeedFilters(filters: StreamFeedFilters) {
   return {
     ratio: filters.ratio ?? null,
     has_ref: Boolean(filters.has_ref),
-    fast: Boolean(filters.fast),
     q: normalizeStreamSearchQuery(filters.q),
   };
 }
@@ -94,7 +92,6 @@ export function useStreamFeedQuery(
         {
           ratio: filters.ratio,
           has_ref: filters.has_ref,
-          fast: filters.fast,
           q: filters.q,
         },
         limit,

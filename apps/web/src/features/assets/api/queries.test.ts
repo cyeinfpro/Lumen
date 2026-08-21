@@ -32,7 +32,6 @@ test("search query normalization removes blank cache fragments", () => {
   deepEqual(normalizeStreamFeedFilters({ q: "   " }), {
     ratio: null,
     has_ref: false,
-    fast: false,
     q: null,
   });
 });

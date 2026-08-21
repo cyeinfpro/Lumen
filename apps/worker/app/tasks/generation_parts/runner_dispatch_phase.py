@@ -49,6 +49,7 @@ from .request_options import (
     image_request_options,
     image_requested_count,
     prompt_with_aspect_ratio_constraint,
+    prompt_with_native_transparency_constraint,
     validate_resolved_size,
 )
 from .retry_state import (
@@ -147,9 +148,12 @@ async def prepare_upstream_request(state: GenerationRunState) -> None:
         state.generation.upstream_request,
         size=state.resolved.size,
     )
-    state.prompt_for_upstream = prompt_with_aspect_ratio_constraint(
-        state.prompt,
-        state.aspect_ratio,
+    state.prompt_for_upstream = prompt_with_native_transparency_constraint(
+        prompt_with_aspect_ratio_constraint(
+            state.prompt,
+            state.aspect_ratio,
+        ),
+        state.image_request_options.get("background"),
     )
     await load_references_and_mask(state)
     normalize_mask(state)

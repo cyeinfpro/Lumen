@@ -400,6 +400,7 @@ async def test_dispatch_close_propagates_to_dual_race_cleanup(
             prompt="image",
             images=None,
             mask=None,
+            background="auto",
             provider_override=provider,
         ),
         channel="stream_only",

@@ -158,6 +158,7 @@ class GenerationErrorCode(StrEnum):
     MISSING_INPUT_IMAGES = "missing_input_images"
     REFERENCE_IMAGE_TOO_LARGE = "reference_image_too_large"
     DIRECT_IMAGE_RESULT_UNKNOWN = "direct_image_result_unknown"
+    TRANSPARENT_OUTPUT_MISSING_ALPHA = "transparent_output_missing_alpha"
     # image-job sidecar 的 `uncertain` 终态：上游已回 2xx 但本地未能交付图片，
     # 上游是否计费不可知。与 direct 版一样按 terminal 处理（重试可能二次扣费）。
     IMAGE_JOB_RESULT_UNKNOWN = "image_job_result_unknown"
@@ -357,7 +358,6 @@ DEFAULT_CHAT_MODEL = "gpt-5.6-sol"
 # 聊天走 5.6 Sol，但图像链路实测 5.4 更稳；默认同时带
 # reasoning.effort=high 与 service_tier=priority。
 DEFAULT_IMAGE_RESPONSES_MODEL = "gpt-5.4"
-DEFAULT_IMAGE_RESPONSES_MODEL_FAST = "gpt-5.4-mini"
 # 重试 backoff（秒）— DESIGN §6.4
 # 10/30s 对付网络瞬断；后续拉到分钟级是为了给 OpenAI
 # rate_limit / codex-window 冷却时间，避免短 backoff 连打在 rate_limit 下白打。

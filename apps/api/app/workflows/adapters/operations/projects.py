@@ -704,7 +704,6 @@ async def _dispatch_showcase_images_generation(
                 count=1,
                 render_quality="high" if body.final_quality != "standard" else "medium",
                 final_quality=body.final_quality,
-                fast=False,
             ),
             workflow_meta={
                 "workflow_action": "showcase_image",

@@ -75,12 +75,6 @@ def test_link_code_real_token_keeps_mixed_case_alphabet() -> None:
     assert len(code) >= 22
 
 
-def test_telegram_bool_option_treats_string_false_as_disabled() -> None:
-    assert telegram._bool_option("false") is False
-    assert telegram._bool_option("0") is False
-    assert telegram._bool_option("true") is True
-
-
 class _TelegramPromptIdempotencyDb:
     def __init__(self) -> None:
         self.rows: dict[str, Any] = {}

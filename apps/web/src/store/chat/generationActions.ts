@@ -82,10 +82,6 @@ const _regenerateInFlight = new Set<string>();
 const _upscaleInFlight = new Set<string>();
 const _rerollInFlight = new Set<string>();
 
-type GenerationActionDependencies = {
-  runtimeFastDefault: () => boolean | null;
-};
-
 type SilentGenerationPayload = Omit<
   Parameters<typeof createSilentGeneration>[1],
   "idempotency_key"
@@ -208,7 +204,6 @@ async function createSemanticSilentGeneration(
 async function _runUpscale(
   set: ChatStateSetter,
   get: ChatStateGetter,
-  dependencies: GenerationActionDependencies,
   imageId: string,
   request: GenerationRequestFence,
 ): Promise<void> {
@@ -265,7 +260,6 @@ async function _runUpscale(
       fixed_size: fixedSize,
       quality: "4k",
       count: 1,
-      fast: dependencies.runtimeFastDefault() ?? false,
       render_quality: "high",
       background: "auto",
       moderation: "low",
@@ -315,7 +309,6 @@ async function _runUpscale(
 export function createGenerationActions(
   set: ChatStateSetter,
   get: ChatStateGetter,
-  dependencies: GenerationActionDependencies,
 ): Pick<
   ChatState,
   | "retryAssistant"
@@ -657,7 +650,7 @@ export function createGenerationActions(
           state.currentUserId,
         );
         releaseRequest = request.release;
-        await _runUpscale(set, get, dependencies, imageId, request);
+        await _runUpscale(set, get, imageId, request);
       } finally {
         releaseRequest();
         _upscaleInFlight.delete(imageId);
@@ -710,7 +703,6 @@ export function createGenerationActions(
               : undefined,
             quality: rerollQuality,
             count: 1,
-            fast: dependencies.runtimeFastDefault() ?? false,
             render_quality: rerollRenderQuality,
             background: "auto",
             moderation: "low",

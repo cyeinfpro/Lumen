@@ -86,6 +86,7 @@ export interface ChatState {
   setQuality: (quality: Quality) => void;
   setRenderQuality: (quality: RenderQualityChoice) => void;
   setImageCount: (count: number) => void;
+  setTransparentBackground: (enabled: boolean) => void;
   setReasoningEffort: (value: ReasoningEffort | undefined) => void;
   setFast: (value: boolean) => void;
   setWebSearch: (value: boolean) => void;

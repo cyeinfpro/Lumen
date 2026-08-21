@@ -155,7 +155,6 @@ async def test_malformed_success_without_user_id_is_kept_ambiguous(
             "count": 1,
             "resolution": "2k",
             "output_format": "jpeg",
-            "fast": False,
         },
         LegacyGenerationApi(),  # type: ignore[arg-type]
         answer,

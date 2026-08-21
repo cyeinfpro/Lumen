@@ -19,6 +19,7 @@ test("extracted composer actions preserve preferences while clearing drafts", ()
     params: {
       ...createComposerState(null).params,
       aspect_ratio: "16:9" as const,
+      background: "opaque" as const,
     },
     reasoningEffort: "medium" as const,
     fast: false,
@@ -48,12 +49,16 @@ test("extracted composer actions preserve preferences while clearing drafts", ()
 
   actions.setFast(true);
   assert.equal(fastTouched, 1);
+  actions.setTransparentBackground(true);
+  assert.equal(state.composer.params.background, "transparent");
+  actions.setTransparentBackground(false);
+  assert.equal(state.composer.params.background, "opaque");
   actions.clearComposer();
 
   assert.equal(state.composer.text, "");
   assert.deepEqual(state.composer.attachments, []);
   assert.equal(state.composer.mode, "image");
-  assert.equal(state.composer.params, initialComposer.params);
+  assert.deepEqual(state.composer.params, initialComposer.params);
   assert.equal(state.composer.reasoningEffort, "medium");
   assert.equal(state.composer.fast, true);
   assert.equal(state.composer.webSearch, false);

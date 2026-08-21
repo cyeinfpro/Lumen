@@ -56,6 +56,7 @@ interface MobileComposerOverlaysProps {
   codeInterpreter: boolean;
   imageGeneration: boolean;
   fast: boolean;
+  transparentBackground: boolean;
   inpaint: Inpaint;
   onCloseAttachmentMenu: () => void;
   onInsertMention: (imageNumber: number) => void;
@@ -74,6 +75,7 @@ interface MobileComposerOverlaysProps {
   onCodeInterpreterChange: (value: boolean) => void;
   onImageGenerationChange: (value: boolean) => void;
   onFastChange: (value: boolean) => void;
+  onTransparentBackgroundChange: (value: boolean) => void;
 }
 
 function attachmentMenuDescription(
@@ -131,6 +133,7 @@ export function MobileComposerOverlays({
   codeInterpreter,
   imageGeneration,
   fast,
+  transparentBackground,
   inpaint,
   onCloseAttachmentMenu,
   onInsertMention,
@@ -149,6 +152,7 @@ export function MobileComposerOverlays({
   onCodeInterpreterChange,
   onImageGenerationChange,
   onFastChange,
+  onTransparentBackgroundChange,
 }: MobileComposerOverlaysProps) {
   const attachmentTitle =
     attachmentMenuIndex >= 0
@@ -200,6 +204,8 @@ export function MobileComposerOverlays({
           onImageGenerationChange={onImageGenerationChange}
           fast={fast}
           onFastChange={onFastChange}
+          transparentBackground={transparentBackground}
+          onTransparentBackgroundChange={onTransparentBackgroundChange}
         />
       </BottomSheet>
 

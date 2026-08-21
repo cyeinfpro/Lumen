@@ -221,7 +221,6 @@ def _model_library_generate_image_params() -> ImageParamsIn:
         aspect_ratio="4:5",
         count=1,
         render_quality="high",
-        fast=False,
     )
     return params.model_copy(
         update={"output_format": "png", "output_compression": None}

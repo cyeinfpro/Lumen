@@ -143,23 +143,25 @@ export function MobileStudioTopBar() {
             />
             <ContextWindowMeter stats={contextStats} compact />
             <ConversationMemoryButton compact />
-            <Pressable
-              size="default"
-              minHit
-              pressScale="tight"
-              haptic="light"
-              onPress={() => setFast(!fast)}
-              aria-label={fast ? "关闭 Fast 模式" : "开启 Fast 模式"}
-              aria-pressed={fast}
-              className={[
-                "h-10 w-10 shrink-0 rounded-[var(--radius-control)] border",
-                fast
-                  ? "border-accent-border bg-accent-soft"
-                  : "border-[var(--border-subtle)] bg-[var(--bg-1)]",
-              ].join(" ")}
-            >
-              <FastLamp on={fast} />
-            </Pressable>
+            {mode === "chat" ? (
+              <Pressable
+                size="default"
+                minHit
+                pressScale="tight"
+                haptic="light"
+                onPress={() => setFast(!fast)}
+                aria-label={fast ? "关闭聊天 Fast" : "开启聊天 Fast"}
+                aria-pressed={fast}
+                className={[
+                  "h-10 w-10 shrink-0 rounded-[var(--radius-control)] border",
+                  fast
+                    ? "border-accent-border bg-accent-soft"
+                    : "border-[var(--border-subtle)] bg-[var(--bg-1)]",
+                ].join(" ")}
+              >
+                <FastLamp on={fast} />
+              </Pressable>
+            ) : null}
             <Link
               href="/me"
               aria-label="会话与账户设置"

@@ -64,7 +64,7 @@ def test_image_requested_params_snapshot_whitelists_and_compacts() -> None:
         has_mask=False,
     )
 
-    assert snapshot["fast"] is True
+    assert "fast" not in snapshot
     assert snapshot["billing_tier"] == list(range(20))
     assert "unknown" not in snapshot
 

@@ -36,7 +36,6 @@ export interface LightboxItem {
   output_compression?: number | string | null;
   background?: string;
   moderation?: string;
-  fast?: boolean;
   /** 生成模型名或模型 id，按调用方已有数据透传展示。 */
   model?: string;
   model_id?: string;

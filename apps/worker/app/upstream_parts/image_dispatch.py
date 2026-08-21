@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from typing import Any
@@ -17,6 +18,10 @@ from .image_execution import (
     ImageExecutionRequest,
     ImageProviderRoute,
     ImageResult,
+)
+from .generated_payload import (
+    cleanup_owned_generated_payload,
+    materialize_generated_payload,
 )
 
 
@@ -280,19 +285,81 @@ def _merge_image_route_errors(
     )
 
 
+def _validate_transparent_results(
+    request: ImageExecutionRequest,
+    results: list[ImageResult],
+    *,
+    source: str,
+) -> list[ImageResult]:
+    if request.background != "transparent":
+        return results
+    services = _request_services(request)
+    invalid = False
+    try:
+        for payload, _revised_prompt in results:
+            raw = materialize_generated_payload(payload)
+            with services.infrastructure.PILImage.open(io.BytesIO(raw)) as image:
+                image.load()
+                if image.mode not in {"LA", "RGBA", "P"}:
+                    invalid = True
+                    break
+                with image.convert("RGBA") as rgba:
+                    minimum_alpha = rgba.getchannel("A").getextrema()[0]
+                if isinstance(minimum_alpha, tuple):
+                    minimum_alpha = minimum_alpha[0]
+                if minimum_alpha >= 255:
+                    invalid = True
+                    break
+    except Exception as exc:  # noqa: BLE001
+        invalid = True
+        services.infrastructure.logger.warning(
+            "transparent output validation failed source=%s err=%r",
+            source,
+            exc,
+        )
+    if not invalid:
+        return results
+    for payload, _revised_prompt in results:
+        if not isinstance(payload, str):
+            cleanup_owned_generated_payload(payload)
+    raise services.infrastructure.UpstreamError(
+        "upstream returned opaque pixels for a transparent image request",
+        error_code=(
+            services.infrastructure.EC.TRANSPARENT_OUTPUT_MISSING_ALPHA.value
+        ),
+        status_code=200,
+        payload={
+            "reason": "transparent_output_missing_alpha",
+            "source": source,
+        },
+    )
+
+
+def _is_transparency_contract_error(exc: BaseException) -> bool:
+    return getattr(exc, "payload", {}).get("reason") == (
+        "transparent_output_missing_alpha"
+    )
+
+
 async def _run_image2_with_responses_fallback(
     request: ImageExecutionRequest,
     route: ImageProviderRoute,
 ) -> list[ImageResult]:
     services = _request_services(request)
     try:
-        return await _run_direct_image2_once(request)
+        return _validate_transparent_results(
+            request,
+            await _run_direct_image2_once(request),
+            source="image2",
+        )
     except (
         asyncio.CancelledError,
         services.infrastructure.UpstreamCancelled,
     ):
         raise
     except Exception as primary_error:  # noqa: BLE001
+        if _is_transparency_contract_error(primary_error):
+            raise
         if direct_requests._is_direct_image_result_unknown(
             primary_error,
             runtime=request.upstream_runtime,
@@ -317,7 +384,11 @@ async def _run_image2_with_responses_fallback(
                 fallback_error=unavailable,
             ) from primary_error
         try:
-            return [await _run_responses_once(request)]
+            return _validate_transparent_results(
+                request,
+                [await _run_responses_once(request)],
+                source="responses",
+            )
         except (
             asyncio.CancelledError,
             services.infrastructure.UpstreamCancelled,
@@ -339,13 +410,19 @@ async def _run_responses_with_image2_fallback(
 ) -> list[ImageResult]:
     services = _request_services(request)
     try:
-        return [await _run_responses_once(request)]
+        return _validate_transparent_results(
+            request,
+            [await _run_responses_once(request)],
+            source="responses",
+        )
     except (
         asyncio.CancelledError,
         services.infrastructure.UpstreamCancelled,
     ):
         raise
     except Exception as primary_error:  # noqa: BLE001
+        if _is_transparency_contract_error(primary_error):
+            raise
         if direct_requests._is_direct_image_result_unknown(
             primary_error,
             runtime=request.upstream_runtime,
@@ -375,7 +452,11 @@ async def _run_responses_with_image2_fallback(
             except services.infrastructure.UpstreamError as missing_images:
                 raise missing_images from primary_error
         try:
-            return await _run_direct_image2_once(request)
+            return _validate_transparent_results(
+                request,
+                await _run_direct_image2_once(request),
+                source="image2",
+            )
         except (
             asyncio.CancelledError,
             services.infrastructure.UpstreamCancelled,
@@ -417,13 +498,21 @@ async def _run_masked_image_once(
             status="routed",
         )
     if not route.use_jobs:
-        return await _run_direct_image2_once(request)
-    return [
-        await services.image_jobs.image_job_with_failover(
+        return _validate_transparent_results(
             request,
-            endpoint_override="generations",
+            await _run_direct_image2_once(request),
+            source="image2_masked",
         )
-    ]
+    return _validate_transparent_results(
+        request,
+        [
+            await services.image_jobs.image_job_with_failover(
+                request,
+                endpoint_override="generations",
+            )
+        ],
+        source="image_jobs_masked",
+    )
 
 
 def _dual_race_image_iter(
@@ -448,15 +537,19 @@ async def _run_non_race_image_once(
     runtime = request.upstream_runtime
     services = _request_services(request)
     if route.use_jobs:
-        return [
-            await services.image_jobs.image_job_with_failover(
-                request,
-                endpoint_preference=_image_jobs_endpoint_for_engine(
-                    route.engine,
-                    runtime=runtime,
-                ),
-            )
-        ]
+        return _validate_transparent_results(
+            request,
+            [
+                await services.image_jobs.image_job_with_failover(
+                    request,
+                    endpoint_preference=_image_jobs_endpoint_for_engine(
+                        route.engine,
+                        runtime=runtime,
+                    ),
+                )
+            ],
+            source="image_jobs",
+        )
     if route.engine == services.core.IMAGE_ROUTE_IMAGE2:
         return await _run_image2_with_responses_fallback(request, route)
     return await _run_responses_with_image2_fallback(request, route)
@@ -475,9 +568,23 @@ async def _run_image_once_for_provider(
             yield item
         return
     if route.engine == services.core.IMAGE_ROUTE_DUAL_RACE:
+        transparency_error: BaseException | None = None
         async with aclosing(_dual_race_image_iter(request, route)) as results:
             async for item in results:
-                yield item
+                try:
+                    validated = _validate_transparent_results(
+                        request,
+                        [item],
+                        source="dual_race",
+                    )
+                except services.infrastructure.UpstreamError as exc:
+                    if not _is_transparency_contract_error(exc):
+                        raise
+                    transparency_error = exc
+                    continue
+                yield validated[0]
+        if transparency_error is not None:
+            raise transparency_error
         return
     for item in await _run_non_race_image_once(request, route):
         yield item
