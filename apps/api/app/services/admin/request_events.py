@@ -18,7 +18,6 @@ from sqlalchemy.orm import aliased
 
 from lumen_core.constants import (
     DEFAULT_IMAGE_RESPONSES_MODEL,
-    DEFAULT_IMAGE_RESPONSES_MODEL_FAST,
     UPSTREAM_MODEL,
 )
 from lumen_core.models import (
@@ -274,7 +273,7 @@ _MODEL_SHORT_LABELS = MappingProxyType(
     {
         UPSTREAM_MODEL: "image2",
         DEFAULT_IMAGE_RESPONSES_MODEL: "5.4",
-        DEFAULT_IMAGE_RESPONSES_MODEL_FAST: "5.4 mini",
+        "gpt-5.4-mini": "5.4 mini",
     }
 )
 
@@ -283,10 +282,14 @@ def short_model(name: str) -> str:
     return _MODEL_SHORT_LABELS.get(name, name)
 
 
-def responses_model_from_request(req: dict[str, Any], *, fast: bool) -> str:
-    return json_str(req, "responses_model") or (
-        DEFAULT_IMAGE_RESPONSES_MODEL_FAST if fast else DEFAULT_IMAGE_RESPONSES_MODEL
-    )
+def responses_model_from_request(req: dict[str, Any]) -> str:
+    explicit = json_str(req, "responses_model")
+    if explicit:
+        return explicit
+    # Historical generations may only have the retired image Fast flag.
+    if req.get("fast") is True:
+        return "gpt-5.4-mini"
+    return DEFAULT_IMAGE_RESPONSES_MODEL
 
 
 def generation_model_label_from_request(
@@ -302,12 +305,10 @@ def generation_model_label_from_request(
     route = request_route(req) or "responses"
     actual_route = json_str(req, "actual_route")
     endpoint = json_str(req, "actual_endpoint") or ""
-    fast = bool(req.get("fast"))
     actual_model = _model_from_actual_route(
         req,
         actual_route=actual_route,
         endpoint=endpoint,
-        fast=fast,
     )
     if actual_model is not None:
         return actual_model
@@ -316,7 +317,6 @@ def generation_model_label_from_request(
         route=route,
         action=action,
         status=status,
-        fast=fast,
     )
 
 
@@ -325,16 +325,15 @@ def _model_from_actual_route(
     *,
     actual_route: str | None,
     endpoint: str,
-    fast: bool,
 ) -> str | None:
     if endpoint.startswith(("image-jobs:responses", "responses:")):
-        return short_model(responses_model_from_request(req, fast=fast))
+        return short_model(responses_model_from_request(req))
     if endpoint.startswith(("image-jobs:", "images/")):
         return short_model(UPSTREAM_MODEL)
     if actual_route and actual_route.startswith(("image2", "image_jobs")):
         return short_model(UPSTREAM_MODEL)
     if actual_route and actual_route.startswith("responses"):
-        return short_model(responses_model_from_request(req, fast=fast))
+        return short_model(responses_model_from_request(req))
     return None
 
 
@@ -344,19 +343,18 @@ def _model_from_requested_route(
     route: str,
     action: str,
     status: str,
-    fast: bool,
 ) -> str:
     if route == "image2":
         return short_model(UPSTREAM_MODEL)
     if route == "image_jobs":
-        if (action == "generate" and not fast) or action == "edit":
+        if action in {"generate", "edit"}:
             return short_model(UPSTREAM_MODEL)
-        return short_model(responses_model_from_request(req, fast=fast))
+        return short_model(responses_model_from_request(req))
     if route == "dual_race" and status in {"queued", "running"}:
-        return f"竞速中: {short_model(responses_model_from_request(req, fast=fast))} / {short_model(UPSTREAM_MODEL)}"
+        return f"竞速中: {short_model(responses_model_from_request(req))} / {short_model(UPSTREAM_MODEL)}"
     if route == "dual_race":
         return "历史未记录"
-    return short_model(responses_model_from_request(req, fast=fast))
+    return short_model(responses_model_from_request(req))
 
 
 def generation_model_label(gen: Generation) -> str:
@@ -371,9 +369,9 @@ def request_event_model_stat_label(model: str) -> str:
     normalized = (model or "").strip()
     if normalized in {
         short_model(DEFAULT_IMAGE_RESPONSES_MODEL),
-        short_model(DEFAULT_IMAGE_RESPONSES_MODEL_FAST),
+        short_model("gpt-5.4-mini"),
         DEFAULT_IMAGE_RESPONSES_MODEL,
-        DEFAULT_IMAGE_RESPONSES_MODEL_FAST,
+        "gpt-5.4-mini",
     }:
         return "Codex 原生"
     if normalized in {short_model(UPSTREAM_MODEL), UPSTREAM_MODEL}:
@@ -410,7 +408,6 @@ def safe_upstream_details(upstream_request: dict[str, Any] | None) -> dict[str, 
         "actual_route",
         "actual_source",
         "background",
-        "fast",
         "image_job_endpoint_used",
         "image_job_expires_at",
         "image_job_format",

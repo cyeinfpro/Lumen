@@ -27,6 +27,7 @@ export function StudioContextBar({
   title,
   view,
   onViewChange,
+  composerMode,
   fast,
   onFastChange,
   contextStats,
@@ -34,6 +35,7 @@ export function StudioContextBar({
   title: string;
   view: "chat" | "images";
   onViewChange: (view: "chat" | "images") => void;
+  composerMode: "chat" | "image";
   fast: boolean;
   onFastChange: (next: boolean) => void;
   contextStats: ContextStats;
@@ -134,7 +136,7 @@ export function StudioContextBar({
           )}
         >
           <Settings2 className="h-4 w-4" aria-hidden />
-          {fast && (
+          {composerMode === "chat" && fast && (
             <span
               aria-hidden
               className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--accent)]"
@@ -161,39 +163,41 @@ export function StudioContextBar({
               </p>
             </div>
 
-            <button
-              type="button"
-              aria-pressed={fast}
-              onClick={() => onFastChange(!fast)}
-              className={cn(
-                "type-control flex min-h-10 w-full items-center gap-2 rounded-[var(--radius-control)] px-2.5 text-left",
-                "transition-colors focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
-                fast
-                  ? "bg-accent-soft text-[var(--fg-0)]"
-                  : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
-              )}
-            >
-              <Zap
-                className={cn(
-                  "h-4 w-4",
-                  fast ? "text-[var(--accent)]" : "text-[var(--fg-2)]",
-                )}
-                fill={fast ? "currentColor" : "none"}
-                aria-hidden
-              />
-              <span className="min-w-0 flex-1">
-                Fast
-              </span>
-              <span
-                aria-hidden
-                className={cn(
-                  "h-2 w-2 rounded-full",
-                  fast ? "bg-[var(--accent)]" : "bg-[var(--fg-3)]",
-                )}
-              />
-            </button>
+            {composerMode === "chat" ? (
+              <>
+                <button
+                  type="button"
+                  aria-pressed={fast}
+                  onClick={() => onFastChange(!fast)}
+                  className={cn(
+                    "type-control flex min-h-10 w-full items-center gap-2 rounded-[var(--radius-control)] px-2.5 text-left",
+                    "transition-colors focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
+                    fast
+                      ? "bg-accent-soft text-[var(--fg-0)]"
+                      : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
+                  )}
+                >
+                  <Zap
+                    className={cn(
+                      "h-4 w-4",
+                      fast ? "text-[var(--accent)]" : "text-[var(--fg-2)]",
+                    )}
+                    fill={fast ? "currentColor" : "none"}
+                    aria-hidden
+                  />
+                  <span className="min-w-0 flex-1">聊天 Fast</span>
+                  <span
+                    aria-hidden
+                    className={cn(
+                      "h-2 w-2 rounded-full",
+                      fast ? "bg-[var(--accent)]" : "bg-[var(--fg-3)]",
+                    )}
+                  />
+                </button>
 
-            <div className="my-2 h-px bg-[var(--border-subtle)]" />
+                <div className="my-2 h-px bg-[var(--border-subtle)]" />
+              </>
+            ) : null}
 
             <div className="list-group grid px-1">
               <div className="list-row flex min-h-10 items-center justify-between gap-3 px-1">

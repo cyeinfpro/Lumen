@@ -42,7 +42,6 @@ _ALLOWED_VALUES: Mapping[str, frozenset[str]] = MappingProxyType(
         "count": frozenset(str(value) for _, value in COUNT_LABELS),
         "resolution": frozenset(value for _, value in RESOLUTION_LABELS),
         "output_format": frozenset(value for _, value in FORMAT_LABELS),
-        "fast": _BOOL_VALUES,
         "enhance": _BOOL_VALUES,
     }
 )
@@ -67,7 +66,7 @@ def _coerce(field: str, value: str) -> object | None:
         return None
     if field == "count":
         return int(value)
-    if field in ("fast", "enhance"):
+    if field == "enhance":
         return value == "true"
     return value
 

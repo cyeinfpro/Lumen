@@ -42,21 +42,19 @@ import { shareOrCopyLink } from "@/lib/shareLink";
 function parseFilters(sp: URLSearchParams): StreamFeedFilters {
   const ratio = sp.get("ratio") ?? undefined;
   const has_ref = sp.get("has_ref") === "1";
-  const fast = sp.get("fast") === "1";
-  return { ratio, has_ref, fast };
+  return { ratio, has_ref };
 }
 
 function filtersToQueryString(f: StreamFeedFilters): string {
   const p = new URLSearchParams();
   if (f.ratio) p.set("ratio", f.ratio);
   if (f.has_ref) p.set("has_ref", "1");
-  if (f.fast) p.set("fast", "1");
   const s = p.toString();
   return s ? `?${s}` : "";
 }
 
 function hasAnyFilter(f: StreamFeedFilters): boolean {
-  return Boolean(f.ratio || f.has_ref || f.fast);
+  return Boolean(f.ratio || f.has_ref);
 }
 
 function shouldShowOverview(
@@ -376,9 +374,6 @@ export function DesktopStream() {
   const onToggleReferenceFilter = useCallback(() => {
     applyFilters({ ...filters, has_ref: !filters.has_ref });
   }, [applyFilters, filters]);
-  const onToggleFastFilter = useCallback(() => {
-    applyFilters({ ...filters, fast: !filters.fast });
-  }, [applyFilters, filters]);
 
   const onRefresh = useCallback(() => {
     void query.refetch();
@@ -452,7 +447,6 @@ export function DesktopStream() {
                 onRefresh={onRefresh}
                 onClearFilters={clearAllControls}
                 onToggleReferenceFilter={onToggleReferenceFilter}
-                onToggleFastFilter={onToggleFastFilter}
                 selectionMode={selectionActive}
                 selectedCount={selectedImageIds.length}
                 sharingSelected={createMultiShareMutation.isPending}

@@ -52,7 +52,6 @@ class SubmissionRuntime:
     resolve_intent: Callable[..., Intent]
     message_request_metadata: Callable[..., dict[str, Any]]
     resolve_fast_default: Callable[[AsyncSession], Awaitable[bool]]
-    image_params_with_fast_default: Callable[..., Any]
     chat_params_with_fast_default: Callable[..., Any]
     ensure_file_search_configured: Callable[..., Awaitable[None]]
     assistant_context_runtime: Callable[[], Any]
@@ -163,16 +162,14 @@ async def submit_user_message(
         operation_namespace=MESSAGE_CREATE_IDEMPOTENCY_OPERATION,
         request_fingerprint=request_fingerprint,
     )
-    fast_default = await runtime.resolve_fast_default(db)
-    image_params = runtime.image_params_with_fast_default(
-        body.image_params,
-        fast_default,
-    )
-    chat_params = runtime.chat_params_with_fast_default(
-        body.chat_params,
-        fast_default,
-    )
+    image_params = body.image_params
+    chat_params = body.chat_params
     if is_chat_intent(intent):
+        fast_default = await runtime.resolve_fast_default(db)
+        chat_params = runtime.chat_params_with_fast_default(
+            chat_params,
+            fast_default,
+        )
         await runtime.ensure_file_search_configured(db, chat_params)
     user_content = build_user_content(
         body,

@@ -97,7 +97,6 @@ async def test_redo_carries_original_reference_images(
             "size_requested": "3200x1800",
             "render_quality": "high",
             "output_format": "png",
-            "fast": True,
             "input_image_ids": ["img-a", "img-b"],
         }
     )
@@ -353,6 +352,6 @@ async def test_valid_cfg_callback_still_applies() -> None:
 async def test_bool_cfg_callback_coerces_to_bool() -> None:
     state = CfgState(DEFAULT_PARAMS)
 
-    await menu.on_cfg(_make_cfg_callback("cfg:fast:false"), state)  # type: ignore[arg-type]
+    await menu.on_cfg(_make_cfg_callback("cfg:enhance:true"), state)  # type: ignore[arg-type]
 
-    assert state.data["params"]["fast"] is False
+    assert state.data["params"]["enhance"] is True

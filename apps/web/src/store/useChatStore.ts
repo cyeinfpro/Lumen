@@ -186,9 +186,7 @@ function createChatStore() {
         await sendMessageAction(opts);
       },
 
-      ...createGenerationActions(set, get, {
-        runtimeFastDefault: () => _runtimeFastDefault,
-      }),
+      ...createGenerationActions(set, get),
 
       appendUserMessage: (message) => {
         const convId = get().currentConvId;

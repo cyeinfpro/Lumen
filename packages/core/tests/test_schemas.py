@@ -256,7 +256,7 @@ def test_image_params_support_render_and_output_options():
     assert ImageParamsIn().count == 1
     assert ImageParamsIn(count=10).count == 10
     assert ImageParamsIn().output_format is None
-    assert ImageParamsIn().fast is None
+    assert "fast" not in ImageParamsIn.model_validate({"fast": True}).model_dump()
     jpeg_transparent = ImageParamsIn(
         output_format="jpeg",
         output_compression=88,

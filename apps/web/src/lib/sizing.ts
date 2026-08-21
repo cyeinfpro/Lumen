@@ -86,10 +86,8 @@ export function qualityToFixedSize(quality: Quality, aspect: AspectRatio): { siz
 export function defaultOutputCompression(input: {
   renderQuality: RenderQuality;
   outputFormat: ImageOutputFormat;
-  fast: boolean;
 }): number | undefined {
   void input.renderQuality;
-  void input.fast;
   if (input.outputFormat === "png") return undefined;
   return 0;
 }

@@ -2369,10 +2369,10 @@ def test_workflow_image_params_use_high_quality_jpeg() -> None:
 
     assert params.output_format == "jpeg"
     assert params.output_compression == 100
-    assert params.fast is False
+    assert "fast" not in params.model_dump()
 
 
-def test_workflow_image_params_default_to_non_fast_high_quality_for_showcase() -> None:
+def test_workflow_image_params_default_to_high_quality_for_showcase() -> None:
     params = workflow_runtime._image_params(  # noqa: SLF001
         aspect_ratio="4:5",
         count=1,
@@ -2380,7 +2380,7 @@ def test_workflow_image_params_default_to_non_fast_high_quality_for_showcase() -
         final_quality="high",
     )
 
-    assert params.fast is False
+    assert "fast" not in params.model_dump()
     assert params.render_quality == "high"
     assert params.fixed_size == "1600x2000"
 
@@ -3502,7 +3502,7 @@ def test_candidate_image_params_use_lossless_png_reference() -> None:
     assert params.fixed_size == "1600x2000"
     assert params.count == 1
     assert params.render_quality == "high"
-    assert params.fast is False
+    assert "fast" not in params.model_dump()
     assert params.output_format == "png"
     assert params.output_compression is None
     assert params.background == "opaque"
@@ -4617,7 +4617,7 @@ def test_accessory_preview_image_params_use_png_reference_quality() -> None:
     assert params.fixed_size == "1600x2000"
     assert params.count == 1
     assert params.render_quality == "high"
-    assert params.fast is False
+    assert "fast" not in params.model_dump()
     assert params.output_format == "png"
     assert params.output_compression is None
     assert params.background == "opaque"
@@ -5396,13 +5396,13 @@ def test_model_diversity_anchor_rotates_by_candidate_index_and_gender() -> None:
     assert "visibly different" in child_anchor
 
 
-def test_model_library_generate_image_params_use_lossless_png_with_fast_off() -> None:
+def test_model_library_generate_image_params_use_lossless_png() -> None:
     params = model_library._model_library_generate_image_params()  # noqa: SLF001
 
     assert params.aspect_ratio == "4:5"
     assert params.count == 1
     assert params.render_quality == "high"
-    assert params.fast is False
+    assert "fast" not in params.model_dump()
     assert params.output_format == "png"
     assert params.output_compression is None
 

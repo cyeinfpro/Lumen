@@ -55,7 +55,6 @@ export type DesktopGalleryItem = {
     size_actual?: string;
     size_requested?: string;
     quality?: string;
-    fast?: boolean;
     created_at?: string;
     filename?: string;
     parent_image_id?: string | null;
@@ -168,7 +167,6 @@ function toDesktopGalleryImage(item: LightboxItem): DesktopImageMeta {
     size_actual: item.size_actual,
     size_requested: item.size_requested,
     quality: item.quality,
-    fast: item.fast,
     created_at: item.created_at,
     filename: firstPresent(item.filename, item.file_name),
     parent_image_id: valueOrNull(item.parent_image_id),
@@ -376,7 +374,6 @@ function fallbackCurrentLightboxItem(
     size_actual: meta.size_actual,
     size_requested: meta.size_requested,
     quality: meta.quality,
-    fast: meta.fast,
     mime: meta.mime,
     filename: meta.filename,
     created_at: meta.created_at,

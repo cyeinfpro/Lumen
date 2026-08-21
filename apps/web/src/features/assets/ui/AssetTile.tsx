@@ -8,7 +8,6 @@ import {
   Image as ImageIcon,
   ImageDown,
   RotateCcw,
-  Zap,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import {
@@ -542,12 +541,6 @@ function GenerationTileMetadata({
         {item.aspect_ratio && (
           <span className="shrink-0 rounded-[4px] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-1.5 py-px type-caption font-mono tabular-nums text-[var(--fg-2)]">
             {item.aspect_ratio}
-          </span>
-        )}
-        {item.fast && (
-          <span className="inline-flex shrink-0 items-center gap-0.5 rounded-[4px] border border-accent-border bg-accent-soft px-1.5 py-px type-caption font-medium text-accent">
-            <Zap className="h-2.5 w-2.5" />
-            快速
           </span>
         )}
         {item.has_ref && (

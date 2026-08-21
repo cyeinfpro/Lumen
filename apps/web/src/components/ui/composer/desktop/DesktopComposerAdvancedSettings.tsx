@@ -6,6 +6,7 @@ import {
   FileSearch,
   Globe2,
   ImagePlus,
+  Layers2,
   X,
   Zap,
 } from "lucide-react";
@@ -57,6 +58,8 @@ interface AdvancedComposerSettingsProps {
   onImageGenerationChange: (value: boolean) => void;
   fast: boolean;
   onFastChange: (value: boolean) => void;
+  transparentBackground: boolean;
+  onTransparentBackgroundChange: (value: boolean) => void;
   onClose: () => void;
 }
 
@@ -82,6 +85,8 @@ export function AdvancedComposerSettings({
   onImageGenerationChange,
   fast,
   onFastChange,
+  transparentBackground,
+  onTransparentBackgroundChange,
   onClose,
 }: AdvancedComposerSettingsProps) {
   const imageMode = mode === "image";
@@ -142,19 +147,21 @@ export function AdvancedComposerSettings({
                 </div>
               </section>
 
-              <section className="grid gap-2" aria-labelledby="image-speed-settings">
+              <section className="grid gap-2" aria-labelledby="image-background-settings">
                 <h3
-                  id="image-speed-settings"
+                  id="image-background-settings"
                   className="type-caption text-[var(--fg-2)]"
                 >
-                  执行
+                  背景
                 </h3>
                 <ToggleRow
-                  active={fast}
-                  onClick={() => onFastChange(!fast)}
-                  icon={<Zap className="h-4 w-4" aria-hidden />}
-                  label="Fast"
-                  detail="优先更快完成"
+                  active={transparentBackground}
+                  onClick={() =>
+                    onTransparentBackgroundChange(!transparentBackground)
+                  }
+                  icon={<Layers2 className="h-4 w-4" aria-hidden />}
+                  label="透明底"
+                  detail="Alpha 通道"
                 />
               </section>
             </div>

@@ -111,7 +111,6 @@ _MESSAGE_REGENERATE_IDEMPOTENCY_OPERATION = (
 _SILENT_GENERATION_IDEMPOTENCY_OPERATION = (
     _message_idempotency.SILENT_GENERATION_IDEMPOTENCY_OPERATION
 )
-_image_params_with_fast_default = _message_submission.image_params_with_fast_default
 _chat_params_with_fast_default = _message_submission.chat_params_with_fast_default
 _wants_transparent_background = _message_submission.wants_transparent_background
 _image_upstream_request = _message_submission.image_upstream_request
@@ -511,7 +510,6 @@ def _submission_runtime() -> _submission.SubmissionRuntime:
         resolve_intent=resolve_intent,
         message_request_metadata=_message_request_metadata,
         resolve_fast_default=_resolve_fast_default,
-        image_params_with_fast_default=_image_params_with_fast_default,
         chat_params_with_fast_default=_chat_params_with_fast_default,
         ensure_file_search_configured=_ensure_file_search_configured,
         assistant_context_runtime=_assistant_context_runtime,
@@ -613,8 +611,6 @@ def _silent_generation_runtime() -> _silent.SilentGenerationRuntime:
         byok_image_visible_filter=_byok_image_visible_filter,
         get_spec=get_spec,
         get_setting=get_setting,
-        resolve_fast_default=_resolve_fast_default,
-        image_params_with_fast_default=_image_params_with_fast_default,
         create_assistant_task=_create_assistant_task,
         await_post_commit_publishes=_await_post_commit_publishes,
         publish_message_appended=_publish_message_appended,

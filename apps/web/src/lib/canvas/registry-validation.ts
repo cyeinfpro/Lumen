@@ -22,6 +22,7 @@ export function validateCanvasNodeConfig(
 type CanvasConfigValidator = (config: CanvasConfigRecord) => boolean;
 
 const NODE_UI_KEYS = new Set(["collapsed", "color_tag", "preset_id"]);
+// Accepted only so locally cached V1 graphs can load and be re-saved without it.
 const IMAGE_CONFIG_KEYS = new Set([
   "model",
   "aspect_ratio",
@@ -131,7 +132,7 @@ function imageConfigIsValid(config: CanvasConfigRecord): boolean {
       new Set(["auto", "low", "medium", "high"]),
     ) &&
     optionalInteger(config, "count", 1, 10) &&
-    optionalNullableBoolean(config, "fast") &&
+    optionalLegacyImageFast(config) &&
     optionalNullableSetValue(
       config,
       "output_format",
@@ -256,11 +257,8 @@ function optionalBoolean(config: CanvasConfigRecord, key: string): boolean {
   return config[key] === undefined || typeof config[key] === "boolean";
 }
 
-function optionalNullableBoolean(
-  config: CanvasConfigRecord,
-  key: string,
-): boolean {
-  return config[key] === null || optionalBoolean(config, key);
+function optionalLegacyImageFast(config: CanvasConfigRecord): boolean {
+  return config.fast === null || optionalBoolean(config, "fast");
 }
 
 function optionalSetValue(

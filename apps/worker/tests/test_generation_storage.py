@@ -677,6 +677,30 @@ def test_prompt_with_aspect_ratio_constraint_adds_square_guard() -> None:
     assert "poster" in prompt
 
 
+def test_transparent_prompt_adds_native_alpha_constraint_once() -> None:
+    prompt = request_options.prompt_with_native_transparency_constraint(
+        "生成一张证件照",
+        "transparent",
+    )
+
+    assert "genuine transparency" in prompt
+    assert "Do not draw a checkerboard" in prompt
+    assert (
+        request_options.prompt_with_native_transparency_constraint(
+            prompt,
+            "transparent",
+        )
+        == prompt
+    )
+    assert (
+        request_options.prompt_with_native_transparency_constraint(
+            "生成一张证件照",
+            "auto",
+        )
+        == "生成一张证件照"
+    )
+
+
 def test_retry_delay_adds_jitter(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(retry_state.random, "uniform", lambda low, high: high)
 

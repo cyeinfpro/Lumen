@@ -26,8 +26,10 @@ from app.upstream_clients.image_job_models import (
 )
 from app.upstream_parts.image_execution import (
     ImageExecutionRequest,
+    ImageProviderRoute,
     ImageRequestContext,
 )
+from app.upstream_parts import image_dispatch
 from app.upstream_parts import (
     InlineImageBytes,
     StagedImageFile,
@@ -37,16 +39,12 @@ from app.upstream_parts import (
 from app.upstream_parts.upstream_impl import build_image_upstream_runtime
 from lumen_core.constants import (
     DEFAULT_IMAGE_RESPONSES_MODEL,
-    DEFAULT_IMAGE_RESPONSES_MODEL_FAST,
     UPSTREAM_MODEL,
 )
 from lumen_core.url_security import PublicHttpDownload, PublicHttpStagedDownload
 
 TEST_UPSTREAM_RUNTIME = build_image_upstream_runtime()
 TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
-
-PNG_B64 = base64.b64encode(b"fake-png-bytes").decode("ascii")
-
 
 def _make_tiny_png(
     size: tuple[int, int] = (2, 2), color: tuple[int, int, int] = (128, 128, 128)
@@ -57,6 +55,16 @@ def _make_tiny_png(
 
 
 TINY_PNG = _make_tiny_png()
+
+
+def _make_transparent_tiny_png() -> bytes:
+    buf = _io.BytesIO()
+    _PILImage.new("RGBA", (2, 2), color=(0, 0, 0, 0)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+TRANSPARENT_TINY_PNG = _make_transparent_tiny_png()
+PNG_B64 = base64.b64encode(TRANSPARENT_TINY_PNG).decode("ascii")
 
 
 def _image_request(**changes: Any) -> ImageExecutionRequest:
@@ -98,7 +106,7 @@ def _responses_body(
     )
 
 
-def test_image_request_options_respect_render_quality_for_4k_and_fast() -> None:
+def test_image_request_options_ignore_legacy_fast_for_4k() -> None:
     medium_4k = request_options.image_request_options(
         {"render_quality": "medium", "fast": False},
         size="3840x2160",
@@ -106,24 +114,16 @@ def test_image_request_options_respect_render_quality_for_4k_and_fast() -> None:
     assert medium_4k["render_quality"] == "medium"
     assert medium_4k["responses_model"] == DEFAULT_IMAGE_RESPONSES_MODEL
     assert medium_4k["output_compression"] == 100
+    assert "fast" not in medium_4k
 
-    fast_4k = request_options.image_request_options(
+    legacy_fast_4k = request_options.image_request_options(
         {"render_quality": "high", "fast": True, "output_compression": 95},
         size="3840x2160",
     )
-    assert fast_4k["render_quality"] == "high"
-    assert fast_4k["responses_model"] == DEFAULT_IMAGE_RESPONSES_MODEL_FAST
-    assert fast_4k["output_compression"] == 95
-
-
-def test_image_request_options_treat_string_false_fast_as_disabled() -> None:
-    options = request_options.image_request_options(
-        {"render_quality": "high", "fast": "false"},
-        size="1024x1024",
-    )
-
-    assert options["responses_model"] == DEFAULT_IMAGE_RESPONSES_MODEL
-    assert options["render_quality"] == "high"
+    assert legacy_fast_4k["render_quality"] == "high"
+    assert legacy_fast_4k["responses_model"] == DEFAULT_IMAGE_RESPONSES_MODEL
+    assert legacy_fast_4k["output_compression"] == 95
+    assert "fast" not in legacy_fast_4k
 
 
 async def _first_image_result(
@@ -1136,10 +1136,11 @@ async def test_generate_image_uses_responses_stream(
     assert "b64" not in progress_events[1]
 
 
-def test_fast_responses_body_uses_mini_model_without_forcing_image_options() -> None:
+def test_explicit_responses_model_does_not_force_image_options() -> None:
+    explicit_model = "custom-reasoning-model"
     body = _responses_body(
         action="generate",
-        prompt="make a fast 4k landscape",
+        prompt="make a 4k landscape",
         size="3840x2160",
         images=None,
         quality="high",
@@ -1147,17 +1148,48 @@ def test_fast_responses_body_uses_mini_model_without_forcing_image_options() -> 
         output_compression=0,
         background="auto",
         moderation="low",
-        model=DEFAULT_IMAGE_RESPONSES_MODEL_FAST,
+        model=explicit_model,
     )
 
-    assert body["model"] == DEFAULT_IMAGE_RESPONSES_MODEL_FAST
-    # 对齐 Codex CLI 标准模板后，fast 路径也统一带 medium reasoning + summary auto。
+    assert body["model"] == explicit_model
     assert body["reasoning"] == {"effort": "medium", "summary": "auto"}
     tool = body["tools"][0]
     assert tool["quality"] == "high"
     assert tool["output_format"] == "jpeg"
     assert tool["output_compression"] == 0
     assert tool["size"] == "3840x2160"
+
+
+@pytest.mark.asyncio
+async def test_fake_transparent_image2_result_fails_without_responses_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _image_request(background="transparent", output_format="png")
+    route = ImageProviderRoute(
+        channel="stream_only",
+        engine="image2",
+        use_jobs=False,
+        provider_name="test-provider",
+    )
+    responses_calls = 0
+
+    async def opaque_direct(_request: ImageExecutionRequest):
+        return [(InlineImageBytes(TINY_PNG), None)]
+
+    async def responses_must_not_run(_request: ImageExecutionRequest):
+        nonlocal responses_calls
+        responses_calls += 1
+        return (InlineImageBytes(TRANSPARENT_TINY_PNG), None)
+
+    monkeypatch.setattr(image_dispatch, "_run_direct_image2_once", opaque_direct)
+    monkeypatch.setattr(image_dispatch, "_run_responses_once", responses_must_not_run)
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await image_dispatch._run_image2_with_responses_fallback(request, route)
+
+    assert exc_info.value.error_code == "transparent_output_missing_alpha"
+    assert exc_info.value.payload["reason"] == "transparent_output_missing_alpha"
+    assert responses_calls == 0
 
 
 def test_retry_attempt_injects_cache_busters() -> None:
@@ -1269,7 +1301,7 @@ async def test_generate_image_can_use_image2_direct_route(
         )
     )
 
-    assert b64 == InlineImageBytes(b"fake-png-bytes")
+    assert b64 == InlineImageBytes(TRANSPARENT_TINY_PNG)
     assert revised == "direct prompt"
     assert client.streams == []
     assert len(client.posts) == 1
@@ -1392,9 +1424,9 @@ async def test_generate_image_direct_image2_yields_all_n_results(
     ]
 
     assert results == [
-        (InlineImageBytes(b"fake-png-bytes"), "direct prompt 1"),
-        (InlineImageBytes(b"fake-png-bytes"), "direct prompt 2"),
-        (InlineImageBytes(b"fake-png-bytes"), "direct prompt 3"),
+        (InlineImageBytes(TRANSPARENT_TINY_PNG), "direct prompt 1"),
+        (InlineImageBytes(TRANSPARENT_TINY_PNG), "direct prompt 2"),
+        (InlineImageBytes(TRANSPARENT_TINY_PNG), "direct prompt 3"),
     ]
     assert client.posts[0]["json"]["n"] == 3
 
@@ -1487,7 +1519,7 @@ async def test_stream_responses_falls_back_to_direct_image2_on_moderation(
         )
     )
 
-    assert b64 == InlineImageBytes(b"fake-png-bytes")
+    assert b64 == InlineImageBytes(TRANSPARENT_TINY_PNG)
     assert revised == "direct prompt"
     assert len(client.streams) == 1
     assert len(client.posts) == 1
@@ -2667,7 +2699,7 @@ async def test_extract_image_result_accepts_b64_json() -> None:
             upstream_runtime=TEST_UPSTREAM_RUNTIME
         ),
     )
-    assert b64 == InlineImageBytes(b"fake-png-bytes")
+    assert b64 == InlineImageBytes(TRANSPARENT_TINY_PNG)
     assert revised == "rp"
 
 

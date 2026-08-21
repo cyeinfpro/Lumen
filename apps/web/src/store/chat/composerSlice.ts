@@ -49,6 +49,7 @@ export type ComposerActions = Pick<
   | "setQuality"
   | "setRenderQuality"
   | "setImageCount"
+  | "setTransparentBackground"
   | "setReasoningEffort"
   | "setFast"
   | "setWebSearch"
@@ -286,6 +287,16 @@ export function createComposerActions(
           params: {
             ...state.composer.params,
             count: clampImageCount(count),
+          },
+        },
+      })),
+    setTransparentBackground: (enabled) =>
+      set((state) => ({
+        composer: {
+          ...state.composer,
+          params: {
+            ...state.composer.params,
+            background: enabled ? "transparent" : "opaque",
           },
         },
       })),

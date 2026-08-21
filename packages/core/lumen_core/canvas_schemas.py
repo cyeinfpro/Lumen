@@ -156,11 +156,19 @@ class ImageGenerateNodeConfig(_StrictModel):
     fixed_size: str | None = Field(default=None, max_length=32)
     render_quality: Literal["auto", "low", "medium", "high"] = "high"
     count: int = Field(default=1, ge=1, le=10)
-    fast: bool | None = None
     output_format: Literal["png", "jpeg", "webp"] | None = "webp"
     output_compression: int | None = Field(default=None, ge=0, le=100)
     background: Literal["auto", "opaque", "transparent"] = "auto"
     moderation: Literal["auto", "low"] = "low"
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_legacy_fast(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "fast" not in value:
+            return value
+        normalized = dict(value)
+        normalized.pop("fast", None)
+        return normalized
 
     @model_validator(mode="after")
     def normalize_transparent_output(self) -> "ImageGenerateNodeConfig":
@@ -302,7 +310,6 @@ class ImageUpscaleNode(CanvasNodeBase):
         default_factory=lambda: ImageGenerateNodeConfig(
             size="2K",
             quality="2k",
-            fast=True,
         )
     )
 
@@ -315,7 +322,7 @@ class ImageUpscaleNode(CanvasNodeBase):
         config = dict(normalized.get("config") or {})
         config.setdefault("size", "2K")
         config.setdefault("quality", "2k")
-        config.setdefault("fast", True)
+        config.pop("fast", None)
         normalized["config"] = config
         return normalized
 

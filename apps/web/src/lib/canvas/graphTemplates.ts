@@ -392,7 +392,7 @@ function createCreativeCampaignTemplate(): CanvasGraph {
   const image = createCanvasNode("image_generate", { x: 760, y: 150 }, {
     id: "campaign-image-1",
     title: "商品主视觉",
-    config: { aspect_ratio: "4:5", quality: "4k", size: "4K", fast: false },
+    config: { aspect_ratio: "4:5", quality: "4k", size: "4K" },
     ui: { preset_id: "product_key_visual" },
   });
   const video = createCanvasNode(

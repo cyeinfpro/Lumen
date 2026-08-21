@@ -116,6 +116,7 @@ export function DesktopStudio() {
   const promoteImageToReference = useChatStore((s) => s.promoteImageToReference);
   const setText = useChatStore((s) => s.setText);
   const setMode = useChatStore((s) => s.setMode);
+  const composerMode = useChatStore((s) => s.composer.mode);
   const fast = useChatStore((s) => s.composer.fast);
   const setFast = useChatStore((s) => s.setFast);
   const isWideSidebar = useMediaQuery("(min-width: 1440px)");
@@ -326,6 +327,7 @@ export function DesktopStudio() {
               title={currentTitle}
               view={studioView}
               onViewChange={setStudioView}
+              composerMode={composerMode}
               fast={fast}
               onFastChange={setFast}
               contextStats={contextStats}

@@ -38,7 +38,7 @@ test("canvas store adds catalog-compatible node overrides without changing direc
   const store = createCanvasEditorStore(createDefaultCanvasGraph(), 3);
   const nodeId = store.getState().addNode("image_upscale", { x: 100, y: 200 }, {
     title: "4K 高清重绘",
-    config: { quality: "4k", size: "4K", fast: false },
+    config: { quality: "4k", size: "4K" },
     ui: { preset_id: "image_4k_redraw" },
   });
   const node = store.getState().graph.nodes.find((item) => item.id === nodeId);

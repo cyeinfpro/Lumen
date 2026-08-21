@@ -144,7 +144,6 @@ def _image_params(config: dict[str, Any]) -> ImageParamsIn:
                 "fixed_size": config.get("fixed_size"),
                 "count": int(config.get("count") or 1),
                 "quality": (resolution if resolution in {"1k", "2k", "4k"} else "1k"),
-                "fast": config.get("fast"),
                 "render_quality": render_quality,
                 "output_format": config.get("output_format") or "webp",
                 "output_compression": config.get("output_compression"),

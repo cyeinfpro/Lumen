@@ -115,7 +115,7 @@ def test_v1_node_catalog_parses_with_strict_configs() -> None:
     assert graph.nodes[5].config.quality == "standard"
     assert graph.nodes[8].config.size == "2K"
     assert graph.nodes[8].config.quality == "2k"
-    assert graph.nodes[8].config.fast is True
+    assert "fast" not in graph.nodes[8].config.model_dump()
     assert graph.nodes[10].config.mode == "t2v"
     assert graph.nodes[11].config.mode == "i2v"
     assert graph.nodes[12].config.mode == "reference"

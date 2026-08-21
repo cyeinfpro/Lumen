@@ -275,7 +275,6 @@ def image_params(
     count: int = 1,
     render_quality: str = "high",
     final_quality: str | None = None,
-    fast: bool = False,
 ) -> ImageParamsIn:
     fixed = fixed_size_for_quality(aspect_ratio, final_quality or "high")
     return ImageParamsIn(
@@ -283,7 +282,6 @@ def image_params(
         size_mode="fixed" if fixed else "auto",
         fixed_size=fixed,
         count=count,
-        fast=fast,
         render_quality=render_quality,  # type: ignore[arg-type]
         output_format="jpeg",
         output_compression=100,
@@ -297,7 +295,6 @@ def candidate_image_params() -> ImageParamsIn:
         aspect_ratio="4:5",
         count=1,
         render_quality="high",
-        fast=False,
     )
     return params.model_copy(
         update={"output_format": "png", "output_compression": None}
@@ -310,7 +307,6 @@ def accessory_preview_image_params() -> ImageParamsIn:
         count=1,
         render_quality="high",
         final_quality="high",
-        fast=False,
     )
     return params.model_copy(
         update={"output_format": "png", "output_compression": None}

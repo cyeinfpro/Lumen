@@ -93,6 +93,12 @@ export function DesktopComposerPill({
   const setAspectRatio = useChatStore((s) => s.setAspectRatio);
   const count = useChatStore((s) => s.composer.params.count ?? 1);
   const setImageCount = useChatStore((s) => s.setImageCount);
+  const transparentBackground = useChatStore(
+    (s) => s.composer.params.background === "transparent",
+  );
+  const setTransparentBackground = useChatStore(
+    (s) => s.setTransparentBackground,
+  );
   const reasoningEffort = useChatStore((s) => s.composer.reasoningEffort);
   const setReasoningEffort = useChatStore((s) => s.setReasoningEffort);
   const fast = useChatStore((s) => s.composer.fast);
@@ -336,6 +342,7 @@ export function DesktopComposerPill({
     quality,
     renderQuality,
     fast,
+    transparentBackground,
     maskActive: inpaint.maskActive,
     costLabel: costEstimate.label,
     costWarning: costEstimate.warning,
@@ -662,8 +669,8 @@ export function DesktopComposerPill({
               onQualityChange={setQuality}
               renderQuality={renderQuality}
               onRenderQualityChange={setRenderQuality}
-              fast={fast}
-              onFastChange={setFast}
+              transparentBackground={transparentBackground}
+              onTransparentBackgroundChange={setTransparentBackground}
               attachmentCount={attachments.length}
               costLabel={costEstimate.label}
               costWarning={costEstimate.warning}
@@ -765,6 +772,8 @@ export function DesktopComposerPill({
               onImageGenerationChange={setImageGeneration}
               fast={fast}
               onFastChange={setFast}
+              transparentBackground={transparentBackground}
+              onTransparentBackgroundChange={setTransparentBackground}
               onClose={() => setAdvancedOpen(false)}
             />
           </DesktopPopover>

@@ -2,7 +2,7 @@
 
 import { Chip } from "@/components/ui/primitives/mobile";
 import type { StreamFeedFilters } from "../model/contracts";
-import { Eraser, Gauge, Image as ImageIcon, SlidersHorizontal } from "lucide-react";
+import { Eraser, Image as ImageIcon, SlidersHorizontal } from "lucide-react";
 
 const RATIO_CHOICES: Array<{ value: string | null; label: string }> = [
   { value: null, label: "全部" },
@@ -24,7 +24,7 @@ export interface FilterBarProps {
 }
 
 function hasAnyFilter(filters: StreamFeedFilters): boolean {
-  return Boolean(filters.ratio || filters.has_ref || filters.fast);
+  return Boolean(filters.ratio || filters.has_ref);
 }
 
 export function FilterBar({ open, filters, onChange, onClear }: FilterBarProps) {
@@ -74,13 +74,6 @@ export function FilterBar({ open, filters, onChange, onClear }: FilterBarProps) 
               }
             >
               含参考图
-            </Chip>
-            <Chip
-              active={Boolean(filters.fast)}
-              icon={<Gauge className="h-3.5 w-3.5" />}
-              onClick={() => onChange({ ...filters, fast: !filters.fast })}
-            >
-              快速
             </Chip>
             {active && (
               <Chip

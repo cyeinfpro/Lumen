@@ -410,15 +410,13 @@ function buildImageParams(prepared: PreparedSend): ImageParams | undefined {
         defaultOutputCompression({
           renderQuality,
           outputFormat,
-          fast: prepared.composer.fast,
         }));
   const imageParams: ImageParams = {
     ...rest,
     ...resolvedSize,
     quality: resolvedQuality,
-    fast: prepared.composer.fast,
     render_quality: renderQuality,
-    background: backgroundOverride ?? "auto",
+    background: backgroundOverride ?? "opaque",
     moderation: moderationOverride ?? "low",
   };
   if (outputFormat !== undefined) imageParams.output_format = outputFormat;

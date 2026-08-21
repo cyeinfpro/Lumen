@@ -4,7 +4,6 @@ export interface GenerationSummary {
   prompt: string;
   aspect_ratio: string;
   has_ref: boolean;
-  fast: boolean;
   quality?: string | null;
   output_format?: string | null;
   size_actual: string;
@@ -44,7 +43,6 @@ export interface GenerationSummary {
 export interface StreamFeedFilters {
   ratio?: string;
   has_ref?: boolean;
-  fast?: boolean;
   q?: string | null;
 }
 

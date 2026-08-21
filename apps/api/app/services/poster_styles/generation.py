@@ -38,7 +38,6 @@ def generate_image_params(aspect_ratio: str) -> ImageParamsIn:
         aspect_ratio=aspect_ratio,  # type: ignore[arg-type]
         size_mode="auto",
         count=1,
-        fast=False,
         render_quality="high",
         output_format="jpeg",
         output_compression=100,

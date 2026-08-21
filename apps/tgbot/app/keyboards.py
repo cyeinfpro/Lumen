@@ -65,7 +65,6 @@ DEFAULT_PARAMS = MappingProxyType(
         "count": 1,
         "resolution": "2k",
         "output_format": "jpeg",
-        "fast": True,
         # 提交 prompt 后先调 enhance，让用户选择优化版、手改版或原文。
         "enhance": False,
     }
@@ -142,18 +141,13 @@ def main_menu(params: dict[str, object]) -> InlineKeyboardMarkup:
         b_fmt.button(text=f"{prefix}{text}", callback_data=f"cfg:output_format:{value}")
     b_fmt.adjust(2)
 
-    b_fast = InlineKeyboardBuilder()
-    fast_on = bool(params.get("fast"))
+    b_options = InlineKeyboardBuilder()
     enh_on = bool(params.get("enhance"))
-    b_fast.button(
-        text=f"⚡ 快速：{'开' if fast_on else '关'}",
-        callback_data=f"cfg:fast:{'false' if fast_on else 'true'}",
-    )
-    b_fast.button(
+    b_options.button(
         text=f"✨ 提示词优化：{'开' if enh_on else '关'}",
         callback_data=f"cfg:enhance:{'false' if enh_on else 'true'}",
     )
-    b_fast.adjust(2)
+    b_options.adjust(1)
 
     b5 = InlineKeyboardBuilder()
     b5.button(text="🚀 开始生成", callback_data="cfg:start")
@@ -165,7 +159,7 @@ def main_menu(params: dict[str, object]) -> InlineKeyboardMarkup:
     rows += b3.as_markup().inline_keyboard
     rows += b4.as_markup().inline_keyboard
     rows += b_fmt.as_markup().inline_keyboard
-    rows += b_fast.as_markup().inline_keyboard
+    rows += b_options.as_markup().inline_keyboard
     rows += b5.as_markup().inline_keyboard
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -181,8 +175,6 @@ def retry_keyboard(gen_id: str) -> InlineKeyboardMarkup | None:
 
 def render_params_summary(params: dict[str, object]) -> str:
     tags = []
-    if params.get("fast"):
-        tags.append("⚡ 快速")
     if params.get("enhance"):
         tags.append("✨ 优化")
     tail = ("  ·  " + "  ·  ".join(tags)) if tags else ""

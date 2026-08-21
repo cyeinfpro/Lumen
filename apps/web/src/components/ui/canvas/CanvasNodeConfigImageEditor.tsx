@@ -142,11 +142,6 @@ function ImageGenerationParameters({
         max={10}
         onChange={(value) => patch({ count: value })}
       />
-      <ToggleField
-        label="快速模式"
-        checked={node.config.fast !== false}
-        onChange={(fast) => patch({ fast })}
-      />
     </ConfigSection>
   );
 }

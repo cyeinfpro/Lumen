@@ -2,7 +2,6 @@
 
 import {
   Eraser,
-  Gauge,
   CheckSquare,
   Image as ImageIcon,
   Layers3,
@@ -31,14 +30,13 @@ export interface StreamOverviewProps {
   onRefresh: () => void;
   onClearFilters: () => void;
   onToggleReferenceFilter: () => void;
-  onToggleFastFilter: () => void;
   onToggleSelectionMode?: () => void;
   onClearSelection?: () => void;
   onShareSelected?: () => void;
 }
 
 function hasStreamOverviewFilters(filters: StreamFeedFilters): boolean {
-  return Boolean(filters.ratio || filters.has_ref || filters.fast);
+  return Boolean(filters.ratio || filters.has_ref);
 }
 
 function SelectionControls({
@@ -103,13 +101,11 @@ function FilterChips({
   filters,
   searchValue,
   onToggleReferenceFilter,
-  onToggleFastFilter,
 }: Pick<
   StreamOverviewProps,
   | "filters"
   | "searchValue"
   | "onToggleReferenceFilter"
-  | "onToggleFastFilter"
 >) {
   const hasSearch = searchValue.trim().length > 0;
   return (
@@ -127,16 +123,6 @@ function FilterChips({
         >
           <ImageIcon className="h-3 w-3" />
           参考图
-        </button>
-      )}
-      {filters.fast && (
-        <button
-          type="button"
-          onClick={onToggleFastFilter}
-          className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] px-2 type-caption text-[var(--accent)] transition-colors hover:bg-[var(--bg-2)] focus-visible:outline-none md:min-h-9"
-        >
-          <Gauge className="h-3 w-3" />
-          快速
         </button>
       )}
       {hasSearch && (
@@ -163,7 +149,6 @@ export function StreamOverview({
   onRefresh,
   onClearFilters,
   onToggleReferenceFilter,
-  onToggleFastFilter,
   onToggleSelectionMode,
   onClearSelection,
   onShareSelected,
@@ -241,7 +226,6 @@ export function StreamOverview({
             filters={filters}
             searchValue={searchValue}
             onToggleReferenceFilter={onToggleReferenceFilter}
-            onToggleFastFilter={onToggleFastFilter}
           />
         </div>
       )}

@@ -143,7 +143,6 @@ const userMessage: UserMessage = {
     aspect_ratio: "1:1",
     size_mode: "auto",
     count: 1,
-    fast: false,
     quality: "1k",
   },
   created_at: 1,
@@ -210,9 +209,7 @@ function makeHarness() {
       Object.assign(state, partial);
     }
   };
-  const actions = createGenerationActions(set, get, {
-    runtimeFastDefault: () => false,
-  });
+  const actions = createGenerationActions(set, get);
   return { state, get, set, actions };
 }
 

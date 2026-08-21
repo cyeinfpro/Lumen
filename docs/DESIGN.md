@@ -795,7 +795,7 @@ queued ──► running ──► succeeded
 
 **默认渲染质量与尺寸策略（2026-04-28 起）：**
 
-- 上游 `quality` 由 `render_quality` 派生：1K/fast draft → `low`，普通 2K → `medium`，4K/终稿 → `high`
+- 上游 `quality` 由 `render_quality` 派生：草稿 → `low`，普通 2K → `medium`，4K/终稿 → `high`
 - 默认输出格式为 JPEG；JPEG/WebP 可通过 `output_compression` 控制压缩，默认 `0`（无额外压缩，尽量接近 PNG 保真度），PNG 不带压缩参数
 - 默认 **preset 升级到 4K 级别**，按比例分配到不超过 `8,294,400` 像素（gpt-image-2 上限）
 - 显式 `fixed_size` 仍按上游真实能力校验：

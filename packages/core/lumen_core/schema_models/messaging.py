@@ -27,9 +27,6 @@ class ImageParamsIn(BaseModel):
     # upstream dimensions, whose pixel count can be lower than the nominal tier
     # for wide/tall aspect ratios.
     quality: Literal["1k", "2k", "4k"] | None = "4k"
-    # Image Fast uses the lighter responses reasoning model for image_generation:
-    # gpt-5.4-mini when enabled, gpt-5.4 when disabled.
-    fast: bool | None = None
     # Rendering quality is distinct from the UI's 1K/2K/4K resolution preset.
     render_quality: Literal["auto", "low", "medium", "high"] = "high"
     output_format: Literal["png", "jpeg", "webp"] | None = None

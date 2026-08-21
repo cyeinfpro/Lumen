@@ -6,6 +6,7 @@ import {
   FileSearch,
   Globe2,
   ImagePlus,
+  Layers2,
   Zap,
 } from "lucide-react";
 import { Button, Select } from "@/components/ui/primitives";
@@ -64,6 +65,8 @@ interface MobileAdvancedSettingsProps {
   onImageGenerationChange: (value: boolean) => void;
   fast: boolean;
   onFastChange: (value: boolean) => void;
+  transparentBackground: boolean;
+  onTransparentBackgroundChange: (value: boolean) => void;
 }
 
 export function MobileAdvancedSettings({
@@ -88,6 +91,8 @@ export function MobileAdvancedSettings({
   onImageGenerationChange,
   fast,
   onFastChange,
+  transparentBackground,
+  onTransparentBackgroundChange,
 }: MobileAdvancedSettingsProps) {
   const imageMode = mode === "image";
 
@@ -145,12 +150,14 @@ export function MobileAdvancedSettings({
             </Button>
           </div>
           <Chip
-            active={fast}
-            onClick={() => onFastChange(!fast)}
-            icon={<Zap className="h-3.5 w-3.5" aria-hidden />}
+            active={transparentBackground}
+            onClick={() =>
+              onTransparentBackgroundChange(!transparentBackground)
+            }
+            icon={<Layers2 className="h-3.5 w-3.5" aria-hidden />}
             className="min-h-11 justify-center"
           >
-            Fast
+            透明底
           </Chip>
         </div>
       ) : (
