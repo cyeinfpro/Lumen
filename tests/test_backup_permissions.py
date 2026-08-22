@@ -168,6 +168,7 @@ esac
             "TEST_IDENTITY_GROUP": group,
             "TEST_IDENTITY_UID": str(pwd.getpwnam(user).pw_uid),
             "TEST_IDENTITY_GID": str(grp.getgrnam(group).gr_gid),
+            "LUMEN_APP_STORAGE_GID": str(grp.getgrnam(group).gr_gid),
         }
     )
     return env

@@ -242,6 +242,7 @@ def _write_identity_mocks(fakebin: Path) -> dict[str, str]:
         "TEST_IDENTITY_GID": str(os.getgid()),
         "LUMEN_BACKUP_SERVICE_USER": identity_user,
         "LUMEN_BACKUP_SERVICE_GROUP": identity_group,
+        "LUMEN_APP_STORAGE_GID": str(os.getgid()),
     }
 
 
