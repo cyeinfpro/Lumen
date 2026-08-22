@@ -139,6 +139,20 @@ def _write_adoption_receipt(
     )
 
 
+def test_adoption_receipt_parent_is_private_with_permissive_umask(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner()
+    receipt = tmp_path / "restore-state" / "adoption.json"
+    previous_umask = os.umask(0o022)
+    try:
+        runner._write_adoption_receipt(receipt, {"schema": 1})  # noqa: SLF001
+    finally:
+        os.umask(previous_umask)
+
+    assert receipt.parent.stat().st_mode & 0o777 == 0o700
+
+
 def test_restore_runner_accepts_only_fresh_timestamp_regular_file(
     tmp_path: Path,
 ) -> None:

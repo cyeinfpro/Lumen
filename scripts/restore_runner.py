@@ -430,7 +430,7 @@ def _load_adoption_receipt(path: Path) -> dict[str, object] | None:
 
 
 def _write_adoption_receipt(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     parent_info = path.parent.lstat()
     if not stat.S_ISDIR(parent_info.st_mode):
         raise RestoreTriggerError("restore adoption receipt directory is unsafe")
