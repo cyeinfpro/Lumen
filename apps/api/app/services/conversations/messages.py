@@ -34,6 +34,7 @@ from .cursor import (
     message_alive_filters,
 )
 from ...deps import CurrentUser
+from ..agent_conversations import studio_conversation_filter
 from .contracts import MessageListOut
 
 
@@ -75,6 +76,7 @@ async def _message_statement(
             Conversation.id == conv_id,
             Conversation.user_id == user.id,
             Conversation.deleted_at.is_(None),
+            studio_conversation_filter(),
             *alive_filters,
         )
     )
@@ -100,6 +102,7 @@ async def _message_statement(
                                 Conversation.id == conv_id,
                                 Conversation.user_id == user.id,
                                 Conversation.deleted_at.is_(None),
+                                studio_conversation_filter(),
                             )
                         ),
                         *alive_filters,
@@ -169,6 +172,7 @@ async def _load_task_rows(
                     Conversation.id == conv_id,
                     Conversation.user_id == user_id,
                     Conversation.deleted_at.is_(None),
+                    studio_conversation_filter(),
                 )
                 .order_by(desc(Generation.created_at), desc(Generation.id))
                 .limit(TASK_INCLUDE_LIMIT)
@@ -189,6 +193,7 @@ async def _load_task_rows(
                     Conversation.id == conv_id,
                     Conversation.user_id == user_id,
                     Conversation.deleted_at.is_(None),
+                    studio_conversation_filter(),
                 )
                 .order_by(desc(Completion.created_at), desc(Completion.id))
                 .limit(TASK_INCLUDE_LIMIT)

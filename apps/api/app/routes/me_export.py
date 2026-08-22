@@ -17,14 +17,36 @@ from typing import Any, BinaryIO
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.model_entities import (
-    Conversation,
-    Image,
-    Message,
-)
 from lumen_core.message_content import public_message_content
+from lumen_core.model_entities import Conversation, Image, Message
 
 from ..config import settings
+from . import me_export_agent as _agent_export
+
+AgentExportStats = _agent_export.AgentExportStats
+ExportAgentRunDescriptor = _agent_export.ExportAgentRunDescriptor
+ExportAgentSessionDescriptor = _agent_export.ExportAgentSessionDescriptor
+ExportAgentToolCallDescriptor = _agent_export.ExportAgentToolCallDescriptor
+iter_export_agent_run_batches = _agent_export.iter_export_agent_run_batches
+iter_export_agent_session_batches = _agent_export.iter_export_agent_session_batches
+iter_export_agent_tool_call_batches = (
+    _agent_export.iter_export_agent_tool_call_batches
+)
+
+
+async def export_agent_data(
+    db: AsyncSession,
+    archive: zipfile.ZipFile,
+    user_id: str,
+) -> AgentExportStats:
+    return await _agent_export.export_agent_data(
+        db,
+        archive,
+        user_id,
+        session_batches=iter_export_agent_session_batches,
+        run_batches=iter_export_agent_run_batches,
+        tool_batches=iter_export_agent_tool_call_batches,
+    )
 
 
 _EXT_BY_MIME = MappingProxyType(
@@ -46,6 +68,9 @@ class ExportStats:
     images: int
     images_skipped: int
     zip_bytes: int
+    agent_sessions: int = 0
+    agent_runs: int = 0
+    agent_tool_calls: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,15 +371,22 @@ async def build_export_archive(
         allowZip64=True,
     ) as archive:
         messages = await _export_messages(db, archive, user_id)
+        agent_stats: AgentExportStats = await export_agent_data(db, archive, user_id)
+        agent_sessions = agent_stats.sessions
+        agent_runs = agent_stats.runs
+        agent_tool_calls = agent_stats.tool_calls
         images = await _export_images(db, archive, user_id)
         archive.writestr(
             "export-manifest.json",
             json.dumps(
                 {
-                    "schema": 1,
+                    "schema": 2,
                     "complete": True,
                     "messages": messages,
                     "images": images,
+                    "agent_sessions": agent_sessions,
+                    "agent_runs": agent_runs,
+                    "agent_tool_calls": agent_tool_calls,
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -365,5 +397,8 @@ async def build_export_archive(
         messages=messages,
         images=images,
         images_skipped=0,
+        agent_sessions=agent_sessions,
+        agent_runs=agent_runs,
+        agent_tool_calls=agent_tool_calls,
         zip_bytes=tmp.tell(),
     )

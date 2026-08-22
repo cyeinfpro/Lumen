@@ -81,6 +81,130 @@ resources = ["web-build"]
 [gates.web-runner-syntax]
 command = "node --check apps/web/scripts/run-tests.mjs"
 
+[gates.agent-runtime-test]
+command = "npm --prefix apps/agent-runtime test"
+
+[gates.agent-runtime-typecheck]
+command = "npm --prefix apps/agent-runtime run type-check"
+
+[gates.agent-runtime-lint]
+command = "npm --prefix apps/agent-runtime run lint"
+
+[gates.agent-runtime-build]
+command = "npm --prefix apps/agent-runtime run build"
+resources = ["web-build"]
+
+[gates.agent-fullstack-harness-syntax]
+command = "node --check apps/web/scripts/run-agent-fullstack-e2e.mjs"
+
+[[rules]]
+name = "agent-runtime-worker"
+paths = [
+  "apps/agent-runtime/**",
+  "apps/worker/app/agent_billing.py",
+  "apps/worker/app/agent_context.py",
+  "apps/worker/app/agent_runtime_client.py",
+  "apps/worker/app/tasks/agent_run.py",
+  "apps/worker/app/tasks/agent_run_parts/**",
+  "apps/worker/tests/test_agent_runtime_worker.py",
+  "apps/worker/tests/test_agent_run_persistence.py",
+  "apps/worker/tests/test_agent_billing_conservation.py",
+]
+commands = [
+  "uv run pytest -q apps/worker/tests/test_agent_runtime_worker.py apps/worker/tests/test_agent_run_persistence.py apps/worker/tests/test_agent_billing_conservation.py",
+]
+gates = [
+  "python-ruff",
+  "backend-architecture",
+  "backend-complexity",
+  "backend-runtime-state",
+  "agent-runtime-test",
+  "agent-runtime-typecheck",
+  "agent-runtime-lint",
+  "agent-runtime-build",
+]
+risk = ["runtime-state", "redis", "billing", "provider-credentials"]
+resources = []
+
+[[rules]]
+name = "agent-runtime-ops"
+paths = [
+  ".env.example",
+  ".github/workflows/ci.yml",
+  ".github/workflows/docker-release.yml",
+  "CONTRIBUTING.md",
+  "Dockerfile.python",
+  "README.md",
+  "apps/agent-runtime/Dockerfile",
+  "apps/agent-runtime/README.md",
+  "apps/agent-runtime/package.json",
+  "apps/agent-runtime/package-lock.json",
+  "deploy/README.md",
+  "deploy/docker/README.md",
+  "deploy/docker/docker-compose.local.yml",
+  "docker-compose.yml",
+  "docker-compose.dev.yml",
+  "docker-compose.bluegreen.yml",
+  "docker-compose.public-dns.yml",
+  "docs/adr/**",
+  "docs/runbooks/blue-green-upgrade.md",
+  "docs/runbooks/update-troubleshooting.md",
+  "docs/versioning.md",
+  "scripts/build_release_manifest.py",
+  "scripts/install/**",
+  "scripts/lib/container_release.sh",
+  "scripts/lumenctl.sh",
+  "scripts/lumenctl/compose.sh",
+  "scripts/promote_release_images.py",
+  "scripts/release_manifest_guard.py",
+  "scripts/release_proof.py",
+  "scripts/update/**",
+  "scripts/version.py",
+  "tests/test_agent_runtime_ops_contracts.py",
+  "tests/test_promote_release_images.py",
+  "tests/test_release_manifest.py",
+  "tests/test_release_manifest_guard.py",
+  "tests/test_release_proof.py",
+  "tests/test_version_script.py",
+]
+commands = [
+  "uv run pytest -q tests/test_agent_runtime_ops_contracts.py tests/test_release_manifest.py tests/test_release_manifest_guard.py tests/test_release_proof.py tests/test_promote_release_images.py tests/test_version_script.py",
+]
+gates = ["python-ruff", "agent-runtime-test", "agent-runtime-typecheck", "agent-runtime-lint", "agent-runtime-build"]
+risk = ["release", "installer", "update", "rollback", "supply-chain"]
+resources = ["web-build"]
+
+[[rules]]
+name = "agent-api-maintenance"
+paths = [
+  "apps/api/app/config.py",
+  "apps/api/app/main.py",
+  "apps/api/app/observability.py",
+  "apps/api/app/routes/admin_agent_health.py",
+  "apps/api/app/routes/admin_dlq_routes.py",
+  "apps/api/app/routes/me.py",
+  "apps/api/app/routes/system_settings.py",
+  "apps/api/app/services/account_deletion.py",
+  "apps/api/app/services/agent/**",
+  "apps/api/app/services/agent_health.py",
+  "apps/api/tests/test_admin_dlq_retry.py",
+  "apps/api/tests/test_agent_api_foundation.py",
+  "apps/api/tests/test_agent_postgres_integration.py",
+  "apps/api/tests/test_agent_health.py",
+  "apps/api/tests/test_health.py",
+  "apps/api/tests/test_me_export_integrity.py",
+  "apps/api/tests/test_me_security.py",
+  "apps/worker/app/tasks/byok_retention.py",
+  "packages/core/lumen_core/byok_retention.py",
+  "packages/core/tests/test_byok_retention.py",
+]
+commands = [
+  "uv run pytest -q apps/api/tests/test_agent_health.py apps/api/tests/test_health.py apps/api/tests/test_admin_dlq_retry.py apps/api/tests/test_agent_api_foundation.py apps/api/tests/test_agent_postgres_integration.py apps/api/tests/test_me_security.py apps/api/tests/test_me_export_integrity.py packages/core/tests/test_byok_retention.py",
+]
+gates = ["python-ruff", "backend-architecture", "backend-complexity", "backend-runtime-state"]
+risk = ["readiness", "privacy", "retention", "dlq", "account-deletion"]
+resources = []
+
 [[rules]]
 name = "test-infrastructure"
 paths = [
@@ -197,6 +321,44 @@ commands = [
 gates = ["web-architecture", "web-complexity", "web-typecheck"]
 risk = ["sse-replay"]
 resources = []
+
+[[rules]]
+name = "web-agent"
+paths = [
+  "apps/web/e2e/**",
+  "apps/web/playwright.config.ts",
+  "apps/web/next.config.ts",
+  "apps/web/eslint.config.mjs",
+  "apps/web/tsconfig.json",
+  "apps/web/.gitignore",
+  "apps/web/scripts/run-agent-fullstack-e2e.mjs",
+  "apps/web/package.json",
+  "apps/web/package-lock.json",
+  "apps/web/src/app/agent/**",
+  "apps/web/src/features/agent/**",
+  "apps/web/src/store/agent/**",
+  "apps/web/src/lib/navigation.ts",
+  "apps/web/src/proxy.ts",
+  "apps/web/src/components/RuntimeDefaultsBootstrap.tsx",
+  "apps/web/src/components/ui/CommandPalette.tsx",
+  "apps/web/src/components/ui/shell/MobileTabBar.tsx",
+  "apps/web/src/components/ui/shell/PrivateSidebarShell.tsx",
+  "apps/web/src/components/ui/tray/**",
+  "apps/web/src/app/admin/_panels/HealthPanel.tsx",
+  "apps/web/src/app/admin/_panels/settings/**",
+]
+commands = [
+  "cd apps/web && npm test -- src/lib/navigation.test.ts src/features/agent/model/agentDomain.test.ts src/features/agent/api/validators.test.ts src/store/agent/agentStore.test.ts src/store/privateSurfaceIdentity.test.ts src/components/ui/tray/taskCenterModel.test.ts src/lib/api/responseValidators.test.ts",
+  "cd apps/web && npm run test:e2e",
+]
+gates = [
+  "web-architecture",
+  "web-complexity",
+  "web-typecheck",
+  "agent-fullstack-harness-syntax",
+]
+risk = ["identity-isolation", "sse-replay", "browser-workflow", "generation-routing"]
+resources = ["web-build"]
 
 [[rules]]
 name = "web-generation"

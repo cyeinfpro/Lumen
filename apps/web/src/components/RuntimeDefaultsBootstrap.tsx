@@ -21,6 +21,7 @@ export type RuntimeDefaults = {
   fast?: boolean;
   upload_max_source_bytes?: number;
   canvas_enabled?: boolean;
+  agent_enabled?: boolean;
   nav_visibility?: NavVisibility;
 };
 
@@ -42,6 +43,9 @@ function pickRuntimeDefaults(
   if (typeof value?.canvas_enabled === "boolean") {
     next.canvas_enabled = value.canvas_enabled;
   }
+  if (typeof value?.agent_enabled === "boolean") {
+    next.agent_enabled = value.agent_enabled;
+  }
   if (value?.nav_visibility && typeof value.nav_visibility === "object") {
     next.nav_visibility = normalizeNavVisibility(value.nav_visibility);
   }
@@ -50,8 +54,14 @@ function pickRuntimeDefaults(
 
 function applyRuntimeDefaultsToStores(defaults: RuntimeDefaults): void {
   useChatStore.getState().applyRuntimeDefaults(defaults);
-  useUiStore.getState().setNavVisibility(defaults.nav_visibility);
-  useUiStore.getState().setCanvasEnabled(defaults.canvas_enabled === true);
+  const ui = useUiStore.getState();
+  const agentEnabled = defaults.agent_enabled === true;
+  ui.setAgentEnabled(agentEnabled);
+  ui.setNavVisibility({
+    ...defaults.nav_visibility,
+    agent: agentEnabled && defaults.nav_visibility?.agent === true,
+  });
+  ui.setCanvasEnabled(defaults.canvas_enabled === true);
 }
 
 function writeRuntimeDefaultsCookie(defaults: RuntimeDefaults) {
@@ -78,6 +88,7 @@ export function RuntimeDefaultsBootstrap({
   const defaultFast = defaults.fast;
   const defaultUploadMaxSourceBytes = defaults.upload_max_source_bytes;
   const defaultCanvasEnabled = defaults.canvas_enabled;
+  const defaultAgentEnabled = defaults.agent_enabled;
   const defaultNavVisibility = defaults.nav_visibility;
 
   const initialDefaults = useMemo(
@@ -86,12 +97,14 @@ export function RuntimeDefaultsBootstrap({
         fast: defaultFast,
         upload_max_source_bytes: defaultUploadMaxSourceBytes,
         canvas_enabled: defaultCanvasEnabled,
+        agent_enabled: defaultAgentEnabled,
         nav_visibility: defaultNavVisibility,
       }),
     [
       defaultFast,
       defaultUploadMaxSourceBytes,
       defaultCanvasEnabled,
+      defaultAgentEnabled,
       defaultNavVisibility,
     ],
   );
@@ -120,6 +133,7 @@ export function RuntimeDefaultsBootstrap({
   const serverUploadMaxSourceBytes =
     serverRuntimeDefaults?.upload_max_source_bytes;
   const serverCanvasEnabled = serverRuntimeDefaults?.canvas_enabled;
+  const serverAgentEnabled = serverRuntimeDefaults?.agent_enabled;
   const serverNavVisibility = serverRuntimeDefaults?.nav_visibility;
 
   const runtimeDefaults = useMemo(
@@ -128,20 +142,26 @@ export function RuntimeDefaultsBootstrap({
         fast: serverFast,
         upload_max_source_bytes: serverUploadMaxSourceBytes,
         canvas_enabled: serverCanvasEnabled,
+        agent_enabled: serverAgentEnabled,
         nav_visibility: serverNavVisibility,
       }),
     [
       serverFast,
       serverUploadMaxSourceBytes,
       serverCanvasEnabled,
+      serverAgentEnabled,
       serverNavVisibility,
     ],
   );
 
   useLayoutEffect(() => {
-    if (!meQuery.data || identityUnavailable) return;
+    if (!meQuery.data || identityUnavailable) {
+      useUiStore.getState().setRuntimeDefaultsAuthoritative(false);
+      return;
+    }
     useChatStore.getState().setCurrentUser(meQuery.data.id);
     applyRuntimeDefaultsToStores(runtimeDefaults);
+    useUiStore.getState().setRuntimeDefaultsAuthoritative(true);
   }, [identityUnavailable, meQuery.data, runtimeDefaults]);
 
   useLayoutEffect(() => {
@@ -157,16 +177,26 @@ export function RuntimeDefaultsBootstrap({
     meQuery.data && !identityUnavailable && runtimeDefaults.nav_visibility
       ? runtimeDefaults.nav_visibility
       : initialDefaults.nav_visibility;
+  const authoritativeNavigationReady = Boolean(
+    meQuery.data && !identityUnavailable,
+  );
 
   useEffect(() => {
     if (isPublicAuthPath) return;
+    if (pathname.startsWith("/agent") && !authoritativeNavigationReady) return;
     const redirectTo = getRedirectForHiddenNavPath(
       pathname,
       effectiveNavVisibility,
     );
     if (!redirectTo || redirectTo === pathname) return;
     router.replace(redirectTo);
-  }, [effectiveNavVisibility, isPublicAuthPath, pathname, router]);
+  }, [
+    authoritativeNavigationReady,
+    effectiveNavVisibility,
+    isPublicAuthPath,
+    pathname,
+    router,
+  ]);
 
   useEffect(() => {
     if (

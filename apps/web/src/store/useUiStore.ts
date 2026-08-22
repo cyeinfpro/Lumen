@@ -79,6 +79,10 @@ interface UiState {
   setNavVisibility: (visibility: NavVisibility | undefined | null) => void;
   canvasEnabled: boolean;
   setCanvasEnabled: (enabled: boolean) => void;
+  agentEnabled: boolean;
+  setAgentEnabled: (enabled: boolean) => void;
+  runtimeDefaultsAuthoritative: boolean;
+  setRuntimeDefaultsAuthoritative: (resolved: boolean) => void;
   lightbox: UiLightboxState;
   openLightbox: (id: string, src: string, alt: string, previewSrc?: string) => void;
   /**
@@ -132,6 +136,11 @@ export const useUiStore = create<UiState>((set) => ({
     set({ navVisibility: normalizeNavVisibility(visibility) }),
   canvasEnabled: false,
   setCanvasEnabled: (enabled) => set({ canvasEnabled: enabled }),
+  agentEnabled: false,
+  setAgentEnabled: (enabled) => set({ agentEnabled: enabled }),
+  runtimeDefaultsAuthoritative: false,
+  setRuntimeDefaultsAuthoritative: (resolved) =>
+    set({ runtimeDefaultsAuthoritative: resolved }),
   lightbox: createClosedLightbox(),
   openLightbox: (id, src, alt, previewSrc) => {
     const identity = getPrivateIdentitySnapshot();

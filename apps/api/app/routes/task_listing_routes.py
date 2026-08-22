@@ -420,6 +420,10 @@ def _build_task_item(
         date=sort_at,
         cursor=cursor,
         conversation_id=conversation_id,
+        agent_session_id=getattr(task, "agent_session_id", None)
+        or _task_request_str(task, "agent_session_id"),
+        agent_run_id=getattr(task, "agent_run_id", None)
+        or _task_request_str(task, "agent_run_id"),
         project_id=project_id,
         workflow_type=workflow_type,
         workflow_step_key=workflow_step_key,

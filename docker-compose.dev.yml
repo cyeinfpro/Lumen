@@ -11,6 +11,15 @@ x-app-build: &app-build
     LUMEN_APP_GID: "${LUMEN_APP_GID:-10001}"
 
 services:
+  agent-runtime:
+    image: lumen-agent-runtime:dev
+    build:
+      context: ./apps/agent-runtime
+      dockerfile: Dockerfile
+      args:
+        NODE_BASE: "${LUMEN_NODE_BASE_REF:-node:22.22.0-alpine}"
+        LUMEN_VERSION: "${LUMEN_VERSION:-dev}"
+
   api:
     image: lumen-api:dev
     build: *app-build

@@ -22,6 +22,9 @@ export interface BackendGeneration {
   id: string;
   message_id: string;
   conversation_id?: string | null;
+  agent_session_id?: string | null;
+  agent_run_id?: string | null;
+  agent_tool_call_id?: string | null;
   project_id?: string | null;
   user_api_credential_id?: string | null;
   upstream_supplier_id?: string | null;
@@ -76,6 +79,8 @@ export interface BackendCompletion {
   id: string;
   message_id: string;
   conversation_id?: string | null;
+  agent_session_id?: string | null;
+  agent_run_id?: string | null;
   project_id?: string | null;
   source?: string | null;
   user_api_credential_id?: string | null;

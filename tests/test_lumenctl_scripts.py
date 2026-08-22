@@ -2067,6 +2067,7 @@ def test_update_failure_restores_env_bytes_and_retains_unready_release_evidence(
         f"LUMEN_REDIS_IMAGE_REF=redis:7.4-alpine@sha256:{'2' * 64}\n"
         f"LUMEN_API_IMAGE_REF=example.invalid/lumen-api@sha256:{'3' * 64}\n"
         f"LUMEN_WORKER_IMAGE_REF=example.invalid/lumen-worker@sha256:{'4' * 64}\n"
+        f"LUMEN_AGENT_RUNTIME_IMAGE_REF=example.invalid/lumen-agent-runtime@sha256:{'7' * 64}\n"
         f"LUMEN_WEB_IMAGE_REF=example.invalid/lumen-web@sha256:{'5' * 64}\n"
         f"LUMEN_TGBOT_IMAGE_REF=example.invalid/lumen-tgbot@sha256:{'6' * 64}\n"
         f"LUMEN_VERSION=1.2.44\n"
@@ -2972,7 +2973,7 @@ def test_update_script_runs_docker_compose_pull_migrate_up_phases() -> None:
     # restart_services: fast 模式使用 --no-deps，因此必须先把 API 启动并等到
     # healthy，再启动依赖 API 的 worker / web。否则 Web 可能缓存旧 Docker DNS
     # 地址，令更新完成后仍持续 502。
-    assert "for _svc in api worker web" in text
+    assert "_target_services=(agent-runtime api worker web)" in text
     assert "for _svc in api web" in text
     assert 'lumen_update_start_bound_service "${CURRENT_LINK}" "${_svc}"' in text
     assert 'compose_up_service "${compose_dir}" "${service}"' in text
@@ -3178,9 +3179,12 @@ def test_update_script_supports_optional_local_build_when_env_set() -> None:
     text = update_source_text()
     # build 路径必须由 env 显式开启
     assert "LUMEN_UPDATE_BUILD:-0" in text
-    assert "build api worker web" in text
+    assert "build api worker agent-runtime web" in text
     # build 路径仍走 lumen_compose_in（不直接 systemctl）
-    assert 'lumen_compose_in "${NEW_RELEASE}" build api worker web' in text
+    assert (
+        'lumen_compose_in "${NEW_RELEASE}" build api worker agent-runtime web'
+        in text
+    )
     assert "LUMEN_UPDATE_BUILD=1 已完成本地 build，跳过远程 pull" in text
 
 
@@ -3966,6 +3970,7 @@ fi
         *"config --images"*)
           printf '%s\\n' "${LUMEN_API_IMAGE_REF:?}"
           printf '%s\\n' "${LUMEN_WORKER_IMAGE_REF:?}"
+          printf '%s\\n' "${LUMEN_AGENT_RUNTIME_IMAGE_REF:?}"
           printf '%s\\n' "${LUMEN_WEB_IMAGE_REF:?}"
       exit 0
       ;;
@@ -3997,6 +4002,7 @@ if [ "$#" -ge 2 ] && [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
         case "${service}" in
           api) hex="$(printf 'a%.0s' {1..64})" ;;
           worker) hex="$(printf 'b%.0s' {1..64})" ;;
+          agent-runtime) hex="$(printf 'd%.0s' {1..64})" ;;
           web) hex="$(printf 'c%.0s' {1..64})" ;;
           *) exit 1 ;;
         esac
@@ -4016,6 +4022,7 @@ if [ "$#" -ge 2 ] && [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
   case "${service}" in
     api) hex="$(printf 'a%.0s' {1..64})" ;;
     worker) hex="$(printf 'b%.0s' {1..64})" ;;
+    agent-runtime) hex="$(printf 'd%.0s' {1..64})" ;;
     web) hex="$(printf 'c%.0s' {1..64})" ;;
     *) exit 1 ;;
   esac
@@ -4027,6 +4034,7 @@ if [ "$#" -ge 1 ] && [ "$1" = "inspect" ]; then
   case "$*" in
     *'{{.Image}}'*lumen-api*) printf 'sha256:%s\\n' "$(printf 'a%.0s' {1..64})" ;;
     *'{{.Image}}'*lumen-worker*) printf 'sha256:%s\\n' "$(printf 'b%.0s' {1..64})" ;;
+    *'{{.Image}}'*lumen-agent-runtime*) printf 'sha256:%s\\n' "$(printf 'd%.0s' {1..64})" ;;
     *'{{.Image}}'*lumen-web*) printf 'sha256:%s\\n' "$(printf 'c%.0s' {1..64})" ;;
     *) printf 'healthy\\n' ;;
   esac
@@ -4257,6 +4265,12 @@ except BlockingIOError:
         "#!/usr/bin/env bash\nexit 1\n", encoding="utf-8"
     )
     (fakebin / "sleep").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    (fakebin / "df").write_text(
+        "#!/usr/bin/env bash\n"
+        "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'\n"
+        "printf 'fake 12582912 1048576 11534336 9%% /opt\\n'\n",
+        encoding="utf-8",
+    )
     (fakebin / "uname").write_text(
         "#!/usr/bin/env bash\nprintf 'Linux\\n'\n", encoding="utf-8"
     )

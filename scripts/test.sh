@@ -66,6 +66,18 @@ ensure_web_deps() {
     )
 }
 
+ensure_agent_runtime_deps() {
+    if [ -x "apps/agent-runtime/node_modules/.bin/eslint" ] &&
+       [ -x "apps/agent-runtime/node_modules/.bin/tsc" ] &&
+       [ -x "apps/agent-runtime/node_modules/.bin/vitest" ]; then
+        return
+    fi
+
+    echo
+    echo "==> apps/agent-runtime dependencies"
+    npm --prefix apps/agent-runtime ci --ignore-scripts
+}
+
 echo "==> apps/worker/tests"
 uv run pytest apps/worker/tests "$@"
 
@@ -96,6 +108,26 @@ echo
 echo "==> tests (operations scripts)"
 uv run pytest tests "$@"
 
+if [ "${LUMEN_TEST_SKIP_AGENT_RUNTIME:-0}" != "1" ]; then
+    ensure_agent_runtime_deps
+
+    echo
+    echo "==> apps/agent-runtime tests"
+    npm --prefix apps/agent-runtime test
+
+    echo
+    echo "==> apps/agent-runtime type-check"
+    npm --prefix apps/agent-runtime run type-check
+
+    echo
+    echo "==> apps/agent-runtime lint"
+    npm --prefix apps/agent-runtime run lint
+
+    echo
+    echo "==> apps/agent-runtime build"
+    npm --prefix apps/agent-runtime run build
+fi
+
 if [ "${LUMEN_TEST_SKIP_WEB:-0}" != "1" ]; then
     ensure_web_deps
 
@@ -124,7 +156,7 @@ if [ "${LUMEN_TEST_SKIP_WEB:-0}" != "1" ]; then
     echo "==> apps/web build"
     (
         cd apps/web
-        npm run build
+        NEXT_DIST_DIR="${LUMEN_WEB_TEST_DIST_DIR:-.next-build-check}" npm run build
     )
 fi
 

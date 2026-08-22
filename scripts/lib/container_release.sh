@@ -30,14 +30,30 @@ lumen_compose() {
     if [ "${build_mode}" -eq 1 ]; then
         : "${LUMEN_API_IMAGE_REF:=lumen-api:dev}"
         : "${LUMEN_WORKER_IMAGE_REF:=lumen-worker:dev}"
+        : "${LUMEN_AGENT_RUNTIME_IMAGE_REF:=lumen-agent-runtime:dev}"
         : "${LUMEN_WEB_IMAGE_REF:=lumen-web:dev}"
         : "${LUMEN_TGBOT_IMAGE_REF:=lumen-tgbot:dev}"
         export LUMEN_API_IMAGE_REF LUMEN_WORKER_IMAGE_REF
+        export LUMEN_AGENT_RUNTIME_IMAGE_REF
         export LUMEN_WEB_IMAGE_REF LUMEN_TGBOT_IMAGE_REF
     elif lumen_prepare_missing_app_image_refs; then
         :
     else
         return $?
+    fi
+    local compose_arg="" agent_runtime_targeted=0
+    for compose_arg in "$@"; do
+        if [ "${compose_arg}" = "agent-runtime" ]; then
+            agent_runtime_targeted=1
+            break
+        fi
+    done
+    if [ "${build_mode}" -ne 1 ] && [ "${agent_runtime_targeted}" -eq 1 ]; then
+        if ! lumen_image_ref_is_immutable \
+                "${LUMEN_AGENT_RUNTIME_IMAGE_REF:-}"; then
+            log_error "启动 agent-runtime 前必须绑定 LUMEN_AGENT_RUNTIME_IMAGE_REF=name@sha256。"
+            return 64
+        fi
     fi
     if ! docker compose version >/dev/null 2>&1; then
         log_error "未检测到 docker compose v2，请安装/升级到 Docker Compose v2 后重试。"
@@ -59,7 +75,14 @@ lumen_compose() {
     fi
     # ${explicit[@]+"${explicit[@]}"}: 兼容 set -u — 空数组 ${arr[@]} 报
     # unbound variable，需用 + 形式 "如果定义了就展开"。
-    COMPOSE_PROJECT_NAME="${LUMEN_COMPOSE_PROJECT:-lumen}" \
+    local active_profiles="${COMPOSE_PROFILES:-}"
+    case ",${active_profiles}," in
+        *,agent-runtime,*) ;;
+        ,,) active_profiles="agent-runtime" ;;
+        *) active_profiles="${active_profiles},agent-runtime" ;;
+    esac
+    COMPOSE_PROFILES="${active_profiles}" \
+        COMPOSE_PROJECT_NAME="${LUMEN_COMPOSE_PROJECT:-lumen}" \
         lumen_docker compose --ansi=never ${explicit[@]+"${explicit[@]}"} "$@"
 }
 
@@ -87,6 +110,12 @@ lumen_verify_image_signature_if_required() {
         return 1
     fi
     cosign verify \
+        --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+        --certificate-identity-regexp "https://github.com/cyeinfpro/Lumen/.github/workflows/docker-release.yml@refs/(tags/v.*|heads/main)" \
+        "${image}" >/dev/null \
+        || return 1
+    cosign verify-attestation \
+        --type spdxjson \
         --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
         --certificate-identity-regexp "https://github.com/cyeinfpro/Lumen/.github/workflows/docker-release.yml@refs/(tags/v.*|heads/main)" \
         "${image}" >/dev/null
@@ -155,8 +184,9 @@ lumen_set_compose_image_ref_in_env() {
     case "${key}" in
         LUMEN_POSTGRES_IMAGE_REF|LUMEN_REDIS_IMAGE_REF|\
         LUMEN_API_IMAGE_REF|LUMEN_WORKER_IMAGE_REF|\
+        LUMEN_AGENT_RUNTIME_IMAGE_REF|\
         LUMEN_WEB_IMAGE_REF|LUMEN_TGBOT_IMAGE_REF|\
-        LUMEN_PYTHON_BASE_REF)
+        LUMEN_PYTHON_BASE_REF|LUMEN_NODE_BASE_REF)
             ;;
         *)
             log_error "拒绝未知镜像引用键：${key}"
@@ -192,8 +222,8 @@ lumen_apply_release_manifest_compose_env() {
         fi
         count=$((count + 1))
     done <<< "${rows}"
-    if [ "${count}" -ne 7 ]; then
-        log_error "release manifest 导出的镜像引用数量为 ${count}，期望 7。"
+    if [ "${count}" -ne 7 ] && [ "${count}" -ne 9 ]; then
+        log_error "release manifest 导出的镜像引用数量为 ${count}，期望 7（旧 release）或 9。"
         return 1
     fi
 }
@@ -264,10 +294,11 @@ lumen_apply_rolling_app_image_refs() {
     local tag="$2"
     local env_file="$3"
     local service key ref
-    for service in api worker web tgbot; do
+    for service in api worker agent-runtime web tgbot; do
         case "${service}" in
             api) key="LUMEN_API_IMAGE_REF" ;;
             worker) key="LUMEN_WORKER_IMAGE_REF" ;;
+            agent-runtime) key="LUMEN_AGENT_RUNTIME_IMAGE_REF" ;;
             web) key="LUMEN_WEB_IMAGE_REF" ;;
             tgbot) key="LUMEN_TGBOT_IMAGE_REF" ;;
         esac
@@ -319,13 +350,21 @@ lumen_prepare_missing_app_image_refs() {
             missing=1
         fi
     done
+    key=LUMEN_AGENT_RUNTIME_IMAGE_REF
+    eval "value=\${${key}:-}"
+    if [ -z "${value}" ] && [ -n "${env_file}" ] && [ -f "${env_file}" ]; then
+        value="$(lumen_env_value "${key}" "${env_file}" 2>/dev/null || true)"
+    fi
+    if lumen_image_ref_is_immutable "${value}"; then
+        export "${key}=${value}"
+    fi
     [ "${missing}" -eq 1 ] || return 0
     [ -n "${env_file}" ] && [ -f "${env_file}" ] || {
         log_error "生产 Compose 缺少应用 immutable image refs。"
         return 64
     }
     [ "${registry%/}" = "ghcr.io/cyeinfpro" ] || {
-        log_error "自定义 registry 必须显式提供四个应用 immutable image refs。"
+        log_error "自定义 registry 必须显式提供五个应用 immutable image refs。"
         return 64
     }
     if ! lumen_image_tag_is_valid "${tag}"; then

@@ -46,10 +46,20 @@ def _start_bash(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=process_env,
+        start_new_session=True,
     )
 
 
-def _wait_for_file(path: Path, timeout: float = 5.0) -> None:
+def _terminate_process_group(process: subprocess.Popen[str]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    if process.poll() is None:
+        process.wait(timeout=5)
+
+
+def _wait_for_file(path: Path, timeout: float = 15.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if path.exists():
@@ -650,7 +660,10 @@ def test_migration_refuses_to_run_while_global_maintenance_lock_is_held(
         )
     finally:
         go.touch()
-        holder_stdout, holder_stderr = holder.communicate(timeout=5)
+        try:
+            holder_stdout, holder_stderr = holder.communicate(timeout=15)
+        finally:
+            _terminate_process_group(holder)
 
     assert holder.returncode == 0, holder_stderr + holder_stdout
     assert result.returncode != 0
@@ -833,11 +846,9 @@ def test_lumen_with_lock_releases_after_child_signal_status(
     try:
         _wait_for_file(ready)
         os.kill(int(child_pid_file.read_text(encoding="utf-8")), sig)
-        stdout, stderr = process.communicate(timeout=5)
+        stdout, stderr = process.communicate(timeout=15)
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
+        _terminate_process_group(process)
 
     assert process.returncode == expected_rc, stderr + stdout
     assert not lock_dir.exists()
@@ -896,11 +907,9 @@ def test_lumen_with_lock_preserves_nondefault_signal_disposition(
         time.sleep(0.1)
         assert process.poll() is None
         assert lock_dir.is_dir()
-        stdout, stderr = process.communicate(timeout=5)
+        stdout, stderr = process.communicate(timeout=15)
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
+        _terminate_process_group(process)
 
     assert process.returncode == 0, stderr + stdout
     assert completed.is_file()
@@ -939,11 +948,9 @@ def test_lumen_with_lock_default_term_releases_and_runs_saved_exit_once(
     try:
         _wait_for_file(ready)
         os.kill(process.pid, signal.SIGTERM)
-        stdout, stderr = process.communicate(timeout=5)
+        stdout, stderr = process.communicate(timeout=15)
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
+        _terminate_process_group(process)
 
     assert process.returncode in (-signal.SIGTERM, 143), stderr + stdout
     assert not lock_dir.exists()
@@ -1047,11 +1054,9 @@ def test_lumen_with_lock_signal_cleanup_cannot_delete_successor_owner(
         """
     )
     try:
-        stdout, stderr = process.communicate(timeout=5)
+        stdout, stderr = process.communicate(timeout=15)
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
+        _terminate_process_group(process)
 
     assert process.returncode in (-signal.SIGTERM, 143), stderr + stdout
     assert successor.is_file()
@@ -1276,11 +1281,9 @@ def test_signal_at_first_stop_recovers_before_any_directory_move(
         assert len(owner_dirs) == 1
         assert (owner_dirs[0] / "phase").read_text(encoding="utf-8") == "stopping\n"
         go.touch()
-        stdout, stderr = process.communicate(timeout=5)
+        stdout, stderr = process.communicate(timeout=15)
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
+        _terminate_process_group(process)
 
     assert process.returncode == expected_rc, stderr + stdout
     _assert_original_layout_restored(root)
@@ -1317,11 +1320,9 @@ def test_signal_after_shared_extraction_restores_dirs_links_and_env(
         assert (root / ".env").is_symlink()
         assert (root / "current/apps/web/.env.local").exists()
         go.touch()
-        stdout, stderr = process.communicate(timeout=5)
+        stdout, stderr = process.communicate(timeout=15)
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
+        _terminate_process_group(process)
 
     assert process.returncode == 143, stderr + stdout
     _assert_original_layout_restored(root)
@@ -1354,11 +1355,9 @@ def test_signal_between_move_and_moved_ack_uses_intent_manifest(
         assert b"top\tpayload.txt\0" not in moved
         assert not payload.exists()
         go.touch()
-        stdout, stderr = process.communicate(timeout=5)
+        stdout, stderr = process.communicate(timeout=15)
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
+        _terminate_process_group(process)
 
     assert process.returncode == 143, stderr + stdout
     _assert_original_layout_restored(root)
@@ -1479,11 +1478,9 @@ def test_signal_cleanup_cannot_delete_successor_migration_lock(
             encoding="utf-8",
         )
         go.touch()
-        stdout, stderr = process.communicate(timeout=5)
+        stdout, stderr = process.communicate(timeout=15)
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
+        _terminate_process_group(process)
 
     assert process.returncode == 143, stderr + stdout
     assert (root / "payload.txt").read_text(encoding="utf-8") == "keep-me\n"

@@ -171,6 +171,26 @@ def completion_usage_unknown(task: Any) -> bool:
     )
 
 
+def generation_agent_billing_meta(task: Any) -> dict[str, str]:
+    request = getattr(task, "upstream_request", None)
+    if not isinstance(request, dict) or request.get("source") != "agent":
+        return {}
+    output = {
+        "source": "agent",
+        "action_source": "agent.create_image",
+        "agent_image_mode": (
+            "image_to_image"
+            if str(getattr(task, "action", "")) == "edit"
+            else "text_to_image"
+        ),
+    }
+    for key in ("agent_session_id", "agent_run_id", "agent_tool_call_id"):
+        value = request.get(key)
+        if isinstance(value, str) and value:
+            output[key] = value
+    return output
+
+
 def mark_completion_billing_pending(
     task: Any,
     *,

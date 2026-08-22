@@ -20,6 +20,14 @@ from .conversations import (
     MemoryAudit,
 )
 
+from .agents import (
+    AgentCapabilityGrant,
+    AgentSession,
+    AgentRun,
+    AgentRunReference,
+    AgentToolCall,
+)
+
 from .tasks import (
     Generation,
     Completion,
@@ -80,6 +88,11 @@ __all__ = [
     "UserMemory",
     "UserMemoryStaging",
     "MemoryAudit",
+    "AgentCapabilityGrant",
+    "AgentSession",
+    "AgentRun",
+    "AgentRunReference",
+    "AgentToolCall",
     "Generation",
     "Completion",
     "VideoGeneration",

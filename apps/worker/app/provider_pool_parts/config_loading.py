@@ -63,6 +63,16 @@ def _runtime_provider(definition: Any) -> ProviderConfig:
         image_edit_input_transport=definition.image_edit_input_transport,
         image_concurrency=definition.image_concurrency,
         responses_supported=getattr(definition, "responses_supported", None),
+        vision_supported=getattr(definition, "vision_supported", None),
+        agent_api=getattr(definition, "agent_api", "openai-responses"),
+        agent_models=getattr(definition, "agent_models", ()),
+        agent_context_window=getattr(definition, "agent_context_window", 128000),
+        agent_max_output_tokens=getattr(
+            definition, "agent_max_output_tokens", 16384
+        ),
+        agent_reasoning_supported=getattr(
+            definition, "agent_reasoning_supported", True
+        ),
         image_generations_supported=getattr(
             definition,
             "image_generations_supported",
@@ -97,6 +107,12 @@ def _validated_runtime_provider(provider: ProviderConfig, base_url: str) -> Prov
         image_edit_input_transport=provider.image_edit_input_transport,
         image_concurrency=provider.image_concurrency,
         responses_supported=provider.responses_supported,
+        vision_supported=provider.vision_supported,
+        agent_api=provider.agent_api,
+        agent_models=provider.agent_models,
+        agent_context_window=provider.agent_context_window,
+        agent_max_output_tokens=provider.agent_max_output_tokens,
+        agent_reasoning_supported=provider.agent_reasoning_supported,
         image_generations_supported=provider.image_generations_supported,
         image_responses_supported=provider.image_responses_supported,
     )

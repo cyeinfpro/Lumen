@@ -33,6 +33,9 @@ logger = logging.getLogger(__name__)
 # 跳过 BYOK provider，否则会污染共享 provider 池的健康度 / 配额计数。
 _BYOK_PROVIDER_PREFIX = "user:"
 _DEV_ENVS = frozenset({"dev", "development", "local", "test"})
+_AGENT_APIS = frozenset(
+    {"openai-responses", "openai-completions", "anthropic-messages"}
+)
 
 
 def is_byok_provider(provider: Any) -> bool:
@@ -54,6 +57,35 @@ def _is_dev_env() -> bool:
     return settings.app_env.strip().lower() in _DEV_ENVS
 
 
+def _capability_int(
+    capabilities: dict[str, Any],
+    key: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw = capabilities.get(key, default)
+    if isinstance(raw, bool):
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, value))
+
+
+def _agent_api(capabilities: dict[str, Any]) -> str:
+    value = str(capabilities.get("agent_api") or "openai-responses").strip().lower()
+    if value not in _AGENT_APIS:
+        raise UpstreamError(
+            "user API supplier Agent API is unsupported",
+            status_code=503,
+            error_code="agent_provider_api_unsupported",
+        )
+    return value
+
+
 async def _resolve_supplier_base_target(raw_base_url: str) -> PublicHttpTarget:
     dev_env = _is_dev_env()
     return await resolve_public_http_target(
@@ -71,6 +103,9 @@ async def _validate_supplier_base_url(raw_base_url: str) -> str:
 async def resolve_user_credential_runtime(
     db: AsyncSession,
     credential_id: str,
+    *,
+    user_id: str | None = None,
+    capability_overrides: dict[str, Any] | None = None,
 ) -> ResolvedProvider:
     now = datetime.now(timezone.utc)
     stmt = (
@@ -90,12 +125,15 @@ async def resolve_user_credential_runtime(
             ),
         )
     )
+    if user_id is not None:
+        stmt = stmt.where(UserApiCredential.user_id == user_id)
     row = (await db.execute(stmt)).first()
     if row is None:
         # 进一步区分 rate_limited 还在窗口内（可恢复）和 credential 不可用（终态）
         raw = await db.get(UserApiCredential, credential_id)
         if (
             raw is not None
+            and (user_id is None or raw.user_id == user_id)
             and raw.rate_limited_until is not None
             and raw.rate_limited_until > now
         ):
@@ -117,6 +155,13 @@ async def resolve_user_credential_runtime(
             payload={"credential_id": credential_id},
         )
     credential, supplier = row
+    if user_id is not None and credential.user_id != user_id:
+        raise UpstreamError(
+            "user API credential is not active",
+            status_code=403,
+            error_code=EC.UPSTREAM_AUTH_ERROR.value,
+            payload={"credential_id": credential_id},
+        )
     try:
         api_key = decrypt_api_key(
             credential.key_ciphertext,
@@ -147,11 +192,15 @@ async def resolve_user_credential_runtime(
             error_code=EC.UPSTREAM_INVALID_REQUEST.value,
             payload={"credential_id": credential_id},
         ) from exc
-    caps = (
+    supplier_caps = (
         supplier.capabilities_jsonb
         if isinstance(supplier.capabilities_jsonb, dict)
         else {}
     )
+    caps = {
+        **supplier_caps,
+        **(capability_overrides if isinstance(capability_overrides, dict) else {}),
+    }
     try:
         image_jobs_enabled = parse_provider_bool(
             caps.get("image_jobs_enabled", False),
@@ -175,6 +224,29 @@ async def resolve_user_credential_runtime(
         # 拒绝；避免老代码 fallback 成 ["chat","image"] 让任意 supplier 误用 image。
         purposes=tuple(supplier.purposes or []),
         responses_supported=True,
+        vision_supported=(
+            caps.get("vision_supported") is True
+            or (
+                isinstance(caps.get("input_modalities"), list)
+                and "image" in caps["input_modalities"]
+            )
+        ),
+        agent_api=_agent_api(caps),
+        agent_context_window=_capability_int(
+            caps,
+            "agent_context_window",
+            default=128000,
+            minimum=4096,
+            maximum=2_000_000,
+        ),
+        agent_max_output_tokens=_capability_int(
+            caps,
+            "agent_max_output_tokens",
+            default=16384,
+            minimum=1,
+            maximum=128000,
+        ),
+        agent_reasoning_supported=caps.get("agent_reasoning_supported") is not False,
         image_generations_supported=None,
         image_responses_supported=True,
     )

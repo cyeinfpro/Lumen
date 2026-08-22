@@ -6,6 +6,7 @@ import pytest
 
 from app.routes import admin_models
 from app.services.admin_model_cache import AdminModelCache
+from lumen_core.schema_models.providers import AdminProviderModelsDiscoverIn
 
 
 PROVIDERS_RAW = json.dumps(
@@ -139,3 +140,111 @@ async def test_admin_models_cache_avoids_refetch(
 
     assert first is second
     assert calls == 1
+
+
+def test_gpt_56_profile_uses_conservative_known_family_defaults() -> None:
+    profile = admin_models._model_profile(  # noqa: SLF001
+        "gpt-5.6-sol",
+        {"id": "gpt-5.6-sol"},
+        agent_api="openai-responses",
+    )
+
+    assert profile.source == "known_family"
+    assert profile.responses_supported is True
+    assert profile.vision_supported is True
+    assert profile.reasoning_supported is True
+    assert profile.context_window == 128_000
+    assert profile.max_output_tokens == 16_384
+
+    namespaced = admin_models._model_profile(  # noqa: SLF001
+        "openai/gpt-5.6-mini",
+        {"id": "openai/gpt-5.6-mini"},
+        agent_api="openai-responses",
+    )
+    assert namespaced.source == "known_family"
+    assert namespaced.vision_supported is True
+    assert namespaced.reasoning_supported is True
+
+
+def test_model_catalog_auth_headers_follow_provider_api() -> None:
+    assert admin_models._models_headers("openai-responses", "secret") == {  # noqa: SLF001
+        "authorization": "Bearer secret"
+    }
+    assert admin_models._models_headers("anthropic-messages", "secret") == {  # noqa: SLF001
+        "x-api-key": "secret",
+        "anthropic-version": "2023-06-01",
+    }
+
+
+def test_provider_model_metadata_overrides_family_defaults() -> None:
+    profile = admin_models._model_profile(  # noqa: SLF001
+        "gpt-5.6-custom",
+        {
+            "id": "gpt-5.6-custom",
+            "context_length": 400_000,
+            "max_output_tokens": 32_000,
+            "architecture": {"input_modalities": ["text"]},
+            "supported_parameters": ["temperature"],
+        },
+        agent_api="openai-responses",
+    )
+
+    assert profile.source == "provider"
+    assert profile.context_window == 400_000
+    assert profile.max_output_tokens == 32_000
+    assert profile.vision_supported is False
+    assert profile.reasoning_supported is False
+
+
+@pytest.mark.asyncio
+async def test_discover_models_reuses_saved_key_only_for_unchanged_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_read_providers(_db: object) -> tuple[str, str]:
+        return PROVIDERS_RAW, "db"
+
+    captured: dict[str, object] = {}
+
+    async def fake_fetch(**kwargs: object) -> tuple[object, None]:
+        captured.update(kwargs)
+        return {
+            "data": [
+                {
+                    "id": "gpt-5.6-sol",
+                    "context_length": 256_000,
+                    "input_modalities": ["text", "image"],
+                }
+            ]
+        }, None
+
+    monkeypatch.setattr(admin_models, "_read_providers", fake_read_providers)
+    monkeypatch.setattr(admin_models, "_fetch_models_payload", fake_fetch)
+
+    out = await admin_models.discover_provider_models(
+        AdminProviderModelsDiscoverIn(
+            provider_name="main",
+            base_url="https://main.example/v1",
+            api_key="",
+            agent_api="openai-responses",
+        ),
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+    )
+
+    assert out.error is None
+    assert [model.id for model in out.models] == ["gpt-5.6-sol"]
+    assert out.models[0].profile.context_window == 256_000
+    assert captured["api_key"] == "sk-main"
+
+    changed = await admin_models.discover_provider_models(
+        AdminProviderModelsDiscoverIn(
+            provider_name="main",
+            base_url="https://changed.example/v1",
+            api_key="",
+            agent_api="openai-responses",
+        ),
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+    )
+    assert changed.models == []
+    assert changed.error == "API key is required to discover models"

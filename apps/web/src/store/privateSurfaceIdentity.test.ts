@@ -31,6 +31,9 @@ const { useUiStore } = await import(
 const { useChatStore } = await import(
   new URL("./useChatStore.ts", import.meta.url).href
 );
+const { useAgentStore } = await import(
+  new URL("./agent/useAgentStore.ts", import.meta.url).href
+);
 const { requestSessionInvalidation } = await import(
   new URL("../lib/runtimeResilience.ts", import.meta.url).href
 );
@@ -213,6 +216,9 @@ test("private surfaces reset synchronously and reject stale lightbox epochs", as
         },
       },
     });
+    useAgentStore.getState().setDraft("agent-session-a", {
+      text: "private Agent draft",
+    });
 
     const activation = activatePrivateClientState("user-b");
     const inpaintAfterSwitch = useInpaintStore.getState();
@@ -227,6 +233,9 @@ test("private surfaces reset synchronously and reject stale lightbox epochs", as
     assert.equal(uiAfterSwitch.lightbox.ownerUserId, "user-b");
     assert.equal(uiAfterSwitch.lightbox.open, false);
     assert.equal(uiAfterSwitch.lightbox.action, null);
+    assert.equal(useAgentStore.getState().ownerUserId, "user-b");
+    assert.deepEqual(useAgentStore.getState().draftsBySession, {});
+    assert.deepEqual(useAgentStore.getState().messagesBySession, {});
     await activation;
 
     useUiStore
@@ -254,6 +263,7 @@ test("private surfaces reset synchronously and reject stale lightbox epochs", as
     assert.equal(useInpaintStore.getState().ownerUserId, null);
     assert.equal(useUiStore.getState().lightbox.ownerUserId, null);
     assert.equal(useUiStore.getState().lightbox.open, false);
+    assert.equal(useAgentStore.getState().ownerUserId, null);
 
     useInpaintStore.getState().openInpaint({
       imageId: "public-image",

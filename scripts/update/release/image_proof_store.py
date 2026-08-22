@@ -175,9 +175,17 @@ def _validate_image_binding_artifacts(
 
     services = _require_mapping(proof.get("services"), "image proof services")
     service_names = set(services)
-    if not {"api", "worker", "web"}.issubset(service_names) or service_names - {
+    compose_source = (release_path / "docker-compose.yml").read_text(encoding="utf-8")
+    runtime_expected = bool(
+        re.search(r"(?m)^  agent-runtime:\s*$", compose_source)
+    )
+    required_services = {"api", "worker", "web"}
+    if runtime_expected:
+        required_services.add("agent-runtime")
+    if not required_services.issubset(service_names) or service_names - {
         "api",
         "worker",
+        "agent-runtime",
         "web",
         "tgbot",
     }:
@@ -243,6 +251,8 @@ def _validate_image_binding_artifacts(
         "web": image_ids["web"],
         "worker": image_ids["worker"],
     }
+    if "agent-runtime" in image_ids:
+        expected_compose["agent-runtime"] = image_ids["agent-runtime"]
     if "tgbot" in image_ids:
         expected_compose["tgbot"] = image_ids["tgbot"]
     compose_services = _require_mapping(

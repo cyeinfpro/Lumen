@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # Immutable image binding and startup proof for Lumen update targets.
-
 LUMEN_UPDATE_IMAGE_PROOF_NAME=".update-image-proof.json"
 LUMEN_UPDATE_IMAGE_OVERRIDE_NAME=".update-images.override.yml"
-
 # Once an image binding exists, every compose command against this release
 # consumes the same Image ID override. Commands against an old rollback release
 # keep their original compose files because the resolved directory differs.
@@ -32,13 +30,12 @@ lumen_compose_in() {
         ( cd "${dir}" && lumen_compose "$@" )
     fi
 }
-
 lumen_update_tgbot_enabled() {
     env_key_present "${SHARED_ENV:?}" "TELEGRAM_BOT_TOKEN"
 }
-
 lumen_update_required_image_references() {
     local images extra="" service expected key
+    local core_services=(api worker web)
     if ! images="$(
         lumen_compose_in "${NEW_RELEASE:?}" config --images 2>/dev/null
     )"; then
@@ -59,10 +56,16 @@ lumen_update_required_image_references() {
         fi
     fi
     images="$(printf '%s\n%s\n' "${images}" "${extra}" | sed '/^$/d')"
-    for service in api worker web; do
+    if [ -f "${NEW_RELEASE}/docker-compose.yml" ] \
+            && grep -Eq '^[[:space:]]{2}agent-runtime:[[:space:]]*$' \
+                "${NEW_RELEASE}/docker-compose.yml"; then
+        core_services=(api worker agent-runtime web)
+    fi
+    for service in "${core_services[@]}"; do
         case "${service}" in
             api) key="LUMEN_API_IMAGE_REF" ;;
             worker) key="LUMEN_WORKER_IMAGE_REF" ;;
+            agent-runtime) key="LUMEN_AGENT_RUNTIME_IMAGE_REF" ;;
             web) key="LUMEN_WEB_IMAGE_REF" ;;
         esac
         eval "expected=\${${key}:-}"
@@ -87,7 +90,6 @@ lumen_update_required_image_references() {
         printf 'tgbot\t%s\n' "${expected}"
     fi
 }
-
 lumen_update_manifest_immutable_ref() {
     local service="$1"
     local guard="${LUMEN_RELEASE_MANIFEST_GUARD:-${SCRIPT_DIR}/release_manifest_guard.py}"
@@ -98,7 +100,6 @@ lumen_update_manifest_immutable_ref() {
         --service "${service}" \
         | awk -F '\t' 'NR == 1 { print $4 }'
 }
-
 lumen_update_capture_image_record() {
     local service="$1" image="$2" records_file="$3"
     local expected_immutable="$4" inspect_file
@@ -116,7 +117,6 @@ import json
 from pathlib import Path
 import re
 import sys
-
 inspect_path = Path(sys.argv[1])
 records_path = Path(sys.argv[2])
 service, source_ref, source_commit = sys.argv[3:6]
@@ -125,7 +125,6 @@ expected_immutable = sys.argv[7]
 image_id_re = re.compile(r"^sha256:[0-9a-f]{64}$")
 commit_re = re.compile(r"^[0-9a-f]{40}$")
 digest_ref_re = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
-
 payload = json.loads(inspect_path.read_text(encoding="utf-8"))
 if not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
     raise SystemExit(f"invalid docker inspect payload for {source_ref}")
@@ -143,7 +142,6 @@ if not build and (not commit_re.fullmatch(revision) or revision != source_commit
         f"image={source_ref} image_id={image_id} "
         f"revision={revision or '<missing>'} source={source_commit}"
     )
-
 repository = source_ref.split("@", 1)[0]
 last_slash = repository.rfind("/")
 last_colon = repository.rfind(":")
@@ -166,7 +164,6 @@ if expected_immutable and expected_immutable not in matching:
         "release manifest digest mismatch on inspected Image ID: "
         f"service={service} image_id={image_id} expected={expected_immutable}"
     )
-
 record = {
     "image_id": image_id,
     "repo_digests": matching,
@@ -205,7 +202,8 @@ records = [
 ]
 services = {record["service"]: record for record in records}
 expected = {"api", "worker", "web"}
-if not expected.issubset(services) or set(services) - (expected | {"tgbot"}):
+allowed = expected | {"agent-runtime", "tgbot"}
+if not expected.issubset(services) or set(services) - allowed:
     raise SystemExit("immutable image proof service set is incomplete")
 
 compose_services = {
@@ -216,6 +214,8 @@ compose_services = {
     "web": services["web"]["image_id"],
     "worker": services["worker"]["image_id"],
 }
+if "agent-runtime" in services:
+    compose_services["agent-runtime"] = services["agent-runtime"]["image_id"]
 if "tgbot" in services:
     compose_services["tgbot"] = services["tgbot"]["image_id"]
 proof = {

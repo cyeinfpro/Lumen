@@ -36,7 +36,7 @@ lumen_compose_status() {
     printf '\n---\n'
     log_step "容器健康状态"
     local cn state
-    for cn in lumen-api lumen-worker lumen-web lumen-pg lumen-redis lumen-tgbot; do
+    for cn in lumen-api lumen-worker lumen-agent-runtime lumen-web lumen-pg lumen-redis lumen-tgbot; do
         state="$(lumen_docker inspect --format '{{.Name}} {{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}n/a{{end}}' "${cn}" 2>/dev/null || true)"
         if [ -n "${state}" ]; then
             printf '  %s\n' "${state#/}"
@@ -60,7 +60,7 @@ lumen_compose_status() {
     fi
 }
 
-_LUMENCTL_VALID_SERVICES="api worker web tgbot postgres redis migrate bootstrap"
+_LUMENCTL_VALID_SERVICES="api worker agent-runtime web tgbot postgres redis migrate bootstrap"
 
 lumen_compose_logs() {
     lumen_require_docker_access
@@ -84,8 +84,8 @@ lumen_compose_restart() {
     lumen_require_docker_access
     local workdir=""
     workdir="$(lumenctl_compose_workdir)" || return 1
-    log_step "docker compose up -d --wait --force-recreate api worker web"
-    lumenctl_compose up -d --wait --force-recreate api worker web \
+    log_step "docker compose up -d --wait --force-recreate agent-runtime api worker web"
+    lumenctl_compose up -d --wait --force-recreate agent-runtime api worker web \
         && lumen_require_compose_core_readiness \
             "${workdir}" \
             "${LUMEN_API_READY_URL:-http://127.0.0.1:8000/readyz}" \
@@ -95,17 +95,17 @@ lumen_compose_restart() {
 
 lumen_compose_stop() {
     lumen_require_docker_access
-    log_step "docker compose stop api worker web tgbot"
+    log_step "docker compose stop agent-runtime api worker web tgbot"
     # tgbot 走 profile，stop 时不在默认范围；显式指定即可，未运行也是 noop。
-    lumenctl_compose stop api worker web tgbot || true
+    lumenctl_compose stop agent-runtime api worker web tgbot || true
 }
 
 lumen_compose_start() {
     lumen_require_docker_access
     local workdir=""
     workdir="$(lumenctl_compose_workdir)" || return 1
-    log_step "docker compose up -d --wait api worker web"
-    lumenctl_compose up -d --wait api worker web \
+    log_step "docker compose up -d --wait agent-runtime api worker web"
+    lumenctl_compose up -d --wait agent-runtime api worker web \
         && lumen_require_compose_core_readiness \
             "${workdir}" \
             "${LUMEN_API_READY_URL:-http://127.0.0.1:8000/readyz}" \
@@ -270,6 +270,20 @@ lumenctl_tgbot_running() {
         | grep -Fxq tgbot
 }
 
+lumenctl_agent_runtime_expected() {
+    grep -Eq '^[[:space:]]{2}agent-runtime:[[:space:]]*$' \
+        "$1/docker-compose.yml" 2>/dev/null
+}
+
+lumenctl_core_services_for_release() {
+    local compose_dir="$1"
+    if lumenctl_agent_runtime_expected "${compose_dir}"; then
+        printf '%s\n' agent-runtime api worker web
+    else
+        printf '%s\n' api worker web
+    fi
+}
+
 lumenctl_restore_tgbot_state() {
     local compose_dir="$1"
     local should_run="$2"
@@ -328,7 +342,7 @@ _lumen_compose_rollback_locked() {
     if [ "${LUMEN_NONINTERACTIVE:-}" != "1" ] \
             && [ "${LUMEN_ROLLBACK_YES:-}" != "1" ]; then
         printf '\n'
-        log_warn "rollback 将切换到 release ${old_id}（镜像 tag=${old_tag}, version=${old_version}），并重启 api/worker/web/tgbot（按配置）。"
+        log_warn "rollback 将切换到 release ${old_id}（镜像 tag=${old_tag}, version=${old_version}），并重启核心服务与按配置启用的 tgbot。"
         if ! confirm "继续 rollback？"; then
             log_info "已取消。"
             return 0
@@ -376,9 +390,16 @@ _lumen_compose_rollback_locked() {
         log_step "docker compose pull"
         lumen_compose_in "${deploy_root}/current" pull \
             || log_warn "compose pull 返回非零，将继续 up 使用本地旧镜像兜底"
-        log_step "docker compose up -d --wait api worker web"
+        local target_core_services=()
+        while IFS= read -r service; do
+            [ -n "${service}" ] && target_core_services+=("${service}")
+        done < <(lumenctl_core_services_for_release "${deploy_root}/current")
+        if ! lumenctl_agent_runtime_expected "${deploy_root}/current"; then
+            lumen_docker stop lumen-agent-runtime >/dev/null 2>&1 || true
+        fi
+        log_step "docker compose up -d --wait ${target_core_services[*]}"
         if ! lumen_compose_in "${deploy_root}/current" \
-                up --pull missing -d --wait api worker web; then
+                up --pull missing -d --wait "${target_core_services[@]}"; then
             rollback_rc=1
         elif ! lumenctl_restore_tgbot_state \
                 "${deploy_root}/current" "${target_tgbot_enabled}"; then
@@ -419,8 +440,15 @@ _lumen_compose_rollback_locked() {
     fi
     if [ "${restore_ok}" -eq 1 ]; then
         log_warn "rollback 前状态已恢复，尝试重新拉起原 release 核心服务。"
+        local original_core_services=()
+        while IFS= read -r service; do
+            [ -n "${service}" ] && original_core_services+=("${service}")
+        done < <(lumenctl_core_services_for_release "${deploy_root}/current")
+        if ! lumenctl_agent_runtime_expected "${deploy_root}/current"; then
+            lumen_docker stop lumen-agent-runtime >/dev/null 2>&1 || true
+        fi
         if lumen_compose_in "${deploy_root}/current" \
-                up --pull missing -d --wait api worker web \
+                up --pull missing -d --wait "${original_core_services[@]}" \
                 && lumenctl_restore_tgbot_state \
                     "${deploy_root}/current" "${original_tgbot_running}" \
                 && lumen_require_compose_core_readiness \

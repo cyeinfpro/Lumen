@@ -116,6 +116,14 @@ ensure_env_secret() {
     local value
     value="$(env_file_get "${key}" "${file}")"
     if [ -n "${value}" ]; then
+        case "${key}" in
+            AGENT_RUNTIME_SHARED_SECRET|AGENT_TOOL_CAPABILITY_SECRET)
+                if [ "${#value}" -lt 32 ]; then
+                    log_error "${key} 已配置但短于 32 字符；拒绝静默轮转。"
+                    return 1
+                fi
+                ;;
+        esac
         return 0
     fi
     if [ "${key}" = "BYOK_API_KEY_MASTER_SECRET" ] && [ "${LUMEN_ALLOW_BYOK_KEY_GEN:-0}" != "1" ]; then
@@ -180,6 +188,19 @@ ensure_required_env_secrets() {
         2) generated+=("TELEGRAM_BOT_SHARED_SECRET") ;;
         *) return 1 ;;
     esac
+    ensure_env_secret "${file}" AGENT_RUNTIME_SHARED_SECRET 32 || case "$?" in
+        2) generated+=("AGENT_RUNTIME_SHARED_SECRET") ;;
+        *) return 1 ;;
+    esac
+    ensure_env_secret "${file}" AGENT_TOOL_CAPABILITY_SECRET 32 || case "$?" in
+        2) generated+=("AGENT_TOOL_CAPABILITY_SECRET") ;;
+        *) return 1 ;;
+    esac
+    if [ "$(env_file_get AGENT_RUNTIME_SHARED_SECRET "${file}")" = \
+            "$(env_file_get AGENT_TOOL_CAPABILITY_SECRET "${file}")" ]; then
+        log_error "Agent Runtime 与工具 capability 必须使用不同密钥。"
+        return 1
+    fi
 
     local db_user db_name db_password redis_password
     db_user="$(env_file_get DB_USER "${file}")"

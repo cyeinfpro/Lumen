@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
@@ -11,10 +12,18 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
-from lumen_core.constants import CompletionStatus, GenerationStatus, VideoGenerationStatus
+from lumen_core.constants import (
+    CompletionStatus,
+    GenerationStatus,
+    VideoGenerationStatus,
+)
+from lumen_core.agent_events import AgentRunStatus
 from lumen_core.memory_extraction_models import MemoryExtractionRun
 from lumen_core.model_entities import (
     Completion,
+    AgentRun,
+    AgentRunReference,
+    AgentToolCall,
     Generation,
     Video,
     VideoGeneration,
@@ -77,6 +86,100 @@ async def _release_account_delete_task_hold(
 async def _account_wallet_exists(db: AsyncSession, user_id: str) -> bool:
     wallet = await billing_core.get_wallet(db, user_id, lock=False, create=False)
     return wallet is not None
+
+
+@dataclass(frozen=True, slots=True)
+class _AgentCancellation:
+    count: int
+    running_ids: tuple[str, ...]
+    holds_released: int
+
+
+@dataclass(frozen=True, slots=True)
+class _AgentRedaction:
+    runs: int | None
+    references: int | None
+    tool_calls: int | None
+
+
+async def _redact_account_agent_data(
+    db: AsyncSession,
+    *,
+    user_id: str,
+) -> _AgentRedaction:
+    run_ids = select(AgentRun.id).where(AgentRun.user_id == user_id)
+    tools_result = await db.execute(
+        update(AgentToolCall)
+        .where(AgentToolCall.agent_run_id.in_(run_ids))
+        .values(arguments_jsonb={}, error_message=None)
+        .execution_options(synchronize_session=False)
+    )
+    references_result = await db.execute(
+        update(AgentRunReference)
+        .where(AgentRunReference.agent_run_id.in_(run_ids))
+        .values(display_label=None, metadata_jsonb={})
+        .execution_options(synchronize_session=False)
+    )
+    runs_result = await db.execute(
+        update(AgentRun)
+        .where(AgentRun.user_id == user_id)
+        .values(
+            request_snapshot_jsonb={},
+            system_prompt_snapshot=None,
+            error_message=None,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return _AgentRedaction(
+        runs=dml_rowcount(runs_result),
+        references=dml_rowcount(references_result),
+        tool_calls=dml_rowcount(tools_result),
+    )
+
+
+async def _cancel_agent_runs(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    canceled_at: datetime,
+    account_mode: str,
+) -> _AgentCancellation:
+    runs = list(
+        (
+            await db.execute(
+                select(AgentRun)
+                .where(
+                    AgentRun.user_id == user_id,
+                    AgentRun.status.in_(("queued", "running")),
+                )
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    running_ids: list[str] = []
+    holds_released = 0
+    for run in runs:
+        previous_status = run.status
+        run.cancel_requested_at = run.cancel_requested_at or canceled_at
+        run.status = AgentRunStatus.CANCELLED.value
+        run.finished_at = canceled_at
+        run.execution_epoch = int(run.execution_epoch or 0) + 1
+        run.error_code = "agent_cancelled"
+        run.error_message = None
+        if previous_status == AgentRunStatus.RUNNING.value:
+            running_ids.append(run.id)
+        elif account_mode == "wallet" and int(run.text_hold_micro or 0) > 0:
+            holds_released += int(
+                await _release_account_delete_task_hold(
+                    db,
+                    user_id=user_id,
+                    ref_type="agent_run",
+                    ref_id=run.id,
+                )
+            )
+    return _AgentCancellation(len(runs), tuple(running_ids), holds_released)
 
 
 async def cancel_account_active_tasks(
@@ -144,6 +247,13 @@ async def cancel_account_active_tasks(
         .scalars()
         .all()
     )
+    agent_cleanup = await _cancel_agent_runs(
+        db,
+        user_id=user_id,
+        canceled_at=canceled_at,
+        account_mode=account_mode,
+    )
+    agent_redaction = await _redact_account_agent_data(db, user_id=user_id)
     task_ids: list[str] = []
     queued_generation_ids: list[str] = []
     queued_generation_execution_epochs: dict[str, int] = {}
@@ -152,7 +262,7 @@ async def cancel_account_active_tasks(
     streaming_completion_ids: list[str] = []
     deferred_generation_ids: list[str] = []
     deferred_completion_ids: list[str] = []
-    holds_released = 0
+    holds_released = agent_cleanup.holds_released
     releasable_queued_generations = [
         generation
         for generation in generations
@@ -238,7 +348,7 @@ async def cancel_account_active_tasks(
         user_id=user_id,
         canceled_at=canceled_at,
     )
-    return {
+    cleanup: dict[str, object] = {
         "generations_canceled": len(generations),
         "completions_canceled": len(completions),
         "video_generations_canceled": len(video_cleanup.active_ids),
@@ -255,6 +365,13 @@ async def cancel_account_active_tasks(
         "deferred_completion_ids": deferred_completion_ids,
         **video_cleanup.cleanup_fields(),
     }
+    if agent_cleanup.count:
+        cleanup["agent_runs_canceled"] = agent_cleanup.count
+        cleanup["running_agent_run_ids"] = list(agent_cleanup.running_ids)
+    cleanup["agent_runs_redacted"] = agent_redaction.runs
+    cleanup["agent_references_redacted"] = agent_redaction.references
+    cleanup["agent_tool_calls_redacted"] = agent_redaction.tool_calls
+    return cleanup
 
 
 async def cancel_account_memory_extractions(
@@ -325,10 +442,15 @@ async def post_commit_account_task_cleanup(
             if isinstance(task_id, str)
         ],
     ]
+    cancel_agent_run_ids = [
+        run_id
+        for run_id in cleanup.get("running_agent_run_ids", [])
+        if isinstance(run_id, str)
+    ]
     has_queued_generations = bool(
         isinstance(queued_generation_ids, list) and queued_generation_ids
     )
-    if not has_queued_generations and not cancel_task_ids:
+    if not has_queued_generations and not cancel_task_ids and not cancel_agent_run_ids:
         if int(cleanup.get("holds_released") or 0) > 0:
             try:
                 await invalidate_balance_cache(user_id)
@@ -341,8 +463,8 @@ async def post_commit_account_task_cleanup(
         return
     try:
         redis = get_redis()
-        queued_generation_entries = (
-            await capture_queued_generation_cleanup_entries(redis, cleanup)
+        queued_generation_entries = await capture_queued_generation_cleanup_entries(
+            redis, cleanup
         )
         for task_id, execution_epoch, ownership_token in queued_generation_entries:
             await _release_account_generation_queue_state(
@@ -353,6 +475,8 @@ async def post_commit_account_task_cleanup(
             )
         for task_id in cancel_task_ids:
             await redis.set(f"task:{task_id}:cancel", "1", ex=3600)
+        for run_id in cancel_agent_run_ids:
+            await redis.set(f"agent:{run_id}:cancel", "1", ex=3600)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "account deletion cancel signal write failed user=%s err=%s", user_id, exc

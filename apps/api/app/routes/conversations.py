@@ -43,6 +43,7 @@ from ..services.active_user import (
     active_user_fence_http_error,
     lock_active_user,
 )
+from ..services.agent_conversations import studio_conversation_filter
 from ..services.conversation_cleanup import (
     cancel_conversation_memory_extractions as _cancel_conversation_memory_extractions,
     conversation_wallet_exists as _conversation_wallet_exists,
@@ -191,6 +192,7 @@ async def _get_owned_conv(
                 Conversation.id == conv_id,
                 Conversation.user_id == user_id,
                 Conversation.deleted_at.is_(None),
+                studio_conversation_filter(),
             )
         )
     ).scalar_one_or_none()
@@ -228,6 +230,7 @@ async def _get_owned_conv_for_update(
                 Conversation.id == conv_id,
                 Conversation.user_id == user_id,
                 Conversation.deleted_at.is_(None),
+                studio_conversation_filter(),
             )
             .with_for_update(of=Conversation)
         )
@@ -322,6 +325,7 @@ async def list_conversations(
     stmt = select(Conversation).where(
         Conversation.user_id == user.id,
         Conversation.deleted_at.is_(None),
+        studio_conversation_filter(),
     )
     if retention_filter is not None:
         stmt = stmt.where(retention_filter)

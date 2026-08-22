@@ -40,6 +40,7 @@ function productionSources(root: string): string[] {
 
 test("realtime, generation, and assets expose real public feature entries", () => {
   const expected = {
+    agent: ["./containers/ResponsiveAgent"],
     assets: [
       "./api/queries",
       "./model/prewarmScheduler",
@@ -97,11 +98,12 @@ test("features never deep-import another feature", () => {
   }
 });
 
-test("public realtime hook stays polling-only and does not acquire the registry", () => {
+test("public realtime hook owns EventSource through the shared registry", () => {
   const hook = source("features/realtime/model/useSSE.ts");
   const registry = source("shared/realtime/runtimeRegistry.ts");
   doesNotMatch(hook, /new Map/);
   match(registry, /const runtimes = new Map<string, RealtimeRuntime>\(\)/);
-  match(hook, /REALTIME_TRANSPORT_MODE = "polling-only"/);
-  doesNotMatch(hook, /acquireRealtimeRuntime|releaseRealtimeRuntime/);
+  match(hook, /REALTIME_TRANSPORT_MODE = "event-source-with-polling-fallback"/);
+  match(hook, /acquireRealtimeRuntime/);
+  match(hook, /releaseRealtimeRuntime/);
 });

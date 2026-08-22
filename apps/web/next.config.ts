@@ -51,6 +51,18 @@ function unique(values: Array<string | null | undefined>): string[] {
   ];
 }
 
+function buildDirectory(value: string | undefined): string {
+  const directory = value?.trim() || ".next";
+  if (
+    !/^[A-Za-z0-9._-]+$/u.test(directory) ||
+    directory === "." ||
+    directory === ".."
+  ) {
+    throw new Error("NEXT_DIST_DIR must be a directory name inside apps/web");
+  }
+  return directory;
+}
+
 const publicApiOrigin = optionalHttpOrigin(
   process.env.NEXT_PUBLIC_API_BASE,
   "NEXT_PUBLIC_API_BASE",
@@ -93,6 +105,7 @@ const upgradeInsecureRequests =
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  distDir: buildDirectory(process.env.NEXT_DIST_DIR),
   devIndicators: false,
   // Next.js v16 experimental.proxyClientMaxBodySize：
   // proxy 读 body 时默认只 buffer 10MB；素材视频允许 64 MiB，

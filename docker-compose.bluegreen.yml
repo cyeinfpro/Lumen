@@ -3,6 +3,11 @@
 #   docker compose -f docker-compose.yml -f docker-compose.bluegreen.yml up -d api-green
 
 services:
+  # Runtime remains a single immutable backend service during API blue/green.
+  # Both API colors resolve this same service and gate /readyz when Agent is on.
+  agent-runtime:
+    profiles: ["agent-runtime"]
+
   api-green:
     init: true
     cap_drop:

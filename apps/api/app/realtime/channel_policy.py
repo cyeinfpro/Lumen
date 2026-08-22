@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core.model_entities import AgentSession
 from lumen_core.models import (
     Completion,
     Conversation,
@@ -32,6 +33,7 @@ class ChannelRequest:
     conversation_ids: set[str] = field(default_factory=set)
     task_ids: set[str] = field(default_factory=set)
     storyboard_ids: set[str] = field(default_factory=set)
+    agent_session_ids: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,7 @@ class ChannelOwnership:
     conversation_ids: set[str]
     task_ids: set[str]
     storyboard_ids: set[str]
+    agent_session_ids: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -53,7 +56,7 @@ def parse_channel(raw: str, user_id: str) -> tuple[str, str, str] | None:
     if not channel or ":" not in channel:
         return None
     prefix, _, ref = channel.partition(":")
-    if prefix not in {"user", "conv", "task", "storyboard"}:
+    if prefix not in {"user", "conv", "task", "storyboard", "agent"}:
         return None
     if prefix == "user" and ref != user_id:
         raise ChannelPolicyError(
@@ -86,6 +89,8 @@ def remember_channel_reference(
         request.task_ids.add(ref)
     elif prefix == "storyboard":
         request.storyboard_ids.add(ref)
+    elif prefix == "agent":
+        request.agent_session_ids.add(ref)
 
 
 async def owned_conversation_ids(
@@ -100,6 +105,9 @@ async def owned_conversation_ids(
             Conversation.id.in_(conversation_ids),
             Conversation.user_id == user_id,
             Conversation.deleted_at.is_(None),
+            ~select(AgentSession.id)
+            .where(AgentSession.conversation_id == Conversation.id)
+            .exists(),
         )
     )
     return set(rows.scalars().all())
@@ -142,6 +150,26 @@ async def owned_storyboard_ids(
     return set(rows.scalars().all())
 
 
+async def owned_agent_session_ids(
+    db: AsyncSession,
+    agent_session_ids: set[str],
+    user_id: str,
+) -> set[str]:
+    if not agent_session_ids:
+        return set()
+    rows = await db.execute(
+        select(AgentSession.id)
+        .join(Conversation, Conversation.id == AgentSession.conversation_id)
+        .where(
+            AgentSession.id.in_(agent_session_ids),
+            AgentSession.user_id == user_id,
+            Conversation.user_id == user_id,
+            Conversation.deleted_at.is_(None),
+        )
+    )
+    return set(rows.scalars().all())
+
+
 async def load_channel_ownership(
     request: ChannelRequest,
     user_id: str,
@@ -158,7 +186,17 @@ async def load_channel_ownership(
         request.storyboard_ids,
         user_id,
     )
-    return ChannelOwnership(conversation_ids, task_ids, storyboard_ids)
+    agent_session_ids = await owned_agent_session_ids(
+        db,
+        request.agent_session_ids,
+        user_id,
+    )
+    return ChannelOwnership(
+        conversation_ids,
+        task_ids,
+        storyboard_ids,
+        agent_session_ids,
+    )
 
 
 def authorized_channel(
@@ -174,6 +212,12 @@ def authorized_channel(
         raise ChannelPolicyError(
             "forbidden_channel",
             f"storyboard {ref} not owned",
+            403,
+        )
+    if prefix == "agent" and ref not in ownership.agent_session_ids:
+        raise ChannelPolicyError(
+            "forbidden_channel",
+            f"agent session {ref} not owned",
             403,
         )
     return channel

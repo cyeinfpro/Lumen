@@ -224,6 +224,10 @@ release_tgbot_expected() {
   [ -f "$SHARED_ENV" ] || return 1
   [ -n "$(env_value TELEGRAM_BOT_TOKEN "$SHARED_ENV")" ]
 }
+release_agent_runtime_expected() {
+  grep -Eq '^[[:space:]]{2}agent-runtime:[[:space:]]*$' \
+    "$(release_dir "$1")/docker-compose.yml" 2>/dev/null
+}
 validate_release_metadata() {
   python3 - "$(release_dir "$1")" "$1" <<'PY'
 import json
@@ -285,21 +289,25 @@ if manifest_path.exists():
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict) or manifest.get("commit_sha") != source_commit:
         raise SystemExit("release manifest commit mismatch")
-    manifest_images = manifest.get("images")
-    if not isinstance(manifest_images, dict):
+    legacy_images = manifest.get("images")
+    component_images = manifest.get("components", {})
+    if not isinstance(legacy_images, dict) or not isinstance(component_images, dict):
         raise SystemExit("release manifest images are invalid")
+    manifest_images = {**legacy_images, **component_images}
 
 compose_services = proof.get("compose_services")
 services = proof.get("services")
 if not isinstance(compose_services, dict) or not isinstance(services, dict):
     raise SystemExit("image proof service maps are invalid")
 required = ["api", "worker", "web"]
+if re.search(r"(?m)^  agent-runtime:\s*$", (release / "docker-compose.yml").read_text(encoding="utf-8")):
+    required.append("agent-runtime")
 if expected_tgbot:
     required.append("tgbot")
 for alias in ("api-green", "bootstrap", "migrate"):
     if alias in compose_services and compose_services[alias] != compose_services.get("api"):
         raise SystemExit(f"{alias} image proof does not match api")
-for service in ("api", "worker", "web", "tgbot"):
+for service in ("api", "worker", "agent-runtime", "web", "tgbot"):
     if service not in services:
         if service in required:
             raise SystemExit(f"missing image proof for {service}")
@@ -385,6 +393,7 @@ apply_release_env() {
       case "$service" in
         api) key=LUMEN_API_IMAGE_REF ;;
         worker) key=LUMEN_WORKER_IMAGE_REF ;;
+        agent-runtime) key=LUMEN_AGENT_RUNTIME_IMAGE_REF ;;
         web) key=LUMEN_WEB_IMAGE_REF ;;
         tgbot) key=LUMEN_TGBOT_IMAGE_REF ;;
         *) return 1 ;;
@@ -421,7 +430,12 @@ apply_compose_release() {
     echo "docker compose is unavailable for release $id" >&2
     return 1
   fi
-  compose_command "$id" up -d --wait api worker web || return 1
+  if release_agent_runtime_expected "$id"; then
+    compose_command "$id" up -d --wait agent-runtime api worker web || return 1
+  else
+    compose_command "$id" up -d --wait api worker web || return 1
+    docker stop lumen-agent-runtime >/dev/null 2>&1 || true
+  fi
   if release_tgbot_expected; then
     compose_command "$id" --profile tgbot up -d --wait tgbot || return 1
   else
@@ -476,6 +490,7 @@ verify_env_identity() {
       case "$service" in
         api) key=LUMEN_API_IMAGE_REF ;;
         worker) key=LUMEN_WORKER_IMAGE_REF ;;
+        agent-runtime) key=LUMEN_AGENT_RUNTIME_IMAGE_REF ;;
         web) key=LUMEN_WEB_IMAGE_REF ;;
         tgbot) key=LUMEN_TGBOT_IMAGE_REF ;;
         *) return 1 ;;

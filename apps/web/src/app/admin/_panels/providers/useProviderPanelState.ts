@@ -29,6 +29,7 @@ import {
   type Draft,
   type FieldErrors,
 } from "./model";
+import { useProviderModelDiscovery } from "./useProviderModelDiscovery";
 
 type ValidationFailure = {
   message: string;
@@ -86,6 +87,17 @@ function validateProviderDraft(
   const existingProvider = serverItems.find(
     (item) => item.name.trim() === draft.name.trim(),
   );
+  if (
+    existingProvider &&
+    !draft.api_key.trim() &&
+    existingProvider.base_url.trim().replace(/\/$/u, "") !==
+      draft.base_url.trim().replace(/\/$/u, "")
+  ) {
+    return {
+      message: `「${draft.name}」修改基础地址后需重新填写 API 密钥`,
+      index,
+    };
+  }
   if (
     !draft.api_key.trim() &&
     !providerHasStoredKey(existingProvider) &&
@@ -163,7 +175,28 @@ function providerPayloadItem(
       1,
       Math.min(32, Number(draft.image_concurrency ?? 1) || 1),
     ),
+    ...providerAgentPayload(draft),
     proxy: draft.proxy || null,
+  };
+}
+
+function providerAgentPayload(draft: Draft) {
+  return {
+    responses_supported: draft.responses_supported ?? null,
+    vision_supported: draft.vision_supported ?? null,
+    agent_api: draft.agent_api ?? "openai-responses",
+    agent_models: draft.agent_models ?? [],
+    agent_context_window: Math.max(
+      4096,
+      Math.min(2_000_000, Number(draft.agent_context_window) || 128_000),
+    ),
+    agent_max_output_tokens: Math.max(
+      1,
+      Math.min(128_000, Number(draft.agent_max_output_tokens) || 16_384),
+    ),
+    agent_reasoning_supported: draft.agent_reasoning_supported !== false,
+    image_generations_supported: draft.image_generations_supported ?? null,
+    image_responses_supported: draft.image_responses_supported ?? null,
   };
 }
 
@@ -240,6 +273,17 @@ export function useProviderPanelState() {
       ),
     [serverItems],
   );
+  const {
+    currentDefaultModel,
+    defaultModelForSave,
+    modelDiscoveries,
+    cancelAll: cancelModelDiscoveries,
+    remove: removeModelDiscovery,
+    updateDraft,
+    discover: discoverModels,
+    select: selectDiscoveredModel,
+    setDefault: setDiscoveredModelDefault,
+  } = useProviderModelDiscovery({ drafts, setDrafts, serverKeyHints });
 
   useEffect(() => {
     if (savedAt == null) return;
@@ -248,11 +292,12 @@ export function useProviderPanelState() {
   }, [savedAt]);
 
   const cancelEdit = useCallback(() => {
+    cancelModelDiscoveries();
     setDrafts(null);
     setEditingIdx(null);
     setGlobalError(null);
     setDeleteConfirmIdx(null);
-  }, []);
+  }, [cancelModelDiscoveries]);
 
   useEffect(() => {
     if (!drafts) return;
@@ -330,24 +375,13 @@ export function useProviderPanelState() {
   }, []);
 
   const removeProvider = useCallback((index: number) => {
+    removeModelDiscovery(drafts?.[index]?._key);
     setDrafts((current) =>
       current ? current.filter((_, itemIndex) => itemIndex !== index) : current,
     );
     setEditingIdx(null);
     setDeleteConfirmIdx(null);
-  }, []);
-
-  const updateDraft = useCallback(
-    (index: number, patch: Partial<Draft>) => {
-      setDrafts((current) => {
-        if (!current) return current;
-        const next = [...current];
-        next[index] = { ...next[index], ...patch };
-        return next;
-      });
-    },
-    [],
-  );
+  }, [drafts, removeModelDiscovery]);
 
   const moveProvider = useCallback((index: number, direction: -1 | 1) => {
     setDrafts((current) => {
@@ -382,6 +416,9 @@ export function useProviderPanelState() {
       {
         items: providerPayload(drafts, serverItems),
         proxies: serverProxies.map(proxyOutToIn),
+        ...(defaultModelForSave
+          ? { default_model: defaultModelForSave }
+          : {}),
       },
       {
         onSuccess: () => {
@@ -395,6 +432,7 @@ export function useProviderPanelState() {
   }, [
     cancelEdit,
     drafts,
+    defaultModelForSave,
     serverItems,
     serverProxies,
     updateMutation,
@@ -432,6 +470,8 @@ export function useProviderPanelState() {
     savedAt,
     draftErrors,
     serverKeyHints,
+    currentDefaultModel,
+    modelDiscoveries,
     newCardRef,
     probeMap,
     statsMap,
@@ -454,6 +494,9 @@ export function useProviderPanelState() {
     addProvider,
     removeProvider,
     updateDraft,
+    discoverModels,
+    selectDiscoveredModel,
+    setDiscoveredModelDefault,
     moveProvider,
     validateAndSave,
     onProbeAll,

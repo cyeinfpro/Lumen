@@ -60,6 +60,8 @@ _SENSITIVE_KEY_HINTS = (
     "data_url",
     "b64",
     "base64",
+    "capability",
+    "proxy",
 )
 
 
@@ -109,6 +111,32 @@ def _scrub_request(request: Any) -> Any:
     return cleaned
 
 
+def _scrub_stacktrace_variables(event: dict[str, Any]) -> None:
+    containers: list[Any] = []
+    exception = event.get("exception")
+    if isinstance(exception, dict):
+        containers.extend(exception.get("values", []))
+    threads = event.get("threads")
+    if isinstance(threads, dict):
+        containers.extend(threads.get("values", []))
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        stacktrace = container.get("stacktrace")
+        if not isinstance(stacktrace, dict):
+            continue
+        frames = stacktrace.get("frames")
+        if not isinstance(frames, list):
+            continue
+        for frame in frames:
+            if not isinstance(frame, dict) or not isinstance(frame.get("vars"), dict):
+                continue
+            frame["vars"] = {
+                key: _scrub_value(key, value)
+                for key, value in frame["vars"].items()
+            }
+
+
 def _sentry_before_send(
     event: Event,
     _hint: dict[str, Any],
@@ -125,6 +153,7 @@ def _sentry_before_send(
             if key in user:
                 user[key] = "[redacted]"
         event["user"] = user
+    _scrub_stacktrace_variables(event)
     return event
 
 
@@ -261,6 +290,100 @@ task_reconcile_lease_unknown_total = _metric(
     "lumen_task_reconcile_lease_unknown_total",
     "Task reconciler lease reads that could not determine ownership.",
     labelnames=("kind",),
+)
+
+# ---- Pi Agent orchestration ----
+agent_runs_total = _metric(
+    Counter,
+    "lumen_agent_runs_total",
+    "Durably finalized Agent runs by status.",
+    labelnames=("status", "provider", "model"),
+)
+
+agent_run_duration_seconds = _metric(
+    Histogram,
+    "lumen_agent_run_duration_seconds",
+    "Agent Worker orchestration duration by terminal status.",
+    labelnames=("status",),
+    buckets=(0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0),
+)
+
+agent_turns_histogram = _metric(
+    Histogram,
+    "lumen_agent_turns",
+    "Model turns completed per finalized Agent run.",
+    buckets=(0, 1, 2, 3, 4, 5, 6, 8, 12),
+)
+
+agent_runtime_requests_total = _metric(
+    Counter,
+    "lumen_agent_runtime_requests_total",
+    "Worker-to-Runtime requests by bounded outcome.",
+    labelnames=("outcome",),
+)
+
+agent_runtime_disconnects_total = _metric(
+    Counter,
+    "lumen_agent_runtime_disconnects_total",
+    "Runtime stream disconnects by side-effect phase.",
+    labelnames=("phase",),
+)
+
+agent_tool_calls_total = _metric(
+    Counter,
+    "lumen_agent_tool_calls_total",
+    "Agent tool lifecycle events by name and outcome.",
+    labelnames=("name", "mode", "status"),
+)
+
+agent_tool_duration_seconds = _metric(
+    Histogram,
+    "lumen_agent_tool_duration_seconds",
+    "Agent tool duration by name and terminal outcome.",
+    labelnames=("name", "mode", "status"),
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0),
+)
+
+agent_limits_total = _metric(
+    Counter,
+    "lumen_agent_limits_total",
+    "Agent host limit stops by bounded reason.",
+    labelnames=("reason",),
+)
+
+agent_generation_links_total = _metric(
+    Counter,
+    "lumen_agent_generation_links_total",
+    "Generation links accepted from Agent tools by mode and outcome.",
+    labelnames=("mode", "status"),
+)
+
+agent_reconciliation_total = _metric(
+    Counter,
+    "lumen_agent_reconciliation_total",
+    "Agent stale-run reconciliation actions and outcomes.",
+    labelnames=("action", "outcome"),
+)
+
+agent_provider_usage_tokens_total = _metric(
+    Counter,
+    "lumen_agent_provider_usage_tokens_total",
+    "Agent provider usage tokens by canonical kind.",
+    labelnames=("kind",),
+)
+
+agent_partial_runs_total = _metric(
+    Counter,
+    "lumen_agent_partial_runs_total",
+    "Agent partial runs by bounded reason.",
+    labelnames=("reason",),
+)
+
+agent_reference_images = _metric(
+    Histogram,
+    "lumen_agent_reference_images",
+    "Reference image count in prepared Agent runs.",
+    buckets=(0, 1, 2, 3, 4),
 )
 
 # ---- 账号级 image 调度指标（多 provider = 多 OAuth 账号 → 每号一组时序） ----
@@ -415,6 +538,8 @@ def init_sentry(
             environment=environment or "dev",
             traces_sample_rate=traces_sample_rate,
             send_default_pii=False,
+            include_local_variables=False,
+            max_request_body_size="never",
             before_send=_sentry_before_send,
             before_breadcrumb=_sentry_before_breadcrumb,
         )
@@ -610,6 +735,19 @@ __all__ = [
     "billing_idempotency_replay_total",
     "completion_cancel_check_errors_total",
     "task_reconcile_lease_unknown_total",
+    "agent_runs_total",
+    "agent_run_duration_seconds",
+    "agent_turns_histogram",
+    "agent_runtime_requests_total",
+    "agent_runtime_disconnects_total",
+    "agent_tool_calls_total",
+    "agent_tool_duration_seconds",
+    "agent_limits_total",
+    "agent_generation_links_total",
+    "agent_reconciliation_total",
+    "agent_provider_usage_tokens_total",
+    "agent_partial_runs_total",
+    "agent_reference_images",
     "safe_outcome",
     "account_image_state",
     "account_image_calls_total",

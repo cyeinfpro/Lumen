@@ -34,6 +34,7 @@ SNAPSHOT_REQUIRED_AFTER_PHASE = PHASE_INDEX["check"]
 SUBPHASE_PARENT = {
     phase: "restart_services"
     for phase in (
+        "start_target_runtime",
         "start_target_worker",
         "start_green",
         "shift_traffic_50",

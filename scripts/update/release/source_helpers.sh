@@ -241,8 +241,21 @@ try_image_extract_release() {
     # docker cp 不支持通配符;逐个 cp 完整 release-time 内容
     # （host 仅严格需要 docker-compose.yml + scripts + deploy；apps/packages/pyproject/
     # uv.lock 主要让 host ssh 调试时能看到完整代码树，不影响 runtime — 容器从 image 起。）
-    local required_paths=(docker-compose.yml VERSION deploy scripts)
-    local optional_paths=(apps packages pyproject.toml uv.lock)
+    local required_paths=(
+        docker-compose.yml
+        VERSION
+        deploy
+        scripts
+    )
+    local optional_paths=(
+        docker-compose.dev.yml
+        docker-compose.bluegreen.yml
+        docker-compose.public-dns.yml
+        apps
+        packages
+        pyproject.toml
+        uv.lock
+    )
     local path
     for path in "${required_paths[@]}"; do
         if ! docker cp "${cid}:/app/${path}" "${out_dir}/${path}" 2>/dev/null; then

@@ -13,8 +13,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-SERVICES = ("api", "worker", "tgbot", "web")
+LEGACY_SERVICES = ("api", "worker", "tgbot", "web")
+COMPONENT_SERVICES = ("agent-runtime",)
+SERVICES = (*LEGACY_SERVICES, *COMPONENT_SERVICES)
 DEPENDENCIES = ("python", "postgres", "redis")
+COMPONENT_DEPENDENCIES = ("node",)
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 IMMUTABLE_REF_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -72,6 +75,19 @@ def _parse_dependency_image(value: str) -> tuple[str, str]:
     return name, reference
 
 
+def _parse_component_dependency_image(value: str) -> tuple[str, str]:
+    name, separator, reference = value.partition("=")
+    if not separator or name not in COMPONENT_DEPENDENCIES:
+        raise ReleaseManifestError(
+            f"component dependency image must be NAME=name@sha256:..., got {value!r}"
+        )
+    if not IMMUTABLE_REF_RE.fullmatch(reference):
+        raise ReleaseManifestError(
+            f"invalid immutable component dependency image for {name}: {reference!r}"
+        )
+    return name, reference
+
+
 def resolve_image_digest(reference: str) -> str:
     result = subprocess.run(
         ["docker", "buildx", "imagetools", "inspect", "--raw", reference],
@@ -97,6 +113,7 @@ def build_release_manifest(
     alembic_heads: list[str],
     image_digests: dict[str, str],
     dependency_images: dict[str, str],
+    component_dependency_images: dict[str, str],
     generated_at: str,
 ) -> dict[str, object]:
     if not VERSION_RE.fullmatch(version):
@@ -124,9 +141,11 @@ def build_release_manifest(
             raise ReleaseManifestError(
                 f"invalid immutable dependency image for {name}: {reference!r}"
             )
+    if set(component_dependency_images) != set(COMPONENT_DEPENDENCIES):
+        raise ReleaseManifestError("component dependency image set mismatch")
 
     clean_registry = registry.rstrip("/")
-    images: dict[str, dict[str, str]] = {}
+    images: dict[str, dict[str, object]] = {}
     for service in SERVICES:
         digest = image_digests[service]
         if not SHA256_RE.fullmatch(digest):
@@ -137,6 +156,11 @@ def build_release_manifest(
             "sha_tag": f"{repository}:sha-{short_sha}",
             "digest": digest,
             "immutable_ref": f"{repository}@{digest}",
+            "artifacts": {
+                "signature": "sigstore-keyless",
+                "sbom": "spdx-json",
+                "sbom_attestation_type": "spdxjson",
+            },
         }
 
     manifest: dict[str, object] = {
@@ -150,7 +174,17 @@ def build_release_manifest(
             name: {"immutable_ref": dependency_images[name]}
             for name in DEPENDENCIES
         },
-        "images": images,
+        # Keep the original four-image map untouched so every supported old
+        # schema-1 updater can validate a transition release. New readers bind
+        # backend components from the additive map below.
+        "images": {service: images[service] for service in LEGACY_SERVICES},
+        "components": {
+            service: images[service] for service in COMPONENT_SERVICES
+        },
+        "component_dependencies": {
+            name: {"immutable_ref": component_dependency_images[name]}
+            for name in COMPONENT_DEPENDENCIES
+        },
     }
     if "todo" in json.dumps(manifest, ensure_ascii=True).lower():
         raise ReleaseManifestError("release manifest contains TODO")
@@ -163,11 +197,15 @@ def render_release_notes(manifest: dict[str, object]) -> str:
     short_sha = str(manifest["short_sha"])
     heads = manifest["alembic_heads"]
     images = manifest["images"]
+    components = manifest.get("components", {})
+    component_dependencies = manifest.get("component_dependencies", {})
     dependencies = manifest["dependencies"]
     if (
         not isinstance(heads, list)
         or not isinstance(images, dict)
         or not isinstance(dependencies, dict)
+        or not isinstance(components, dict)
+        or not isinstance(component_dependencies, dict)
     ):
         raise ReleaseManifestError("invalid release manifest structure")
 
@@ -181,7 +219,8 @@ def render_release_notes(manifest: dict[str, object]) -> str:
         "```text",
     ]
     for service in SERVICES:
-        image = images.get(service)
+        source = components if service in COMPONENT_SERVICES else images
+        image = source.get(service)
         if not isinstance(image, dict):
             raise ReleaseManifestError(f"missing image metadata for {service}")
         lines.append(str(image["immutable_ref"]))
@@ -189,6 +228,11 @@ def render_release_notes(manifest: dict[str, object]) -> str:
         dependency = dependencies.get(name)
         if not isinstance(dependency, dict):
             raise ReleaseManifestError(f"missing dependency metadata for {name}")
+        lines.append(str(dependency["immutable_ref"]))
+    for name in COMPONENT_DEPENDENCIES:
+        dependency = component_dependencies.get(name)
+        if not isinstance(dependency, dict):
+            raise ReleaseManifestError(f"missing component dependency for {name}")
         lines.append(str(dependency["immutable_ref"]))
     lines.extend(
         [
@@ -237,6 +281,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Provide python/postgres/redis as complete name@sha256 references.",
     )
     parser.add_argument(
+        "--component-dependency-image",
+        action="append",
+        default=[],
+        metavar="NAME=REF",
+        help="Provide component base images as complete name@sha256 references.",
+    )
+    parser.add_argument(
         "--resolve-images",
         action="store_true",
         help="Resolve release tags with docker buildx imagetools inspect.",
@@ -263,6 +314,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         if len(dependencies) != len(args.dependency_image):
             raise ReleaseManifestError("duplicate dependency image name")
+        component_dependencies = dict(
+            _parse_component_dependency_image(value)
+            for value in args.component_dependency_image
+        )
+        if len(component_dependencies) != len(args.component_dependency_image):
+            raise ReleaseManifestError("duplicate component dependency image name")
 
         if args.resolve_images:
             for service in SERVICES:
@@ -286,6 +343,7 @@ def main(argv: list[str] | None = None) -> int:
             alembic_heads=heads,
             image_digests=digests,
             dependency_images=dependencies,
+            component_dependency_images=component_dependencies,
             generated_at=generated_at,
         )
         args.output.write_text(

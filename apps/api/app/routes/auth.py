@@ -90,9 +90,11 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 _GENERATION_FAST_DEFAULT_KEY = "generation.fast_default"
 _CANVAS_ENABLED_KEY = "canvas.enabled"
+_AGENT_ENABLED_KEY = "agent.enabled"
 _NAV_VISIBILITY_SETTING_KEYS = MappingProxyType(
     {
         "studio": "ui.nav.studio_visible",
+        "agent": "ui.nav.agent_visible",
         "video": "ui.nav.video_visible",
         "projects": "ui.nav.projects_visible",
         "assets": "ui.nav.assets_visible",

@@ -2,6 +2,11 @@
 # Use explicitly: docker compose -f docker-compose.yml -f docker-compose.public-dns.yml up -d
 
 services:
+  agent-runtime:
+    dns:
+      - "${LUMEN_WORKER_DNS_PRIMARY:-1.1.1.1}"
+      - "${LUMEN_WORKER_DNS_SECONDARY:-8.8.8.8}"
+
   worker:
     dns:
       - "${LUMEN_WORKER_DNS_PRIMARY:-1.1.1.1}"

@@ -2,7 +2,7 @@
 
 // 单条任务条只负责视图组合；状态派生集中在 taskItemModel。
 
-import { Check, RotateCw, X } from "lucide-react";
+import { Check, MapPin, RotateCw, X } from "lucide-react";
 import { memo } from "react";
 
 import { Spinner } from "@/components/ui/primitives/Spinner";
@@ -18,6 +18,7 @@ export interface TaskItemProps {
   onCancel?: (gen: Generation) => void;
   onRetry?: (gen: Generation) => void;
   onView?: (gen: Generation) => void;
+  onLocate?: (gen: Generation) => void;
   busy?: boolean;
   actionError?: string | null;
 }
@@ -27,6 +28,7 @@ export const TaskItem = memo(function TaskItem({
   onCancel,
   onRetry,
   onView,
+  onLocate,
   busy,
   actionError,
 }: TaskItemProps) {
@@ -39,6 +41,7 @@ export const TaskItem = memo(function TaskItem({
       onCancel={onCancel}
       onRetry={onRetry}
       onView={onView}
+      onLocate={onLocate}
       busy={busy}
       actionError={actionError}
     />
@@ -51,6 +54,7 @@ function TaskItemView({
   onCancel,
   onRetry,
   onView,
+  onLocate,
   busy,
   actionError,
 }: TaskItemProps & { presentation: TaskItemPresentation }) {
@@ -78,6 +82,7 @@ function TaskItemView({
         presentation={presentation}
         onCancel={onCancel}
         onRetry={onRetry}
+        onLocate={onLocate}
         busy={busy}
       />
       <TaskRecoveryBar
@@ -201,18 +206,30 @@ function TaskControls({
   presentation,
   onCancel,
   onRetry,
+  onLocate,
   busy,
 }: {
   gen: Generation;
   presentation: TaskItemPresentation;
   onCancel?: (gen: Generation) => void;
   onRetry?: (gen: Generation) => void;
+  onLocate?: (gen: Generation) => void;
   busy?: boolean;
 }) {
   const recoverable = presentation.failed || presentation.canceled;
 
   return (
     <div className="flex shrink-0 items-center gap-0.5">
+      {onLocate && (
+        <IconBtn
+          onClick={() => onLocate(gen)}
+          disabled={busy}
+          aria-label="定位任务消息"
+          title="定位"
+        >
+          <MapPin className="h-3.5 w-3.5" />
+        </IconBtn>
+      )}
       {presentation.running && onCancel && (
         <IconBtn
           onClick={() => onCancel(gen)}

@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
   AlertTriangle,
+  Bot,
   CheckCircle2,
   CreditCard,
   MessageCircle,
@@ -16,6 +17,7 @@ import {
 
 import {
   getAdminBillingOverview,
+  getAdminAgentHealth,
   getAdminContextHealth,
   getProviderStats,
   getSystemSettings,
@@ -54,6 +56,16 @@ interface HealthTileModel {
 interface ProviderHealth {
   enabled: number;
   weak: number;
+}
+
+interface AgentHealth {
+  operational: boolean;
+  runtime_auth_configured: boolean;
+  tool_gateway_configured: boolean;
+  runtime_live: boolean | null;
+  runtime_ready: boolean | null;
+  runtime_version: string | null;
+  error_code: string | null;
 }
 
 function providerHealthFor(
@@ -228,6 +240,93 @@ function eventsTile(
   };
 }
 
+function agentHealthPresentation(status: AgentHealth | undefined): {
+  value: string;
+  detail: string;
+  tone: Tone;
+} {
+  if (!status) {
+    return { value: "等待状态", detail: "等待 Runtime 健康状态", tone: "danger" };
+  }
+  if (status.operational) {
+    return {
+      value: "已就绪",
+      detail: `${status.runtime_version ?? "Runtime"} · 进程与 Pi 隔离检查通过`,
+      tone: "ok",
+    };
+  }
+  if (!status.runtime_auth_configured || !status.tool_gateway_configured) {
+    return {
+      value: "未就绪",
+      detail: "Runtime 或工具网关密钥未配置",
+      tone: "danger",
+    };
+  }
+  if (status.runtime_live === false) {
+    return { value: "未就绪", detail: "Runtime 进程不可达", tone: "danger" };
+  }
+  const error = status.error_code ? ` · ${status.error_code}` : "";
+  return {
+    value: "未就绪",
+    detail:
+      status.runtime_ready === false
+        ? `Runtime readiness 未通过${error}`
+        : "等待 Runtime 健康状态",
+    tone: "danger",
+  };
+}
+
+function agentTile(
+  enabled: boolean,
+  status: AgentHealth | undefined,
+  loading: boolean,
+  failed: boolean,
+): HealthTileModel {
+  if (!enabled) {
+    return {
+      key: "agent-runtime",
+      icon: <Bot className="h-4 w-4" />,
+      label: "Agent Runtime",
+      value: "已关闭",
+      detail: "Agent API 闸门关闭",
+      tone: "neutral",
+      tab: "settings",
+    };
+  }
+  if (failed) {
+    return {
+      key: "agent-runtime",
+      icon: <Bot className="h-4 w-4" />,
+      label: "Agent Runtime",
+      value: "状态异常",
+      detail: "Agent 状态接口不可用",
+      tone: "danger",
+      tab: "settings",
+    };
+  }
+  if (loading) {
+    return {
+      key: "agent-runtime",
+      icon: <Bot className="h-4 w-4" />,
+      label: "Agent Runtime",
+      value: "加载中",
+      detail: "正在读取 Runtime 健康状态",
+      tone: "neutral",
+      tab: "settings",
+    };
+  }
+  const presentation = agentHealthPresentation(status);
+  return {
+    key: "agent-runtime",
+    icon: <Bot className="h-4 w-4" />,
+    label: "Agent Runtime",
+    value: presentation.value,
+    detail: presentation.detail,
+    tone: presentation.tone,
+    tab: "settings",
+  };
+}
+
 function toneSummary(tiles: HealthTileModel[]) {
   const dangerous = tiles.filter((tile) => tile.tone === "danger").length;
   const warnings = tiles.filter((tile) => tile.tone === "warn").length;
@@ -269,6 +368,17 @@ export function HealthPanel({ onOpenTab }: HealthPanelProps) {
     queryFn: getSystemSettings,
     retry: false,
   });
+  const agentEnabled = settingValue(
+    new Map((settingsQ.data?.items ?? []).map((item) => [item.key, item])),
+    "agent.enabled",
+    "0",
+  ) === "1";
+  const agentQ = useQuery({
+    queryKey: ["admin", "agent", "status", "health"],
+    queryFn: getAdminAgentHealth,
+    enabled: agentEnabled,
+    retry: false,
+  });
   const failedEventsQ = useQuery({
     queryKey: ["admin", "request-events", "failed", "24h", "health"],
     queryFn: () => listAdminRequestEvents({ limit: 6, status: "failed", range: "24h" }),
@@ -295,6 +405,12 @@ export function HealthPanel({ onOpenTab }: HealthPanelProps) {
     billingTile(billingHealth, billingQ.isLoading),
     telegramTile(telegramHealth, settingsQ.isLoading),
     contextTile(contextHealth, contextQ.isLoading),
+    agentTile(
+      agentEnabled,
+      agentQ.data,
+      agentQ.isLoading,
+      agentQ.isError,
+    ),
     eventsTile(failedEvents, failedEventsQ.isLoading),
   ];
 
@@ -307,6 +423,7 @@ export function HealthPanel({ onOpenTab }: HealthPanelProps) {
     orphanQ.isFetching,
     contextQ.isFetching,
     settingsQ.isFetching,
+    agentQ.isFetching,
     failedEventsQ.isFetching,
   );
 
@@ -318,6 +435,7 @@ export function HealthPanel({ onOpenTab }: HealthPanelProps) {
     void orphanQ.refetch();
     void contextQ.refetch();
     void settingsQ.refetch();
+    if (agentEnabled) void agentQ.refetch();
     void failedEventsQ.refetch();
   };
 

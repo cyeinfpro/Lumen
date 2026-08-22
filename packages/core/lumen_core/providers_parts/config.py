@@ -7,6 +7,7 @@ from typing import Any
 
 from ..immutables import immutable_mapping
 from .definitions import (
+    AGENT_API_VALUES,
     DEFAULT_IMAGE_EDIT_INPUT_TRANSPORT,
     DEFAULT_LEGACY_PROVIDER_BASE_URL,
     DEFAULT_PROVIDER_PURPOSES,
@@ -191,6 +192,49 @@ def _positive_optional_int(raw: Any) -> int | None:
     return value if value > 0 else None
 
 
+def _bounded_agent_int(raw: Any, *, default: int, maximum: int, field: str) -> int:
+    if raw in (None, ""):
+        return default
+    if isinstance(raw, bool):
+        raise ValueError(f"{field} must be an integer")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be an integer") from exc
+    if value < 1 or value > maximum:
+        raise ValueError(f"{field} must be between 1 and {maximum}")
+    return value
+
+
+def _agent_api(raw: Any) -> str:
+    value = str(raw or "openai-responses").strip().lower()
+    if value not in AGENT_API_VALUES:
+        raise ValueError("agent_api is unsupported")
+    return value
+
+
+def _agent_models(raw: Any) -> tuple[str, ...]:
+    if raw in (None, ""):
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError("agent_models must be a list")
+    models: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str):
+            raise ValueError("agent_models entries must be strings")
+        model = item.strip()
+        if not model or model in seen:
+            continue
+        if len(model) > 256:
+            raise ValueError("agent model id exceeds 256 characters")
+        seen.add(model)
+        models.append(model)
+    if len(models) > 128:
+        raise ValueError("agent_models exceeds 128 entries")
+    return tuple(models)
+
+
 def _image_jobs_endpoint(item: dict[str, Any]) -> tuple[str, bool]:
     raw_endpoint = item.get("image_jobs_endpoint")
     endpoint = raw_endpoint.strip().lower() if isinstance(raw_endpoint, str) else "auto"
@@ -272,6 +316,26 @@ def parse_provider_item(item: dict[str, Any], *, index: int) -> ProviderDefiniti
         image_edit_input_transport=image_edit_input_transport,
         image_concurrency=image_concurrency,
         responses_supported=parse_optional_bool(item.get("responses_supported")),
+        vision_supported=parse_optional_bool(item.get("vision_supported")),
+        agent_api=_agent_api(item.get("agent_api")),
+        agent_models=_agent_models(item.get("agent_models")),
+        agent_context_window=_bounded_agent_int(
+            item.get("agent_context_window"),
+            default=128000,
+            maximum=2_000_000,
+            field="agent_context_window",
+        ),
+        agent_max_output_tokens=_bounded_agent_int(
+            item.get("agent_max_output_tokens"),
+            default=16384,
+            maximum=128000,
+            field="agent_max_output_tokens",
+        ),
+        agent_reasoning_supported=_parse_bool(
+            item.get("agent_reasoning_supported"),
+            default=True,
+            field="agent_reasoning_supported",
+        ),
         image_generations_supported=parse_optional_bool(
             item.get("image_generations_supported")
         ),

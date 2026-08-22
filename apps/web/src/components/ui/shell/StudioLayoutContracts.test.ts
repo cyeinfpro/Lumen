@@ -12,6 +12,7 @@ const pageSource = source("../../../app/page.tsx");
 const responsiveSource = source("./ResponsiveStudio.tsx");
 const desktopNavSource = source("./DesktopTopNav.tsx");
 const desktopStudioSource = source("./DesktopStudio.tsx");
+const privateSidebarSource = source("./PrivateSidebarShell.tsx");
 const mobileStudioSource = source("./MobileStudio.tsx");
 const conversationRouteSyncSource = source("./useConversationRouteSync.ts");
 const conversationSelectionSource = source("./conversationSelection.ts");
@@ -209,12 +210,13 @@ test("desktop primary navigation is viewport-centered and uses links", () => {
 });
 
 test("desktop drawer traps focus and restores the trigger", () => {
-  match(desktopStudioSource, /background\.inert = true/);
-  match(desktopStudioSource, /e\.key !== "Tab"/);
-  match(desktopStudioSource, /returnFocusTarget\?\.focus\(\)/);
-  match(desktopStudioSource, /document\.body\.style\.overflow = "hidden"/);
-  match(desktopStudioSource, /previousBackgroundInert/);
-  match(desktopStudioSource, /previousBackgroundAriaHidden/);
+  match(privateSidebarSource, /background\.inert = true/);
+  match(privateSidebarSource, /event\.key !== "Tab"/);
+  match(privateSidebarSource, /returnFocusTarget\?\.focus\(\)/);
+  match(privateSidebarSource, /document\.body\.style\.overflow = "hidden"/);
+  match(privateSidebarSource, /previousBackgroundInert/);
+  match(privateSidebarSource, /previousBackgroundAriaHidden/);
+  match(desktopStudioSource, /DesktopPrivateSidebarDrawer/);
 });
 
 test("responsive shell persists the first measured viewport", () => {
@@ -362,10 +364,7 @@ test("mobile navigation keeps current state and closes transient layers safely",
   doesNotMatch(mobileTabBarSource, /router\.replace\(tab\.route\)/);
   match(mobileMeSource, /conversationId=\$\{encodeURIComponent\(conv\.id\)\}/);
   match(streamSearchSource, /inputRef\.current\?\.blur\(\)/);
-  match(
-    mobileDrawerSource,
-    /<Sidebar embedded showBrand onNavigate=\{onClose\} \/>/,
-  );
+  match(mobileDrawerSource, /children \?\? <Sidebar embedded showBrand onNavigate=\{onClose\} \/>/);
   match(mobileDrawerSource, /w-\[var\(--sidebar-panel-w\)\]/);
   match(mobileDrawerSource, /bg-\[var\(--surface-scrim\)\]/);
   doesNotMatch(

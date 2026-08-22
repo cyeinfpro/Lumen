@@ -10,7 +10,6 @@ import {
 import { AnimatePresence, motion } from "framer-motion";
 import {
   AlertCircle,
-  Check,
   ChevronDown,
   ChevronUp,
   GripVertical,
@@ -25,14 +24,17 @@ import {
   Switch,
 } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
+import { DraftAgentCapabilityFields } from "./agentCapabilities";
+import { AgentModelDiscoveryFields } from "./AgentModelDiscoveryFields";
+import { ProviderIdentityFields } from "./ProviderIdentityFields";
 import {
-  PROVIDER_PURPOSES,
   type Draft,
   type FieldErrors,
   endpointDisplayLabel,
   normalizePurposes,
   purposeLabel,
 } from "./model";
+import type { ProviderModelDiscoveryState } from "./modelDiscovery";
 
 export type DraftCardProps = {
   draft: Draft;
@@ -44,11 +46,16 @@ export type DraftCardProps = {
   errors?: FieldErrors;
   isExisting: boolean;
   hasExistingKey: boolean;
+  modelDiscovery?: ProviderModelDiscoveryState;
+  currentDefaultModel: string;
   onToggle: () => void;
   onUpdate: (patch: Partial<Draft>) => void;
   onRemove: () => void;
   onMove: (dir: -1 | 1) => void;
   onDeleteConfirm: (show: boolean) => void;
+  onDiscoverModels: () => void;
+  onSelectModel: (modelId: string) => void;
+  onSetDefaultModel: (enabled: boolean) => void;
 };
 
 export const DraftCard = forwardRef<HTMLDivElement, DraftCardProps>(
@@ -63,11 +70,16 @@ export const DraftCard = forwardRef<HTMLDivElement, DraftCardProps>(
       errors,
       isExisting,
       hasExistingKey,
+      modelDiscovery,
+      currentDefaultModel,
       onToggle,
       onUpdate,
       onRemove,
       onMove,
       onDeleteConfirm,
+      onDiscoverModels,
+      onSelectModel,
+      onSetDefaultModel,
     },
     ref,
   ) {
@@ -112,12 +124,17 @@ export const DraftCard = forwardRef<HTMLDivElement, DraftCardProps>(
               errors={errors}
               isExisting={isExisting}
               hasExistingKey={hasExistingKey}
+              modelDiscovery={modelDiscovery}
+              currentDefaultModel={currentDefaultModel}
               nameRef={nameRef}
               showDeleteConfirm={showDeleteConfirm}
               onUpdate={onUpdate}
               onRemove={onRemove}
               onMove={onMove}
               onDeleteConfirm={onDeleteConfirm}
+              onDiscoverModels={onDiscoverModels}
+              onSelectModel={onSelectModel}
+              onSetDefaultModel={onSetDefaultModel}
             />
           )}
         </AnimatePresence>
@@ -198,12 +215,17 @@ function DraftCardEditor({
   errors,
   isExisting,
   hasExistingKey,
+  modelDiscovery,
+  currentDefaultModel,
   nameRef,
   showDeleteConfirm,
   onUpdate,
   onRemove,
   onMove,
   onDeleteConfirm,
+  onDiscoverModels,
+  onSelectModel,
+  onSetDefaultModel,
 }: {
   draft: Draft;
   proxies: ProviderProxyOut[];
@@ -212,12 +234,17 @@ function DraftCardEditor({
   errors?: FieldErrors;
   isExisting: boolean;
   hasExistingKey: boolean;
+  modelDiscovery?: ProviderModelDiscoveryState;
+  currentDefaultModel: string;
   nameRef: RefObject<HTMLInputElement | null>;
   showDeleteConfirm: boolean;
   onUpdate: (patch: Partial<Draft>) => void;
   onRemove: () => void;
   onMove: (dir: -1 | 1) => void;
   onDeleteConfirm: (show: boolean) => void;
+  onDiscoverModels: () => void;
+  onSelectModel: (modelId: string) => void;
+  onSetDefaultModel: (enabled: boolean) => void;
 }) {
   return (
     <motion.div
@@ -228,7 +255,7 @@ function DraftCardEditor({
       className="overflow-hidden"
     >
       <div className="space-y-4 border-t border-[var(--border-subtle)] px-5 pb-5 pt-4">
-        <DraftIdentityFields
+        <ProviderIdentityFields
           draft={draft}
           proxies={proxies}
           errors={errors}
@@ -236,8 +263,22 @@ function DraftCardEditor({
           hasExistingKey={hasExistingKey}
           nameRef={nameRef}
           onUpdate={onUpdate}
+          onDiscoverModels={onDiscoverModels}
         />
         <DraftExecutionFields draft={draft} onUpdate={onUpdate} />
+        <AgentModelDiscoveryFields
+          draft={draft}
+          discovery={modelDiscovery}
+          currentDefaultModel={currentDefaultModel}
+          canDiscover={Boolean(
+            draft.base_url.trim() &&
+              (draft.api_key.trim() || hasExistingKey)
+          )}
+          onDiscover={onDiscoverModels}
+          onSelect={onSelectModel}
+          onSetDefault={onSetDefaultModel}
+        />
+        <DraftAgentCapabilityFields draft={draft} onUpdate={onUpdate} />
         <DraftImageJobFields draft={draft} onUpdate={onUpdate} />
         <DraftCardActions
           index={index}
@@ -249,146 +290,6 @@ function DraftCardEditor({
         />
       </div>
     </motion.div>
-  );
-}
-
-function DraftIdentityFields({
-  draft,
-  proxies,
-  errors,
-  isExisting,
-  hasExistingKey,
-  nameRef,
-  onUpdate,
-}: {
-  draft: Draft;
-  proxies: ProviderProxyOut[];
-  errors?: FieldErrors;
-  isExisting: boolean;
-  hasExistingKey: boolean;
-  nameRef: RefObject<HTMLInputElement | null>;
-  onUpdate: (patch: Partial<Draft>) => void;
-}) {
-  return (
-    <>
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        <Field label="名称" required error={errors?.name} hint="唯一标识">
-        <Input
-          ref={nameRef}
-          type="text"
-          value={draft.name}
-          onChange={(event) => onUpdate({ name: event.target.value })}
-          placeholder="例如：主供应商"
-          className={fieldCls(Boolean(errors?.name))}
-          />
-        </Field>
-        <Field
-          label="基础地址"
-          required
-          error={errors?.base_url}
-          hint="支持 HTTP/HTTPS，可填内网地址"
-        >
-          <Input
-            type="url"
-            value={draft.base_url}
-            onChange={(event) => onUpdate({ base_url: event.target.value })}
-            placeholder="http://10.0.0.8:8000/v1"
-            className={fieldCls(Boolean(errors?.base_url))}
-          />
-        </Field>
-      </div>
-
-      <Field
-        label="API 密钥"
-        hint={providerApiKeyHint(isExisting, hasExistingKey)}
-        required={!isExisting || !hasExistingKey}
-      >
-        <Input
-          type="password"
-          value={draft.api_key}
-          onChange={(event) => onUpdate({ api_key: event.target.value })}
-          placeholder={providerApiKeyPlaceholder(isExisting, hasExistingKey)}
-          autoComplete="new-password"
-          className={fieldCls(false)}
-        />
-      </Field>
-
-      <PurposeField draft={draft} onUpdate={onUpdate} />
-
-      <Field label="代理" hint="供应商可直连或使用一个代理">
-        <Select
-          value={draft.proxy ?? ""}
-          onChange={(event) =>
-            onUpdate({ proxy: event.target.value || null })
-          }
-          className={fieldCls(false)}
-        >
-          <option value="">不使用代理</option>
-          {proxies.map((proxy) => (
-            <option
-              key={proxy.name}
-              value={proxy.name.trim()}
-              disabled={!proxy.name.trim()}
-            >
-              {proxy.name.trim() || "(未命名代理)"} ·{" "}
-              {proxy.type === "ssh" ? "SSH" : "S5"}
-            </option>
-          ))}
-        </Select>
-      </Field>
-    </>
-  );
-}
-
-function PurposeField({
-  draft,
-  onUpdate,
-}: {
-  draft: Draft;
-  onUpdate: (patch: Partial<Draft>) => void;
-}) {
-  const purposes = normalizePurposes(draft.purposes);
-  return (
-    <Field label="用途" hint="先按用途过滤，再按健康度与权重选号">
-      <div className="flex flex-wrap gap-2">
-        {PROVIDER_PURPOSES.map((option) => {
-          const checked = purposes.includes(option.value);
-          const disabled = checked && purposes.length === 1;
-          return (
-            <button
-              key={option.value}
-              type="button"
-              disabled={disabled}
-              onClick={() => {
-                const next = checked
-                  ? purposes.filter((item) => item !== option.value)
-                  : [...purposes, option.value];
-                if (next.length > 0) onUpdate({ purposes: next });
-              }}
-              className={
-                "inline-flex min-h-[36px] items-center gap-2 rounded-[var(--radius-panel)] border px-3 type-caption transition-colors disabled:cursor-not-allowed disabled:opacity-50 " +
-                (checked
-          ? "border-accent-border bg-accent-soft text-accent"
-                  : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)] hover:text-[var(--fg-1)]")
-              }
-            >
-              <span
-                className={
-                  "flex h-3.5 w-3.5 items-center justify-center rounded border " +
-                  (checked
-                  ? "border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-on)]"
-                    : "border-[var(--border-strong)]")
-                }
-                aria-hidden
-              >
-                {checked ? <Check className="h-3 w-3" /> : null}
-              </span>
-              {option.label}
-            </button>
-          );
-        })}
-      </div>
-    </Field>
   );
 }
 
@@ -722,23 +623,6 @@ function DraftCardActions({
       )}
     </div>
   );
-}
-
-function providerApiKeyHint(
-  isExisting: boolean,
-  hasExistingKey: boolean,
-): string {
-  if (!isExisting) return "新增供应商必须填写";
-  return hasExistingKey
-    ? "留空保持原值不变"
-    : "当前没有保存密钥，启用前必须填写";
-}
-
-function providerApiKeyPlaceholder(
-  isExisting: boolean,
-  hasExistingKey: boolean,
-): string {
-  return isExisting && hasExistingKey ? "（留空保持不变）" : "sk-...";
 }
 
 function fieldCls(hasError: boolean): string {

@@ -487,6 +487,12 @@ class ProviderPool(
                         image_concurrency=p.image_concurrency,
                         purposes=p.purposes,
                         responses_supported=p.responses_supported,
+                        vision_supported=p.vision_supported,
+                        agent_api=p.agent_api,
+                        agent_models=p.agent_models,
+                        agent_context_window=p.agent_context_window,
+                        agent_max_output_tokens=p.agent_max_output_tokens,
+                        agent_reasoning_supported=p.agent_reasoning_supported,
                         image_generations_supported=p.image_generations_supported,
                         image_responses_supported=p.image_responses_supported,
                         text_circuit_state=circuit_state,
@@ -751,6 +757,19 @@ async def resolve_provider_proxy_url(
     return await _PROVIDER_PROXY_LIFECYCLE.resolve(proxy)
 
 
+async def resolve_agent_provider_proxy_url(
+    proxy: ProviderProxyDefinition | None,
+    *,
+    bind_host: str,
+    advertise_host: str,
+) -> str | None:
+    return await _PROVIDER_PROXY_LIFECYCLE.resolve_for_agent(
+        proxy,
+        bind_host=bind_host,
+        advertise_host=advertise_host,
+    )
+
+
 async def close_provider_proxy_tunnels() -> None:
     await _PROVIDER_PROXY_LIFECYCLE.close()
 
@@ -870,5 +889,6 @@ __all__ = [
     "TextProviderAttempt",
     "get_pool",
     "probe_providers",
+    "resolve_agent_provider_proxy_url",
     "text_provider_attempt",
 ]

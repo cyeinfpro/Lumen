@@ -1,4 +1,5 @@
-# Build and push the four Lumen Docker images (api/worker/tgbot/web) to GHCR.
+# Build and push the five Lumen Docker images
+# (api/worker/tgbot/web/agent-runtime) to GHCR.
 # Triggers: push to main, push of v* tag, or manual workflow_dispatch.
 # Tag pushes additionally publish a GitHub Release with image references.
 
@@ -31,6 +32,7 @@ env:
   PYTHON_BASE_SOURCE: python:3.12-slim
   POSTGRES_IMAGE_SOURCE: pgvector/pgvector:pg16
   REDIS_IMAGE_SOURCE: redis:7.4-alpine
+  NODE_BASE_SOURCE: node:22.22.0-alpine
 
 jobs:
   resolve-ref:
@@ -210,6 +212,7 @@ jobs:
       python_ref: ${{ steps.images.outputs.python_ref }}
       postgres_ref: ${{ steps.images.outputs.postgres_ref }}
       redis_ref: ${{ steps.images.outputs.redis_ref }}
+      node_ref: ${{ steps.images.outputs.node_ref }}
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
@@ -220,6 +223,7 @@ jobs:
           PYTHON_SOURCE: ${{ env.PYTHON_BASE_SOURCE }}
           POSTGRES_SOURCE: ${{ env.POSTGRES_IMAGE_SOURCE }}
           REDIS_SOURCE: ${{ env.REDIS_IMAGE_SOURCE }}
+          NODE_SOURCE: ${{ env.NODE_BASE_SOURCE }}
         run: |
           set -euo pipefail
           resolve_ref() {
@@ -238,10 +242,12 @@ jobs:
           resolve_ref python_ref "${PYTHON_SOURCE}"
           resolve_ref postgres_ref "${POSTGRES_SOURCE}"
           resolve_ref redis_ref "${REDIS_SOURCE}"
+          resolve_ref node_ref "${NODE_SOURCE}"
           {
             printf 'PYTHON_BASE_REF=%s\n' "${python_ref}"
             printf 'POSTGRES_IMAGE_REF=%s\n' "${postgres_ref}"
             printf 'REDIS_IMAGE_REF=%s\n' "${redis_ref}"
+            printf 'NODE_BASE_REF=%s\n' "${node_ref}"
           } > /tmp/runtime-image-refs.env
 
       - name: Upload immutable dependency image refs
@@ -303,6 +309,8 @@ jobs:
         run: uv run python scripts/baseline_monotonic.py
 
       - name: Python tests
+        env:
+          LUMEN_TEST_SKIP_AGENT_RUNTIME: "1"
         run: bash scripts/test.sh
 
       - name: Setup Node
@@ -313,6 +321,18 @@ jobs:
       - name: Web dependencies
         working-directory: apps/web
         run: npm ci
+
+      - name: Agent Runtime dependencies
+        working-directory: apps/agent-runtime
+        run: npm ci --ignore-scripts
+
+      - name: Agent Runtime production dependency audit
+        working-directory: apps/agent-runtime
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Agent Runtime tests and static gates
+        working-directory: apps/agent-runtime
+        run: npm test && npm run type-check && npm run lint && npm run build
 
       - name: Reject vulnerable production dependencies
         working-directory: apps/web
@@ -348,6 +368,7 @@ jobs:
           PYTHON_BASE_REF: ${{ needs.resolve-runtime-images.outputs.python_ref }}
           POSTGRES_IMAGE_REF: ${{ needs.resolve-runtime-images.outputs.postgres_ref }}
           REDIS_IMAGE_REF: ${{ needs.resolve-runtime-images.outputs.redis_ref }}
+          NODE_BASE_REF: ${{ needs.resolve-runtime-images.outputs.node_ref }}
         run: |
           set -euo pipefail
           cp .env.example .env.ci
@@ -357,6 +378,8 @@ jobs:
           image_proxy_secret="$(openssl rand -hex 32)"
           byok_secret="$(openssl rand -hex 48)"
           telegram_secret="$(openssl rand -hex 32)"
+          agent_runtime_secret="$(openssl rand -hex 32)"
+          agent_tool_secret="$(openssl rand -hex 32)"
           sed -i \
             -e "s|^DB_PASSWORD=.*|DB_PASSWORD=${db_pass}|" \
             -e "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=${redis_pass}|" \
@@ -364,11 +387,15 @@ jobs:
             -e "s|^IMAGE_PROXY_SECRET=.*|IMAGE_PROXY_SECRET=${image_proxy_secret}|" \
             -e "s|^BYOK_API_KEY_MASTER_SECRET=.*|BYOK_API_KEY_MASTER_SECRET=${byok_secret}|" \
             -e "s|^TELEGRAM_BOT_SHARED_SECRET=.*|TELEGRAM_BOT_SHARED_SECRET=${telegram_secret}|" \
+            -e "s|^AGENT_RUNTIME_SHARED_SECRET=.*|AGENT_RUNTIME_SHARED_SECRET=${agent_runtime_secret}|" \
+            -e "s|^AGENT_TOOL_CAPABILITY_SECRET=.*|AGENT_TOOL_CAPABILITY_SECRET=${agent_tool_secret}|" \
             -e "s|^LUMEN_PYTHON_BASE_REF=.*|LUMEN_PYTHON_BASE_REF=${PYTHON_BASE_REF}|" \
             -e "s|^LUMEN_POSTGRES_IMAGE_REF=.*|LUMEN_POSTGRES_IMAGE_REF=${POSTGRES_IMAGE_REF}|" \
             -e "s|^LUMEN_REDIS_IMAGE_REF=.*|LUMEN_REDIS_IMAGE_REF=${REDIS_IMAGE_REF}|" \
+            -e "s|^LUMEN_NODE_BASE_REF=.*|LUMEN_NODE_BASE_REF=${NODE_BASE_REF}|" \
             -e "s|^LUMEN_API_IMAGE_REF=.*|LUMEN_API_IMAGE_REF=ghcr.io/cyeinfpro/lumen-api@sha256:0000000000000000000000000000000000000000000000000000000000000000|" \
             -e "s|^LUMEN_WORKER_IMAGE_REF=.*|LUMEN_WORKER_IMAGE_REF=ghcr.io/cyeinfpro/lumen-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000|" \
+            -e "s|^LUMEN_AGENT_RUNTIME_IMAGE_REF=.*|LUMEN_AGENT_RUNTIME_IMAGE_REF=ghcr.io/cyeinfpro/lumen-agent-runtime@sha256:0000000000000000000000000000000000000000000000000000000000000000|" \
             -e "s|^LUMEN_WEB_IMAGE_REF=.*|LUMEN_WEB_IMAGE_REF=ghcr.io/cyeinfpro/lumen-web@sha256:0000000000000000000000000000000000000000000000000000000000000000|" \
             -e "s|^LUMEN_TGBOT_IMAGE_REF=.*|LUMEN_TGBOT_IMAGE_REF=ghcr.io/cyeinfpro/lumen-tgbot@sha256:0000000000000000000000000000000000000000000000000000000000000000|" \
             .env.ci
@@ -381,7 +408,10 @@ jobs:
             >/tmp/lumen-compose-config.yml
           docker compose --env-file .env.ci config --images \
             | python3 scripts/check_immutable_images.py
+          docker compose --env-file .env.ci --profile agent-runtime config --images \
+            | python3 scripts/check_immutable_images.py
           docker compose --env-file .env.ci \
+            --profile agent-runtime \
             -f docker-compose.yml -f docker-compose.bluegreen.yml \
             config --images | python3 scripts/check_immutable_images.py
 
@@ -389,7 +419,7 @@ jobs:
         run: >-
           docker compose --env-file .env.ci
           -f docker-compose.yml -f docker-compose.dev.yml
-          build api worker web tgbot
+          --profile agent-runtime build api worker agent-runtime web tgbot
 
       - name: Image start smoke
         env:
@@ -411,7 +441,9 @@ jobs:
           docker compose --env-file .env.ci -f docker-compose.yml -f docker-compose.dev.yml -f deploy/docker/docker-compose.local.yml down -v --remove-orphans || true
           docker compose --env-file .env.ci -f docker-compose.yml -f docker-compose.dev.yml -f deploy/docker/docker-compose.local.yml up -d --wait postgres redis
           docker compose --env-file .env.ci -f docker-compose.yml -f docker-compose.dev.yml -f deploy/docker/docker-compose.local.yml --profile migrate run --rm migrate
-          docker compose --env-file .env.ci -f docker-compose.yml -f docker-compose.dev.yml -f deploy/docker/docker-compose.local.yml up -d --wait api worker web
+          docker compose --env-file .env.ci -f docker-compose.yml -f docker-compose.dev.yml -f deploy/docker/docker-compose.local.yml --profile agent-runtime up -d --wait agent-runtime api worker web
+          docker compose --env-file .env.ci -f docker-compose.yml -f docker-compose.dev.yml -f deploy/docker/docker-compose.local.yml exec -T agent-runtime node -e "fetch('http://127.0.0.1:8090/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+          docker compose --env-file .env.ci -f docker-compose.yml -f docker-compose.dev.yml -f deploy/docker/docker-compose.local.yml exec -T agent-runtime sh -ec '! touch /app/.lumen-write-probe 2>/dev/null; touch /tmp/lumen-write-probe; rm /tmp/lumen-write-probe'
           curl -fsS http://127.0.0.1:18000/healthz
           curl -fsS http://127.0.0.1:13000/
 
@@ -441,6 +473,7 @@ jobs:
           - { name: lumen-api,    file: ./Dockerfile.python,    context: .,           platforms: "linux/amd64,linux/arm64" }
           - { name: lumen-worker, file: ./Dockerfile.python,    context: .,           platforms: "linux/amd64,linux/arm64" }
           - { name: lumen-tgbot,  file: ./Dockerfile.python,    context: .,           platforms: "linux/amd64,linux/arm64" }
+          - { name: lumen-agent-runtime, file: ./apps/agent-runtime/Dockerfile, context: ./apps/agent-runtime, platforms: "linux/amd64,linux/arm64" }
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -514,6 +547,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}
           build-args: |
             PYTHON_BASE=${{ needs.resolve-runtime-images.outputs.python_ref }}
+            NODE_BASE=${{ needs.resolve-runtime-images.outputs.node_ref }}
             LUMEN_VERSION=${{ steps.meta-vars.outputs.lumen_version }}
             LUMEN_GIT_SHA=${{ needs.resolve-ref.outputs.commit }}
             LUMEN_BUILD_TIME=${{ steps.meta-vars.outputs.build_time }}
@@ -534,6 +568,38 @@ jobs:
           set -euo pipefail
           [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
           cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Generate, attest, and verify SPDX SBOM
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_NAME: ${{ matrix.image.name }}
+        run: |
+          set -euo pipefail
+          [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          go install github.com/anchore/syft/cmd/syft@v1.33.0
+          mkdir -p /tmp/release-sboms
+          service="${IMAGE_NAME#lumen-}"
+          sbom="/tmp/release-sboms/${service}.spdx.json"
+          "$HOME/go/bin/syft" "registry:${IMAGE}@${DIGEST}" \
+            --output "spdx-json=${sbom}"
+          jq -e '.spdxVersion | startswith("SPDX-")' "${sbom}" >/dev/null
+          cosign attest --yes --type spdxjson --predicate "${sbom}" \
+            "${IMAGE}@${DIGEST}"
+          cosign verify-attestation \
+            --type spdxjson \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-identity-regexp "https://github.com/cyeinfpro/Lumen/.github/workflows/docker-release.yml@refs/(tags/v.*|heads/main)" \
+            "${IMAGE}@${DIGEST}" >/dev/null
+
+      - name: Upload SPDX SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-sbom-${{ matrix.image.name }}
+          path: /tmp/release-sboms/*.spdx.json
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Export signed image digest
         env:
@@ -746,6 +812,36 @@ jobs:
           [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
           cosign sign --yes "${IMAGE}@${DIGEST}"
 
+      - name: Generate, attest, and verify web SPDX SBOM
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lumen-web
+          DIGEST: ${{ steps.merge.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          go install github.com/anchore/syft/cmd/syft@v1.33.0
+          mkdir -p /tmp/release-sboms
+          sbom=/tmp/release-sboms/web.spdx.json
+          "$HOME/go/bin/syft" "registry:${IMAGE}@${DIGEST}" \
+            --output "spdx-json=${sbom}"
+          jq -e '.spdxVersion | startswith("SPDX-")' "${sbom}" >/dev/null
+          cosign attest --yes --type spdxjson --predicate "${sbom}" \
+            "${IMAGE}@${DIGEST}"
+          cosign verify-attestation \
+            --type spdxjson \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-identity-regexp "https://github.com/cyeinfpro/Lumen/.github/workflows/docker-release.yml@refs/(tags/v.*|heads/main)" \
+            "${IMAGE}@${DIGEST}" >/dev/null
+
+      - name: Upload web SPDX SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-sbom-lumen-web
+          path: /tmp/release-sboms/web.spdx.json
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Export signed web digest
         env:
           DIGEST: ${{ steps.merge.outputs.digest }}
@@ -773,6 +869,7 @@ jobs:
     outputs:
       api_digest: ${{ steps.digests.outputs.api_digest }}
       worker_digest: ${{ steps.digests.outputs.worker_digest }}
+      agent_runtime_digest: ${{ steps.digests.outputs.agent_runtime_digest }}
       tgbot_digest: ${{ steps.digests.outputs.tgbot_digest }}
       web_digest: ${{ steps.digests.outputs.web_digest }}
       is_prerelease: ${{ steps.publication.outputs.is_prerelease }}
@@ -804,16 +901,17 @@ jobs:
         run: |
           set -euo pipefail
           file_count="$(find /tmp/release-digests -maxdepth 1 -type f | wc -l | tr -d ' ')"
-          if [[ "${file_count}" -ne 4 ]]; then
-            echo "expected four signed service digests, found ${file_count}" >&2
+          if [[ "${file_count}" -ne 5 ]]; then
+            echo "expected five signed service digests, found ${file_count}" >&2
             exit 1
           fi
-          for service in api worker tgbot web; do
+          for service in api worker agent-runtime tgbot web; do
             path="/tmp/release-digests/${service}"
             [[ -f "${path}" ]]
             IFS= read -r digest < "${path}"
             [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
-            echo "${service}_digest=${digest}" >> "$GITHUB_OUTPUT"
+            output_service="${service//-/_}"
+            echo "${output_service}_digest=${digest}" >> "$GITHUB_OUTPUT"
             if [[ "${service}" == "web" && "${digest}" != "${WEB_JOB_DIGEST}" ]]; then
               echo "web digest artifact does not match merge-web job output" >&2
               exit 1
@@ -838,14 +936,15 @@ jobs:
           SHA_TAG: ${{ needs.resolve-ref.outputs.sha_tag }}
           API_DIGEST: ${{ steps.digests.outputs.api_digest }}
           WORKER_DIGEST: ${{ steps.digests.outputs.worker_digest }}
+          AGENT_RUNTIME_DIGEST: ${{ steps.digests.outputs.agent_runtime_digest }}
           TGBOT_DIGEST: ${{ steps.digests.outputs.tgbot_digest }}
           WEB_DIGEST: ${{ steps.digests.outputs.web_digest }}
         run: |
           set -euo pipefail
           [[ "${REGISTRY_NAMESPACE}" =~ ^[a-z0-9.-]+/[a-z0-9._/-]+$ ]]
           [[ "${SHA_TAG}" =~ ^sha-[0-9a-f]{7}$ ]]
-          services=(api worker tgbot web)
-          digests=("${API_DIGEST}" "${WORKER_DIGEST}" "${TGBOT_DIGEST}" "${WEB_DIGEST}")
+          services=(api worker agent-runtime tgbot web)
+          digests=("${API_DIGEST}" "${WORKER_DIGEST}" "${AGENT_RUNTIME_DIGEST}" "${TGBOT_DIGEST}" "${WEB_DIGEST}")
           for digest in "${digests[@]}"; do
             [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
           done
@@ -903,6 +1002,7 @@ jobs:
           RELEASE_TAG: ${{ needs.resolve-ref.outputs.release_tag }}
           API_DIGEST: ${{ steps.digests.outputs.api_digest }}
           WORKER_DIGEST: ${{ steps.digests.outputs.worker_digest }}
+          AGENT_RUNTIME_DIGEST: ${{ steps.digests.outputs.agent_runtime_digest }}
           TGBOT_DIGEST: ${{ steps.digests.outputs.tgbot_digest }}
           WEB_DIGEST: ${{ steps.digests.outputs.web_digest }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -924,6 +1024,7 @@ jobs:
             --github-repository "${GITHUB_REPOSITORY}" \
             --image-digest "api=${API_DIGEST}" \
             --image-digest "worker=${WORKER_DIGEST}" \
+            --image-digest "agent-runtime=${AGENT_RUNTIME_DIGEST}" \
             --image-digest "tgbot=${TGBOT_DIGEST}" \
             --image-digest "web=${WEB_DIGEST}" \
             --github-output "${GITHUB_OUTPUT}"
@@ -966,6 +1067,7 @@ jobs:
           RELEASE_TAG: ${{ needs.resolve-ref.outputs.release_tag }}
           API_DIGEST: ${{ needs.promote.outputs.api_digest }}
           WORKER_DIGEST: ${{ needs.promote.outputs.worker_digest }}
+          AGENT_RUNTIME_DIGEST: ${{ needs.promote.outputs.agent_runtime_digest }}
           TGBOT_DIGEST: ${{ needs.promote.outputs.tgbot_digest }}
           WEB_DIGEST: ${{ needs.promote.outputs.web_digest }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -979,6 +1081,7 @@ jobs:
             --github-repository "${GITHUB_REPOSITORY}" \
             --image-digest "api=${API_DIGEST}" \
             --image-digest "worker=${WORKER_DIGEST}" \
+            --image-digest "agent-runtime=${AGENT_RUNTIME_DIGEST}" \
             --image-digest "tgbot=${TGBOT_DIGEST}" \
             --image-digest "web=${WEB_DIGEST}"
 
@@ -1043,6 +1146,13 @@ jobs:
           name: runtime-image-refs
           path: /tmp/runtime-image-refs
 
+      - name: Download signed SPDX SBOMs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: /tmp/release-sboms
+          pattern: release-sbom-*
+          merge-multiple: true
+
       - name: Load immutable dependency image refs
         run: |
           set -euo pipefail
@@ -1050,7 +1160,7 @@ jobs:
           [[ -f "${refs}" ]]
           while IFS='=' read -r key value; do
             case "${key}" in
-              PYTHON_BASE_REF|POSTGRES_IMAGE_REF|REDIS_IMAGE_REF) ;;
+              PYTHON_BASE_REF|POSTGRES_IMAGE_REF|REDIS_IMAGE_REF|NODE_BASE_REF) ;;
               *) echo "unexpected runtime image key: ${key}" >&2; exit 1 ;;
             esac
             [[ "${value}" =~ ^[^\ @]+@sha256:[0-9a-f]{64}$ ]]
@@ -1066,6 +1176,7 @@ jobs:
           REGISTRY_NAMESPACE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}
           API_DIGEST: ${{ needs.promote.outputs.api_digest }}
           WORKER_DIGEST: ${{ needs.promote.outputs.worker_digest }}
+          AGENT_RUNTIME_DIGEST: ${{ needs.promote.outputs.agent_runtime_digest }}
           TGBOT_DIGEST: ${{ needs.promote.outputs.tgbot_digest }}
           WEB_DIGEST: ${{ needs.promote.outputs.web_digest }}
         run: |
@@ -1078,11 +1189,13 @@ jobs:
             --alembic-heads-file alembic_heads.txt \
             --image-digest "api=${API_DIGEST}" \
             --image-digest "worker=${WORKER_DIGEST}" \
+            --image-digest "agent-runtime=${AGENT_RUNTIME_DIGEST}" \
             --image-digest "tgbot=${TGBOT_DIGEST}" \
             --image-digest "web=${WEB_DIGEST}" \
             --dependency-image "python=${PYTHON_BASE_REF}" \
             --dependency-image "postgres=${POSTGRES_IMAGE_REF}" \
             --dependency-image "redis=${REDIS_IMAGE_REF}" \
+            --component-dependency-image "node=${NODE_BASE_REF}" \
             --output release-manifest.json \
             --notes-output release_body.md
           echo "path=release_body.md" >> "$GITHUB_OUTPUT"
@@ -1093,7 +1206,9 @@ jobs:
           tag_name: ${{ needs.resolve-ref.outputs.release_tag }}
           name: ${{ needs.resolve-ref.outputs.release_tag }}
           body_path: ${{ steps.body.outputs.path }}
-          files: release-manifest.json
+          files: |
+            release-manifest.json
+            /tmp/release-sboms/*.spdx.json
           draft: false
           prerelease: ${{ needs.promote.outputs.is_prerelease }}
           make_latest: false

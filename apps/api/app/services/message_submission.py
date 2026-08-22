@@ -59,6 +59,11 @@ from .message_generation_tasks import (
     new_generation,
     prepare_generation_billing,
 )
+from .message_generation_batch import (
+    ExistingMessageGenerationCommand,
+    ExistingMessageGenerationServices,
+    execute_generation_batch_for_message,
+)
 
 from .message_submission_billing import (
     billing_http_error as _billing_http_error,
@@ -785,6 +790,20 @@ async def create_assistant_task(
     )
 
 
+async def create_generation_batch_for_message(
+    command: ExistingMessageGenerationCommand,
+) -> AssistantTaskResult:
+    return await execute_generation_batch_for_message(
+        command,
+        ExistingMessageGenerationServices(
+            create_generation_tasks=_create_generation_tasks,
+            create_outbox_rows=_create_outbox_rows,
+            payload_context=_task_payload_context,
+            result_factory=AssistantTaskResult,
+        ),
+    )
+
+
 async def publish_message_appended(
     *,
     redis: Any,
@@ -936,6 +955,7 @@ async def publish_assistant_task(
 __all__ = [
     "AssistantTaskResult",
     "TaskCredentialPin",
+    "ExistingMessageGenerationCommand",
     "_sanitize_system_prompt_source",
     "billing_allow_negative",
     "billing_enabled",
@@ -945,6 +965,7 @@ __all__ = [
     "chat_max_tool_invocations",
     "chat_tool_budget_setting_micro",
     "create_assistant_task",
+    "create_generation_batch_for_message",
     "ensure_chat_wallet_preflight",
     "ensure_file_search_configured",
     "generation_child_idempotency_key",

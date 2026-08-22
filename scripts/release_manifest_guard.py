@@ -22,8 +22,11 @@ _ALIAS_RE = re.compile(r"^v([0-9]+)(?:\.([0-9]+))?$")
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _IMMUTABLE_REF_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
-_SERVICES = ("api", "worker", "web", "tgbot")
+_LEGACY_SERVICES = ("api", "worker", "web", "tgbot")
+_COMPONENT_SERVICES = ("agent-runtime",)
+_SERVICES = (*_LEGACY_SERVICES, *_COMPONENT_SERVICES)
 _DEPENDENCIES = ("python", "postgres", "redis")
+_COMPONENT_DEPENDENCIES = ("node",)
 _ALLOWED_DOWNLOAD_HOSTS = {
     "api.github.com",
     "github.com",
@@ -53,7 +56,7 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def _validate_image(service: str, value: object, tag: str) -> dict[str, str]:
+def _validate_image(service: str, value: object, tag: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ManifestError(f"missing image metadata for {service}")
     repository = f"ghcr.io/cyeinfpro/lumen-{service}"
@@ -66,11 +69,21 @@ def _validate_image(service: str, value: object, tag: str) -> dict[str, str]:
         raise ManifestError(f"invalid digest for {service}")
     if immutable_ref != f"{repository}@{digest}":
         raise ManifestError(f"immutable ref mismatch for {service}")
-    return {
+    artifacts = value.get("artifacts")
+    if artifacts is not None and artifacts != {
+        "signature": "sigstore-keyless",
+        "sbom": "spdx-json",
+        "sbom_attestation_type": "spdxjson",
+    }:
+        raise ManifestError(f"invalid artifact metadata for {service}")
+    output = {
         "tag": expected_tag,
         "digest": digest,
         "immutable_ref": str(immutable_ref),
     }
+    if artifacts is not None:
+        output["artifacts"] = artifacts
+    return output
 
 
 def validate_manifest(payload: object, *, tag: str) -> dict[str, object]:
@@ -84,12 +97,24 @@ def validate_manifest(payload: object, *, tag: str) -> dict[str, object]:
     if not isinstance(commit_sha, str) or not _COMMIT_RE.fullmatch(commit_sha):
         raise ManifestError("release manifest commit is invalid")
     images = payload.get("images")
-    if not isinstance(images, dict) or set(images) != set(_SERVICES):
+    if not isinstance(images, dict) or set(images) != set(_LEGACY_SERVICES):
         raise ManifestError("release manifest image set is invalid")
     validated_images = {
         service: _validate_image(service, images.get(service), tag)
-        for service in _SERVICES
+        for service in _LEGACY_SERVICES
     }
+    components = payload.get("components")
+    if components is None:
+        validated_components: dict[str, dict[str, object]] = {}
+    elif not isinstance(components, dict) or set(components) != set(
+        _COMPONENT_SERVICES
+    ):
+        raise ManifestError("release manifest component image set is invalid")
+    else:
+        validated_components = {
+            service: _validate_image(service, components.get(service), tag)
+            for service in _COMPONENT_SERVICES
+        }
     dependencies = payload.get("dependencies")
     if not isinstance(dependencies, dict) or set(dependencies) != set(_DEPENDENCIES):
         raise ManifestError("release manifest dependency image set is invalid")
@@ -102,10 +127,31 @@ def validate_manifest(payload: object, *, tag: str) -> dict[str, object]:
         ):
             raise ManifestError(f"invalid immutable dependency image for {name}")
         validated_dependencies[name] = {"immutable_ref": reference}
+    component_dependencies = payload.get("component_dependencies")
+    if component_dependencies is None:
+        validated_component_dependencies: dict[str, dict[str, str]] = {}
+    elif not isinstance(component_dependencies, dict) or set(
+        component_dependencies
+    ) != set(_COMPONENT_DEPENDENCIES):
+        raise ManifestError("release manifest component dependency set is invalid")
+    else:
+        validated_component_dependencies = {}
+        for name in _COMPONENT_DEPENDENCIES:
+            value = component_dependencies.get(name)
+            reference = value.get("immutable_ref") if isinstance(value, dict) else None
+            if not isinstance(reference, str) or not _IMMUTABLE_REF_RE.fullmatch(
+                reference
+            ):
+                raise ManifestError(
+                    f"invalid immutable component dependency image for {name}"
+                )
+            validated_component_dependencies[name] = {"immutable_ref": reference}
     return {
         **payload,
         "dependencies": validated_dependencies,
         "images": validated_images,
+        "components": validated_components,
+        "component_dependencies": validated_component_dependencies,
     }
 
 
@@ -250,12 +296,17 @@ def resolve_alias_tag(alias: str) -> str:
 def print_entries(*, path: Path, tag: str, services: list[str]) -> None:
     payload = load_manifest(path, tag=tag)
     images = payload["images"]
+    components = payload["components"]
     assert isinstance(images, dict)
-    requested = services or list(_SERVICES)
+    assert isinstance(components, dict)
+    available = {**images, **components}
+    requested = services or list(available)
     for service in requested:
         if service not in _SERVICES:
             raise ManifestError(f"unknown service: {service}")
-        image = images[service]
+        if service not in available:
+            raise ManifestError(f"service is absent from this release: {service}")
+        image = available[service]
         assert isinstance(image, dict)
         print(
             "\t".join(
@@ -289,6 +340,16 @@ def print_compose_env(*, path: Path, tag: str) -> None:
         "LUMEN_TGBOT_IMAGE_REF": images["tgbot"]["immutable_ref"],
         "LUMEN_PYTHON_BASE_REF": dependencies["python"]["immutable_ref"],
     }
+    components = payload["components"]
+    component_dependencies = payload["component_dependencies"]
+    assert isinstance(components, dict)
+    assert isinstance(component_dependencies, dict)
+    agent_runtime = components.get("agent-runtime")
+    if isinstance(agent_runtime, dict):
+        values["LUMEN_AGENT_RUNTIME_IMAGE_REF"] = agent_runtime["immutable_ref"]
+    node = component_dependencies.get("node")
+    if isinstance(node, dict):
+        values["LUMEN_NODE_BASE_REF"] = node["immutable_ref"]
     for key, value in values.items():
         print(f"{key}\t{value}")
 

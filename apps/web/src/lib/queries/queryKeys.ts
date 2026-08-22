@@ -38,6 +38,19 @@ function userQueryKeys(userId: string | null | undefined) {
       [...scope, "conversations", "detail", convId] as const,
     conversationContext: (convId: string) =>
       [...scope, "conversations", convId, "context"] as const,
+    agentAll: () => [...scope, "agent"] as const,
+    agentStatus: () => [...scope, "agent", "status"] as const,
+    agentSessionsAll: () => [...scope, "agent", "sessions"] as const,
+    agentSessions: (params?: { q?: string; limit?: number }) =>
+      [...scope, "agent", "sessions", params ?? {}] as const,
+    agentSession: (sessionId: string) =>
+      [...scope, "agent", "session", sessionId] as const,
+    agentMessages: (sessionId: string) =>
+      [...scope, "agent", "session", sessionId, "messages"] as const,
+    agentActiveRun: (sessionId: string) =>
+      [...scope, "agent", "session", sessionId, "active-run"] as const,
+    agentRun: (runId: string) =>
+      [...scope, "agent", "run", runId] as const,
     workflowsAll: () => [...scope, "workflows"] as const,
     workflows: (params?: { type?: string; limit?: number }) =>
       [...scope, "workflows", params ?? {}] as const,

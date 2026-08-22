@@ -90,6 +90,8 @@ export function MobileComposerPill({
   const mode = useChatStore((s) => s.composer.mode);
   const setMode = useChatStore((s) => s.setMode);
   const attachments = useChatStore((s) => s.composer.attachments);
+  const addAttachment = useChatStore((s) => s.addAttachment);
+  const uploadAttachment = useChatStore((s) => s.uploadAttachment);
   const removeAttachment = useChatStore((s) => s.removeAttachment);
   const moveAttachment = useChatStore((s) => s.moveAttachment);
   const aspect = useChatStore((s) => s.composer.params.aspect_ratio);
@@ -325,6 +327,12 @@ export function MobileComposerPill({
     setIsUploading,
     setIsDragActive,
     setExpanded,
+    uploadAttachment,
+    addAttachment,
+    getAttachmentCount: () =>
+      useChatStore.getState().composer.attachments.length,
+    setError: setComposerError,
+    limit: MAX_COMPOSER_ATTACHMENTS,
   });
 
   const inpaint = useMaskInpaint();

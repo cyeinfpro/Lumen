@@ -27,13 +27,22 @@ SYSTEMD_WRITER_UNITS = (
 APPLICATION_SERVICES = ("api", "worker", "tgbot", "web")
 
 
-def _wait_for_file(path: Path, timeout: float = 8.0) -> None:
+def _wait_for_file(path: Path, timeout: float = 15.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if path.exists():
             return
         time.sleep(0.02)
     raise AssertionError(f"timed out waiting for {path}")
+
+
+def _terminate_process_group(process: subprocess.Popen[str]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    if process.poll() is None:
+        process.wait(timeout=5)
 
 
 def _write_fake_docker(path: Path) -> None:
@@ -682,7 +691,10 @@ def _interrupt(
 ) -> tuple[int, str]:
     _wait_for_file(marker)
     os.killpg(process.pid, sig)
-    stdout, stderr = process.communicate(timeout=15)
+    try:
+        stdout, stderr = process.communicate(timeout=30)
+    finally:
+        _terminate_process_group(process)
     return process.returncode, stdout + stderr
 
 

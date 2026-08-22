@@ -69,6 +69,7 @@ FAILURE_MATRIX = (
 )
 
 OutboxKind: TypeAlias = Literal[
+    "agent_run",
     "completion",
     "generation",
     "memory_extract",
@@ -111,6 +112,7 @@ OUTBOX_TASK_JOBS = MappingProxyType(
         "memory_extract": "memory_extract",
         "video_generation": "run_video_generation",
         "storyboard_assembly": "run_storyboard_assembly",
+        "agent_run": "run_agent",
     }
 )
 

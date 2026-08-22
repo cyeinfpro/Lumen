@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import CompileError
 
 from lumen_core.byok_retention import (
     DEFAULT_BYOK_RETENTION_POLICY,
@@ -101,20 +102,28 @@ async def test_prune_expired_byok_user_data_filters_to_byok_users() -> None:
         "messages_deleted": 1,
         "images_deleted": 1,
         "conversations_deleted": 1,
+        "agent_runs_redacted": 1,
+        "agent_references_redacted": 1,
+        "agent_tool_calls_redacted": 1,
     }
-    rendered = "\n".join(
-        str(
-            statement.compile(
+    rendered_statements: list[str] = []
+    for statement in db.statements:
+        try:
+            compiled = statement.compile(
                 dialect=postgresql.dialect(),
                 compile_kwargs={"literal_binds": True},
             )
-        )
-        for statement in db.statements
-    )
+        except CompileError:
+            compiled = statement.compile(dialect=postgresql.dialect())
+        rendered_statements.append(str(compiled))
+    rendered = "\n".join(rendered_statements)
     assert "users.account_mode = 'byok'" in rendered
     assert "UPDATE messages" in rendered
     assert "UPDATE images" in rendered
     assert "UPDATE conversations" in rendered
+    assert "UPDATE agent_runs" in rendered
+    assert "UPDATE agent_tool_calls" in rendered
+    assert "UPDATE agent_run_references" in rendered
 
 
 @pytest.mark.asyncio
@@ -130,5 +139,8 @@ async def test_prune_expired_byok_user_data_skips_when_disabled() -> None:
         "messages_deleted": 0,
         "images_deleted": 0,
         "conversations_deleted": 0,
+        "agent_runs_redacted": 0,
+        "agent_references_redacted": 0,
+        "agent_tool_calls_redacted": 0,
     }
     assert db.statements == []

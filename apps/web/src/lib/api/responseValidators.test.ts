@@ -70,6 +70,13 @@ function rejectsSchema(
 
 test("auth and active-task validators reject valid JSON with wrong fields", () => {
   rejectsSchema(validateAuthUser, { id: 42 });
+  rejectsSchema(validateAuthUser, {
+    id: "user-1",
+    runtime_defaults: {
+      agent_enabled: "yes",
+      nav_visibility: { agent: true },
+    },
+  });
   rejectsSchema(validateActiveTasksResponse, {
     generations: {},
     completions: [],
@@ -145,7 +152,13 @@ test("share and upload validators reject incomplete successful payloads", () => 
 });
 
 test("critical validators preserve valid server payloads without defaults", () => {
-  const auth = { id: "user-1" };
+  const auth = {
+    id: "user-1",
+    runtime_defaults: {
+      agent_enabled: true,
+      nav_visibility: { agent: true },
+    },
+  };
   const active = {
     generations: [],
     completions: [
@@ -225,7 +238,13 @@ test("critical validators preserve valid server payloads without defaults", () =
   assert.equal(validateSystemSettings(system), system);
   assert.equal(validateShare(share), share);
   assert.equal(validateUploadedImage(upload), upload);
-  assert.deepEqual(auth, { id: "user-1" });
+  assert.deepEqual(auth, {
+    id: "user-1",
+    runtime_defaults: {
+      agent_enabled: true,
+      nav_visibility: { agent: true },
+    },
+  });
   assert.deepEqual(upload, {
     id: "image-1",
     width: 1024,

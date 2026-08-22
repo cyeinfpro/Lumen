@@ -20,7 +20,12 @@ SPEC.loader.exec_module(release_proof)
 
 TAG = "v1.2.83"
 COMMIT = "a" * 40
-SERVICES = ("api", "worker", "tgbot", "web")
+SERVICES = ("api", "worker", "tgbot", "web", "agent-runtime")
+ARTIFACTS = {
+    "signature": "sigstore-keyless",
+    "sbom": "spdx-json",
+    "sbom_attestation_type": "spdxjson",
+}
 
 
 def _digest(index: int) -> str:
@@ -33,8 +38,11 @@ def _manifest() -> dict[str, object]:
         "version": TAG,
         "commit_sha": COMMIT,
         "images": {
-            service: {"digest": _digest(index)}
-            for index, service in enumerate(SERVICES, start=1)
+            service: {"digest": _digest(index), "artifacts": ARTIFACTS}
+            for index, service in enumerate(SERVICES[:4], start=1)
+        },
+        "components": {
+            "agent-runtime": {"digest": _digest(5), "artifacts": ARTIFACTS}
         },
     }
 
@@ -75,7 +83,7 @@ class FakeRunner:
 
 
 def _registry(repository: str, alias: str) -> object:
-    service = repository.rsplit("-", maxsplit=1)[1]
+    service = repository.removeprefix("cyeinfpro/lumen-")
     expected = _digest(SERVICES.index(service) + 1)
     observed = expected if alias == TAG else _digest(100 + len(alias))
     return release_proof.RegistryManifest(
@@ -92,6 +100,10 @@ def test_release_proof_verifies_run_manifest_and_all_stable_aliases() -> None:
         runner=FakeRunner(),
         manifest_fetcher=lambda _tag: _manifest(),
         registry_fetcher=_registry,
+        artifact_verifier=lambda _ref: {
+            "signature": "verified",
+            "sbom_attestation": "verified",
+        },
     )
 
     assert proof["status"] == "passed"
@@ -111,6 +123,7 @@ def test_release_proof_fails_closed_when_workflow_did_not_succeed() -> None:
             runner=FakeRunner(successful=False),
             manifest_fetcher=lambda _tag: _manifest(),
             registry_fetcher=_registry,
+            artifact_verifier=lambda _ref: {},
         )
 
 
@@ -132,4 +145,5 @@ def test_release_proof_rejects_alias_source_digest_drift() -> None:
             runner=FakeRunner(),
             manifest_fetcher=lambda _tag: _manifest(),
             registry_fetcher=drifted_registry,
+            artifact_verifier=lambda _ref: {},
         )

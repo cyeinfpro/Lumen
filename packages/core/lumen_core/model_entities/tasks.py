@@ -241,6 +241,30 @@ class Generation(Base, TimestampMixin):
         return value if isinstance(value, str) and value else None
 
     @property
+    def agent_session_id(self) -> str | None:
+        request = (
+            self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        )
+        value = request.get("agent_session_id")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def agent_run_id(self) -> str | None:
+        request = (
+            self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        )
+        value = request.get("agent_run_id")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def agent_tool_call_id(self) -> str | None:
+        request = (
+            self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        )
+        value = request.get("agent_tool_call_id")
+        return value if isinstance(value, str) and value else None
+
+    @property
     def attachment_roles(self) -> list[dict[str, Any]]:
         request = (
             self.upstream_request if isinstance(self.upstream_request, dict) else {}

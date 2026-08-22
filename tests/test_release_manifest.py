@@ -72,7 +72,8 @@ def test_cli_writes_complete_machine_readable_manifest(tmp_path: Path) -> None:
     heads.write_text("0041_billing_window_ledger (head)\n", encoding="utf-8")
     commit = "a" * 40
     digest_args: list[str] = []
-    for index, service in enumerate(("api", "worker", "tgbot", "web"), start=1):
+    services = ("api", "worker", "tgbot", "web", "agent-runtime")
+    for index, service in enumerate(services, start=1):
         digest_args.extend(["--image-digest", f"{service}=sha256:{index:064x}"])
     dependency_args = [
         "--dependency-image",
@@ -81,6 +82,8 @@ def test_cli_writes_complete_machine_readable_manifest(tmp_path: Path) -> None:
         f"postgres=pgvector/pgvector:pg16@sha256:{'b' * 64}",
         "--dependency-image",
         f"redis=redis:7.4-alpine@sha256:{'c' * 64}",
+        "--component-dependency-image",
+        f"node=node:22.22.0-alpine@sha256:{'d' * 64}",
     ]
 
     result = subprocess.run(
@@ -118,15 +121,26 @@ def test_cli_writes_complete_machine_readable_manifest(tmp_path: Path) -> None:
     assert manifest["commit_sha"] == commit
     assert manifest["version"] == "v1.2.45"
     assert set(manifest["images"]) == {"api", "worker", "tgbot", "web"}
+    assert set(manifest["components"]) == {"agent-runtime"}
     assert set(manifest["dependencies"]) == {"python", "postgres", "redis"}
-    for index, service in enumerate(("api", "worker", "tgbot", "web"), start=1):
-        image = manifest["images"][service]
+    assert set(manifest["component_dependencies"]) == {"node"}
+    for index, service in enumerate(services, start=1):
+        image = (
+            manifest["components"][service]
+            if service == "agent-runtime"
+            else manifest["images"][service]
+        )
         expected_digest = f"sha256:{index:064x}"
         assert image["tag"].endswith(f"/lumen-{service}:v1.2.45")
         assert image["digest"] == expected_digest
         assert image["immutable_ref"] == (
             f"ghcr.io/cyeinfpro/lumen-{service}@{expected_digest}"
         )
+        assert image["artifacts"] == {
+            "signature": "sigstore-keyless",
+            "sbom": "spdx-json",
+            "sbom_attestation_type": "spdxjson",
+        }
     assert "TODO" not in manifest_path.read_text(encoding="utf-8").upper()
     assert "0041_billing_window_ledger" in notes_path.read_text(encoding="utf-8")
 
@@ -137,14 +151,19 @@ def test_docker_release_publishes_verified_release_manifest() -> None:
     assert "uv run alembic heads" in workflow
     assert '--image-digest "api=${API_DIGEST}"' in workflow
     assert '--image-digest "worker=${WORKER_DIGEST}"' in workflow
+    assert '--image-digest "agent-runtime=${AGENT_RUNTIME_DIGEST}"' in workflow
     assert '--image-digest "tgbot=${TGBOT_DIGEST}"' in workflow
     assert '--image-digest "web=${WEB_DIGEST}"' in workflow
     assert '--dependency-image "python=${PYTHON_BASE_REF}"' in workflow
     assert '--dependency-image "postgres=${POSTGRES_IMAGE_REF}"' in workflow
     assert '--dependency-image "redis=${REDIS_IMAGE_REF}"' in workflow
+    assert '--component-dependency-image "node=${NODE_BASE_REF}"' in workflow
     assert "--resolve-images" not in workflow
     assert "release-manifest.json" in workflow
-    assert "files: release-manifest.json" in workflow
+    assert "release-manifest.json" in workflow
+    assert "cosign attest --yes --type spdxjson" in workflow
+    assert "cosign verify-attestation" in workflow
+    assert "spdx.json" in workflow
     assert "packages: read" in workflow
     assert "populate alembic heads" not in workflow.lower()
 
@@ -172,7 +191,7 @@ def test_docker_release_prepares_storage_state_bind_before_starting_apps() -> No
     start_apps = (
         "docker compose --env-file .env.ci -f docker-compose.yml "
         "-f docker-compose.dev.yml -f deploy/docker/docker-compose.local.yml "
-        "up -d --wait api worker web"
+        "--profile agent-runtime up -d --wait agent-runtime api worker web"
     )
     assert prepare_state_dir in run
     assert start_apps in run
@@ -316,6 +335,7 @@ def test_docker_release_promotes_aliases_only_after_all_signed_builds() -> None:
     assert set(promote["outputs"]) == {
         "api_digest",
         "worker_digest",
+        "agent_runtime_digest",
         "tgbot_digest",
         "web_digest",
         "is_prerelease",
@@ -408,10 +428,14 @@ def test_github_release_and_manifest_gate_stable_shared_aliases() -> None:
     assert manifest_env["WORKER_DIGEST"] == (
         "${{ needs.promote.outputs.worker_digest }}"
     )
+    assert manifest_env["AGENT_RUNTIME_DIGEST"] == (
+        "${{ needs.promote.outputs.agent_runtime_digest }}"
+    )
     assert manifest_env["TGBOT_DIGEST"] == ("${{ needs.promote.outputs.tgbot_digest }}")
     assert manifest_env["WEB_DIGEST"] == "${{ needs.promote.outputs.web_digest }}"
     assert '--image-digest "api=${API_DIGEST}"' in manifest_run
     assert '--image-digest "worker=${WORKER_DIGEST}"' in manifest_run
+    assert '--image-digest "agent-runtime=${AGENT_RUNTIME_DIGEST}"' in manifest_run
     assert '--image-digest "tgbot=${TGBOT_DIGEST}"' in manifest_run
     assert '--image-digest "web=${WEB_DIGEST}"' in manifest_run
     assert "--resolve-images" not in manifest_run

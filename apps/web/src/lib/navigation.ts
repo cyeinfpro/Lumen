@@ -1,6 +1,12 @@
 // Application navigation policy is UI-framework independent.
 
-export type AppNavKey = "studio" | "video" | "projects" | "assets" | "me";
+export type AppNavKey =
+  | "studio"
+  | "agent"
+  | "video"
+  | "projects"
+  | "assets"
+  | "me";
 export type HideableAppNavKey = Exclude<AppNavKey, "me">;
 export type NavVisibility = Partial<Record<HideableAppNavKey, boolean>>;
 
@@ -21,6 +27,23 @@ const APP_NAV_ITEMS: readonly AppNavItem[] = [
     detail: "自由聊天、生图、图生图、修图",
     keywords: ["new", "studio", "home", "创作", "首页", "工作台", "聊天", "生图"],
     matchPrefixes: ["/"],
+  },
+  {
+    key: "agent",
+    label: "Agent",
+    route: "/agent",
+    detail: "自主对话、文生图和参考图创作",
+    keywords: [
+      "agent",
+      "bot",
+      "assistant",
+      "智能体",
+      "助手",
+      "对话",
+      "生图",
+      "图生图",
+    ],
+    matchPrefixes: ["/agent"],
   },
   {
     key: "video",
@@ -58,6 +81,7 @@ const APP_NAV_ITEMS: readonly AppNavItem[] = [
 
 export const DEFAULT_NAV_VISIBILITY: Required<NavVisibility> = {
   studio: true,
+  agent: false,
   video: true,
   projects: true,
   assets: true,
@@ -68,6 +92,9 @@ export function normalizeNavVisibility(
 ): Required<NavVisibility> {
   return {
     studio: value?.studio !== false,
+    // Agent is a new fail-closed surface. Missing legacy cookie values must
+    // never opt a user into a route whose API gate may still be disabled.
+    agent: value?.agent === true,
     video: value?.video !== false,
     projects: value?.projects !== false,
     assets: value?.assets !== false,
@@ -121,6 +148,16 @@ export function getFirstVisibleNavRoute(
   visibility?: NavVisibility | null,
 ): string {
   return getAppNavItems(visibility)[0]?.route ?? "/me";
+}
+
+export function getFirstVisibleNavRouteExcluding(
+  excluded: HideableAppNavKey,
+  visibility?: NavVisibility | null,
+): string {
+  return getFirstVisibleNavRoute({
+    ...normalizeNavVisibility(visibility),
+    [excluded]: false,
+  });
 }
 
 export function getRedirectForHiddenNavPath(

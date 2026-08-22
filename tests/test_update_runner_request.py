@@ -707,7 +707,7 @@ def test_failed_recovered_original_is_not_consumed_as_success(
             {
                 "schema": 2,
                 "status": "failed_recovered_original",
-                "operation_id": "update-failed-target",
+                "operation_id": payload["operation_id"],
                 "request": _journal_request(payload),
             }
         ),

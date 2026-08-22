@@ -41,6 +41,9 @@ def _usage_by_kind(rows: list[WalletTransaction]) -> BillingUsageByKindOut:
         "cache_creation": 0,
         "image": 0,
         "reasoning": 0,
+        "agent_text": 0,
+        "agent_text_to_image": 0,
+        "agent_image_to_image": 0,
     }
     for row in rows:
         meta = row.meta or {}
@@ -59,6 +62,13 @@ def _usage_by_kind(rows: list[WalletTransaction]) -> BillingUsageByKindOut:
             if sum(row_totals.values()) > 0:
                 for key, value in row_totals.items():
                     totals[key] += value
+                if row.ref_type == "agent_run":
+                    totals["agent_text"] += sum(row_totals.values())
+                elif row.ref_type == "generation" and meta.get("source") == "agent":
+                    if meta.get("agent_image_mode") == "image_to_image":
+                        totals["agent_image_to_image"] += sum(row_totals.values())
+                    else:
+                        totals["agent_text_to_image"] += sum(row_totals.values())
                 continue
 
         fallback = (
@@ -68,6 +78,14 @@ def _usage_by_kind(rows: list[WalletTransaction]) -> BillingUsageByKindOut:
         )
         if row.ref_type in {"generation", "video_generation"}:
             totals["image"] += fallback
+            if meta.get("source") == "agent":
+                if meta.get("agent_image_mode") == "image_to_image":
+                    totals["agent_image_to_image"] += fallback
+                else:
+                    totals["agent_text_to_image"] += fallback
+        elif row.ref_type == "agent_run":
+            totals["output"] += fallback
+            totals["agent_text"] += fallback
         elif row.kind in (*_CHARGE_KINDS, "settle"):
             totals["output"] += fallback
     return BillingUsageByKindOut(**totals)

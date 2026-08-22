@@ -19,7 +19,7 @@ from .contracts import (
     UnknownUpstreamDependencies,
     UnknownUpstreamSettlement,
 )
-from .helpers import task_pricing_snapshot
+from .helpers import generation_agent_billing_meta, task_pricing_snapshot
 
 BONUS_BILLING_OBLIGATION_KEY = "bonus_billing_obligation"
 
@@ -298,6 +298,7 @@ async def settle_generation(
             "retry_count": deps.generation_billing_retry_count(generation),
             "rate_multiplier_x10000": rate_multiplier,
             "provider": deps.generation_settle_provider(generation),
+            **generation_agent_billing_meta(generation),
         },
     )
     if tx is None:
@@ -320,6 +321,7 @@ async def settle_generation(
                 "image_count": billable_image_count,
                 "balance_after": tx.balance_after,
                 "hold_after": tx.hold_after,
+                **generation_agent_billing_meta(generation),
             },
         )
     )

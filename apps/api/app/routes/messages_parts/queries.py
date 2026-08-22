@@ -20,6 +20,8 @@ from lumen_core.schema_models import (
     PostMessageOut,
 )
 
+from ...services.agent_conversations import studio_conversation_filter
+
 
 async def lock_idempotency_key(
     db: AsyncSession,
@@ -139,6 +141,7 @@ async def lookup_idempotent_post(
                 Message.conversation_id == conv_id,
                 Conversation.user_id == user_id,
                 Conversation.deleted_at.is_(None),
+                studio_conversation_filter(),
                 *alive_filters,
             )
         )
@@ -154,6 +157,7 @@ async def lookup_idempotent_post(
                 Message.conversation_id == conv_id,
                 Conversation.user_id == user_id,
                 Conversation.deleted_at.is_(None),
+                studio_conversation_filter(),
                 *alive_filters,
             )
         )
@@ -250,6 +254,7 @@ async def get_message(
                 Message.conversation_id == conv_id,
                 Conversation.user_id == user_id,
                 Conversation.deleted_at.is_(None),
+                studio_conversation_filter(),
                 *message_alive_filters_fn(),
             )
         )

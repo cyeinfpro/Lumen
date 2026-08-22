@@ -6,6 +6,7 @@ from typing import cast
 import pytest
 
 from app import main
+from app.agent_runtime_client import AgentRuntimeClient
 from app.provider_runtime.upstream_services import ImageUpstreamRuntime
 from app.runtime import (
     CapabilityStatus,
@@ -352,6 +353,10 @@ async def test_worker_runtime_exposes_typed_context_and_idempotent_shutdown() ->
     )
     completion = cast(CompletionRuntime, object())
     video = cast(VideoGenerationRuntime, object())
+    agent_runtime = AgentRuntimeClient(
+        base_url="http://agent-runtime:8090",
+        shared_secret="test-agent-runtime-secret-0123456789",
+    )
     runtime = WorkerRuntime(
         _runtime_settings=runtime_settings,
         _image_upstream=image_upstream,
@@ -360,6 +365,7 @@ async def test_worker_runtime_exposes_typed_context_and_idempotent_shutdown() ->
         _completion=completion,
         _video=video,
         _metrics_server=main.MetricsServerRuntime(),
+        _agent_runtime=agent_runtime,
         _lifecycle=lifecycle,
     )
 
@@ -376,6 +382,7 @@ async def test_worker_runtime_exposes_typed_context_and_idempotent_shutdown() ->
         "completion_runtime": completion,
         "video_generation_runtime": video,
         "metrics_server_runtime": runtime.metrics_server(),
+        "agent_runtime_client": agent_runtime,
     }
     assert calls == ["generation", "upstream", "engine"]
     diagnostics = runtime.diagnostics()

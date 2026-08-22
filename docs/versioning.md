@@ -28,6 +28,8 @@ python3 scripts/version.py check
 - `packages/core/lumen_core/__init__.py`
 - `apps/web/package.json`
 - `apps/web/package-lock.json`
+- `apps/agent-runtime/package.json`
+- `apps/agent-runtime/package-lock.json`
 
 `check` 还会检查 `uv.lock` 里的 workspace package 版本。若 lockfile 漂移，先运行 `uv lock`，否则 Dockerfile 里的 `uv sync --frozen` 会在 release 构建阶段失败。
 
@@ -87,19 +89,20 @@ main
 
 `latest` 只能由正式版本 tag 更新，不能由普通 main push 覆盖。
 
-Docker alias 发布不是 OCI registry 事务。发布流程会先验证四个 immutable
+Docker alias 发布不是 OCI registry 事务。发布流程会先验证五个 immutable
 digest，再分两阶段处理 alias：
 
 1. release 的精确 tag 先逐服务写入并验证；已存在但 digest 不同的精确 tag
    会直接拒绝覆盖。
-2. GitHub Release 和 `release-manifest.json` 使用四个已验证的精确 tag 与
+2. GitHub Release 和 `release-manifest.json` 使用五个已验证的精确 tag 与
    输入 immutable digest 创建，成为 stable updater 的 source of truth。
 3. stable 的 `vMAJOR.MINOR`、`vMAJOR`、`latest` 最后推进；`main` push 则只
    推进 `main`。共享 alias 会先建立完整 rollback baseline，再逐 alias 写入和
    验证。stable alias 当前不存在时，baseline 来自与现有 alias 状态匹配的前一
-   个完整 stable `release-manifest.json`；首次新 major 因此也能在失败后把四个
+   个完整 stable `release-manifest.json`；首次新 major 因此也能在失败后把五个
    服务统一恢复到同一个前一 stable release。`main` 没有 release manifest
-   契约，若四个旧 `main` alias 不是全部存在，预检会在任何写入前拒绝发布。
+   契约。五镜像过渡只允许原有四个 `main` alias 全部存在而 Runtime alias
+   单独缺失；其它不完整集合仍会在任何写入前拒绝发布。
    任一步骤失败或收到 `SIGINT` / `SIGTERM` 时，流程会恢复全部 alias 到该完整
    baseline，并让 workflow 保持失败。
 
@@ -118,6 +121,12 @@ run 而丢失。只有 `promote-shared` 使用固定
 `stable-mutable-aliases` group 串行化；GitHub 可能替换该组中的旧 pending
 alias job，但不会影响对应 tag 已完成的 exact aliases/GitHub Release。shared
 阶段在写入前重新查询已发布 stable Releases，并以 SemVer guard 拒绝降级。
+
+为兼容受支持的旧 updater，schema 1 的 `images` 继续精确包含
+`api/worker/tgbot/web`；`components.agent-runtime` 是第五个镜像的增量字段。新版
+guard 合并两者，旧 guard 忽略 `components`。五个镜像都声明并验证 keyless
+签名与 `spdxjson` SBOM attestation；Node base digest 记录在
+`component_dependencies.node`。
 
 ## 一键更新 Channel
 

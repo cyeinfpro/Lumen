@@ -53,6 +53,11 @@ class DatabaseRuntimeDefaultsProvider:
             defaults.canvas_enabled = (
                 await self._runtime.get_setting(self._db, canvas_spec) == "1"
             )
+        agent_spec = self._runtime.get_spec(self._runtime._AGENT_ENABLED_KEY)
+        if agent_spec is not None:
+            defaults.agent_enabled = (
+                await self._runtime.get_setting(self._db, agent_spec) == "1"
+            )
         return defaults
 
 

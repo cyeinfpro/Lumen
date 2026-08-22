@@ -158,6 +158,12 @@ class ProviderConfig:
     image_edit_input_transport: str = "url"
     image_concurrency: int = 1
     responses_supported: bool | None = None
+    vision_supported: bool | None = None
+    agent_api: str = "openai-responses"
+    agent_models: tuple[str, ...] = ()
+    agent_context_window: int = 128000
+    agent_max_output_tokens: int = 16384
+    agent_reasoning_supported: bool = True
     image_generations_supported: bool | None = None
     image_responses_supported: bool | None = None
 
@@ -219,6 +225,12 @@ class ResolvedProvider:
     image_daily_quota: int | None = None
     purposes: tuple[str, ...] = DEFAULT_PROVIDER_PURPOSES
     responses_supported: bool | None = None
+    vision_supported: bool | None = None
+    agent_api: str = "openai-responses"
+    agent_models: tuple[str, ...] = ()
+    agent_context_window: int = 128000
+    agent_max_output_tokens: int = 16384
+    agent_reasoning_supported: bool = True
     image_generations_supported: bool | None = None
     image_responses_supported: bool | None = None
     text_circuit_state: str = field(default="closed", repr=False, compare=False)

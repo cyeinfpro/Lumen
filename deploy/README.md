@@ -30,8 +30,8 @@ bash scripts/lumenctl.sh install-lumen
 5. §17.4 停旧 systemd（仅 stop，不 disable）
 6. §17.5 `COMPOSE_PROJECT_NAME=lumen docker compose up -d --wait postgres redis`
 7. §17.6 `COMPOSE_PROJECT_NAME=lumen docker compose --profile migrate run --rm migrate`（fail-fast，迁移失败立即停止整个切换）
-8. §17.7 `COMPOSE_PROJECT_NAME=lumen docker compose up -d --wait api worker web`，按需 `--profile tgbot up -d tgbot`
-9. §17.8 验证：`docker compose ps`、`curl --noproxy '*' http://127.0.0.1:8000/readyz`、`docker compose exec -T worker python -m app.worker_health check`、`curl http://127.0.0.1:3000/`。`/healthz` 只用于容器 liveness，不作为切换事务提交依据。
+8. §17.7 `COMPOSE_PROJECT_NAME=lumen docker compose --profile agent-runtime up -d --wait agent-runtime api worker web`，按需 `--profile tgbot up -d tgbot`
+9. §17.8 验证：`docker compose ps`、API `/readyz`、Worker health、Runtime `/readyz` 和 Web。Agent 关闭时 API readiness 不依赖 Runtime `/readyz`，但 Runtime 容器 liveness 仍必须通过。
 10. §17.9 Docker 栈稳定后 `sudo systemctl disable --now lumen-api lumen-worker lumen-web lumen-tgbot`
 
 ## 数据目录与权限
@@ -132,6 +132,21 @@ sudo systemctl enable --now lumen-api lumen-worker lumen-web
 
 - 宿主机 `.venv`、`.next`、`node_modules` 仍可用
 - 旧代码能兼容当前 DB schema
+
+## Agent Runtime
+
+`agent-runtime` 是 Compose 后端网络中的私有 Node 服务，不映射宿主端口，也不挂载
+仓库、媒体或用户目录。安装和更新会生成两个不同的内部密钥。保持
+`agent.enabled=0` 与 `ui.nav.agent_visible=0`，直到 Runtime、Worker 和工具网关均
+通过健康检查；管理后台会拒绝在 Runtime 未就绪时启用 Agent。
+
+Runtime 没有持久卷，也不能访问数据库或 Redis，因此备份/恢复只需冻结 API、Worker
+等实际 writer；Runtime 本身不进入数据归档或 restore journal。
+
+从只认识四个应用镜像的旧安装升级到首个五镜像 release 时，先完成一次 stable
+更新，再用新安装的脚本对同一目标重跑一次更新。第一遍安全安装新脚本，第二遍
+绑定 Runtime digest 并启动服务；两次之间不得开启 Agent。完整契约见
+`docs/adr/0003-agent-deployment-release-compatibility.md`。
 
 ## image-job sidecar
 
@@ -253,4 +268,6 @@ LUMEN_UPDATE_BUILD=1 bash scripts/lumenctl.sh update-lumen
 bash scripts/test.sh   # 按 worker / api / core 三个子进程分别跑（同进程合跑会有全局状态污染）
 ```
 
-CI 拆 job 时按相同 3 段切分。镜像构建走 `.github/workflows/docker-release.yml`（push main / tag v* 触发，buildx + GHCR + matrix 4 镜像）。
+CI 还独立运行 Agent Runtime 的 test/type-check/lint/build。镜像构建走
+`.github/workflows/docker-release.yml`（push main / tag v* 触发，buildx + GHCR，
+五个应用镜像均签名并附带 SPDX JSON SBOM attestation）。

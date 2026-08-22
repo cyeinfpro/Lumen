@@ -796,6 +796,8 @@ def test_restart_records_tgbot_as_required_when_it_starts_the_service(
             return 0
         }}
         ROOT={shlex.quote(str(tmp_path))}
+        mkdir -p "${{ROOT}}/current"
+        printf 'services:\n  agent-runtime:\n' > "${{ROOT}}/current/docker-compose.yml"
         SHARED_ENV={shlex.quote(str(shared_env))}
         TARGET_IMAGE_OVERRIDE_FILE={shlex.quote(str(tmp_path / "override.yml"))}
         LUMEN_UPDATE_BLUE_GREEN=0
@@ -809,6 +811,7 @@ def test_restart_records_tgbot_as_required_when_it_starts_the_service(
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert events.read_text(encoding="utf-8").splitlines() == [
+        "start:agent-runtime",
         "start:api",
         "start:worker",
         "start:web",
@@ -825,6 +828,10 @@ def test_dependency_readiness_failure_rolls_back_before_commit(
     events = tmp_path / "events.log"
     current = tmp_path / "current"
     current.mkdir()
+    (current / "docker-compose.yml").write_text(
+        "services:\n  agent-runtime:\n",
+        encoding="utf-8",
+    )
     shared_env = tmp_path / "shared.env"
     shared_env.write_text("", encoding="utf-8")
     result = _run(
@@ -916,7 +923,7 @@ def test_dependency_readiness_failure_rolls_back_before_commit(
     assert result.returncode == 0, result.stderr + result.stdout
     lines = events.read_text(encoding="utf-8").splitlines()
     assert f"core-ready:{current}:{failed_dependency}" in lines
-    assert "compose-liveness:api worker web" in lines
+    assert "compose-liveness:agent-runtime api worker web" in lines
     assert "commit" not in lines
     assert lines.count("rollback:links") == 1
     assert lines.count("rollback:env") == 1
@@ -932,6 +939,10 @@ def test_tgbot_readiness_failure_blocks_update_commit(
     events = tmp_path / "events.log"
     current = tmp_path / "current"
     current.mkdir()
+    (current / "docker-compose.yml").write_text(
+        "services:\n  agent-runtime:\n",
+        encoding="utf-8",
+    )
     shared_env = tmp_path / "shared.env"
     shared_env.write_text(
         ("TELEGRAM_BOT_TOKEN=configured\n" if decision_source == "shared_env" else ""),
@@ -978,7 +989,7 @@ def test_tgbot_readiness_failure_blocks_update_commit(
 
     assert result.returncode == 0, result.stderr + result.stdout
     lines = events.read_text(encoding="utf-8").splitlines()
-    assert "compose:api worker web tgbot" in lines
+    assert "compose:agent-runtime api worker web tgbot" in lines
     assert "commit" not in lines
     assert "fail:health_check" in lines
 

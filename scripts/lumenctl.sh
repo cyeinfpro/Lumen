@@ -116,9 +116,9 @@ Lifecycle commands:
 Docker compose runtime:
   status               docker compose ps + 健康检查
   logs [service]       跟随 service 日志（默认 api，等价 docker compose logs -f）
-  start                up -d --wait api worker web
-  stop                 stop api worker web tgbot
-  restart              up -d --force-recreate api worker web
+  start                up -d --wait agent-runtime api worker web
+  stop                 stop agent-runtime api worker web tgbot
+  restart              up -d --force-recreate agent-runtime api worker web
   migrate              compose --profile migrate run --rm migrate
   bootstrap            创建初始 admin（需 LUMEN_ADMIN_EMAIL / LUMEN_ADMIN_PASSWORD）
   migrate-env          dry-run 检查旧 .env 的容器内 URL

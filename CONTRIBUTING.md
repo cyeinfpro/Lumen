@@ -4,13 +4,14 @@
 
 ## 通用约定
 
-- **代码组织**：所有改动需明确归属到 `apps/api`、`apps/worker`、`apps/web`、`packages/core` 之一；跨模块改动需在 PR 描述说明影响面。
+- **代码组织**：所有改动需明确归属到 `apps/api`、`apps/worker`、`apps/agent-runtime`、`apps/web`、`packages/core` 之一；跨模块改动需在 PR 描述说明影响面。
 - **依赖管理**：Python 用 `uv`（根目录 `pyproject.toml` + `uv.lock`），前端用各自 `package.json`。不要手动改 `uv.lock`。
 - **测试**：与生成路径、上游调用、计费相关的改动必须带回归测试；UI 改动至少在移动端 Safari + 桌面 Chrome 上人工验证。统一入口 `bash scripts/test.sh`，会按 worker / api / core 三个子进程分别跑（同进程合跑会因 `apps/api/app` 与 `apps/worker/app` 同名 package 引发 module cache 与 PIL/Prometheus 全局状态污染）。
 - **提交信息**：遵循现有 commit message 风格（动词起首，描述变化与原因），不要塞 emoji。
 - **生产数据**：不擅自回填或改动历史数据；任何 migration 必须 dry-run 后再上。
 - **环境变量**：`apps/web` 的 Next.js build 只读 `apps/web/.env*`，不要把根 `.env` 当成 single source of truth。
 - **部署**：rsync 必须按 `deploy/` 下示例排除整个 `apps/worker/var/` 目录，不要只靠后缀 filter。
+- **Agent Runtime**：依赖必须精确锁定；禁止 Pi built-in tools/resource discovery、凭据/session 持久化、宿主端口和仓库/媒体挂载。变更需运行 Runtime 全部四个 gate 与 Agent ops contract tests。
 
 ## 上游调用约定
 

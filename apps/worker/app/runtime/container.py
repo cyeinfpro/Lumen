@@ -6,6 +6,7 @@ from enum import StrEnum
 from typing import TypedDict
 
 from ..provider_runtime.upstream_services import ImageUpstreamRuntime
+from ..agent_runtime_client import AgentRuntimeClient
 from ..observability import MetricsServerRuntime
 from ..runtime_settings import RuntimeSettingsCache
 from ..storage_writes import StorageWriteCoordinator
@@ -36,6 +37,7 @@ class WorkerRuntimeValues(TypedDict):
     completion_runtime: CompletionRuntime
     video_generation_runtime: VideoGenerationRuntime
     metrics_server_runtime: MetricsServerRuntime
+    agent_runtime_client: AgentRuntimeClient
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +57,7 @@ class WorkerRuntime:
     _completion: CompletionRuntime
     _video: VideoGenerationRuntime
     _metrics_server: MetricsServerRuntime
+    _agent_runtime: AgentRuntimeClient
     _lifecycle: RuntimeLifecycle
 
     def runtime_settings(self) -> RuntimeSettingsCache:
@@ -78,6 +81,9 @@ class WorkerRuntime:
     def metrics_server(self) -> MetricsServerRuntime:
         return self._metrics_server
 
+    def agent_runtime(self) -> AgentRuntimeClient:
+        return self._agent_runtime
+
     def context_values(self) -> WorkerRuntimeValues:
         return WorkerRuntimeValues(
             runtime_settings_cache=self._runtime_settings,
@@ -87,6 +93,7 @@ class WorkerRuntime:
             completion_runtime=self._completion,
             video_generation_runtime=self._video,
             metrics_server_runtime=self._metrics_server,
+            agent_runtime_client=self._agent_runtime,
         )
 
     def start(self, *, logger: logging.Logger | None = None) -> None:
@@ -106,6 +113,13 @@ class WorkerRuntime:
             RuntimeCapability("http_transport", CapabilityStatus.ENABLED),
             RuntimeCapability("storage_writes", CapabilityStatus.ENABLED),
             RuntimeCapability("metrics_server", CapabilityStatus.ENABLED),
+            RuntimeCapability(
+                "agent_runtime",
+                CapabilityStatus.ENABLED
+                if self._agent_runtime.configured
+                else CapabilityStatus.DISABLED,
+                "configured" if self._agent_runtime.configured else "closed_by_default",
+            ),
             RuntimeCapability(
                 "postprocess_executor",
                 CapabilityStatus.ENABLED

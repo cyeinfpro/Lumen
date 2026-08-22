@@ -1,6 +1,6 @@
 {
   "name": "web",
-  "version": "1.2.134",
+  "version": "1.2.135",
   "private": true,
   "imports": {
     "#canvas-autosave": "./src/lib/canvas/autosave.ts",
@@ -19,6 +19,9 @@
     "build": "next build --webpack",
     "start": "next start -H 0.0.0.0 -p 3000",
     "test": "node scripts/run-tests.mjs",
+    "test:e2e": "playwright test",
+    "test:e2e:fullstack": "node scripts/run-agent-fullstack-e2e.mjs",
+    "test:e2e:install": "playwright install chromium",
     "lint": "npm run check:layout-contract && npm run check:ui-governance && npm run check:architecture && npm run check:complexity && npm run lint:eslint",
     "lint:eslint": "eslint",
     "check:architecture": "node scripts/check-architecture.mjs",
@@ -57,6 +60,7 @@
     "zustand": "^5.0.12"
   },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",

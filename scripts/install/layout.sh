@@ -329,7 +329,7 @@ prepare_env_file() {
         cp "${example}" "${shared_env}"
         chmod 600 "${shared_env}"
         ensure_required_env_secrets "${shared_env}" || exit 1
-        log_info "已写入随机密钥（DB_PASSWORD/REDIS_PASSWORD/SESSION_SECRET/IMAGE_PROXY_SECRET/BYOK_API_KEY_MASTER_SECRET/TELEGRAM_BOT_SHARED_SECRET）。"
+        log_info "已写入数据库、会话、BYOK、Telegram 与 Agent 内部随机密钥。"
     else
         log_info "shared/.env 已存在，跳过密钥生成。"
         ensure_required_env_secrets "${shared_env}" || exit 1

@@ -1,11 +1,3 @@
-"""管理员 Provider Pool 管理与探活。
-
-GET  /admin/providers       — 列出 provider（API Key 脱敏）
-PUT  /admin/providers       — 结构化保存（支持 key 保留）
-POST /admin/providers/probe — 手动探活（支持按名称过滤）
-PATCH /admin/providers/{name}/enabled — 单字段启停
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -72,6 +64,8 @@ _normalize_proxy_type = _presentation.normalize_proxy_type
 _normalize_purposes = _presentation.normalize_purposes
 _safe_int = _presentation.safe_int
 _to_out = _presentation.provider_out
+_provider_agent_update_fields = _presentation.provider_agent_update_fields
+_provider_update_credentials = _presentation.provider_update_credentials
 _to_proxy_out = _presentation.proxy_out
 _ProbeOutcome = _probe.ProbeOutcome
 _classify_probe_status = _probe.classify_probe_status
@@ -387,12 +381,21 @@ def _provider_rows(
     body: ProvidersUpdateIn,
     *,
     old_keys: dict[str, str],
+    old_items_by_name: dict[str, dict[str, Any]],
     proxy_names: set[str],
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for provider_input in body.items:
         name = provider_input.name.strip()
-        api_key = provider_input.api_key.strip() or old_keys.get(name, "")
+        old_item = old_items_by_name.get(name, {})
+        try:
+            new_base_url, api_key = _provider_update_credentials(
+                provider_input,
+                old_keys=old_keys,
+                old_item=old_item,
+            )
+        except ValueError as exc:
+            raise _http("invalid_request", f"provider「{name}」{exc}", 422) from exc
         if not api_key and provider_input.enabled:
             raise _http(
                 "invalid_request",
@@ -409,7 +412,7 @@ def _provider_rows(
         endpoint = _normalize_image_jobs_endpoint(provider_input.image_jobs_endpoint)
         row: dict[str, Any] = {
             "name": name,
-            "base_url": provider_input.base_url.strip(),
+            "base_url": new_base_url,
             "api_key": api_key,
             "priority": provider_input.priority,
             "weight": max(1, provider_input.weight),
@@ -431,15 +434,11 @@ def _provider_rows(
             "image_concurrency": _normalize_image_concurrency(
                 provider_input.image_concurrency
             ),
+            **_provider_agent_update_fields(
+                provider_input,
+                old_item,
+            ),
         }
-        for key in (
-            "responses_supported",
-            "image_generations_supported",
-            "image_responses_supported",
-        ):
-            value = _normalize_capability(getattr(provider_input, key, None))
-            if value is not None:
-                row[key] = value
         if proxy_name:
             row["proxy"] = proxy_name
         rows.append(row)
@@ -488,8 +487,7 @@ async def update_providers(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ProvidersOut:
-    # 共享行并发写保护：与 /admin/proxies 写同一行 DB，先拿事务级咨询锁
-    # 再做读-改-写，避免并发保存互相覆盖（丢失更新）。
+    # 与 /admin/proxies 共享咨询锁，避免并发读改写互相覆盖。
     await _lock_providers_config(db)
 
     # 清空场景
@@ -517,13 +515,18 @@ async def update_providers(
     _validate_provider_update_names(body)
     old_raw, _ = await _read_providers(db)
     old_keys, old_proxy_passwords = _stored_provider_secrets(old_raw)
-    _old_items, old_proxy_rows = _parse_config(old_raw or "")
+    old_items, old_proxy_rows = _parse_config(old_raw or "")
     proxy_rows = _provider_proxy_rows(
         body, old_proxy_passwords, old_proxy_rows
     )
     provider_rows = _provider_rows(
         body,
         old_keys=old_keys,
+        old_items_by_name={
+            str(item.get("name") or "").strip(): item
+            for item in old_items
+            if str(item.get("name") or "").strip()
+        },
         proxy_names={row["name"] for row in proxy_rows},
     )
     raw_json = _provider_update_json(provider_rows, proxy_rows)
@@ -535,6 +538,12 @@ async def update_providers(
         db.add(SystemSetting(key="providers", value=raw_json))
     else:
         existing.value = raw_json
+    if body.default_model is not None:
+        await _upsert_setting_value(
+            db,
+            "upstream.default_model",
+            body.default_model.strip(),
+        )
 
     await write_audit(
         db,
@@ -545,6 +554,7 @@ async def update_providers(
         details={
             "count": len(provider_rows),
             "names": [row["name"] for row in provider_rows],
+            "default_model_updated": body.default_model is not None,
         },
         autocommit=False,
     )

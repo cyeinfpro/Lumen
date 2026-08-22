@@ -6,11 +6,13 @@ import {
   Clock3,
   ImageIcon,
   MessageSquareText,
+  MapPin,
   RefreshCw,
   RotateCw,
   X,
 } from "lucide-react";
 import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 
 import {
   userTaskQueryKeys,
@@ -23,6 +25,7 @@ import { cn } from "@/lib/utils";
 import {
   deriveTaskCenterViewState,
   deriveTaskHistoryPresentation,
+  resolveTaskRoute,
   TASK_FILTERS,
   taskFilterStatus,
   type TaskFilter,
@@ -41,6 +44,7 @@ interface TaskCenterProps {
   onCancelGeneration: (gen: Generation) => void;
   onRetryGeneration: (gen: Generation) => void;
   onViewGeneration: (gen: Generation) => void;
+  onLocateGeneration: (gen: Generation) => void;
   onClose: () => void;
 }
 
@@ -51,9 +55,11 @@ export function TaskCenter({
   onCancelGeneration,
   onRetryGeneration,
   onViewGeneration,
+  onLocateGeneration,
   onClose,
 }: TaskCenterProps) {
   const [filter, setFilter] = useState<TaskFilter>("all");
+  const router = useRouter();
   const userScope = useUserQueryScope();
   const status = taskFilterStatus(filter);
   const query = useQuery({
@@ -92,6 +98,7 @@ export function TaskCenter({
             onCancel={onCancelGeneration}
             onRetry={onRetryGeneration}
             onView={onViewGeneration}
+            onLocate={onLocateGeneration}
             busy={generationActionStates[generation.id]?.busy}
             actionError={generationActionStates[generation.id]?.error}
           />
@@ -110,6 +117,11 @@ export function TaskCenter({
             onCancelGeneration={onCancelGeneration}
             onRetryGeneration={onRetryGeneration}
             onViewGeneration={onViewGeneration}
+            onLocateGeneration={onLocateGeneration}
+            onLocateTask={(route) => {
+              onClose();
+              router.push(route);
+            }}
           />
         ))}
         {query.isLoading && (
@@ -208,6 +220,8 @@ function TaskCenterHistoryItem({
   onCancelGeneration,
   onRetryGeneration,
   onViewGeneration,
+  onLocateGeneration,
+  onLocateTask,
 }: {
   task: TaskItemResponse;
   localGeneration: Generation | undefined;
@@ -218,6 +232,8 @@ function TaskCenterHistoryItem({
   onCancelGeneration: (generation: Generation) => void;
   onRetryGeneration: (generation: Generation) => void;
   onViewGeneration: (generation: Generation) => void;
+  onLocateGeneration: (generation: Generation) => void;
+  onLocateTask: (route: string) => void;
 }) {
   if (localGeneration) {
     return (
@@ -226,6 +242,7 @@ function TaskCenterHistoryItem({
         onCancel={onCancelGeneration}
         onRetry={onRetryGeneration}
         onView={onViewGeneration}
+        onLocate={onLocateGeneration}
         busy={busy}
         actionError={actionError}
       />
@@ -238,6 +255,7 @@ function TaskCenterHistoryItem({
       actionError={actionError}
       onRetry={onRetry}
       onCancel={onCancel}
+      onLocate={onLocateTask}
     />
   );
 }
@@ -256,12 +274,14 @@ function TaskHistoryRow({
   actionError,
   onRetry,
   onCancel,
+  onLocate,
 }: {
   task: TaskItemResponse;
   busy: boolean;
   actionError: string | null;
   onRetry: () => void;
   onCancel: () => void;
+  onLocate: (route: string) => void;
 }) {
   const presentation = deriveTaskHistoryPresentation(task);
 
@@ -283,6 +303,7 @@ function TaskHistoryRow({
           busy={busy}
           onRetry={onRetry}
           onCancel={onCancel}
+          onLocate={onLocate}
         />
       </div>
       {actionError && (
@@ -371,15 +392,29 @@ function TaskHistoryControls({
   busy,
   onRetry,
   onCancel,
+  onLocate,
 }: {
   task: TaskItemResponse;
   presentation: TaskHistoryPresentation;
   busy: boolean;
   onRetry: () => void;
   onCancel: () => void;
+  onLocate: (route: string) => void;
 }) {
+  const route = resolveTaskRoute(task);
   return (
     <div className="flex shrink-0 items-start gap-0.5">
+      {route ? (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onLocate(route)}
+          aria-label="定位任务消息"
+          className="inline-flex h-11 w-11 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-2)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50"
+        >
+          <MapPin className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
       {presentation.active && (
         <button
           type="button"

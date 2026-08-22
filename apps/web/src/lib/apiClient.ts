@@ -89,8 +89,10 @@ export interface AuthUser {
     fast?: boolean;
     upload_max_source_bytes?: number;
     canvas_enabled?: boolean;
+    agent_enabled?: boolean;
     nav_visibility?: {
       studio?: boolean;
+      agent?: boolean;
       video?: boolean;
       projects?: boolean;
       assets?: boolean;
@@ -349,6 +351,8 @@ export interface TaskItemResponse {
   action_source?: string | null;
   trace_id?: string | null;
   conversation_id?: string | null;
+  agent_session_id?: string | null;
+  agent_run_id?: string | null;
   project_id?: string | null;
   workflow_type?: string | null;
   workflow_step_key?: string | null;

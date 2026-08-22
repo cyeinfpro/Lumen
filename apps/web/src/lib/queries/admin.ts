@@ -418,7 +418,12 @@ export function useUpdateProvidersMutation(
     UseMutationOptions<
       ProvidersOut,
       Error,
-      ProviderItemIn[] | { items: ProviderItemIn[]; proxies?: ProviderProxyIn[] }
+      | ProviderItemIn[]
+      | {
+          items: ProviderItemIn[];
+          proxies?: ProviderProxyIn[];
+          default_model?: string;
+        }
     >,
     "mutationFn"
   >,
@@ -427,12 +432,19 @@ export function useUpdateProvidersMutation(
   return useMutation<
     ProvidersOut,
     Error,
-    ProviderItemIn[] | { items: ProviderItemIn[]; proxies?: ProviderProxyIn[] }
+    | ProviderItemIn[]
+    | {
+        items: ProviderItemIn[];
+        proxies?: ProviderProxyIn[];
+        default_model?: string;
+      }
   >({
     mutationFn: (payload) => updateProviders(payload),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
       qc.invalidateQueries({ queryKey: qk.providers() });
+      qc.invalidateQueries({ queryKey: qk.adminModels() });
+      qc.invalidateQueries({ queryKey: qk.systemSettings() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });

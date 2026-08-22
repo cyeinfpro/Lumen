@@ -20,6 +20,7 @@ export type Op = { kind: "set"; value: string } | { kind: "clear" };
 export type SettingGroupId =
   | "site"
   | "ui"
+  | "agent"
   | "image"
   | "upstream"
   | "providers"
@@ -101,9 +102,11 @@ export const IMAGE_JOB_BASE_URL_KEY = "image.job_base_url";
 export const SITE_PUBLIC_BASE_URL_KEY = "site.public_base_url";
 export const SITE_SHARE_EXPIRATION_DAYS_KEY = "site.share_expiration_days";
 export const UI_NAV_STUDIO_VISIBLE_KEY = "ui.nav.studio_visible";
+export const UI_NAV_AGENT_VISIBLE_KEY = "ui.nav.agent_visible";
 export const UI_NAV_VIDEO_VISIBLE_KEY = "ui.nav.video_visible";
 export const UI_NAV_PROJECTS_VISIBLE_KEY = "ui.nav.projects_visible";
 export const UI_NAV_ASSETS_VISIBLE_KEY = "ui.nav.assets_visible";
+export const AGENT_ENABLED_KEY = "agent.enabled";
 export const HIDDEN_KEYS = new Set<string>([
   "providers",
   "image.primary_route",
@@ -198,6 +201,29 @@ export const SETTING_META: Record<string, SettingMeta> = {
     defaultValue: "1",
     recommended: "默认显示。四个业务入口可分别关闭。",
     keywords: ["ui", "nav", "studio", "创作", "入口", "导航"],
+  },
+  [UI_NAV_AGENT_VISIBLE_KEY]: {
+    group: "agent",
+    title: "显示 Agent 入口",
+    summary: "控制主导航里的 Agent 是否向用户显示。",
+    detail: "需同时开启 Agent 能力",
+    kind: "toggle",
+    icon: Bot,
+    defaultValue: "0",
+    recommended: "灰度验证完成后再显示入口。",
+    keywords: ["ui", "nav", "agent", "智能体", "入口", "导航"],
+  },
+  [AGENT_ENABLED_KEY]: {
+    group: "agent",
+    title: "启用 Agent 能力",
+    summary: "开启 Agent API、会话和运行入口。",
+    detail: "运行时未就绪时保持关闭",
+    kind: "toggle",
+    icon: Bot,
+    defaultValue: "0",
+    recommended: "确认 Agent Runtime、Worker 和工具网关就绪后开启。",
+    warning: "开启后 Agent API 会接受真实请求并产生对话或图片费用。",
+    keywords: ["agent", "enabled", "runtime", "worker", "智能体"],
   },
   [UI_NAV_VIDEO_VISIBLE_KEY]: {
     group: "ui",
@@ -604,6 +630,12 @@ export const GROUPS: {
     icon: SlidersHorizontal,
   },
   {
+    id: "agent",
+    label: "Agent",
+    description: "能力开关和导航入口",
+    icon: Bot,
+  },
+  {
     id: "image",
     label: "图片生成",
     description: "引擎、通道和尺寸策略",
@@ -669,7 +701,7 @@ export const GROUP_NAV_SECTIONS: {
   label: string;
   ids: FilterId[];
 }[] = [
-  { label: "核心", ids: ["all", "image", "upstream", "providers", "site", "ui"] },
+  { label: "核心", ids: ["all", "agent", "image", "upstream", "providers", "site", "ui"] },
   {
     label: "上下文",
     ids: ["context_auto", "context_caption", "context_manual"],
@@ -755,6 +787,7 @@ export function countByGroup(items: SystemSettingItem[]): Record<SettingGroupId,
   const counts: Record<SettingGroupId, number> = {
     site: 0,
     ui: 0,
+    agent: 0,
     image: 0,
     upstream: 0,
     providers: 0,
@@ -796,6 +829,7 @@ export function getSettingMeta(key: string, fallbackDescription?: string): Setti
   const prefix = key.includes(".") ? key.split(".")[0] : key;
   let group: SettingGroupId = "advanced";
   if (prefix === "site") group = "site";
+  else if (prefix === "agent") group = "agent";
   else if (prefix === "image") group = "image";
   else if (prefix === "upstream") group = "upstream";
   else if (prefix === "providers") group = "providers";

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from .common import BaseOut
 
@@ -17,6 +17,20 @@ ProviderPurpose = Literal["chat", "image", "embedding"]
 
 def _default_provider_purposes() -> list[ProviderPurpose]:
     return ["chat", "image"]
+
+
+def _normalize_agent_models(values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        value = raw.strip()
+        if not value or value in seen:
+            continue
+        if len(value) > 256:
+            raise ValueError("agent model id exceeds 256 characters")
+        seen.add(value)
+        normalized.append(value)
+    return normalized
 
 
 class ProviderItemOut(BaseModel):
@@ -37,6 +51,14 @@ class ProviderItemOut(BaseModel):
     image_concurrency: int = 1
     # Capability tri-state (image-stability-hardening §P2). null = 未知（默认）。
     responses_supported: bool | None = None
+    vision_supported: bool | None = None
+    agent_api: Literal[
+        "openai-responses", "openai-completions", "anthropic-messages"
+    ] = "openai-responses"
+    agent_models: list[str] = Field(default_factory=list, max_length=128)
+    agent_context_window: int = Field(default=128000, ge=4096, le=2_000_000)
+    agent_max_output_tokens: int = Field(default=16384, ge=1, le=128000)
+    agent_reasoning_supported: bool = True
     image_generations_supported: bool | None = None
     image_responses_supported: bool | None = None
 
@@ -75,6 +97,41 @@ class AdminModelsOut(BaseModel):
     errors: list[AdminModelsErrorOut] = []
 
 
+class AdminProviderModelProfileOut(BaseModel):
+    agent_api: Literal[
+        "openai-responses", "openai-completions", "anthropic-messages"
+    ]
+    responses_supported: bool | None = None
+    vision_supported: bool | None = None
+    context_window: int = Field(ge=4096, le=2_000_000)
+    max_output_tokens: int = Field(ge=1, le=128000)
+    reasoning_supported: bool
+    source: Literal["provider", "known_family", "conservative"]
+
+
+class AdminProviderModelOut(BaseModel):
+    id: str = Field(min_length=1, max_length=256)
+    profile: AdminProviderModelProfileOut
+
+
+class AdminProviderModelsDiscoverIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_name: str | None = Field(default=None, max_length=120)
+    base_url: str = Field(min_length=8, max_length=2048)
+    api_key: str = Field(default="", max_length=8192, repr=False)
+    proxy: str | None = Field(default=None, max_length=120)
+    agent_api: Literal[
+        "openai-responses", "openai-completions", "anthropic-messages"
+    ] = "openai-responses"
+
+
+class AdminProviderModelsDiscoverOut(BaseModel):
+    models: list[AdminProviderModelOut] = Field(default_factory=list, max_length=1000)
+    fetched_at: datetime
+    error: str | None = None
+
+
 class ProviderItemIn(BaseModel):
     name: str
     base_url: str
@@ -95,8 +152,21 @@ class ProviderItemIn(BaseModel):
     image_concurrency: int = 1
     # Capability tri-state（详见 ProviderItemOut 注释）
     responses_supported: bool | None = None
+    vision_supported: bool | None = None
+    agent_api: Literal[
+        "openai-responses", "openai-completions", "anthropic-messages"
+    ] = "openai-responses"
+    agent_models: list[str] = Field(default_factory=list, max_length=128)
+    agent_context_window: int = Field(default=128000, ge=4096, le=2_000_000)
+    agent_max_output_tokens: int = Field(default=16384, ge=1, le=128000)
+    agent_reasoning_supported: bool = True
     image_generations_supported: bool | None = None
     image_responses_supported: bool | None = None
+
+    @field_validator("agent_models")
+    @classmethod
+    def validate_agent_models(cls, values: list[str]) -> list[str]:
+        return _normalize_agent_models(values)
 
 
 class ProviderProxyIn(BaseModel):
@@ -113,6 +183,7 @@ class ProviderProxyIn(BaseModel):
 class ProvidersUpdateIn(BaseModel):
     items: list[ProviderItemIn]
     proxies: list[ProviderProxyIn] = []
+    default_model: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 VideoProviderKind = Literal[
@@ -495,6 +566,10 @@ __all__ = [
     "AdminModelOut",
     "AdminModelsErrorOut",
     "AdminModelsOut",
+    "AdminProviderModelProfileOut",
+    "AdminProviderModelOut",
+    "AdminProviderModelsDiscoverIn",
+    "AdminProviderModelsDiscoverOut",
     "ProviderItemIn",
     "ProviderProxyIn",
     "ProvidersUpdateIn",
