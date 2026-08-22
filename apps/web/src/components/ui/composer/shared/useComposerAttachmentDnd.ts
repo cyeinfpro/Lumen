@@ -79,9 +79,16 @@ export function useComposerAttachmentDnd<TAttachment>({
       } finally {
         uploadControllersRef.current.delete(ctl);
         setIsUploading(uploadControllersRef.current.size > 0);
+        setExpanded(true);
       }
     },
-    [uploadAttachment, addAttachment, setError, setIsUploading],
+    [
+      uploadAttachment,
+      addAttachment,
+      setError,
+      setExpanded,
+      setIsUploading,
+    ],
   );
 
   const ingestMany = useCallback(
@@ -106,7 +113,13 @@ export function useComposerAttachmentDnd<TAttachment>({
       }
       if (ok > 0) pushMobileToast(`已添加 ${ok} 张参考图`, "success");
     },
-    [getAttachmentCount, ingestFile, limit, limitMessage, setError],
+    [
+      getAttachmentCount,
+      ingestFile,
+      limit,
+      limitMessage,
+      setError,
+    ],
   );
 
   const handlePaste = useCallback(
@@ -184,7 +197,6 @@ export function useComposerAttachmentDnd<TAttachment>({
   );
 
   useEffect(() => {
-    const uploadControllers = uploadControllersRef.current;
     const resetDragState = () => {
       dragDepthRef.current = 0;
       setIsDragActive(false);
@@ -224,10 +236,6 @@ export function useComposerAttachmentDnd<TAttachment>({
       window.removeEventListener("drop", onDrop);
       window.removeEventListener("dragleave", onDragLeave);
       window.removeEventListener("dragend", resetDragState);
-      for (const ctl of uploadControllers) {
-        ctl.abort();
-      }
-      uploadControllers.clear();
     };
   }, [dragDepthRef, ingestMany, setExpanded, setIsDragActive]);
 
