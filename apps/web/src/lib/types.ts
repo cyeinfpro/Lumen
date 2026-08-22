@@ -237,6 +237,9 @@ export interface Generation {
   recommended_actions?: RecommendedErrorAction[];
   source?: string | null;
   conversation_id?: string | null;
+  agent_session_id?: string | null;
+  agent_run_id?: string | null;
+  agent_tool_call_id?: string | null;
   project_id?: string | null;
   thumb_url?: string | null;
   diagnostics?: ImageGenerationDiagnostics | null;

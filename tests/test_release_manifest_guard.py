@@ -30,6 +30,8 @@ def _manifest(tag: str = "v1.2.3") -> dict[str, object]:
             "digest": digest,
             "immutable_ref": f"{repository}@{digest}",
         }
+    agent_digest = f"sha256:{5:064x}"
+    agent_repository = "ghcr.io/cyeinfpro/lumen-agent-runtime"
     return {
         "schema_version": 1,
         "version": tag,
@@ -49,6 +51,18 @@ def _manifest(tag: str = "v1.2.3") -> dict[str, object]:
             },
         },
         "images": images,
+        "components": {
+            "agent-runtime": {
+                "tag": f"{agent_repository}:{tag}",
+                "digest": agent_digest,
+                "immutable_ref": f"{agent_repository}@{agent_digest}",
+            }
+        },
+        "component_dependencies": {
+            "node": {
+                "immutable_ref": "node:22.22.0-alpine@sha256:" + ("d" * 64)
+            }
+        },
     }
 
 
@@ -61,7 +75,25 @@ def test_release_manifest_guard_validates_exact_image_set(tmp_path: Path) -> Non
 
     assert loaded["version"] == "v1.2.3"
     assert set(loaded["images"]) == {"api", "worker", "web", "tgbot"}
+    assert set(loaded["components"]) == {"agent-runtime"}
+    assert set(loaded["component_dependencies"]) == {"node"}
     assert set(loaded["dependencies"]) == {"python", "postgres", "redis"}
+
+
+def test_release_manifest_guard_accepts_legacy_schema_one_without_components(
+    tmp_path: Path,
+) -> None:
+    guard = _load_guard()
+    payload = _manifest()
+    payload.pop("components")
+    payload.pop("component_dependencies")
+    path = tmp_path / "release-manifest.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = guard.load_manifest(path, tag="v1.2.3")
+
+    assert loaded["components"] == {}
+    assert loaded["component_dependencies"] == {}
 
 
 def test_release_manifest_guard_rejects_mutated_digest_or_tag(

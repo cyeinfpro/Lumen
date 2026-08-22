@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
 from lumen_core.model_entities.billing_operations import WalletTransaction
+from lumen_core.model_entities.agents import AgentRun
 from lumen_core.model_entities.tasks import Completion, Generation, VideoGeneration
 from lumen_core.upstream_billing import (
     UpstreamCostKnowledge,
@@ -30,6 +31,10 @@ _HOLD_TASKS = MappingProxyType(
         "video_generation": (
             VideoGeneration,
             frozenset({"succeeded", "failed", "canceled", "expired"}),
+        ),
+        "agent_run": (
+            AgentRun,
+            frozenset({"succeeded", "partial", "failed", "cancelled"}),
         ),
     }
 )
@@ -115,7 +120,11 @@ def _hold_release_proof(task: Any, *, ref_type: str) -> str | None:
     proven_absent = UpstreamCostKnowledge.PROVEN_ABSENT.value
     payloads: list[Mapping[str, Any]] = []
     attributes = (
-        ("diagnostics",) if ref_type == "video_generation" else ("upstream_request",)
+        ("diagnostics",)
+        if ref_type == "video_generation"
+        else ("dispatch_jsonb", "billing_jsonb")
+        if ref_type == "agent_run"
+        else ("upstream_request",)
     )
     for attribute in attributes:
         value = getattr(task, attribute, None)
@@ -136,6 +145,18 @@ def _hold_release_proof(task: Any, *, ref_type: str) -> str | None:
         return "upstream_dispatch:proven_undelivered"
     if ref_type == "video_generation" and _video_delivery_proven_absent(task):
         return "submit_delivery_state:proven_absent"
+    if ref_type == "agent_run":
+        dispatch = (
+            task.dispatch_jsonb
+            if isinstance(getattr(task, "dispatch_jsonb", None), Mapping)
+            else {}
+        )
+        if dispatch.get("runtime_delivery") in {
+            "claimed",
+            "context_ready",
+            "proven_absent",
+        }:
+            return f"runtime_delivery:{dispatch['runtime_delivery']}"
     return None
 
 

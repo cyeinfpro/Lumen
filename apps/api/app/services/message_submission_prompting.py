@@ -41,6 +41,7 @@ class TaskCredentialPin:
     default_chat_model: str
     fast_chat_model: str | None
     default_image_model: str | None
+    capabilities_jsonb: dict[str, Any] | None = None
 
 
 def _non_blank(text: str | None) -> str | None:
@@ -193,12 +194,26 @@ async def resolve_task_credential_pin(
                 "your current API Key does not support this task type",
                 412,
             )
+        supplier_capabilities = (
+            getattr(supplier, "capabilities_jsonb", None)
+            if isinstance(getattr(supplier, "capabilities_jsonb", None), dict)
+            else {}
+        )
+        credential_capabilities = (
+            getattr(active, "capabilities_jsonb", None)
+            if isinstance(getattr(active, "capabilities_jsonb", None), dict)
+            else {}
+        )
         return TaskCredentialPin(
             credential_id=active.id,
             supplier_id=active.supplier_id,
             default_chat_model=supplier.default_chat_model or DEFAULT_CHAT_MODEL,
             fast_chat_model=supplier.fast_chat_model,
             default_image_model=getattr(supplier, "default_image_model", None),
+            capabilities_jsonb={
+                **supplier_capabilities,
+                **credential_capabilities,
+            },
         )
     raise http_error(
         "NO_ACTIVE_API_KEY",

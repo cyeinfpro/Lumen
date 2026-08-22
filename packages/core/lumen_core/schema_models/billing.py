@@ -66,6 +66,9 @@ class BillingUsageByKindOut(BaseModel):
     cache_creation: int = 0
     image: int = 0
     reasoning: int = 0
+    agent_text: int = 0
+    agent_text_to_image: int = 0
+    agent_image_to_image: int = 0
 
 
 class BillingSnapshotOut(BaseModel):

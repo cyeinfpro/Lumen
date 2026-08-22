@@ -555,7 +555,13 @@ async function hydrateActiveTaskSnapshot(
   if (messages instanceof Error) {
     return { status: "failed", error: messages };
   }
-  const incoming = response.generations ?? [];
+  // Agent generations belong to the independent Agent store/work surface.
+  // Hydrating them into Chat would make Studio recover a private Agent
+  // assistant message it cannot own or route correctly.
+  const incoming = (response.generations ?? []).filter(
+    (generation) =>
+      generation.source !== "agent" && !generation.agent_session_id,
+  );
   context.set((state) =>
     mergeHydratedTaskSnapshot(
       state,

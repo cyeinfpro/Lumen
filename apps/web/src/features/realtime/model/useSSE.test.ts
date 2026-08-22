@@ -161,7 +161,8 @@ test("SSE scope fence drops user A events across the B commit and cleanup window
     true,
   );
   deepEqual(delivered, ["user-b"]);
-  doesNotMatch(source, /acquireRealtimeRuntime|releaseRealtimeRuntime/);
+  match(source, /acquireRealtimeRuntime/);
+  match(source, /releaseRealtimeRuntime/);
   match(subscriptionSource, /export function isSSEScopeCurrent/);
   match(subscriptionSource, /export function dispatchSSEEventForScope/);
   match(lumenSource, /connectionGeneration: identityEpoch,/);
@@ -334,14 +335,12 @@ test("same-user recovery after a fail-closed reset bypasses the recent snapshot 
   );
 });
 
-test("public realtime hook is permanently polling-only and cannot open /events", () => {
-  match(source, /REALTIME_TRANSPORT_MODE = "polling-only"/);
-  match(source, /return \{ status: "idle", reconnect: NOOP_RECONNECT \};/);
-  doesNotMatch(
-    source,
-    /acquireRealtimeRuntime|releaseRealtimeRuntime|EventSource|runtimeRef|\.reconnect\(/,
-  );
-  doesNotMatch(source, /setTimeout|setInterval|scheduleRetry/);
+test("public realtime hook leases the shared EventSource runtime", () => {
+  match(source, /REALTIME_TRANSPORT_MODE = "event-source-with-polling-fallback"/);
+  match(source, /acquireRealtimeRuntime/);
+  match(source, /releaseRealtimeRuntime/);
+  match(source, /runtimeRef\.current\?\.reconnect\(\)/);
+  match(source, /return \{ status, reconnect \};/);
 });
 
 test("SSE subscriber adapter binds scope and registers only real recovery", async () => {
@@ -377,7 +376,7 @@ test("SSE subscriber adapter binds scope and registers only real recovery", asyn
   );
   deepEqual(result, { cursor: "user:user-b" });
 
-  doesNotMatch(source, /createSSESubscriber\(\{/);
+  match(source, /createSSESubscriber\(\{/);
 });
 
 test("polling snapshots stay fenced by scope and identity", () => {
@@ -396,7 +395,7 @@ test("polling snapshots stay fenced by scope and identity", () => {
   match(runtimeSource, /snapshotRequired: this\.hasSnapshotAdapters\(\)/);
 });
 
-test("polling-only keeps existing video, task, chat, and compaction recovery", () => {
+test("polling fallback keeps existing video, task, chat, and compaction recovery", () => {
   match(videoFeedSource, /startVideoActivePolling\(/);
   match(videoFeedSource, /window\.addEventListener\("focus", refreshVisibleTasks\)/);
   match(taskIslandSource, /refetchInterval: 8_000/);

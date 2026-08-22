@@ -75,11 +75,11 @@ def test_configured_tgbot_uses_compose_wait_and_is_tracked(tmp_path: Path) -> No
     assert result.returncode == 0, result.stderr + result.stdout
     calls = compose_log.read_text(encoding="utf-8").splitlines()
     assert calls == [
-        "up --pull missing -d --wait api worker web",
+        "up --pull missing -d --wait agent-runtime api worker web",
         "--profile tgbot up --pull missing -d --wait tgbot",
     ]
     assert "status=started" in result.stdout
-    assert "started=api worker web tgbot" in result.stdout
+    assert "started=agent-runtime api worker web tgbot" in result.stdout
 
 
 def test_configured_tgbot_wait_failure_aborts_install(tmp_path: Path) -> None:
@@ -104,7 +104,7 @@ esac
     ("function_name", "expected"),
     (
         ("start_infrastructure", "postgres redis"),
-        ("start_application_services", "api worker web"),
+        ("start_application_services", "agent-runtime api worker web"),
     ),
 )
 def test_partial_compose_start_is_tracked_before_wait_can_fail(

@@ -10,9 +10,11 @@ import { semanticPostIdempotency } from "@/lib/api/semanticIdempotency";
 import { CLOSE_EVENT } from "@/lib/lightbox/types";
 import { useInpaintStore } from "@/store/useInpaintStore";
 import { useUiStore } from "@/store/useUiStore";
+import { useAgentStore } from "@/store/agent/useAgentStore";
 
 function resetPrivateSurfaces(identity: PrivateIdentitySnapshot): void {
   useInpaintStore.getState().resetForIdentity(identity);
+  useAgentStore.getState().resetForIdentity(identity);
   useUiStore.getState().resetPrivateUiForIdentity(identity);
   if (typeof window !== "undefined") {
     window.dispatchEvent(new Event(CLOSE_EVENT));

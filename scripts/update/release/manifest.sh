@@ -91,7 +91,7 @@ if payload.get("schema_version") != 1 or payload.get("version") != tag:
     raise SystemExit(1)
 if not isinstance(immutable_ref, str) or not immutable_ref.startswith(expected_prefix):
     raise SystemExit(1)
-if not re.fullmatch(r"ghcr\.io/cyeinfpro/lumen-[a-z]+@sha256:[0-9a-f]{64}", immutable_ref):
+if not re.fullmatch(r"ghcr\.io/cyeinfpro/lumen-[a-z-]+@sha256:[0-9a-f]{64}", immutable_ref):
     raise SystemExit(1)
 print(immutable_ref)
 PY

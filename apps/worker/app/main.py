@@ -25,6 +25,7 @@ from lumen_core.context_window import warm_tiktoken
 from lumen_core.storage_capacity import build_storage_capacity
 
 from .config import settings
+from .agent_runtime_client import AgentRuntimeClient
 from .db import engine
 from .jobs.upstream_probe import probe_upstream
 from .observability import (
@@ -43,6 +44,7 @@ from .services import billing_cache
 from .storage import storage
 from .storage_writes import StorageWriteCoordinator
 from .tasks import auto_title as auto_title_tasks
+from .tasks import agent_run as agent_run_tasks
 from .tasks import byok_retention as byok_retention_tasks
 from .tasks import canvas_execution_reconcile as canvas_reconcile_tasks
 from .tasks import context_summary as context_summary_tasks
@@ -246,6 +248,17 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
         await billing_cache.configure(ctx.get("redis"))
         lifecycle.own("billing_cache", billing_cache.shutdown)
 
+        agent_runtime_client = AgentRuntimeClient(
+            base_url=settings.agent_runtime_url,
+            shared_secret=settings.agent_runtime_shared_secret,
+            connect_timeout_seconds=settings.agent_runtime_connect_timeout_seconds,
+            event_idle_timeout_seconds=(
+                settings.agent_runtime_event_idle_timeout_seconds
+            ),
+        )
+        ctx["agent_runtime_client"] = agent_runtime_client
+        lifecycle.own("agent_runtime_client", agent_runtime_client.close)
+
         worker_runtime = WorkerRuntime(
             _runtime_settings=runtime_settings_cache,
             _image_upstream=image_upstream_runtime,
@@ -254,6 +267,7 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
             _completion=completion_runtime,
             _video=video_generation_runtime,
             _metrics_server=metrics_server_runtime,
+            _agent_runtime=agent_runtime_client,
             _lifecycle=lifecycle,
         )
         ctx["worker_runtime"] = worker_runtime
@@ -282,6 +296,7 @@ class WorkerSettings:
         video_generation_tasks.run_video_poll,
         storyboard_assembly_tasks.run_storyboard_assembly,
         completion_tasks.run_completion,
+        agent_run_tasks.run_agent,
         canvas_reconcile_tasks.reconcile_canvas_execution,
         outbox_tasks.publish_outbox,
         auto_title_tasks.auto_title_conversation,
@@ -298,6 +313,7 @@ class WorkerSettings:
         + canvas_reconcile_tasks.cron_jobs
         + video_generation_tasks.cron_jobs
         + volcano_asset_recovery_tasks.cron_jobs
+        + list(agent_run_tasks.cron_jobs)
         + [
             # provider probe 可能卡在 Redis、代理或上游 TCP；arq 的 cron timeout
             # 负责取消该 job，避免它占住 cron 槽位和 worker event loop。

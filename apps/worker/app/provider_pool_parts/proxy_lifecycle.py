@@ -19,6 +19,20 @@ class ProviderProxyLifecycle:
             runtime=runtime,
         )
 
+    async def resolve_for_agent(
+        self,
+        proxy: ProviderProxyDefinition | None,
+        *,
+        bind_host: str,
+        advertise_host: str,
+    ) -> str | None:
+        return await proxy_runtime.resolve_provider_proxy_url(
+            proxy,
+            runtime=self.runtime,
+            bind_host=bind_host,
+            advertise_host=advertise_host,
+        )
+
     async def close(self) -> None:
         runtime = self.runtime
         try:

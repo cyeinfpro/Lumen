@@ -50,7 +50,9 @@ except ImportError:
     )
 
 
-SERVICES = ("api", "worker", "tgbot", "web")
+LEGACY_SERVICES = ("api", "worker", "tgbot", "web")
+COMPONENT_SERVICES = ("agent-runtime",)
+SERVICES = (*LEGACY_SERVICES, *COMPONENT_SERVICES)
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 __all__ = [
@@ -99,11 +101,19 @@ def parse_release_manifest_digests(text: str, *, tag: str) -> dict[str, str]:
     ):
         raise PromotionError(f"release manifest metadata mismatch for {tag}")
     images = payload.get("images")
-    if not isinstance(images, dict) or set(images) != set(SERVICES):
+    if not isinstance(images, dict) or set(images) != set(LEGACY_SERVICES):
         raise PromotionError(f"release manifest image set mismatch for {tag}")
+    components = payload.get("components")
+    if components is None:
+        components = {}
+    if not isinstance(components, dict) or set(components) - set(COMPONENT_SERVICES):
+        raise PromotionError(f"release manifest component set mismatch for {tag}")
+    combined = {**images, **components}
     digests: dict[str, str] = {}
-    for service in SERVICES:
-        image = images.get(service)
+    for service in combined:
+        if service not in SERVICES:
+            raise PromotionError(f"release manifest service is unsupported: {service}")
+        image = combined.get(service)
         repository = f"ghcr.io/cyeinfpro/lumen-{service}"
         if not isinstance(image, dict):
             raise PromotionError(f"release manifest missing {service} for {tag}")
@@ -535,10 +545,24 @@ class PromotionPublisher:
             if snapshot.old_digest is None
         ]
         if missing and plan.mode == "main":
-            raise PromotionError(
-                "mutable aliases have no complete rollback baseline and registry "
-                "deletion is unavailable; refusing first/partial publication "
-                "before writes: " + ", ".join(missing)
+            transition_only = all(
+                snapshot.service in COMPONENT_SERVICES
+                for snapshot in snapshots
+                if snapshot.old_digest is None
+            ) and all(
+                snapshot.old_digest is not None
+                for snapshot in snapshots
+                if snapshot.service in LEGACY_SERVICES
+            )
+            if not transition_only:
+                raise PromotionError(
+                    "mutable aliases have no complete rollback baseline; "
+                    "refusing first/partial publication before writes: "
+                    + ", ".join(missing)
+                )
+            self._log(
+                "main alias transition adds only independently removable "
+                "component services"
             )
 
         if plan.mode == "main":
@@ -868,7 +892,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="SERVICE=SHA256",
-        help="Immutable digest for one service; required for all four services.",
+        help="Immutable digest for one service; required for all release services.",
     )
     parser.add_argument(
         "--docker-command",
@@ -902,7 +926,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 github_command,
                 repository,
             )
-            owner, _, _ = repository.partition("/")
+        if args.phase in {"all", "mutable"} and args.github_repository:
+            github_command = SubprocessCommand(_command_prefix(args.github_command))
+            owner, _, _ = args.github_repository.partition("/")
             package_deleter = GitHubPackageTagDeleter(github_command, owner)
         docker = DockerRegistry(
             SubprocessCommand(_command_prefix(args.docker_command)),

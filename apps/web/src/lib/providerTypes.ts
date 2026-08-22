@@ -6,6 +6,10 @@ import type { AdminUserOut } from "./adminTypes";
 export type ImageJobsEndpoint = "auto" | "generations" | "responses";
 export type ImageEditInputTransport = "url" | "file";
 export type ProviderPurpose = "chat" | "image" | "embedding";
+export type ProviderAgentApi =
+  | "openai-responses"
+  | "openai-completions"
+  | "anthropic-messages";
 
 export interface ProviderItemOut {
   name: string;
@@ -23,6 +27,15 @@ export interface ProviderItemOut {
   image_jobs_base_url: string;
   image_edit_input_transport: ImageEditInputTransport;
   image_concurrency: number;
+  responses_supported: boolean | null;
+  vision_supported: boolean | null;
+  agent_api: ProviderAgentApi;
+  agent_models?: string[];
+  agent_context_window: number;
+  agent_max_output_tokens: number;
+  agent_reasoning_supported: boolean;
+  image_generations_supported: boolean | null;
+  image_responses_supported: boolean | null;
 }
 
 export type ProviderProxyType = "socks5" | "ssh";
@@ -60,6 +73,15 @@ export interface ProviderItemIn {
   image_jobs_base_url?: string;
   image_edit_input_transport?: ImageEditInputTransport;
   image_concurrency?: number;
+  responses_supported?: boolean | null;
+  vision_supported?: boolean | null;
+  agent_api?: ProviderAgentApi;
+  agent_models?: string[];
+  agent_context_window?: number;
+  agent_max_output_tokens?: number;
+  agent_reasoning_supported?: boolean;
+  image_generations_supported?: boolean | null;
+  image_responses_supported?: boolean | null;
 }
 
 export interface ProviderProxyIn {
@@ -71,6 +93,40 @@ export interface ProviderProxyIn {
   password?: string;
   private_key_path?: string | null;
   enabled: boolean;
+}
+
+export type ProviderModelProfileSource =
+  | "provider"
+  | "known_family"
+  | "conservative";
+
+export interface ProviderModelProfile {
+  agent_api: ProviderAgentApi;
+  responses_supported: boolean | null;
+  vision_supported: boolean | null;
+  context_window: number;
+  max_output_tokens: number;
+  reasoning_supported: boolean;
+  source: ProviderModelProfileSource;
+}
+
+export interface ProviderDiscoveredModel {
+  id: string;
+  profile: ProviderModelProfile;
+}
+
+export interface ProviderModelsDiscoverIn {
+  provider_name?: string | null;
+  base_url: string;
+  api_key: string;
+  proxy?: string | null;
+  agent_api: ProviderAgentApi;
+}
+
+export interface ProviderModelsDiscoverOut {
+  models: ProviderDiscoveredModel[];
+  fetched_at: string;
+  error: string | null;
 }
 
 export interface VideoProviderItemOut {

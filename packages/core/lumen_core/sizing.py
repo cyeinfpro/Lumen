@@ -40,6 +40,7 @@ AspectRatio = Literal[
     "2:3",
 ]
 SizeMode = Literal["auto", "fixed"]
+ImageQuality = Literal["1k", "2k", "4k"]
 
 # 默认 preset：按用户要求"默认最大 4K 画质 + 按比例分配"。
 # 每条均满足 validate_explicit_size：16 对齐、最长边 ≤ 3840、总像素 ≤ 8,294,400、长宽比 ≤ 3:1。
@@ -58,6 +59,40 @@ _PRESET: Mapping[str, tuple[int, int]] = immutable_mapping(
         "4:3": (3264, 2448),
         "3:2": (3504, 2336),  # 8,185,344
         "2:3": (2336, 3504),
+    }
+)
+
+_PRESET_1K: Mapping[str, tuple[int, int]] = immutable_mapping(
+    {
+        "1:1": (1024, 1024),
+        "16:9": (1536, 864),
+        "9:16": (864, 1536),
+        "21:9": (1536, 656),
+        "9:21": (656, 1536),
+        "10:7": (1344, 944),
+        "7:10": (944, 1344),
+        "4:5": (1024, 1280),
+        "3:4": (1024, 1360),
+        "4:3": (1360, 1024),
+        "3:2": (1440, 960),
+        "2:3": (960, 1440),
+    }
+)
+
+_PRESET_2K: Mapping[str, tuple[int, int]] = immutable_mapping(
+    {
+        "1:1": (1440, 1440),
+        "16:9": (2048, 1152),
+        "9:16": (1152, 2048),
+        "21:9": (2240, 960),
+        "9:21": (960, 2240),
+        "10:7": (1920, 1344),
+        "7:10": (1344, 1920),
+        "4:5": (1280, 1600),
+        "3:4": (1248, 1664),
+        "4:3": (1664, 1248),
+        "3:2": (1872, 1248),
+        "2:3": (1248, 1872),
     }
 )
 
@@ -89,6 +124,25 @@ class ResolvedSize:
 
 def ratio_instruction(aspect: AspectRatio) -> str:
     return f" Preserve a strict {aspect} composition."
+
+
+def quality_to_fixed_size(quality: ImageQuality, aspect: AspectRatio) -> str:
+    """Resolve the UI quality tier to canonical, validated dimensions."""
+    presets: Mapping[str, tuple[int, int]]
+    if quality == "1k":
+        presets = _PRESET_1K
+    elif quality == "2k":
+        presets = _PRESET_2K
+    elif quality == "4k":
+        presets = _PRESET
+    else:
+        raise ValueError(f"unsupported image quality: {quality!r}")
+    try:
+        width, height = presets[aspect]
+    except KeyError as exc:
+        raise ValueError(f"unsupported aspect ratio: {aspect!r}") from exc
+    validate_explicit_size(width, height)
+    return f"{width}x{height}"
 
 
 def validate_explicit_size(w: int, h: int) -> None:

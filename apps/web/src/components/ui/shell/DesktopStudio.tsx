@@ -13,16 +13,13 @@ import {
   type ReactNode,
 } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { PanelLeftOpen, Plus, X } from "lucide-react";
 
 import { DesktopTopNav } from "@/components/ui/shell/DesktopTopNav";
 import { Sidebar } from "@/components/ui/Sidebar";
 import { Onboarding } from "@/components/Onboarding";
 import { DesktopComposerPill } from "@/components/ui/composer/desktop";
 import {
-  Button,
   ErrorState,
-  IconButton,
   Spinner,
 } from "@/components/ui/primitives";
 import {
@@ -37,13 +34,17 @@ import {
   useListConversationsInfiniteQuery,
 } from "@/lib/queries";
 import { logWarn } from "@/lib/logger";
-import { DURATION, EASE, SPRING } from "@/lib/motion";
+import { DURATION, EASE } from "@/lib/motion";
 import type { Generation, Intent, Message } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { StudioContextBar } from "./StudioContextBar";
 import { useDefaultConversationSelection } from "./useDefaultConversationSelection";
 import { useConversationRouteSync } from "./useConversationRouteSync";
+import {
+  DesktopPrivateSidebarDock,
+  DesktopPrivateSidebarDrawer,
+} from "./PrivateSidebarShell";
 
 declare global {
   interface WindowEventMap {
@@ -315,12 +316,15 @@ export function DesktopStudio() {
         />
 
         <div className="flex min-h-0 flex-1">
-          <DesktopSidebarDock
+          <DesktopPrivateSidebarDock
             expanded={isWideSidebar === true && sidebarOpen}
             onToggle={handleSidebarToggle}
             onCreate={() => !createMut.isPending && createMut.mutate({})}
             creating={createMut.isPending}
-          />
+            label="会话导航"
+          >
+            <Sidebar embedded />
+          </DesktopPrivateSidebarDock>
 
           <section className="flex min-w-0 flex-1 flex-col">
             <StudioContextBar
@@ -380,18 +384,19 @@ export function DesktopStudio() {
         />
       </div>
 
-      <DesktopSidebarDrawer
+      <DesktopPrivateSidebarDrawer
         open={drawerOpen && isWideSidebar !== true}
         onClose={closeSidebarDrawer}
         backgroundRef={workspaceRef}
         returnFocusRef={sidebarTriggerRef}
+        title="会话侧栏"
       >
         <Sidebar
           embedded
           showBrand
           onNavigate={closeSidebarDrawer}
         />
-      </DesktopSidebarDrawer>
+      </DesktopPrivateSidebarDrawer>
     </div>
   );
 }
@@ -539,203 +544,5 @@ function DesktopComposerSlot({
       onSubmit={onSubmit}
       onMetricsChange={onMetricsChange}
     />
-  );
-}
-
-function DesktopSidebarDrawer({
-  open,
-  onClose,
-  backgroundRef,
-  returnFocusRef,
-  children,
-}: {
-  open: boolean;
-  onClose: () => void;
-  backgroundRef: RefObject<HTMLElement | null>;
-  returnFocusRef: RefObject<HTMLButtonElement | null>;
-  children: ReactNode;
-}) {
-  const panelRef = useRef<HTMLElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const panel = panelRef.current;
-    const background = backgroundRef.current;
-    const returnFocusTarget = returnFocusRef.current;
-    const previousBodyOverflow = document.body.style.overflow;
-    const previousBackgroundInert = background?.inert ?? false;
-    const previousBackgroundAriaHidden =
-      background?.getAttribute("aria-hidden") ?? null;
-
-    if (background) {
-      background.inert = true;
-      background.setAttribute("aria-hidden", "true");
-    }
-    document.body.style.overflow = "hidden";
-
-    const focusFrame = window.requestAnimationFrame(() => panel?.focus());
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-        return;
-      }
-      if (e.key !== "Tab" || !panel) return;
-
-      const focusable = Array.from(
-        panel.querySelectorAll<HTMLElement>(
-          'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        ),
-      ).filter(
-        (element) =>
-          !element.hasAttribute("hidden") && element.getClientRects().length > 0,
-      );
-      if (focusable.length === 0) {
-        e.preventDefault();
-        panel.focus();
-        return;
-      }
-
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (
-        e.shiftKey &&
-        (document.activeElement === first || document.activeElement === panel)
-      ) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.cancelAnimationFrame(focusFrame);
-      window.removeEventListener("keydown", onKey);
-      document.body.style.overflow = previousBodyOverflow;
-      if (background) {
-        background.inert = previousBackgroundInert;
-        if (previousBackgroundAriaHidden === null) {
-          background.removeAttribute("aria-hidden");
-        } else {
-          background.setAttribute(
-            "aria-hidden",
-            previousBackgroundAriaHidden,
-          );
-        }
-      }
-      window.requestAnimationFrame(() => returnFocusTarget?.focus());
-    };
-  }, [backgroundRef, open, onClose, returnFocusRef]);
-
-  return (
-    <AnimatePresence>
-      {open && (
-        <>
-          <motion.div
-            key="drawer-backdrop"
-            className="fixed inset-x-0 bottom-0 z-[calc(var(--z-dialog)-1)] bg-[var(--surface-scrim)] min-[1440px]:hidden"
-            style={{
-              top: "calc(var(--top-banner-stack-height, 0px) + env(safe-area-inset-top, 0px))",
-            }}
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.18 }}
-            onClick={onClose}
-            aria-hidden
-          />
-          <motion.aside
-            ref={panelRef}
-            key="drawer-panel"
-            tabIndex={-1}
-            className="fixed bottom-0 left-0 z-[var(--z-dialog)] w-[var(--sidebar-panel-w)] overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--bg-1)] pb-[env(safe-area-inset-bottom,0px)] min-[1440px]:hidden"
-            style={{
-              top: "calc(var(--top-banner-stack-height, 0px) + env(safe-area-inset-top, 0px))",
-            }}
-            initial={{ x: "-100%" }}
-            animate={{ x: 0 }}
-            exit={{ x: "-100%" }}
-            transition={SPRING.drawer}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="desktop-sidebar-drawer-title"
-          >
-            <h2 id="desktop-sidebar-drawer-title" className="sr-only">
-              会话侧栏
-            </h2>
-            <IconButton
-              size="sm"
-              variant="ghost"
-              onClick={onClose}
-              aria-label="关闭会话侧栏"
-              className="absolute right-3 top-3 z-[var(--z-header)] rounded-[var(--radius-control)]"
-            >
-              <X className="h-4 w-4" aria-hidden />
-            </IconButton>
-            {children}
-          </motion.aside>
-        </>
-      )}
-    </AnimatePresence>
-  );
-}
-
-function DesktopSidebarDock({
-  expanded,
-  onToggle,
-  onCreate,
-  creating,
-}: {
-  expanded: boolean;
-  onToggle: () => void;
-  onCreate: () => void;
-  creating: boolean;
-}) {
-  return (
-    <aside
-      aria-label="会话导航"
-      className={cn(
-        "hidden min-[1120px]:flex shrink-0 overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--bg-1)]",
-        "transition-[width] duration-[var(--dur-panel)]",
-        expanded
-          ? "w-[var(--sidebar-rail-w)] min-[1440px]:w-[var(--sidebar-panel-w)]"
-          : "w-[var(--sidebar-rail-w)]",
-      )}
-    >
-      {expanded ? (
-        <div className="hidden h-full min-w-0 flex-1 min-[1440px]:flex">
-          <Sidebar embedded />
-        </div>
-      ) : null}
-      <div
-        className={cn(
-          "flex h-full w-[var(--sidebar-rail-w)] shrink-0 flex-col items-center gap-2 px-2 py-3",
-          expanded && "min-[1440px]:hidden",
-        )}
-      >
-        <IconButton
-          size="md"
-          variant="ghost"
-          onClick={onToggle}
-          aria-label="展开会话侧栏"
-          tooltip="展开会话侧栏"
-        >
-          <PanelLeftOpen className="h-[18px] w-[18px]" aria-hidden />
-        </IconButton>
-        <Button
-          size="md"
-          variant="primary"
-          onClick={onCreate}
-          disabled={creating}
-          aria-label="新建会话"
-          title="新建会话"
-          className="h-10 w-10 px-0"
-        >
-          <Plus className="h-4 w-4" aria-hidden />
-        </Button>
-      </div>
-    </aside>
   );
 }

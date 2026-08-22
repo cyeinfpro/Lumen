@@ -44,6 +44,9 @@ async def cleanup_byok_retention(ctx: dict | None = None) -> dict[str, int | boo
             "messages_deleted": 0,
             "images_deleted": 0,
             "conversations_deleted": 0,
+            "agent_runs_redacted": 0,
+            "agent_references_redacted": 0,
+            "agent_tool_calls_redacted": 0,
         }
 
     async with SessionLocal() as session:

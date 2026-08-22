@@ -37,6 +37,45 @@ if ! snapshot_update_state; then
     exit 1
 fi
 
+# Agent service secrets are transport credentials, not data-encryption keys.
+# A legacy installation can safely receive fresh values before the closed DB
+# feature gate is enabled; existing non-empty weak values are rejected.
+CONFIG_CHANGED=0
+CURRENT_AGENT_RUNTIME_IMAGE_REF="$(
+    lumen_env_value LUMEN_AGENT_RUNTIME_IMAGE_REF "${SHARED_ENV}" 2>/dev/null \
+        || true
+)"
+for AGENT_SECRET_KEY in AGENT_RUNTIME_SHARED_SECRET AGENT_TOOL_CAPABILITY_SECRET; do
+    AGENT_SECRET_VALUE="$(lumen_env_value "${AGENT_SECRET_KEY}" "${SHARED_ENV}" 2>/dev/null || true)"
+    if [ -n "${AGENT_SECRET_VALUE}" ] && [ "${#AGENT_SECRET_VALUE}" -lt 32 ]; then
+        log_error "[check] ${AGENT_SECRET_KEY} 已配置但短于 32 字符；拒绝静默轮转。"
+        emit_fail check 64
+        exit 64
+    fi
+    if [ -z "${AGENT_SECRET_VALUE}" ]; then
+        AGENT_SECRET_VALUE="$(openssl rand -hex 32)" || {
+            log_error "[check] 无法生成 ${AGENT_SECRET_KEY}。"
+            emit_fail check 1
+            exit 1
+        }
+        if ! lumen_set_env_value_in_file \
+                "${SHARED_ENV}" "${AGENT_SECRET_KEY}" "${AGENT_SECRET_VALUE}"; then
+            log_error "[check] 无法安全补齐 ${AGENT_SECRET_KEY}。"
+            emit_fail check 1
+            exit 1
+        fi
+        CONFIG_CHANGED=1
+        log_info "[check] 已补齐 ${AGENT_SECRET_KEY}（值不输出）。"
+    fi
+done
+if [ "$(lumen_env_value AGENT_RUNTIME_SHARED_SECRET "${SHARED_ENV}" 2>/dev/null || true)" = \
+        "$(lumen_env_value AGENT_TOOL_CAPABILITY_SECRET "${SHARED_ENV}" 2>/dev/null || true)" ]; then
+    log_error "[check] Agent Runtime 与工具 capability 不能复用同一密钥。"
+    emit_fail check 64
+    exit 64
+fi
+unset AGENT_SECRET_KEY AGENT_SECRET_VALUE
+
 # 当前 tag 与 channel
 CURRENT_TAG="$(lumen_env_value LUMEN_IMAGE_TAG "${SHARED_ENV}" 2>/dev/null || echo "")"
 PREVIOUS_TAG="${CURRENT_TAG}"
@@ -59,7 +98,6 @@ if lumen_configure_proxy_env "${SHARED_ENV}" >/dev/null 2>&1; then
     LUMEN_PROXY_URL="${LUMEN_UPDATE_PROXY_URL:-${LUMEN_HTTP_PROXY:-}}"
 fi
 
-CONFIG_CHANGED=0
 CURRENT_WEB_BIND_HOST="$(lumen_env_value WEB_BIND_HOST "${SHARED_ENV}" 2>/dev/null || echo "")"
 CURRENT_EXPOSE_WEB_DIRECTLY="$(lumen_env_value LUMEN_EXPOSE_WEB_DIRECTLY "${SHARED_ENV}" 2>/dev/null || echo "")"
 if [ -n "${LUMEN_WEB_BIND_HOST:-}" ]; then
@@ -170,6 +208,7 @@ else
             LUMEN_REDIS_IMAGE_REF \
             LUMEN_API_IMAGE_REF \
             LUMEN_WORKER_IMAGE_REF \
+            LUMEN_AGENT_RUNTIME_IMAGE_REF \
             LUMEN_WEB_IMAGE_REF \
             LUMEN_TGBOT_IMAGE_REF; then
         log_error "[check] 自定义 registry/通道必须预先提供完整生产镜像 digest refs。"
@@ -177,6 +216,23 @@ else
         exit 64
     fi
 fi
+
+TARGET_AGENT_RUNTIME_IMAGE_REF="$(
+    lumen_env_value LUMEN_AGENT_RUNTIME_IMAGE_REF "${SHARED_ENV}" 2>/dev/null \
+        || true
+)"
+if [ "${TARGET_AGENT_RUNTIME_IMAGE_REF}" != "${CURRENT_AGENT_RUNTIME_IMAGE_REF}" ]; then
+    CONFIG_CHANGED=1
+    emit_info check agent_runtime_image "digest_binding_changed"
+fi
+if [ -f "${ROOT}/current/docker-compose.yml" ] \
+        && grep -Eq '^[[:space:]]{2}agent-runtime:[[:space:]]*$' \
+            "${ROOT}/current/docker-compose.yml" \
+        && ! docker inspect lumen-agent-runtime >/dev/null 2>&1; then
+    CONFIG_CHANGED=1
+    emit_info check agent_runtime "missing_redeploy_required"
+fi
+unset CURRENT_AGENT_RUNTIME_IMAGE_REF TARGET_AGENT_RUNTIME_IMAGE_REF
 
 if TARGET_VERSION_FROM_TAG="$(semver_from_image_tag "${TARGET_TAG}" 2>/dev/null || true)" \
         && [ -n "${TARGET_VERSION_FROM_TAG}" ]; then

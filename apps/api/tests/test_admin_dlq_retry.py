@@ -89,6 +89,46 @@ async def test_dlq_retry_restages_outbox_without_premature_resolution(
 
 
 @pytest.mark.asyncio
+async def test_agent_run_dlq_retry_uses_normal_owner_and_outbox_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outbox = OutboxEvent(
+        id="outbox-agent-1",
+        kind="agent_run",
+        payload={"task_id": "agent-run-1"},
+        published_at=datetime.now(timezone.utc),
+    )
+    dlq = OutboxDeadLetter(
+        id="dlq-agent-1",
+        outbox_id=outbox.id,
+        event_type="outbox.agent_run",
+        payload={"task_id": "agent-run-1", "user_id": "user-1"},
+        error_class="OutboxEnqueueFailed",
+        error_message="max_fail_count",
+        retry_count=5,
+        resolved_at=None,
+    )
+    db = _Db([dlq, "agent-run-1", outbox])
+
+    async def fake_audit(*_args: Any, **_kwargs: Any) -> None:
+        assert _kwargs["details"]["event_type"] == "outbox.agent_run"
+
+    monkeypatch.setattr(admin, "write_admin_audit", fake_audit)
+
+    result = await admin.retry_dlq(
+        dlq.id,
+        SimpleNamespace(),  # type: ignore[arg-type]
+        SimpleNamespace(id="admin-1", email="admin@example.test"),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
+
+    assert result["requeued"] is True
+    assert outbox.kind == "agent_run"
+    assert outbox.published_at is None
+    assert dlq.retry_count == 6
+
+
+@pytest.mark.asyncio
 async def test_dlq_retry_rejects_unsupported_type_without_resolving() -> None:
     dlq = OutboxDeadLetter(
         id="dlq-1",

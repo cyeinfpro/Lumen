@@ -15,6 +15,7 @@ start_infra
 migrate_db
 switch
 restart_services
+start_target_runtime
 start_target_worker
 start_green
 shift_traffic_50

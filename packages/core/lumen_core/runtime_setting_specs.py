@@ -9,6 +9,7 @@ DB 中只持久化 SUPPORTED_SETTINGS 列表里的 key；其它 key 视为非法
 
 from __future__ import annotations
 
+from .runtime_setting_agent_specs import AGENT_SETTINGS
 from .runtime_setting_telegram_specs import TELEGRAM_PROXY_ENDPOINT_SETTINGS
 from .runtime_setting_types import SettingSpec
 
@@ -47,6 +48,7 @@ SUPPORTED_SETTINGS: tuple[SettingSpec, ...] = (
         max_value=1,
         allowed_values=("0", "1"),
     ),
+    *AGENT_SETTINGS,
     SettingSpec(
         key="ui.nav.video_visible",
         description="是否向用户显示主导航里的「视频」入口。0=隐藏，1=显示。",

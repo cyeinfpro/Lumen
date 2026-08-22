@@ -69,7 +69,10 @@ export const viewport: Viewport = {
 type ThemePreference = "light" | "dark" | "system";
 
 const RUNTIME_DEFAULTS_COOKIE = "lumen_runtime_defaults_v1";
-const DEFAULT_RUNTIME_DEFAULTS: RuntimeDefaults = { fast: true };
+const DEFAULT_RUNTIME_DEFAULTS: RuntimeDefaults = {
+  fast: true,
+  agent_enabled: false,
+};
 
 // 无 cookie / 未知值时交给系统主题；显式 light/dark 时固定。
 function normalizeTheme(value: string | undefined): ThemePreference {
@@ -84,6 +87,7 @@ function normalizeRuntimeDefaults(value: unknown): RuntimeDefaults {
   const next: RuntimeDefaults = {
     fast: typeof raw.fast === "boolean" ? raw.fast : true,
     canvas_enabled: raw.canvas_enabled === true,
+    agent_enabled: raw.agent_enabled === true,
   };
   if (
     typeof raw.upload_max_source_bytes === "number" &&
@@ -96,6 +100,7 @@ function normalizeRuntimeDefaults(value: unknown): RuntimeDefaults {
     const nav = raw.nav_visibility;
     next.nav_visibility = {
       studio: nav.studio !== false,
+      agent: raw.agent_enabled === true && nav.agent === true,
       video: nav.video !== false,
       projects: nav.projects !== false,
       assets: nav.assets !== false,

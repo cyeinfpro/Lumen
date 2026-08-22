@@ -439,7 +439,7 @@ recover_stale_install_transaction() {
     if install_transaction_phase_started_services "${INSTALL_PHASE}" \
             && [ -f "${RELEASE_DIR}/docker-compose.yml" ]; then
         if ! lumen_compose_in "${RELEASE_DIR}" --profile tgbot stop \
-                tgbot web worker api postgres redis >/dev/null 2>&1; then
+                tgbot web worker api agent-runtime postgres redis >/dev/null 2>&1; then
             log_error "无法停止上次 fresh install 启动的 compose 服务，保留 journal。"
             return 1
         fi
@@ -484,7 +484,7 @@ snapshot_install_state() {
             ps --status running --services 2>/dev/null || true)"
         while IFS= read -r service; do
             case "${service}" in
-                postgres|redis|api|worker|web|tgbot)
+                postgres|redis|agent-runtime|api|worker|web|tgbot)
                     INSTALL_ORIGINAL_RUNNING_SERVICES="${INSTALL_ORIGINAL_RUNNING_SERVICES}${service}"$'\n'
                     ;;
             esac

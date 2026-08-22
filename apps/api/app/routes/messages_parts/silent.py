@@ -33,6 +33,7 @@ from ...services.active_user import (
     active_user_fence_http_error,
     lock_active_user_snapshot,
 )
+from ...services.agent_conversations import studio_conversation_filter
 from ...services.message_idempotency import (
     SILENT_GENERATION_IDEMPOTENCY_OPERATION,
     idempotency_request_metadata,
@@ -136,6 +137,7 @@ async def lookup_silent_generation(
                 Message.conversation_id == conv_id,
                 Conversation.user_id == user_id,
                 Conversation.deleted_at.is_(None),
+                studio_conversation_filter(),
             )
             .order_by(Generation.created_at.asc(), Generation.id.asc())
             .limit(1)
@@ -250,6 +252,7 @@ async def create_silent_generation(
                 Conversation.id == conv_id,
                 Conversation.user_id == user.id,
                 Conversation.deleted_at.is_(None),
+                studio_conversation_filter(),
             )
         )
     ).scalar_one_or_none()

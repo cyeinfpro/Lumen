@@ -6,6 +6,13 @@ lumen_update_tgbot_expected() {
         && env_key_present "${SHARED_ENV}" "TELEGRAM_BOT_TOKEN"
 }
 
+lumen_update_agent_runtime_expected() {
+    local compose_dir="$1"
+    [ -f "${compose_dir}/docker-compose.yml" ] \
+        && grep -Eq '^[[:space:]]{2}agent-runtime:[[:space:]]*$' \
+            "${compose_dir}/docker-compose.yml"
+}
+
 lumen_update_compose_up_bound_service() {
     local compose_dir="$1" service="$2"
     (
@@ -55,7 +62,7 @@ if ! lumen_verify_backup_service_layout_binding; then
     exit 70
 fi
 # --force-recreate：同 start_infra 理由，避免容器名冲突 fail。
-# 服务启动顺序：api → worker → web。fast 模式使用 --no-deps，因此必须
+# 服务启动顺序：agent-runtime → api → worker → web。fast 模式使用 --no-deps，因此必须
 # 由 updater 显式建立依赖顺序。Web 若在 API 缺失或仍指向旧容器地址时启动，
 # 长驻的 Next.js 进程可能继续访问失效的 Docker DNS 结果，令更新完成后仍长期
 # 返回 502。API 重启会短暂断开更新进度 SSE，但前端可重连；不能用全站可用性
@@ -69,12 +76,24 @@ if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] && [ -f "${CURRENT_LINK}/docker-com
     _green_ready_url="${LUMEN_API_GREEN_READY_URL:-http://127.0.0.1:${_green_port}/readyz}"
     _shift_script="${CURRENT_LINK}/scripts/lumen-shift-traffic.sh"
 
-    emit_start start_target_worker
-    if lumen_update_start_bound_service "${CURRENT_LINK}" worker; then
-        emit_done start_target_worker 0
-    else
-        _restart_ok=0
-        emit_fail start_target_worker 1
+    if lumen_update_agent_runtime_expected "${CURRENT_LINK}"; then
+        emit_start start_target_runtime
+        if lumen_update_start_bound_service "${CURRENT_LINK}" agent-runtime; then
+            emit_done start_target_runtime 0
+        else
+            _restart_ok=0
+            emit_fail start_target_runtime 1
+        fi
+    fi
+
+    if [ "${_restart_ok}" = "1" ]; then
+        emit_start start_target_worker
+        if lumen_update_start_bound_service "${CURRENT_LINK}" worker; then
+            emit_done start_target_worker 0
+        else
+            _restart_ok=0
+            emit_fail start_target_worker 1
+        fi
     fi
 
     if [ "${_restart_ok}" = "1" ]; then
@@ -162,7 +181,11 @@ if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] && [ -f "${CURRENT_LINK}/docker-com
         fi
     fi
 else
-    for _svc in api worker web; do
+    _target_services=(api worker web)
+    if lumen_update_agent_runtime_expected "${CURRENT_LINK}"; then
+        _target_services=(agent-runtime api worker web)
+    fi
+    for _svc in "${_target_services[@]}"; do
         if ! lumen_update_start_bound_service "${CURRENT_LINK}" "${_svc}"; then
             _restart_ok=0
             break
@@ -260,8 +283,15 @@ else
                         "${LUMEN_APP_GID:-10001}" \
                     && lumen_release_atomic_switch "${ROOT}" "${CURRENT_ID}" \
                     && lumen_compose_in "${CURRENT_LINK}" pull; then
-                    # 回滚同样先恢复 API，再恢复依赖它的 worker / web。
-                    for _svc in api worker web; do
+                    # 回滚同样按目标 release 能力恢复 Runtime/API/Worker/Web。
+                    _rollback_services=(api worker web)
+                    if grep -Eq '^[[:space:]]{2}agent-runtime:[[:space:]]*$' \
+                            "${CURRENT_LINK}/docker-compose.yml" 2>/dev/null; then
+                        _rollback_services=(agent-runtime api worker web)
+                    else
+                        lumen_docker stop lumen-agent-runtime >/dev/null 2>&1 || true
+                    fi
+                    for _svc in "${_rollback_services[@]}"; do
                         if ! compose_up_service_standard "${CURRENT_LINK}" "${_svc}"; then
                             _rollback_started=0
                             break
@@ -330,7 +360,7 @@ else
         log_error "[restart_services] 自动回滚失败 → 请按 §18 手动回滚："
         log_error "  使用 lumen_atomic_replace_symlink 切换 ${ROOT}/current 到 releases/${CURRENT_ID:-<id>}"
         log_error "  sed -i 's|^LUMEN_IMAGE_TAG=.*|LUMEN_IMAGE_TAG=${ROLLBACK_TAG:-${PREVIOUS_TAG:-<old-tag>}}|' ${SHARED_ENV}"
-        log_error "  cd ${ROOT}/current && COMPOSE_PROJECT_NAME=lumen docker compose pull && docker compose up --pull missing -d --wait api worker web"
+        log_error "  cd ${ROOT}/current && COMPOSE_PROJECT_NAME=lumen docker compose pull && docker compose --profile agent-runtime up --pull missing -d --wait agent-runtime api worker web"
         log_error "  TELEGRAM_BOT_TOKEN 非空时还必须：docker compose --profile tgbot pull tgbot && docker compose --profile tgbot up --pull missing --no-deps -d --force-recreate tgbot"
     fi
     emit_fail restart_services 1

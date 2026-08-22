@@ -153,6 +153,30 @@ def provider_out(item: dict[str, Any], index: int) -> ProviderItemOut:
         ),
         image_concurrency=normalize_image_concurrency(item.get("image_concurrency")),
         responses_supported=normalize_capability(item.get("responses_supported")),
+        vision_supported=normalize_capability(item.get("vision_supported")),
+        agent_api=(
+            item.get("agent_api")
+            if isinstance(item.get("agent_api"), str)
+            and item.get("agent_api")
+            in {"openai-responses", "openai-completions", "anthropic-messages"}
+            else "openai-responses"
+        ),
+        agent_models=[
+            value.strip()
+            for value in item.get("agent_models", [])
+            if isinstance(value, str) and value.strip()
+        ][:128],
+        agent_context_window=min(
+            2_000_000,
+            safe_int(item.get("agent_context_window"), 128000, minimum=4096),
+        ),
+        agent_max_output_tokens=min(
+            128000,
+            safe_int(item.get("agent_max_output_tokens"), 16384, minimum=1),
+        ),
+        agent_reasoning_supported=normalize_bool(
+            item.get("agent_reasoning_supported"), default=True
+        ),
         image_generations_supported=normalize_capability(
             item.get("image_generations_supported")
         ),
@@ -160,6 +184,65 @@ def provider_out(item: dict[str, Any], index: int) -> ProviderItemOut:
             item.get("image_responses_supported")
         ),
     )
+
+
+def provider_agent_update_fields(
+    provider_input: Any,
+    old_item: dict[str, Any],
+) -> dict[str, Any]:
+    def preserved(field: str, fallback: Any) -> Any:
+        return (
+            getattr(provider_input, field)
+            if field in provider_input.model_fields_set
+            else old_item.get(field, fallback)
+        )
+
+    output = {
+        "agent_api": preserved("agent_api", provider_input.agent_api),
+        "agent_models": preserved("agent_models", provider_input.agent_models),
+        "agent_context_window": preserved(
+            "agent_context_window", provider_input.agent_context_window
+        ),
+        "agent_max_output_tokens": preserved(
+            "agent_max_output_tokens", provider_input.agent_max_output_tokens
+        ),
+        "agent_reasoning_supported": preserved(
+            "agent_reasoning_supported",
+            provider_input.agent_reasoning_supported,
+        ),
+    }
+    for key in (
+        "responses_supported",
+        "vision_supported",
+        "image_generations_supported",
+        "image_responses_supported",
+    ):
+        value = normalize_capability(
+            preserved(key, getattr(provider_input, key, None))
+        )
+        if value is not None:
+            output[key] = value
+    return output
+
+
+def provider_update_credentials(
+    provider_input: Any,
+    *,
+    old_keys: dict[str, str],
+    old_item: dict[str, Any],
+) -> tuple[str, str]:
+    name = provider_input.name.strip()
+    submitted_key = provider_input.api_key.strip()
+    new_base_url = provider_input.base_url.strip().rstrip("/")
+    old_base_url = str(old_item.get("base_url") or "").strip().rstrip("/")
+    if (
+        not submitted_key
+        and old_keys.get(name)
+        and old_base_url
+        and old_base_url != new_base_url
+    ):
+        raise ValueError("修改 base_url 后必须重新填写 api_key")
+    return new_base_url, submitted_key or old_keys.get(name, "")
 
 
 def proxy_out(item: dict[str, Any], index: int) -> ProviderProxyOut:

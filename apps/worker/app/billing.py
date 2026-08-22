@@ -376,6 +376,7 @@ async def settle_generation_unknown_upstream(
                 "model": generation.model,
                 "retry_count": _generation_billing_retry_count(generation),
                 "provider": _generation_settle_provider(generation),
+                **helpers.generation_agent_billing_meta(generation),
             },
             settle_event="wallet.settle.image_result_unknown",
             settle_audit_extra={"generation_id": generation.id},

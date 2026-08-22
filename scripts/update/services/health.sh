@@ -68,6 +68,11 @@ WEB_HEALTH_URL="${LUMEN_WEB_HEALTH_URL:-http://127.0.0.1:3000/}"
 HEALTH_TIMEOUT="${LUMEN_HEALTH_TIMEOUT_SECONDS:-300}"
 HEALTH_FAIL=0
 HEALTH_SERVICES=(api worker web)
+if [ -f "${CURRENT_LINK:-${ROOT}/current}/docker-compose.yml" ] \
+        && grep -Eq '^[[:space:]]{2}agent-runtime:[[:space:]]*$' \
+            "${CURRENT_LINK:-${ROOT}/current}/docker-compose.yml"; then
+    HEALTH_SERVICES=(agent-runtime api worker web)
+fi
 if [ "${UPDATE_TGBOT_READINESS_REQUIRED:-0}" = "1" ] \
         || lumen_update_tgbot_expected; then
     HEALTH_SERVICES+=(tgbot)

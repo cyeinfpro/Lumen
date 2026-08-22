@@ -26,6 +26,9 @@ services:
   worker:
     container_name: lumen-local-worker
 
+  agent-runtime:
+    container_name: lumen-local-agent-runtime
+
   web:
     container_name: lumen-local-web
     ports:

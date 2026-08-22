@@ -348,6 +348,106 @@ async def test_update_providers_preserves_existing_ssh_proxy_password(
 
 
 @pytest.mark.asyncio
+async def test_legacy_admin_save_preserves_agent_and_vision_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import providers
+
+    old_raw = json.dumps(
+        {
+            "providers": [
+                {
+                    "name": "agent-provider",
+                    "base_url": "https://upstream.example",
+                    "api_key": "sk-old",
+                    "vision_supported": True,
+                    "responses_supported": True,
+                    "agent_api": "anthropic-messages",
+                    "agent_models": ["claude-sonnet-4", "claude-haiku-4"],
+                    "agent_context_window": 200000,
+                    "agent_max_output_tokens": 8192,
+                    "agent_reasoning_supported": False,
+                }
+            ],
+            "proxies": [],
+        }
+    )
+    db = _FakeProvidersDb(old_raw)
+
+    async def fake_write_audit(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(providers, "write_audit", fake_write_audit)
+    await providers.update_providers(
+        ProvidersUpdateIn(
+            items=[
+                {
+                    "name": "agent-provider",
+                    "base_url": "https://upstream.example",
+                    "api_key": "",
+                    "enabled": True,
+                }
+            ]
+        ),
+        _admin_request(),
+        SimpleNamespace(id="admin-1", email="admin@example.com"),
+        db,  # type: ignore[arg-type]
+    )
+
+    saved = json.loads(db.setting.value)["providers"][0]
+    assert saved["vision_supported"] is True
+    assert saved["responses_supported"] is True
+    assert saved["agent_api"] == "anthropic-messages"
+    assert saved["agent_models"] == ["claude-sonnet-4", "claude-haiku-4"]
+    assert saved["agent_context_window"] == 200000
+    assert saved["agent_max_output_tokens"] == 8192
+    assert saved["agent_reasoning_supported"] is False
+
+
+@pytest.mark.asyncio
+async def test_update_providers_persists_default_model_with_provider_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import providers
+
+    db = _FakeProvidersDb(json.dumps({"providers": [], "proxies": []}))
+    settings: dict[str, str] = {}
+
+    async def fake_write_audit(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def fake_upsert(_db: object, key: str, value: str) -> None:
+        settings[key] = value
+
+    monkeypatch.setattr(providers, "write_audit", fake_write_audit)
+    monkeypatch.setattr(providers, "_upsert_setting_value", fake_upsert)
+
+    out = await providers.update_providers(
+        ProvidersUpdateIn(
+            default_model="gpt-5.6-sol",
+            items=[
+                {
+                    "name": "agent-provider",
+                    "base_url": "https://upstream.example/v1",
+                    "api_key": "sk-test",
+                    "purposes": ["chat"],
+                    "agent_models": ["gpt-5.6-sol", "gpt-5.6-mini"],
+                }
+            ],
+        ),
+        _admin_request(),
+        SimpleNamespace(id="admin-1", email="admin@example.com"),
+        db,  # type: ignore[arg-type]
+    )
+
+    saved = json.loads(db.setting.value)["providers"][0]
+    assert saved["agent_models"] == ["gpt-5.6-sol", "gpt-5.6-mini"]
+    assert out.items[0].agent_models == ["gpt-5.6-sol", "gpt-5.6-mini"]
+    assert settings == {"upstream.default_model": "gpt-5.6-sol"}
+    assert db.committed is True
+
+
+@pytest.mark.asyncio
 async def test_update_providers_allows_disabled_provider_without_api_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -383,6 +483,52 @@ async def test_update_providers_allows_disabled_provider_without_api_key(
     assert saved["providers"][0]["api_key"] == ""
     assert saved["providers"][0]["enabled"] is False
     assert out.items[0].enabled is False
+
+
+@pytest.mark.asyncio
+async def test_update_providers_requires_new_key_when_base_url_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import providers
+
+    db = _FakeProvidersDb(
+        json.dumps(
+            {
+                "providers": [
+                    {
+                        "name": "primary",
+                        "base_url": "https://old.example/v1",
+                        "api_key": "sk-old",
+                    }
+                ],
+                "proxies": [],
+            }
+        )
+    )
+
+    async def fake_write_audit(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(providers, "write_audit", fake_write_audit)
+
+    with pytest.raises(Exception) as excinfo:
+        await providers.update_providers(
+            ProvidersUpdateIn(
+                items=[
+                    {
+                        "name": "primary",
+                        "base_url": "https://new.example/v1",
+                        "api_key": "",
+                    }
+                ]
+            ),
+            _admin_request(),
+            SimpleNamespace(id="admin-1", email="admin@example.com"),
+            db,  # type: ignore[arg-type]
+        )
+
+    assert "修改 base_url 后必须重新填写 api_key" in str(excinfo.value.detail)
+    assert db.committed is False
 
 
 @pytest.mark.asyncio
@@ -736,6 +882,11 @@ async def test_put_providers_persists_capability_flags(
                 "base_url": "https://up.example",
                 "api_key": "sk-cap",
                 "responses_supported": True,
+                "vision_supported": True,
+                "agent_api": "anthropic-messages",
+                "agent_context_window": 200000,
+                "agent_max_output_tokens": 8192,
+                "agent_reasoning_supported": False,
                 "image_generations_supported": False,
                 "image_responses_supported": True,
                 "image_edit_input_transport": "file",
@@ -760,6 +911,11 @@ async def test_put_providers_persists_capability_flags(
     items = persisted["providers"]
     p_with = next(it for it in items if it["name"] == "p-with-cap")
     assert p_with["responses_supported"] is True
+    assert p_with["vision_supported"] is True
+    assert p_with["agent_api"] == "anthropic-messages"
+    assert p_with["agent_context_window"] == 200000
+    assert p_with["agent_max_output_tokens"] == 8192
+    assert p_with["agent_reasoning_supported"] is False
     assert p_with["image_generations_supported"] is False
     assert p_with["image_responses_supported"] is True
     assert p_with["image_edit_input_transport"] == "file"
@@ -770,6 +926,10 @@ async def test_put_providers_persists_capability_flags(
     # API 返回值里 capability 也透出
     out_with_cap = next(it for it in out.items if it.name == "p-with-cap")
     assert out_with_cap.responses_supported is True
+    assert out_with_cap.vision_supported is True
+    assert out_with_cap.agent_api == "anthropic-messages"
+    assert out_with_cap.agent_context_window == 200000
+    assert out_with_cap.agent_reasoning_supported is False
     assert out_with_cap.image_generations_supported is False
     assert out_with_cap.image_edit_input_transport == "file"
     out_without_cap = next(it for it in out.items if it.name == "p-without-cap")

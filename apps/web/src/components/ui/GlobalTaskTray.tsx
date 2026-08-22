@@ -12,6 +12,7 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { ListChecks } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
+import { useRouter } from "next/navigation";
 
 import { useUiStore } from "@/store/useUiStore";
 import { useChatStore } from "@/store/useChatStore";
@@ -25,6 +26,7 @@ import {
   useUserQueryScope,
 } from "@/components/QueryProvider";
 import { TaskCenter } from "./tray/TaskCenter";
+import { resolveGenerationRoute } from "./tray/taskCenterModel";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { useModalLayer } from "./primitives/mobile/useModalLayer";
 import { toast } from "./primitives";
@@ -55,6 +57,7 @@ function taskTrayBadge(activeCount: number, recentCount: number) {
 }
 
 export function GlobalTaskTray() {
+  const router = useRouter();
   const taskTrayMinimized = useUiStore((s) => s.taskTray.minimized);
   const taskIslandMounted = useUiStore((s) => s.taskIslandMounted);
   const setTaskTrayMinimized = useUiStore((s) => s.setTaskTrayMinimized);
@@ -153,6 +156,12 @@ export function GlobalTaskTray() {
       gen.image.display_url ?? gen.image.preview_url ?? gen.image.thumb_url,
     );
   };
+  const handleLocate = (gen: Generation) => {
+    const route = resolveGenerationRoute(gen);
+    if (!route) return;
+    setTaskTrayMinimized(true);
+    router.push(route);
+  };
 
   const expanded = !taskTrayMinimized;
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -235,6 +244,7 @@ export function GlobalTaskTray() {
                 onCancelGeneration={handleCancel}
                 onRetryGeneration={handleRetry}
                 onViewGeneration={handleView}
+                onLocateGeneration={handleLocate}
                 onClose={closeTray}
               />
             </motion.div>

@@ -242,6 +242,28 @@ function ProviderMetadata({
       />
       <MetaSep />
       <MetaItem label="代理" value={provider.proxy ?? "直连"} mono />
+      {provider.purposes.includes("chat") ? (
+        <>
+          <MetaSep />
+          <MetaItem
+            label="Agent"
+            value={`${provider.agent_api} · ${provider.agent_context_window.toLocaleString()} ctx`}
+            mono
+          />
+          <MetaSep />
+          <MetaItem
+            label="图片输入"
+            value={
+              provider.vision_supported === true
+                ? "已验证支持"
+                : provider.vision_supported === false
+                  ? "不支持"
+                  : "未验证"
+            }
+            color={provider.vision_supported === true ? "text-success" : undefined}
+          />
+        </>
+      ) : null}
       <ProviderImageJobMetadata provider={provider} />
       <ProviderProbeMetadata probe={probe} />
       <ProviderStatsMetadata stats={stats} />

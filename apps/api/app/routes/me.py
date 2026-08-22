@@ -264,6 +264,16 @@ async def export_my_data(
     tmp = tempfile.TemporaryFile()
     try:
         stats = await _build_export_archive(db, tmp, user_id)
+        export_details = {
+            "messages": stats.messages,
+            "images": stats.images,
+            "images_skipped": stats.images_skipped,
+            "zip_bytes": stats.zip_bytes,
+        }
+        for key in ("agent_sessions", "agent_runs", "agent_tool_calls"):
+            count = int(getattr(stats, key, 0) or 0)
+            if count > 0:
+                export_details[key] = count
         await write_audit(
             db,
             event_type="me.data.export",
@@ -271,12 +281,7 @@ async def export_my_data(
             actor_email=user_email,
             actor_ip_hash=request_ip_hash(request),
             target_user_id=user_id,
-            details={
-                "messages": stats.messages,
-                "images": stats.images,
-                "images_skipped": stats.images_skipped,
-                "zip_bytes": stats.zip_bytes,
-            },
+            details=export_details,
             autocommit=True,
         )
         tmp.seek(0)
@@ -379,6 +384,28 @@ async def delete_my_account(
         account_mode=getattr(user, "account_mode", "wallet"),
         queue_redis=get_redis(),
     )
+    delete_details = {
+        "users": dml_rowcount(user_result),
+        "sessions_revoked": dml_rowcount(sessions_result),
+        "conversations_deleted": dml_rowcount(conversations_result),
+        "images_deleted": dml_rowcount(images_result),
+        "generations_canceled": task_cleanup["generations_canceled"],
+        "completions_canceled": task_cleanup["completions_canceled"],
+        "video_generations_canceled": task_cleanup["video_generations_canceled"],
+        "videos_deleted": task_cleanup["videos_deleted"],
+        "memory_extractions_canceled": task_cleanup["memory_extractions_canceled"],
+    }
+    agent_runs_canceled = int(task_cleanup.get("agent_runs_canceled", 0) or 0)
+    if agent_runs_canceled > 0:
+        delete_details["agent_runs_canceled"] = agent_runs_canceled
+    for key in (
+        "agent_runs_redacted",
+        "agent_references_redacted",
+        "agent_tool_calls_redacted",
+    ):
+        count = task_cleanup.get(key)
+        if isinstance(count, int):
+            delete_details[key] = count
     await write_audit(
         db,
         event_type="me.account.delete",
@@ -386,17 +413,7 @@ async def delete_my_account(
         actor_email=user.email,
         actor_ip_hash=request_ip_hash(request),
         target_user_id=user.id,
-        details={
-            "users": dml_rowcount(user_result),
-            "sessions_revoked": dml_rowcount(sessions_result),
-            "conversations_deleted": dml_rowcount(conversations_result),
-            "images_deleted": dml_rowcount(images_result),
-            "generations_canceled": task_cleanup["generations_canceled"],
-            "completions_canceled": task_cleanup["completions_canceled"],
-            "video_generations_canceled": task_cleanup["video_generations_canceled"],
-            "videos_deleted": task_cleanup["videos_deleted"],
-            "memory_extractions_canceled": task_cleanup["memory_extractions_canceled"],
-        },
+        details=delete_details,
         autocommit=False,
     )
     await db.commit()

@@ -32,7 +32,9 @@ from release_manifest_guard import (  # noqa: E402
 )
 
 
-SERVICES = ("api", "worker", "tgbot", "web")
+LEGACY_SERVICES = ("api", "worker", "tgbot", "web")
+COMPONENT_SERVICES = ("agent-runtime",)
+SERVICES = (*LEGACY_SERVICES, *COMPONENT_SERVICES)
 TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -61,16 +63,20 @@ class RegistryManifest:
 CommandRunner = Callable[[Sequence[str], Path], CommandResult]
 ManifestFetcher = Callable[[str], dict[str, object]]
 RegistryFetcher = Callable[[str, str], RegistryManifest]
+ArtifactVerifier = Callable[[str], dict[str, object]]
 
 
 def _run(command: Sequence[str], cwd: Path) -> CommandResult:
-    result = subprocess.run(
-        list(command),
-        cwd=cwd,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            list(command),
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        return CommandResult(127, "", str(exc))
     return CommandResult(result.returncode, result.stdout, result.stderr)
 
 
@@ -198,6 +204,63 @@ def _registry_fetcher(github_token: str | None) -> RegistryFetcher:
     return fetch
 
 
+def _artifact_verifier(
+    runner: CommandRunner,
+    root: Path,
+) -> ArtifactVerifier:
+    identity = (
+        "https://github.com/cyeinfpro/Lumen/.github/workflows/"
+        "docker-release.yml@refs/tags/v.*"
+    )
+
+    def verify(reference: str) -> dict[str, object]:
+        signature = runner(
+            (
+                "cosign",
+                "verify",
+                "--certificate-oidc-issuer",
+                "https://token.actions.githubusercontent.com",
+                "--certificate-identity-regexp",
+                identity,
+                reference,
+            ),
+            root,
+        )
+        if signature.returncode != 0:
+            detail = signature.stderr.strip() or signature.stdout.strip()
+            raise ReleaseProofError(
+                f"image signature verification failed for {reference}: "
+                f"{detail or signature.returncode}"
+            )
+        sbom = runner(
+            (
+                "cosign",
+                "verify-attestation",
+                "--type",
+                "spdxjson",
+                "--certificate-oidc-issuer",
+                "https://token.actions.githubusercontent.com",
+                "--certificate-identity-regexp",
+                identity,
+                reference,
+            ),
+            root,
+        )
+        if sbom.returncode != 0:
+            detail = sbom.stderr.strip() or sbom.stdout.strip()
+            raise ReleaseProofError(
+                f"SPDX SBOM attestation verification failed for {reference}: "
+                f"{detail or sbom.returncode}"
+            )
+        return {
+            "signature": "verified",
+            "sbom_attestation": "verified",
+            "sbom_format": "spdx-json",
+        }
+
+    return verify
+
+
 def _stable_aliases(tag: str) -> tuple[str, ...]:
     match = TAG_RE.fullmatch(tag)
     if match is None:
@@ -216,6 +279,7 @@ def verify_release(
     runner: CommandRunner = _run,
     manifest_fetcher: ManifestFetcher = _fetch_release_manifest,
     registry_fetcher: RegistryFetcher | None = None,
+    artifact_verifier: ArtifactVerifier | None = None,
 ) -> dict[str, object]:
     aliases = _stable_aliases(tag)
     if COMMIT_RE.fullmatch(commit) is None:
@@ -298,19 +362,38 @@ def verify_release(
     if manifest.get("commit_sha") != commit:
         raise ReleaseProofError("release manifest commit does not match the tag commit")
     images = manifest.get("images")
-    if not isinstance(images, dict) or set(images) != set(SERVICES):
+    components = manifest.get("components")
+    if (
+        not isinstance(images, dict)
+        or set(images) != set(LEGACY_SERVICES)
+        or not isinstance(components, dict)
+        or set(components) != set(COMPONENT_SERVICES)
+    ):
         raise ReleaseProofError("release manifest has an incomplete image set")
+    release_images = {**images, **components}
 
     fetch_registry = registry_fetcher
     if fetch_registry is None:
         fetch_registry = _registry_fetcher(_github_token(runner, root))
+    verify_artifacts = artifact_verifier or _artifact_verifier(runner, root)
     image_proof: dict[str, object] = {}
     for service in SERVICES:
-        image = images.get(service)
+        image = release_images.get(service)
         expected = image.get("digest") if isinstance(image, dict) else None
         if not isinstance(expected, str) or DIGEST_RE.fullmatch(expected) is None:
             raise ReleaseProofError(f"release manifest digest is invalid for {service}")
+        expected_artifacts = image.get("artifacts") if isinstance(image, dict) else None
+        if expected_artifacts != {
+            "signature": "sigstore-keyless",
+            "sbom": "spdx-json",
+            "sbom_attestation_type": "spdxjson",
+        }:
+            raise ReleaseProofError(
+                f"release manifest artifact metadata is invalid for {service}"
+            )
         repository_path = f"{registry_namespace}/lumen-{service}"
+        immutable_ref = f"ghcr.io/{repository_path}@{expected}"
+        artifact_proof = verify_artifacts(immutable_ref)
         alias_proof: dict[str, dict[str, str]] = {}
         for alias in aliases:
             observed = fetch_registry(repository_path, alias)
@@ -323,6 +406,7 @@ def verify_release(
         image_proof[service] = {
             "expected_digest": expected,
             "aliases": alias_proof,
+            "artifacts": artifact_proof,
         }
 
     return {

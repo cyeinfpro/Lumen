@@ -3,6 +3,7 @@
 import {
   ArrowRight,
   BarChart3,
+  Bot,
   Brain,
   Clapperboard,
   FileText,
@@ -92,6 +93,7 @@ function command(definition: Omit<Command, "searchText">): Command {
 
 const NAV_ICONS: Record<AppNavKey, CommandIcon> = {
   studio: Home,
+  agent: Bot,
   video: Clapperboard,
   projects: FolderKanban,
   assets: Images,

@@ -193,6 +193,49 @@ async def test_resolve_user_credential_runtime_builds_resolved_provider(
     assert provider._byok_http_target.url == provider.base_url
 
 
+@pytest.mark.asyncio
+async def test_agent_runtime_resolution_binds_owner_and_credential_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("cryptography")
+    from lumen_core.byok import encrypt_api_key
+
+    secret = "x" * 32
+    monkeypatch.setattr(byok_runtime.settings, "byok_api_key_master_secret", secret)
+    credential = SimpleNamespace(
+        id="cred-owner-bound",
+        user_id="user-a",
+        key_ciphertext=encrypt_api_key("sk-user-runtime", secret),
+    )
+    supplier = SimpleNamespace(
+        slug="openai",
+        base_url="https://upstream.example",
+        proxy_name=None,
+        image_concurrency_per_key=1,
+        purposes=["chat"],
+        capabilities_jsonb={"vision_supported": False},
+    )
+    provider = await byok_runtime.resolve_user_credential_runtime(
+        _Db([_Result((credential, supplier))]),  # type: ignore[arg-type]
+        credential.id,
+        user_id="user-a",
+        capability_overrides={
+            "vision_supported": True,
+            "agent_context_window": 200_000,
+        },
+    )
+    assert provider.vision_supported is True
+    assert provider.agent_context_window == 200_000
+
+    with pytest.raises(UpstreamError) as captured:
+        await byok_runtime.resolve_user_credential_runtime(
+            _Db([_Result((credential, supplier))]),  # type: ignore[arg-type]
+            credential.id,
+            user_id="user-b",
+        )
+    assert captured.value.status_code == 403
+
+
 def test_validate_byok_http_target_requires_same_origin() -> None:
     target = PublicHttpTarget(
         "https://byok.example/v1",

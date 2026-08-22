@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Bot,
   Camera,
   Clapperboard,
   FolderKanban,
@@ -27,6 +28,7 @@ type TabDef = AppNavItem & { Icon: LucideIcon };
 
 const TAB_ICONS: Record<AppNavKey, LucideIcon> = {
   studio: Camera,
+  agent: Bot,
   video: Clapperboard,
   projects: FolderKanban,
   assets: Images,

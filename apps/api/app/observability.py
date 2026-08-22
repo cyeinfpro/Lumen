@@ -129,6 +129,13 @@ _SENSITIVE_KEY_HINTS = (
     "api_key",
     "apikey",
     "csrf",
+    "prompt",
+    "text",
+    "content",
+    "arguments",
+    "capability",
+    "capability_id",
+    "proxy",
 )
 
 
@@ -181,6 +188,32 @@ def _scrub_request(request: Any) -> Any:
     return cleaned
 
 
+def _scrub_stacktrace_variables(event: dict[str, Any]) -> None:
+    containers: list[Any] = []
+    exception = event.get("exception")
+    if isinstance(exception, dict):
+        containers.extend(exception.get("values", []))
+    threads = event.get("threads")
+    if isinstance(threads, dict):
+        containers.extend(threads.get("values", []))
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        stacktrace = container.get("stacktrace")
+        if not isinstance(stacktrace, dict):
+            continue
+        frames = stacktrace.get("frames")
+        if not isinstance(frames, list):
+            continue
+        for frame in frames:
+            if not isinstance(frame, dict) or not isinstance(frame.get("vars"), dict):
+                continue
+            frame["vars"] = {
+                key: _scrub_value(key, value)
+                for key, value in frame["vars"].items()
+            }
+
+
 def _sentry_before_send(event: Event, _hint: dict[str, Any]) -> Event:
     # Why: emails / cookies / auth headers must never reach Sentry.
     if not isinstance(event, dict):
@@ -195,6 +228,7 @@ def _sentry_before_send(event: Event, _hint: dict[str, Any]) -> Event:
             if k in u:
                 u[k] = "[redacted]"
         event["user"] = u
+    _scrub_stacktrace_variables(event)
     return event
 
 
@@ -272,6 +306,18 @@ telegram_control_dedup_maintenance_total = _counter(
     labelnames=("action",),
 )
 
+agent_runtime_health_total = _counter(
+    "lumen_agent_runtime_health_total",
+    "Agent Runtime health probes by endpoint and bounded outcome.",
+    labelnames=("endpoint", "outcome"),
+)
+
+agent_runtime_health_duration_seconds = _histogram(
+    "lumen_agent_runtime_health_duration_seconds",
+    "Agent Runtime health probe latency by endpoint and bounded outcome.",
+    labelnames=("endpoint", "outcome"),
+)
+
 wallet_balance_total = _gauge(
     "wallet_balance_total",
     "Total wallet balance across all users, in micro RMB.",
@@ -320,6 +366,8 @@ def init_sentry(
             environment=environment or "dev",
             traces_sample_rate=traces_sample_rate,
             send_default_pii=False,
+            include_local_variables=False,
+            max_request_body_size="never",
             integrations=[
                 StarletteIntegration(),
                 FastApiIntegration(),
@@ -440,6 +488,8 @@ __all__ = [
     "apparel_model_library_generate_mode_total",
     "apparel_model_library_reference_extract_total",
     "telegram_control_dedup_maintenance_total",
+    "agent_runtime_health_total",
+    "agent_runtime_health_duration_seconds",
     "wallet_balance_total",
     "wallet_hold_active",
     "wallet_hold_micro",

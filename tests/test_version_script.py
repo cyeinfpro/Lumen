@@ -20,6 +20,7 @@ def _write_minimal_version_tree(tmp_path: Path, version: str = "1.2.3") -> Path:
         "apps/worker",
         "apps/tgbot",
         "apps/web",
+        "apps/agent-runtime",
         "image-job",
         "packages/core/lumen_core",
     ):
@@ -51,7 +52,30 @@ def _write_minimal_version_tree(tmp_path: Path, version: str = "1.2.3") -> Path:
         json.dumps({"version": version, "packages": {"": {"version": version}}}) + "\n",
         encoding="utf-8",
     )
+    (root / "apps/agent-runtime/package.json").write_text(
+        json.dumps({"version": version}) + "\n",
+        encoding="utf-8",
+    )
+    (root / "apps/agent-runtime/package-lock.json").write_text(
+        json.dumps({"version": version, "packages": {"": {"version": version}}}) + "\n",
+        encoding="utf-8",
+    )
     return root
+
+
+def test_version_check_catches_agent_runtime_package_drift(tmp_path: Path) -> None:
+    root = _write_minimal_version_tree(tmp_path)
+    package = json.loads((root / "apps/agent-runtime/package.json").read_text())
+    package["version"] = "0.0.0-private"
+    (root / "apps/agent-runtime/package.json").write_text(
+        json.dumps(package) + "\n",
+        encoding="utf-8",
+    )
+
+    result = _run_check(root)
+
+    assert result.returncode == 1
+    assert "apps/agent-runtime/package.json" in result.stderr
 
 
 def _run_check(

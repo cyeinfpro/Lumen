@@ -1,7 +1,10 @@
 # Lumen full-stack runtime entrypoint (postgres + redis + api + worker + web + tgbot/migrate/bootstrap).
 # Production images are complete name@sha256 references. LUMEN_IMAGE_TAG remains
 # update-channel metadata only and never selects a runtime image.
-# tgbot / migrate / bootstrap live behind compose profiles so default `up -d` only starts the core stack.
+# agent-runtime uses a compatibility profile so four-image updaters can parse
+# this file during the closed-by-default transition. Current install/update
+# scripts always target it explicitly, making it an always-running core service.
+# tgbot / migrate / bootstrap remain optional profiles.
 
 x-service-hardening: &service-hardening
   init: true
@@ -244,6 +247,51 @@ services:
       timeout: 5s
       retries: 3
       start_period: 60s
+
+  agent-runtime:
+    <<: *service-hardening
+    # The API-image fallback is never started by current scripts. It only lets
+    # legacy four-image updaters enumerate an immutable target image set without
+    # learning a fifth manifest key; modern preflight requires and overrides
+    # LUMEN_AGENT_RUNTIME_IMAGE_REF before activating this profile.
+    image: ${LUMEN_AGENT_RUNTIME_IMAGE_REF:-${LUMEN_API_IMAGE_REF:?Set LUMEN_API_IMAGE_REF to name@sha256 digest}}
+    container_name: lumen-agent-runtime
+    user: "${LUMEN_AGENT_RUNTIME_UID:-1000}:${LUMEN_AGENT_RUNTIME_GID:-1000}"
+    profiles: ["agent-runtime"]
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${AGENT_RUNTIME_TMPFS_SIZE:-64m},uid=${LUMEN_AGENT_RUNTIME_UID:-1000},gid=${LUMEN_AGENT_RUNTIME_GID:-1000},mode=1777
+    cpus: "${AGENT_RUNTIME_CPUS:-0.75}"
+    mem_limit: ${AGENT_RUNTIME_MEMORY_LIMIT:-768m}
+    environment:
+      NODE_ENV: "production"
+      AGENT_RUNTIME_HOST: "0.0.0.0"
+      AGENT_RUNTIME_PORT: "8090"
+      AGENT_RUNTIME_SHARED_SECRET: "${AGENT_RUNTIME_SHARED_SECRET:-}"
+      AGENT_RUNTIME_AUTH_CLOCK_SKEW_SECONDS: "${AGENT_RUNTIME_AUTH_CLOCK_SKEW_SECONDS:-30}"
+      AGENT_RUNTIME_NONCE_TTL_SECONDS: "${AGENT_RUNTIME_NONCE_TTL_SECONDS:-120}"
+      AGENT_RUNTIME_NONCE_CACHE_SIZE: "${AGENT_RUNTIME_NONCE_CACHE_SIZE:-10000}"
+      AGENT_RUNTIME_MAX_REQUEST_BYTES: "${AGENT_RUNTIME_MAX_REQUEST_BYTES:-8388608}"
+      AGENT_RUNTIME_MAX_LINE_BYTES: "${AGENT_RUNTIME_MAX_LINE_BYTES:-65536}"
+      AGENT_RUNTIME_MAX_STREAM_BYTES: "${AGENT_RUNTIME_MAX_STREAM_BYTES:-8388608}"
+      AGENT_RUNTIME_MAX_EVENTS: "${AGENT_RUNTIME_MAX_EVENTS:-4096}"
+      AGENT_RUNTIME_MAX_CONCURRENT_RUNS: "${AGENT_RUNTIME_MAX_CONCURRENT_RUNS:-8}"
+      AGENT_RUNTIME_REQUEST_BODY_TIMEOUT_SECONDS: "${AGENT_RUNTIME_REQUEST_BODY_TIMEOUT_SECONDS:-10}"
+    networks:
+      - lumen_backend
+    healthcheck:
+      test:
+        - "CMD"
+        - "node"
+        - "-e"
+        - "fetch('http://127.0.0.1:8090/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
 
   web:
     <<: *service-hardening

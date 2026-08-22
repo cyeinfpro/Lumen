@@ -220,6 +220,9 @@ class GenerationOut(BaseOut):
     provider_attempts: list[dict[str, Any]] = Field(default_factory=list)
     source: str | None = None
     action_source: str | None = None
+    agent_session_id: str | None = None
+    agent_run_id: str | None = None
+    agent_tool_call_id: str | None = None
     trace_id: str | None = None
     attachment_roles: list[dict[str, Any]] = Field(default_factory=list)
     source_image_id: str | None = None
@@ -289,6 +292,8 @@ class TaskItemOut(BaseModel):
     action_source: str | None = None
     trace_id: str | None = None
     conversation_id: str | None = None
+    agent_session_id: str | None = None
+    agent_run_id: str | None = None
     project_id: str | None = None
     workflow_type: str | None = None
     workflow_step_key: str | None = None

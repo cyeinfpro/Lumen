@@ -11,6 +11,7 @@ export const TASK_FILTERS: Array<{ key: TaskFilter; label: string }> = [
 ];
 
 const SOURCE_LABEL: Record<string, string> = {
+  agent: "Agent",
   chat: "聊天",
   project: "项目",
   telegram: "Telegram",
@@ -72,6 +73,53 @@ export function taskKindPath(
   task: TaskItemResponse,
 ): "generations" | "completions" {
   return task.kind === "generation" ? "generations" : "completions";
+}
+
+export function resolveTaskRoute(
+  task: Pick<
+    TaskItemResponse,
+    | "source"
+    | "agent_session_id"
+    | "conversation_id"
+    | "message_id"
+  >,
+): string | null {
+  if ((task.source === "agent" || task.agent_session_id) && task.agent_session_id) {
+    const query = new URLSearchParams({
+      session: task.agent_session_id,
+      scrollTo: task.message_id,
+    });
+    return `/agent?${query.toString()}`;
+  }
+  if (task.conversation_id) {
+    const query = new URLSearchParams({
+      conversationId: task.conversation_id,
+      scrollTo: task.message_id,
+    });
+    return `/?${query.toString()}`;
+  }
+  return null;
+}
+
+export function resolveGenerationRoute(
+  generation: Pick<
+    Generation,
+    "agent_session_id" | "conversation_id" | "message_id" | "source"
+  >,
+): string | null {
+  if (generation.agent_session_id) {
+    const query = new URLSearchParams({
+      session: generation.agent_session_id,
+      scrollTo: generation.message_id,
+    });
+    return `/agent?${query.toString()}`;
+  }
+  if (!generation.conversation_id || generation.source === "agent") return null;
+  const query = new URLSearchParams({
+    conversationId: generation.conversation_id,
+    scrollTo: generation.message_id,
+  });
+  return `/?${query.toString()}`;
 }
 
 export function deriveTaskCenterViewState({

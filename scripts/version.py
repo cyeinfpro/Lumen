@@ -35,6 +35,8 @@ PYPROJECT_FILES = [
 ]
 WEB_PACKAGE_JSON = ROOT / "apps/web/package.json"
 WEB_PACKAGE_LOCK = ROOT / "apps/web/package-lock.json"
+AGENT_RUNTIME_PACKAGE_JSON = ROOT / "apps/agent-runtime/package.json"
+AGENT_RUNTIME_PACKAGE_LOCK = ROOT / "apps/agent-runtime/package-lock.json"
 UV_LOCK = ROOT / "uv.lock"
 CORE_INIT = ROOT / "packages/core/lumen_core/__init__.py"
 UV_LOCK_PACKAGE_NAMES = {
@@ -135,6 +137,60 @@ def current_release_json_path() -> Path | None:
     return None
 
 
+def node_package_targets() -> tuple[tuple[Path, Path], ...]:
+    return (
+        (WEB_PACKAGE_JSON, WEB_PACKAGE_LOCK),
+        (AGENT_RUNTIME_PACKAGE_JSON, AGENT_RUNTIME_PACKAGE_LOCK),
+    )
+
+
+def check_node_package_versions(version: str) -> list[str]:
+    mismatches: list[str] = []
+    for package_path, lock_path in node_package_targets():
+        package = read_json(package_path)
+        if package.get("version") != version:
+            mismatches.append(
+                f"{package_path.relative_to(ROOT)}: "
+                f"{package.get('version')} != {version}"
+            )
+        lock = read_json(lock_path)
+        if lock.get("version") != version:
+            mismatches.append(
+                f"{lock_path.relative_to(ROOT)}: {lock.get('version')} != {version}"
+            )
+        root_package = lock.get("packages", {}).get("", {})
+        if root_package.get("version") != version:
+            mismatches.append(
+                f"{lock_path.relative_to(ROOT)} packages['']: "
+                f"{root_package.get('version')} != {version}"
+            )
+    return mismatches
+
+
+def sync_node_package_versions(version: str) -> list[str]:
+    changed: list[str] = []
+    for package_path, lock_path in node_package_targets():
+        package = read_json(package_path)
+        if package.get("version") != version:
+            package["version"] = version
+            write_json(package_path, package)
+            changed.append(str(package_path.relative_to(ROOT)))
+
+        lock = read_json(lock_path)
+        lock_changed = False
+        if lock.get("version") != version:
+            lock["version"] = version
+            lock_changed = True
+        root_package = lock.get("packages", {}).get("", {})
+        if root_package.get("version") != version:
+            root_package["version"] = version
+            lock_changed = True
+        if lock_changed:
+            write_json(lock_path, lock)
+            changed.append(str(lock_path.relative_to(ROOT)))
+    return changed
+
+
 def rolling_tag_allowed() -> bool:
     return os.environ.get("LUMEN_ALLOW_ROLLING_TAG") == "1"
 
@@ -175,23 +231,7 @@ def check() -> int:
         elif value != version:
             mismatches.append(f"{target.label}: {value} != {version}")
 
-    package_json = read_json(WEB_PACKAGE_JSON)
-    if package_json.get("version") != version:
-        mismatches.append(
-            f"{WEB_PACKAGE_JSON.relative_to(ROOT)}: {package_json.get('version')} != {version}"
-        )
-
-    package_lock = read_json(WEB_PACKAGE_LOCK)
-    if package_lock.get("version") != version:
-        mismatches.append(
-            f"{WEB_PACKAGE_LOCK.relative_to(ROOT)}: {package_lock.get('version')} != {version}"
-        )
-    root_package = package_lock.get("packages", {}).get("", {})
-    if root_package.get("version") != version:
-        mismatches.append(
-            f"{WEB_PACKAGE_LOCK.relative_to(ROOT)} packages['']: "
-            f"{root_package.get('version')} != {version}"
-        )
+    mismatches.extend(check_node_package_versions(version))
 
     if UV_LOCK.exists():
         try:
@@ -268,24 +308,7 @@ def sync() -> int:
         if sync_target(target):
             changed.append(target.label)
 
-    package_json = read_json(WEB_PACKAGE_JSON)
-    if package_json.get("version") != version:
-        package_json["version"] = version
-        write_json(WEB_PACKAGE_JSON, package_json)
-        changed.append(str(WEB_PACKAGE_JSON.relative_to(ROOT)))
-
-    package_lock = read_json(WEB_PACKAGE_LOCK)
-    lock_changed = False
-    if package_lock.get("version") != version:
-        package_lock["version"] = version
-        lock_changed = True
-    root_package = package_lock.get("packages", {}).get("", {})
-    if root_package.get("version") != version:
-        root_package["version"] = version
-        lock_changed = True
-    if lock_changed:
-        write_json(WEB_PACKAGE_LOCK, package_lock)
-        changed.append(str(WEB_PACKAGE_LOCK.relative_to(ROOT)))
+    changed.extend(sync_node_package_versions(version))
     if changed:
         print(f"synced version {version}:")
         for label in changed:

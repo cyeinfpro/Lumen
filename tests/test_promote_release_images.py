@@ -13,7 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "promote_release_images.py"
 REGISTRY = "ghcr.io/cyeinfpro"
-SERVICES = ("api", "worker", "tgbot", "web")
+SERVICES = ("api", "worker", "tgbot", "web", "agent-runtime")
 
 spec = importlib.util.spec_from_file_location("promote_release_images", SCRIPT)
 assert spec is not None and spec.loader is not None
@@ -208,6 +208,17 @@ def _manifest(tag: str, digests: dict[str, str]) -> str:
                     "immutable_ref": f"{REGISTRY}/lumen-{service}@{digest}",
                 }
                 for service, digest in digests.items()
+                if service != "agent-runtime"
+            },
+            "components": {
+                "agent-runtime": {
+                    "tag": f"{REGISTRY}/lumen-agent-runtime:{tag}",
+                    "digest": digests["agent-runtime"],
+                    "immutable_ref": (
+                        f"{REGISTRY}/lumen-agent-runtime@"
+                        f"{digests['agent-runtime']}"
+                    ),
+                }
             },
         }
     )
@@ -519,6 +530,65 @@ def test_first_main_alias_is_rejected_before_any_registry_write() -> None:
     assert not any(
         command[:3] == ("buildx", "imagetools", "create") for command in docker.commands
     )
+
+
+def test_main_transition_adds_only_missing_agent_runtime_alias() -> None:
+    new_digests = _digests()
+    old_digests = _digests(900)
+    state = _immutable_state(new_digests)
+    for service in promotion.LEGACY_SERVICES:
+        state[f"{REGISTRY}/lumen-{service}:main"] = old_digests[service]
+    docker = FakeDockerCommand(state)
+    logs: list[str] = []
+    publisher = _publisher(docker, logs=logs)
+
+    publisher.publish(build_alias_plan("main"), new_digests)
+
+    for service in promotion.LEGACY_SERVICES:
+        assert state[f"{REGISTRY}/lumen-{service}:main"] == new_digests[service]
+    runtime_ref = f"{REGISTRY}/lumen-agent-runtime:main"
+    assert docker.release_digests[runtime_ref] == new_digests["agent-runtime"]
+    assert any("transition adds only" in message for message in logs)
+
+
+def test_stable_transition_uses_legacy_four_image_rollback_manifest() -> None:
+    new_digests = _digests()
+    old_digests = _digests(950)
+    state = _immutable_state(new_digests)
+    for service in SERVICES:
+        image = f"{REGISTRY}/lumen-{service}"
+        state[f"{image}:v1.2.65"] = new_digests[service]
+        if service in promotion.LEGACY_SERVICES:
+            for alias in ("v1.2", "v1", "latest"):
+                state[f"{image}:{alias}"] = old_digests[service]
+    docker = FakeDockerCommand(
+        state,
+        fail_target=f"{REGISTRY}/lumen-worker:v1.2",
+    )
+    publisher = PromotionPublisher(
+        registry=DockerRegistry(docker, delete_tag=docker.delete_tag),
+        registry_namespace=REGISTRY,
+        release_tags=lambda: ("v1.2.64",),
+        release_manifest=lambda _tag: {
+            service: old_digests[service]
+            for service in promotion.LEGACY_SERVICES
+        },
+    )
+
+    with pytest.raises(PromotionError, match="simulated registry write failure"):
+        publisher.publish(
+            build_alias_plan("release", "v1.2.65"),
+            new_digests,
+            phase="mutable",
+        )
+
+    for service in promotion.LEGACY_SERVICES:
+        image = f"{REGISTRY}/lumen-{service}"
+        for alias in ("v1.2", "v1", "latest"):
+            assert state[f"{image}:{alias}"] == old_digests[service]
+    assert f"{REGISTRY}/lumen-agent-runtime:v1.2" not in state
+    assert f"{REGISTRY}/lumen-agent-runtime:v1" not in state
+    assert f"{REGISTRY}/lumen-agent-runtime:latest" not in state
 
 
 def test_first_new_major_partial_failure_restores_absent_mutable_aliases() -> None:

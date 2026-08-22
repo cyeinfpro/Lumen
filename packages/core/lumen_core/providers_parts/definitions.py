@@ -10,6 +10,11 @@ DEFAULT_IMAGE_EDIT_INPUT_TRANSPORT = "url"
 PROVIDER_PURPOSE_VALUES = ("chat", "image", "embedding")
 DEFAULT_PROVIDER_PURPOSES = ("chat", "image")
 IMAGE_JOBS_ENDPOINT_VALUES = ("auto", "generations", "responses")
+AGENT_API_VALUES = (
+    "openai-responses",
+    "openai-completions",
+    "anthropic-messages",
+)
 DEFAULT_LEGACY_PROVIDER_BASE_URL = "https://api.example.com"
 MAX_PROVIDER_WEIGHT = 1000
 SSH_HOST_KEY_FINGERPRINT_RE = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}=?$")
@@ -67,6 +72,12 @@ class ProviderDefinition:
     image_edit_input_transport: str = DEFAULT_IMAGE_EDIT_INPUT_TRANSPORT
     image_concurrency: int = 1
     responses_supported: bool | None = None
+    vision_supported: bool | None = None
+    agent_api: str = "openai-responses"
+    agent_models: tuple[str, ...] = ()
+    agent_context_window: int = 128000
+    agent_max_output_tokens: int = 16384
+    agent_reasoning_supported: bool = True
     image_generations_supported: bool | None = None
     image_responses_supported: bool | None = None
 

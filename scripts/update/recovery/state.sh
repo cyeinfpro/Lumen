@@ -53,18 +53,26 @@ lumen_update_load_original_service_state() {
 lumen_update_restore_original_services() {
     local compose_dir="$1"
     shift
+    local services=("$@")
+    if [ -f "${compose_dir}/docker-compose.yml" ] \
+            && grep -Eq '^[[:space:]]{2}agent-runtime:[[:space:]]*$' \
+                "${compose_dir}/docker-compose.yml"; then
+        services=(agent-runtime "${services[@]}")
+    else
+        lumen_docker stop lumen-agent-runtime >/dev/null 2>&1 || true
+    fi
     if ! lumen_update_load_original_service_state; then
         log_error "无法证明更新前 tgbot 是否 active，拒绝猜测恢复服务集合。"
         return 1
     fi
     if [ "${UPDATE_ORIGINAL_TGBOT_ACTIVE}" -eq 1 ]; then
         if ! lumen_compose_in "${compose_dir}" --profile tgbot \
-                up --pull missing -d --wait --force-recreate "$@" tgbot; then
+                up --pull missing -d --wait --force-recreate "${services[@]}" tgbot; then
             return 1
         fi
     else
         if ! lumen_compose_in "${compose_dir}" \
-                up --pull missing -d --wait --force-recreate "$@"; then
+                up --pull missing -d --wait --force-recreate "${services[@]}"; then
             return 1
         fi
     fi
@@ -289,9 +297,9 @@ restore_uncommitted_update_state() {
             || [ "${UPDATE_OLD_SERVICES_STOPPED}" -eq 1 ]; then
         if lumen_update_load_original_service_state; then
             if [ "${UPDATE_ORIGINAL_TGBOT_ACTIVE}" -eq 1 ]; then
-                log_warn "rollback：重新拉起更新前 release 的 api/worker/web/tgbot。"
+                log_warn "rollback：重新拉起更新前 release 的核心服务与 tgbot。"
             else
-                log_warn "rollback：重新拉起更新前 release 的 api/worker/web；tgbot 原本未运行。"
+                log_warn "rollback：重新拉起更新前 release 的核心服务；tgbot 原本未运行。"
             fi
         else
             log_error "rollback：更新前 tgbot active 状态未知；仅恢复核心服务并要求人工确认 bot。"
@@ -307,9 +315,14 @@ restore_uncommitted_update_state() {
                 UPDATE_OLD_SERVICES_STOPPED=0
             fi
         else
+            local fallback_services=(api worker web)
+            if grep -Eq '^[[:space:]]{2}agent-runtime:[[:space:]]*$' \
+                    "${ROOT}/current/docker-compose.yml" 2>/dev/null; then
+                fallback_services=(agent-runtime api worker web)
+            fi
             if ! lumen_compose_in "${ROOT}/current" \
                     up --pull missing -d --wait --force-recreate \
-                    api worker web \
+                    "${fallback_services[@]}" \
                     || ! lumen_update_wait_for_core_ready "${ROOT}/current"; then
                 log_error "rollback：更新前 release 核心服务未通过 API/Worker readiness。"
                 rc=1

@@ -49,12 +49,13 @@ COPY packages/ packages/
 COPY apps/api/ apps/api/
 COPY apps/worker/ apps/worker/
 COPY apps/tgbot/ apps/tgbot/
+COPY apps/agent-runtime/ apps/agent-runtime/
 COPY image-job/ image-job/
 
 # Release-time files: 打包到 image 让 update.sh 能在 host 不是 git repo 时用
 # `docker create + docker cp` 从 image 提取出来同步到 host release dir。
 # 这样无论 host 上 update.sh 多老，只要拉到新 image 就能自愈到新代码。
-COPY docker-compose.yml VERSION ./
+COPY docker-compose.yml docker-compose.dev.yml docker-compose.bluegreen.yml docker-compose.public-dns.yml VERSION ./
 COPY deploy/ deploy/
 COPY scripts/ scripts/
 

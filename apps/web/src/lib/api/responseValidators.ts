@@ -222,13 +222,19 @@ export function validateAuthUser<T>(value: unknown): T {
       endpoint,
       "response.runtime_defaults",
     );
+    optionalBoolean(
+      defaults,
+      "agent_enabled",
+      endpoint,
+      "response.runtime_defaults",
+    );
     if (defaults.nav_visibility !== undefined) {
       const visibility = record(
         defaults.nav_visibility,
         endpoint,
         "response.runtime_defaults.nav_visibility",
       );
-      for (const key of ["studio", "video", "projects", "assets"]) {
+      for (const key of ["studio", "agent", "video", "projects", "assets"]) {
         optionalBoolean(
           visibility,
           key,

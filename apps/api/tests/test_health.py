@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from types import SimpleNamespace
 
 import app.main as main
 from app.main import healthz, readyz
@@ -59,7 +60,25 @@ async def test_healthz_includes_runtime_version(monkeypatch: pytest.MonkeyPatch)
 @pytest.mark.asyncio
 async def test_readyz_reports_ok_when_dependencies_respond(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main, "engine", OkEngine())
+    async def agent_ready(_connection):
+        return SimpleNamespace(operational=True)
+    monkeypatch.setattr(main, "agent_health_snapshot", agent_ready)
     assert await readyz(redis=OkRedis()) == {"status": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_readyz_fails_when_enabled_agent_runtime_is_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main, "engine", OkEngine())
+
+    async def agent_not_ready(_connection):
+        return SimpleNamespace(operational=False)
+
+    monkeypatch.setattr(main, "agent_health_snapshot", agent_not_ready)
+    with pytest.raises(Exception) as excinfo:
+        await readyz(redis=OkRedis())
+    assert getattr(excinfo.value, "status_code", None) == 503
 
 
 @pytest.mark.asyncio

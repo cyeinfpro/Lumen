@@ -2,7 +2,7 @@
 
 Lumen 是一个自托管的多模态 AI 创作工作台。它把聊天、视觉问答、文生图、图生图、视频生成、Storyboard、资产流、分享、Telegram Bot、Provider 管理、计费和更新运维放在同一个私有部署里。
 
-默认部署形态是 Docker Compose 全栈：Next.js Web、FastAPI API、arq Worker、Telegram Bot、PostgreSQL 16 + pgvector、Redis 7，以及可选的 `image-job` 异步图片 sidecar。
+默认部署形态是 Docker Compose 全栈：Next.js Web、FastAPI API、arq Worker、后端专用 Pi Agent Runtime、Telegram Bot、PostgreSQL 16 + pgvector、Redis 7，以及可选的 `image-job` 异步图片 sidecar。
 
 原生桌面客户端已停止维护并下架。Lumen 现在只提供自托管的 Web / Docker 部署形态；历史桌面安装包和自动更新清单不再作为受支持的分发渠道。
 
@@ -17,6 +17,7 @@ Lumen 是一个自托管的多模态 AI 创作工作台。它把聊天、视觉�
 ## 核心功能
 
 - **Studio**：文本聊天、视觉问答、图片生成/编辑、inpaint、工具调用、全局任务托盘。
+- **Agent**：独立会话中的 Pi 文本推理与受控文生图/图生图工具；默认关闭。
 - **视频工作台**：视频 provider、参考图/视频、队列进度、计费 hold/settle/release。
 - **项目工作流**：服装模特库、自然场景展示、海报风格库、Storyboard 分镜/设定图/关键帧/视频生成。
 - **资产与分享**：生成资产流、已加载作品搜索、签名图片代理、多图分享、公开分享页。
@@ -41,6 +42,8 @@ Next.js Web ---------------> FastAPI API
    |                            v
    |                       arq Worker
    |                            |
+   |                            +--> private Node Agent Runtime (Pi)
+   |                            |
    |                            | Provider Pool + proxies + retries
    |                            v
    |                    OpenAI-compatible upstreams
@@ -54,6 +57,7 @@ Next.js Web ---------------> FastAPI API
 ```text
 apps/api/       FastAPI routes, Alembic migrations, admin/update/backup APIs
 apps/worker/    arq worker, provider calls, image/video processing, billing
+apps/agent-runtime/  private Node/Pi model-tool loop, health and metrics
 apps/web/       Next.js frontend, shell, Studio, Stream, Projects, Admin
 apps/tgbot/     Telegram Bot
 packages/core/  shared models, schemas, pricing, provider and URL helpers
@@ -196,6 +200,8 @@ Validate the expanded production image set before `pull` or `up`:
 ```bash
 docker compose --env-file .env config --images \
   | python3 scripts/check_immutable_images.py
+docker compose --env-file .env --profile agent-runtime config --images \
+  | python3 scripts/check_immutable_images.py
 docker compose --env-file .env \
   -f docker-compose.yml -f docker-compose.bluegreen.yml \
   config --images | python3 scripts/check_immutable_images.py
@@ -208,8 +214,9 @@ immutable `LUMEN_PYTHON_BASE_REF`.
 | --- | --- |
 | Runtime | `APP_ENV`, `PUBLIC_BASE_URL`, `CORS_ALLOW_ORIGINS`, `TRUSTED_PROXIES`, `SESSION_COOKIE_SECURE`, `LUMEN_HSTS_ENABLED`, `LUMEN_HSTS_INCLUDE_SUBDOMAINS` |
 | Database/cache | `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DATABASE_URL`, `REDIS_PASSWORD`, `REDIS_URL` |
-| Images | `LUMEN_POSTGRES_IMAGE_REF`, `LUMEN_REDIS_IMAGE_REF`, `LUMEN_API_IMAGE_REF`, `LUMEN_WORKER_IMAGE_REF`, `LUMEN_WEB_IMAGE_REF`, `LUMEN_TGBOT_IMAGE_REF` |
-| Secrets | `SESSION_SECRET`, `IMAGE_PROXY_SECRET`, `BYOK_API_KEY_MASTER_SECRET` |
+| Images | `LUMEN_POSTGRES_IMAGE_REF`, `LUMEN_REDIS_IMAGE_REF`, `LUMEN_API_IMAGE_REF`, `LUMEN_WORKER_IMAGE_REF`, `LUMEN_AGENT_RUNTIME_IMAGE_REF`, `LUMEN_WEB_IMAGE_REF`, `LUMEN_TGBOT_IMAGE_REF` |
+| Secrets | `SESSION_SECRET`, `IMAGE_PROXY_SECRET`, `BYOK_API_KEY_MASTER_SECRET`, `AGENT_RUNTIME_SHARED_SECRET`, `AGENT_TOOL_CAPABILITY_SECRET` |
+| Agent | `AGENT_ENABLED`, `UI_NAV_AGENT_VISIBLE`, `AGENT_RUNTIME_URL`, `AGENT_*` limits; both feature flags default to `0` |
 | Provider pool | `PROVIDERS`, `UPSTREAM_DEFAULT_MODEL`, `UPSTREAM_GLOBAL_CONCURRENCY`, `IMAGE_GENERATION_CONCURRENCY` |
 | Storage/backup | `LUMEN_DATA_ROOT`, `LUMEN_DB_ROOT`, `STORAGE_ROOT`, `BACKUP_ROOT`, `MAX_KEEP` |
 | Web | `LUMEN_BACKEND_URL`, `NEXT_PUBLIC_API_BASE`, `NEXT_PUBLIC_LUMEN_VERSION`, `LUMEN_UPGRADE_INSECURE_REQUESTS` |
@@ -268,6 +275,11 @@ uv run uvicorn app.main:app --reload --port 8000
 cd ../worker
 uv run python -m arq app.main.WorkerSettings
 
+cd ../agent-runtime
+npm ci --ignore-scripts
+AGENT_RUNTIME_SHARED_SECRET=<32-byte-secret> npm run build
+AGENT_RUNTIME_SHARED_SECRET=<same-secret> npm start
+
 cd ../web
 npm ci
 npm run dev
@@ -295,13 +307,21 @@ Unified gate:
 bash scripts/test.sh -q
 ```
 
-This runs Python ruff, API/Worker/Core/TgBot/image-job/tool tests, web tests, web lint, web type-check and web build. Targeted commands:
+This runs Python governance and API/Worker/Core/TgBot/image-job/tool tests,
+Agent Runtime test/type-check/lint/build, and Web test/lint/type-check/build.
+Targeted commands:
 
 ```bash
 uv run pytest apps/api/tests -q
 uv run pytest apps/worker/tests -q
 uv run pytest packages/core/tests -q
 uv run pytest image-job/tests -q
+
+cd apps/agent-runtime
+npm test
+npm run type-check
+npm run lint
+npm run build
 
 cd apps/web
 npm test
@@ -337,6 +357,10 @@ git push origin vX.Y.Z
 ```
 
 The tag-triggered GitHub Actions `Docker Release` is the production release gate. A main-branch Docker run is not enough for stable/default updates because `latest` is only updated by a successful formal `v*` release tag.
+
+The release contains five immutable application images. CI signs each final
+digest and attaches a verified SPDX JSON SBOM attestation. `release_proof.py`
+requires local `gh` and `cosign` access to verify a published stable release.
 
 Manual `workflow_dispatch.ref` is for branch/SHA rebuilds only. It must not be used to create tag release semantics.
 
@@ -401,6 +425,10 @@ See `docs/runbooks/update-troubleshooting.md`.
 - Private file reads guard against path traversal and symlinks.
 - `image-job` validates downloaded image URLs and every redirect hop against private, loopback, link-local and metadata targets.
 - BYOK keys are encrypted at rest with `BYOK_API_KEY_MASTER_SECRET`; rotating it invalidates stored user keys.
+- Account export includes sanitized Agent session/run/tool NDJSON sections.
+  Account deletion and BYOK retention irreversibly clear Agent prompt snapshots,
+  reference metadata, tool arguments, and internal errors while retaining only
+  bounded billing/idempotency evidence.
 - Public share and invite endpoints are rate-limited.
 
 ## Documentation Map

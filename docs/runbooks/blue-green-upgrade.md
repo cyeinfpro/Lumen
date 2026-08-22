@@ -7,6 +7,8 @@
 ```bash
 python3 scripts/lint_alembic_breaking.py
 bash -n scripts/update.sh scripts/lib.sh scripts/lumen-shift-traffic.sh
+docker compose --profile agent-runtime config --images \
+  | python3 scripts/check_immutable_images.py
 ```
 
 nginx upstream 默认写入：
@@ -44,6 +46,11 @@ stop_green
 ```
 
 最终会把流量切回 canonical `api` 服务，`api-green` 只是临时影子容器，避免下一轮更新状态漂移。
+
+Agent Runtime 保持单副本，不做 Runtime 双副本蓝绿。更新器先按 immutable Image
+ID 重建 Runtime，再重建 Worker 和 green API。`agent.enabled=1` 时 green
+`/readyz` 会执行免费的 Runtime readiness 检查；失败时不切流。旧/new Worker
+不能并行执行同一个 execution epoch。
 
 ## 手动切流
 

@@ -105,6 +105,21 @@ def _origin_looks_public(origin: str) -> bool:
     return bool(host and not _host_is_localish(host))
 
 
+def _internal_service_url(raw: str, *, field: str) -> str:
+    value = (raw or "").strip().rstrip("/")
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(f"{field} must be an HTTP(S) service URL without credentials")
+    return value
+
+
 def _host_allows_insecure_production_http(host: str) -> bool:
     value = host.strip().strip("[]").lower()
     if value == "localhost" or value.endswith(".localhost"):
@@ -253,6 +268,14 @@ class Settings(BaseSettings):
     # 生产必须 ≥32 字符；和 SESSION_SECRET 一样的强度要求。
     telegram_bot_shared_secret: str = ""
 
+    # Runtime-to-API tool capability HMAC key. Agent routes remain disabled by
+    # default; when enabled, the internal tool gateway rejects every request
+    # unless this is at least 32 bytes.
+    agent_tool_capability_secret: str = Field(default="", repr=False)
+    agent_runtime_url: str = "http://agent-runtime:8090"
+    agent_runtime_shared_secret: str = Field(default="", repr=False)
+    agent_runtime_health_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
+
     # Bot 的 TG username（不带 @），仅用于 /me/telegram/link-code 拼 deep_link。
     # 留空则返回 deep_link=None，前端自拼。
     telegram_bot_username: str = ""
@@ -266,6 +289,28 @@ class Settings(BaseSettings):
         _validate_session_ttl(self.session_ttl_min)
         _validate_trusted_proxies(self.trusted_proxies)
         _normalize_and_validate_smtp(self)
+        self.agent_runtime_url = _internal_service_url(
+            self.agent_runtime_url,
+            field="AGENT_RUNTIME_URL",
+        )
+        for field_name in (
+            "agent_tool_capability_secret",
+            "agent_runtime_shared_secret",
+        ):
+            value = str(getattr(self, field_name) or "").strip()
+            if value and len(value.encode("utf-8")) < 32:
+                raise ValueError(
+                    f"{field_name.upper()} must contain at least 32 UTF-8 bytes"
+                )
+            setattr(self, field_name, value)
+        if (
+            self.agent_runtime_shared_secret
+            and self.agent_runtime_shared_secret == self.agent_tool_capability_secret
+        ):
+            raise ValueError(
+                "AGENT_RUNTIME_SHARED_SECRET and AGENT_TOOL_CAPABILITY_SECRET "
+                "must be different"
+            )
         is_dev = _is_development_environment(self.app_env)
         _validate_public_development_origin(self, is_dev=is_dev)
         _configure_byok_secret(self, is_dev=is_dev)

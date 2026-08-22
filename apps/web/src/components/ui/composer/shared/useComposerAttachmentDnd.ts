@@ -16,39 +16,49 @@ import {
 } from "react";
 
 import { pushMobileToast } from "@/components/ui/primitives/mobile";
-import { useChatStore } from "@/store/useChatStore";
 
 import {
-  MAX_COMPOSER_ATTACHMENTS,
   hasImageFile,
   imageFilesFromDataTransfer,
   imageFilesFromList,
-  remainingAttachmentSlots,
 } from "./attachments";
 
-interface UseComposerAttachmentDndOptions {
+interface UseComposerAttachmentDndOptions<TAttachment> {
   fileInputRef: RefObject<HTMLInputElement | null>;
   dragDepthRef: MutableRefObject<number>;
   setIsUploading: (value: boolean) => void;
   setIsDragActive: (value: boolean) => void;
   setExpanded: (value: boolean) => void;
+  uploadAttachment: (
+    file: File,
+    opts: { signal: AbortSignal },
+  ) => Promise<TAttachment>;
+  addAttachment: (attachment: TAttachment) => void;
+  getAttachmentCount: () => number;
+  setError: (message: string | null) => void;
+  limit: number;
+  attachmentNoun?: string;
 }
 
 function isAbortError(err: unknown): boolean {
   return err instanceof DOMException && err.name === "AbortError";
 }
 
-export function useComposerAttachmentDnd({
+export function useComposerAttachmentDnd<TAttachment>({
   fileInputRef,
   dragDepthRef,
   setIsUploading,
   setIsDragActive,
   setExpanded,
-}: UseComposerAttachmentDndOptions) {
-  const addAttachment = useChatStore((s) => s.addAttachment);
-  const uploadAttachment = useChatStore((s) => s.uploadAttachment);
-  const setComposerError = useChatStore((s) => s.setComposerError);
+  uploadAttachment,
+  addAttachment,
+  getAttachmentCount,
+  setError,
+  limit,
+  attachmentNoun = "参考图",
+}: UseComposerAttachmentDndOptions<TAttachment>) {
   const uploadControllersRef = useRef<Set<AbortController>>(new Set());
+  const limitMessage = `最多添加 ${limit} 张${attachmentNoun}`;
 
   const ingestFile = useCallback(
     async (file: File): Promise<boolean> => {
@@ -63,7 +73,7 @@ export function useComposerAttachmentDnd({
       } catch (err) {
         if (isAbortError(err)) return false;
         const msg = err instanceof Error ? err.message : "上传失败";
-        setComposerError(msg);
+        setError(msg);
         pushMobileToast(msg, "danger");
         return false;
       } finally {
@@ -71,26 +81,23 @@ export function useComposerAttachmentDnd({
         setIsUploading(uploadControllersRef.current.size > 0);
       }
     },
-    [uploadAttachment, addAttachment, setComposerError, setIsUploading],
+    [uploadAttachment, addAttachment, setError, setIsUploading],
   );
 
   const ingestMany = useCallback(
     async (files: File[]) => {
       const imageFiles = imageFilesFromList(files);
       if (imageFiles.length === 0) return;
-      const slots = remainingAttachmentSlots(
-        useChatStore.getState().composer.attachments,
-      );
+      const slots = Math.max(0, limit - getAttachmentCount());
       if (slots <= 0) {
-        const msg = `最多添加 ${MAX_COMPOSER_ATTACHMENTS} 张参考图`;
-        setComposerError(msg);
-        pushMobileToast(msg, "danger");
+        setError(limitMessage);
+        pushMobileToast(limitMessage, "danger");
         return;
       }
       const selected = imageFiles.slice(0, slots);
       if (imageFiles.length > slots) {
-        const msg = `最多添加 ${MAX_COMPOSER_ATTACHMENTS} 张参考图，已添加前 ${slots} 张`;
-        setComposerError(msg);
+        const msg = `${limitMessage}，已添加前 ${slots} 张`;
+        setError(msg);
         pushMobileToast(msg, "danger");
       }
       let ok = 0;
@@ -99,7 +106,7 @@ export function useComposerAttachmentDnd({
       }
       if (ok > 0) pushMobileToast(`已添加 ${ok} 张参考图`, "success");
     },
-    [ingestFile, setComposerError],
+    [getAttachmentCount, ingestFile, limit, limitMessage, setError],
   );
 
   const handlePaste = useCallback(
@@ -124,15 +131,14 @@ export function useComposerAttachmentDnd({
 
   const openFilePicker = useCallback(() => {
     if (
-      remainingAttachmentSlots(useChatStore.getState().composer.attachments) <= 0
+      getAttachmentCount() >= limit
     ) {
-      const msg = `最多添加 ${MAX_COMPOSER_ATTACHMENTS} 张参考图`;
-      setComposerError(msg);
-      pushMobileToast(msg, "danger");
+      setError(limitMessage);
+      pushMobileToast(limitMessage, "danger");
       return;
     }
     fileInputRef.current?.click();
-  }, [fileInputRef, setComposerError]);
+  }, [fileInputRef, getAttachmentCount, limit, limitMessage, setError]);
 
   const handleDragEnter = useCallback(
     (e: DragEvent<HTMLDivElement>) => {

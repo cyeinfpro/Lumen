@@ -41,6 +41,7 @@ from .ratelimit import user_rate_limits_effective, user_rate_limits_effective_re
 from .redis_client import get_redis
 from .runtime import ApiRuntime, RuntimeLifecycle
 from .services.admin_model_cache import AdminModelCache
+from .services.agent_health import agent_health_snapshot
 from .runtime_settings import (
     get_setting,
     migrate_image_primary_route,
@@ -261,6 +262,14 @@ def _canvas_feature_for_api_path(path: str) -> tuple[str, str] | None:
     return None
 
 
+def _agent_feature_for_api_path(path: str) -> tuple[str, str] | None:
+    if _path_matches_prefix(path, "/agent") or _path_matches_prefix(
+        path, "/internal/agent"
+    ):
+        return "agent", "agent.enabled"
+    return None
+
+
 def _feature_disabled_response(feature: str) -> JSONResponse:
     return JSONResponse(
         status_code=status.HTTP_404_NOT_FOUND,
@@ -377,12 +386,15 @@ class _NavFeatureGuardMiddleware:
         path = scope.get("path", "")
         matched = _nav_feature_for_api_path(path)
         canvas_matched = _canvas_feature_for_api_path(path)
-        if matched is None and canvas_matched is None:
+        agent_matched = _agent_feature_for_api_path(path)
+        if matched is None and canvas_matched is None and agent_matched is None:
             await self.app(scope, receive, send)
             return
 
         guards = tuple(
-            guard for guard in (matched, canvas_matched) if guard is not None
+            guard
+            for guard in (matched, canvas_matched, agent_matched)
+            if guard is not None
         )
         try:
             values = await self.flags.read(
@@ -396,7 +408,11 @@ class _NavFeatureGuardMiddleware:
                         return
                     continue
                 raw = values[setting_key]
-                disabled = raw == "0" if feature != "canvas" else raw != "1"
+                disabled = (
+                    raw != "1"
+                    if feature in {"canvas", "agent"}
+                    else raw == "0"
+                )
                 if disabled:
                     response = _feature_disabled_response(feature)
                     await response(scope, receive, send)
@@ -404,7 +420,9 @@ class _NavFeatureGuardMiddleware:
         except Exception:  # noqa: BLE001
             logger.warning("feature guard setting read failed", exc_info=True)
             feature = (
-                "canvas"
+                "agent"
+                if agent_matched is not None
+                else "canvas"
                 if canvas_matched is not None
                 else matched[0]
                 if matched is not None
@@ -770,6 +788,9 @@ async def readyz(
         await redis.ping()
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
+            agent_health = await agent_health_snapshot(conn)
+            if not agent_health.operational:
+                raise RuntimeError("Agent Runtime dependency is not ready")
     except Exception as exc:  # noqa: BLE001
         logger.warning("readiness check failed: %s", exc)
         raise HTTPException(
@@ -818,6 +839,7 @@ def _include_core_routers(target: FastAPI) -> None:
 
 def _include_app_routers(target: FastAPI) -> None:
     from .routes import admin as admin_router  # noqa: E402
+    from .routes import admin_agent_health as admin_agent_health_router  # noqa: E402
     from .routes import admin_backups as admin_backups_router  # noqa: E402
     from .routes import admin_models as admin_models_router  # noqa: E402
     from .routes import admin_proxies as admin_proxies_router  # noqa: E402
@@ -826,6 +848,9 @@ def _include_app_routers(target: FastAPI) -> None:
     from .routes import admin_telegram as admin_telegram_router  # noqa: E402
     from .routes import admin_update as admin_update_router  # noqa: E402
     from .routes import auth, storyboards, workflow_routes  # noqa: E402
+    from .routes import agent_runs as agent_runs_router  # noqa: E402
+    from .routes import agent_sessions as agent_sessions_router  # noqa: E402
+    from .routes import internal_agent_tools as internal_agent_tools_router  # noqa: E402
     from .routes import canvases as canvases_router  # noqa: E402
     from .routes import billing as billing_router  # noqa: E402
     from .routes import byok as byok_router  # noqa: E402
@@ -839,12 +864,16 @@ def _include_app_routers(target: FastAPI) -> None:
     from .routes import volcano_assets as volcano_assets_router  # noqa: E402
 
     target.include_router(auth.router, prefix="/auth", tags=["auth"])
+    target.include_router(agent_sessions_router.router)
+    target.include_router(agent_runs_router.router)
+    target.include_router(internal_agent_tools_router.router)
     _include_core_routers(target)
     target.include_router(canvases_router.router)
     target.include_router(workflow_routes.router)
     target.include_router(storyboards.router)
     target.include_router(poster_styles_router.router)
     target.include_router(admin_router.router)
+    target.include_router(admin_agent_health_router.router)
     target.include_router(admin_backups_router.router)
     target.include_router(admin_models_router.router)
     target.include_router(me_router.router)

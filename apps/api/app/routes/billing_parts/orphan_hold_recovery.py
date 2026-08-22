@@ -46,7 +46,7 @@ class _PromptOperationSnapshot:
 
 
 def recovery_action(ref_type: str | None) -> OrphanHoldRecoveryAction:
-    if ref_type in {"generation", "completion", "video_generation"}:
+    if ref_type in {"generation", "completion", "video_generation", "agent_run"}:
         return "release"
     if ref_type == "prompt_enhance":
         return "settle_default"

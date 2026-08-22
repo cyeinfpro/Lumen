@@ -52,6 +52,20 @@ export function nextKey() {
   return ++_draftSeq;
 }
 
+function providerAgentFields(p: ProviderItemOut) {
+  return {
+    responses_supported: p.responses_supported ?? null,
+    vision_supported: p.vision_supported ?? null,
+    agent_api: p.agent_api ?? "openai-responses",
+    agent_models: [...(p.agent_models ?? [])],
+    agent_context_window: Math.max(4096, p.agent_context_window ?? 128_000),
+    agent_max_output_tokens: Math.max(1, p.agent_max_output_tokens ?? 16_384),
+    agent_reasoning_supported: p.agent_reasoning_supported !== false,
+    image_generations_supported: p.image_generations_supported ?? null,
+    image_responses_supported: p.image_responses_supported ?? null,
+  };
+}
+
 export function toDraft(p: ProviderItemOut): Draft {
   // BUG-040: 已有 provider 的 api_key 不会被加载到前端 state（设空字符串）。
   // 提交时若 api_key 为空则维持原值。显示使用后端返回的 api_key_hint（已脱敏）。
@@ -71,6 +85,7 @@ export function toDraft(p: ProviderItemOut): Draft {
     image_jobs_base_url: p.image_jobs_base_url ?? "",
     image_edit_input_transport: p.image_edit_input_transport ?? "url",
     image_concurrency: Math.max(1, p.image_concurrency ?? 1),
+    ...providerAgentFields(p),
     proxy: p.proxy ?? null,
   };
 }
@@ -92,6 +107,15 @@ export function emptyDraft(): Draft {
     image_jobs_base_url: "",
     image_edit_input_transport: "url",
     image_concurrency: 1,
+    responses_supported: null,
+    vision_supported: null,
+    agent_api: "openai-responses",
+    agent_models: [],
+    agent_context_window: 128_000,
+    agent_max_output_tokens: 16_384,
+    agent_reasoning_supported: true,
+    image_generations_supported: null,
+    image_responses_supported: null,
     proxy: null,
   };
 }
@@ -131,6 +155,7 @@ export function providerOutToIn(
     image_jobs_base_url: p.image_jobs_base_url ?? "",
     image_edit_input_transport: p.image_edit_input_transport ?? "url",
     image_concurrency: Math.max(1, p.image_concurrency ?? 1),
+    ...providerAgentFields(p),
     proxy: p.proxy ?? null,
   };
 }

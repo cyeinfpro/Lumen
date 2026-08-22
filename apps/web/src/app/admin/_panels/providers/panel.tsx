@@ -203,12 +203,17 @@ function ProviderPanelContent({
           deleteConfirmIdx={state.deleteConfirmIdx}
           fieldErrors={state.draftErrors}
           serverKeyHints={state.serverKeyHints}
+          modelDiscoveries={state.modelDiscoveries}
+          currentDefaultModel={state.currentDefaultModel}
           newCardRef={state.newCardRef}
           onEdit={state.setEditingIdx}
           onUpdate={state.updateDraft}
           onRemove={state.removeProvider}
           onMove={state.moveProvider}
           onDeleteConfirm={state.setDeleteConfirmIdx}
+          onDiscoverModels={state.discoverModels}
+          onSelectModel={state.selectDiscoveredModel}
+          onSetDefaultModel={state.setDiscoveredModelDefault}
         />
       </div>
     );

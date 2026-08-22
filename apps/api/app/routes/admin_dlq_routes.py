@@ -13,6 +13,7 @@ from sqlalchemy import and_, desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.model_entities import (
+    AgentRun,
     Completion,
     Generation,
     OutboxDeadLetter,
@@ -36,6 +37,7 @@ class DlqItemOut(BaseModel):
 
 
 DlqTaskKind = Literal[
+    "agent_run",
     "generation",
     "completion",
     "video_generation",
@@ -46,6 +48,7 @@ DlqKind = DlqTaskKind | Literal["sse"]
 DLQ_KIND_BY_EVENT_TYPE = MappingProxyType(
     {
         "outbox.generation": "generation",
+        "outbox.agent_run": "agent_run",
         "outbox.completion": "completion",
         "outbox.video_generation": "video_generation",
         "outbox.storyboard_assembly": "storyboard_assembly",
@@ -67,7 +70,9 @@ async def _dlq_task_exists(
     kind: DlqTaskKind,
     task_id: str,
 ) -> bool:
-    if kind == "generation":
+    if kind == "agent_run":
+        statement = select(AgentRun.id).join(User, User.id == AgentRun.user_id)
+    elif kind == "generation":
         statement = select(Generation.id).join(User, User.id == Generation.user_id)
     elif kind == "completion":
         statement = select(Completion.id).join(User, User.id == Completion.user_id)
@@ -101,7 +106,16 @@ async def _soft_deleted_dlq_task_ids(
 ) -> set[str]:
     if not task_ids:
         return set()
-    if kind == "generation":
+    if kind == "agent_run":
+        statement = (
+            select(AgentRun.id)
+            .join(User, User.id == AgentRun.user_id)
+            .where(
+                AgentRun.id.in_(task_ids),
+                User.deleted_at.is_not(None),
+            )
+        )
+    elif kind == "generation":
         statement = (
             select(Generation.id)
             .join(User, User.id == Generation.user_id)

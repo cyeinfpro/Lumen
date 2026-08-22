@@ -25,20 +25,18 @@ test("provider is a thin runtime boundary without business routing", () => {
   doesNotMatch(provider, /switch\s*\(|invalidateQueries|BroadcastChannel|EventSource/);
 });
 
-test("feature hook is polling-only and never acquires an event runtime", () => {
+test("feature hook leases shared realtime and keeps polling fallback", () => {
   ok(hook.trimEnd().split("\n").length < 200);
-  match(hook, /REALTIME_TRANSPORT_MODE = "polling-only"/);
-  match(hook, /status: "idle"/);
-  doesNotMatch(
-    hook,
-    /acquireRealtimeRuntime|releaseRealtimeRuntime|EventSource|runtimeRef/,
-  );
+  match(hook, /REALTIME_TRANSPORT_MODE = "event-source-with-polling-fallback"/);
+  match(hook, /acquireRealtimeRuntime/);
+  match(hook, /releaseRealtimeRuntime/);
+  match(hook, /runtimeRef/);
   match(lumenHook, /const POLLING_INTERVAL_MS = 8_000/);
   match(lumenHook, /hydrateActiveTasks/);
   match(lumenHook, /pollInflightTasks/);
-  match(lumenHook, /setRealtimeRuntimeStatus\("idle"\)/);
+  match(lumenHook, /setRealtimeRuntimeStatus\(channels\.length > 0 \? status : "idle"\)/);
   doesNotMatch(hook, /new Map/);
   doesNotMatch(hook, /function isSSEScopeCurrent/);
-  doesNotMatch(hook, /Object\.fromEntries/);
+  match(hook, /createSSESubscriber/);
   doesNotMatch(hook, /class SharedSSEConnection/);
 });

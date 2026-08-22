@@ -525,6 +525,37 @@ def test_usage_metadata_classification_and_total_values() -> None:
             ref_type="prompt_enhance",
             meta={"actual_micro": 30_000},
         ),
+        SimpleNamespace(
+            kind="settle",
+            amount_micro=-300,
+            ref_type="agent_run",
+            meta={
+                "cost_breakdown": {
+                    "input_cost_micro": 100,
+                    "output_cost_micro": 200,
+                }
+            },
+        ),
+        SimpleNamespace(
+            kind="settle",
+            amount_micro=-400,
+            ref_type="generation",
+            meta={
+                "actual_micro": 400,
+                "source": "agent",
+                "agent_image_mode": "text_to_image",
+            },
+        ),
+        SimpleNamespace(
+            kind="settle",
+            amount_micro=-500,
+            ref_type="generation",
+            meta={
+                "actual_micro": 500,
+                "source": "agent",
+                "agent_image_mode": "image_to_image",
+            },
+        ),
     ]
 
     result = usage._usage_by_kind(rows)  # noqa: SLF001
@@ -554,11 +585,14 @@ def test_usage_metadata_classification_and_total_values() -> None:
         == 0
     )
     assert result == BillingUsageByKindOut(
-        input=5_000,
-        output=40_000,
+        input=5_100,
+        output=40_200,
         cache_read=2_500,
         cache_creation=1_500,
-        image=41_000,
+        image=41_900,
         reasoning=500,
+        agent_text=300,
+        agent_text_to_image=400,
+        agent_image_to_image=500,
     )
-    assert usage._usage_total(result) == 90_500  # noqa: SLF001
+    assert usage._usage_total(result) == 91_700  # noqa: SLF001

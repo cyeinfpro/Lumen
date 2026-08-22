@@ -11,15 +11,8 @@ import {
   useRef,
   useState,
 } from "react";
-import {
-  Loader2,
-  Paperclip,
-  Sparkles,
-  X,
-} from "lucide-react";
-import {
-  pushMobileToast,
-} from "@/components/ui/primitives/mobile";
+import { Loader2, Paperclip, Sparkles, X } from "lucide-react";
+import { pushMobileToast } from "@/components/ui/primitives/mobile";
 import { Badge, Button, IconButton } from "@/components/ui/primitives";
 import { useChatStore } from "@/store/useChatStore";
 import type { ComposerMode } from "@/store/chat/types";
@@ -33,12 +26,8 @@ import {
 import { insertImageMentionToken } from "@/lib/promptImageMentions";
 import { useHaptic } from "@/hooks/useHaptic";
 import { DURATION, EASE } from "@/lib/motion";
-import {
-  DesktopPopover,
-} from "./DesktopPopover";
-import {
-  ComposerExecutionControls,
-} from "./DesktopComposerExecutionControls";
+import { DesktopPopover } from "./DesktopPopover";
+import { ComposerExecutionControls } from "./DesktopComposerExecutionControls";
 import {
   IconBtn,
   ModeSegment,
@@ -116,6 +105,8 @@ export function DesktopComposerPill({
   const setRenderQuality = useChatStore((s) => s.setRenderQuality);
   const composerError = useChatStore((s) => s.composerError);
   const setComposerError = useChatStore((s) => s.setComposerError);
+  const addAttachment = useChatStore((s) => s.addAttachment);
+  const uploadAttachment = useChatStore((s) => s.uploadAttachment);
   const [expanded, setExpanded] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
@@ -308,6 +299,12 @@ export function DesktopComposerPill({
     setIsUploading,
     setIsDragActive,
     setExpanded,
+    uploadAttachment,
+    addAttachment,
+    getAttachmentCount: () =>
+      useChatStore.getState().composer.attachments.length,
+    setError: setComposerError,
+    limit: MAX_COMPOSER_ATTACHMENTS,
   });
 
   const inpaint = useMaskInpaint();

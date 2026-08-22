@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
-type HideableNavKey = "studio" | "video" | "projects" | "assets";
+type HideableNavKey = "studio" | "agent" | "video" | "projects" | "assets";
 type NavVisibility = Partial<Record<HideableNavKey, boolean>>;
 
 const RUNTIME_DEFAULTS_COOKIE = "lumen_runtime_defaults_v1";
@@ -11,6 +11,7 @@ const NAV_ROUTE_PREFIXES: readonly {
   prefixes: readonly string[];
 }[] = [
   { key: "studio", route: "/", prefixes: ["/"] },
+  { key: "agent", route: "/agent", prefixes: ["/agent"] },
   { key: "video", route: "/video", prefixes: ["/video"] },
   { key: "projects", route: "/projects", prefixes: ["/projects"] },
   { key: "assets", route: "/assets", prefixes: ["/assets", "/stream", "/library"] },
@@ -49,17 +50,25 @@ function readNavVisibilityCookie(request: NextRequest): NavVisibility | null {
   if (!raw || raw.length > 512) return null;
   try {
     const parsed = JSON.parse(decodeURIComponent(raw)) as {
+      agent_enabled?: unknown;
       nav_visibility?: NavVisibility;
     };
-    return parsed.nav_visibility && typeof parsed.nav_visibility === "object"
-      ? parsed.nav_visibility
-      : null;
+    if (!parsed.nav_visibility || typeof parsed.nav_visibility !== "object") {
+      return null;
+    }
+    return {
+      ...parsed.nav_visibility,
+      agent:
+        parsed.agent_enabled === true &&
+        parsed.nav_visibility.agent === true,
+    };
   } catch {
     return null;
   }
 }
 
 function isVisible(visibility: NavVisibility | null, key: HideableNavKey): boolean {
+  if (key === "agent") return visibility?.agent === true;
   return visibility?.[key] !== false;
 }
 

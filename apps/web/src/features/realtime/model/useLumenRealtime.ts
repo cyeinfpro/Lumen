@@ -21,9 +21,11 @@ import {
 import { qk } from "@/lib/queries/queryKeys";
 import {
   registerRuntimeRecovery,
+  requestSessionInvalidation,
   setRealtimeRuntimeStatus,
 } from "@/lib/runtimeResilience";
 import { getPrivateIdentitySnapshot } from "@/lib/auth/privateIdentityEpoch";
+import { notifyAuthSessionChanged } from "@/lib/auth/sessionChangeBus";
 import { useSSE, type SSEHandlers } from "./useSSE";
 import {
   disposeChatStoreRuntime,
@@ -330,10 +332,28 @@ export function useLumenRealtime(): void {
     [identityEpoch, queryClient, userId, userScope],
   );
 
-  useSSE(channels, handlers);
+  const { status, reconnect } = useSSE(channels, handlers, {
+    scopeIdentity: userScope,
+    isScopeCurrent: isRealtimeScopeCurrent,
+    recoverSnapshot,
+    onProtocolIssue: (issue) => {
+      logWarn("realtime protocol validation failed", {
+        scope: "sse-protocol",
+        code: issue.reason,
+        extra: issue,
+      });
+    },
+    onAuthInvalidated: () => {
+      notifyAuthSessionChanged();
+      requestSessionInvalidation("realtime_auth_invalidated");
+    },
+  });
 
   useEffect(() => {
-    setRealtimeRuntimeStatus("idle");
+    setRealtimeRuntimeStatus(channels.length > 0 ? status : "idle");
+  }, [channels.length, status]);
+
+  useEffect(() => {
     if (!userId || !userScope) {
       pollNowRef.current = () => {};
       return;
@@ -421,7 +441,6 @@ export function useLumenRealtime(): void {
       controller?.abort();
       window.removeEventListener("focus", requestPoll);
       document.removeEventListener("visibilitychange", onVisibilityChange);
-      setRealtimeRuntimeStatus("idle");
     };
   }, [
     identityEpoch,
@@ -436,8 +455,9 @@ export function useLumenRealtime(): void {
       registerRuntimeRecovery("realtime", () => {
         lastSnapshot.current.syncedAt = 0;
         pollNowRef.current();
+        reconnect();
       }),
-    [],
+    [reconnect],
   );
 
   useEffect(

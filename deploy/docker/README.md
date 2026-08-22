@@ -22,8 +22,13 @@ LUMEN_DB_ROOT=/tmp/lumen-local \
 LUMEN_APP_STORAGE_GID=10001 \
 LUMEN_IMAGE_TAG=local \
 COMPOSE_PROJECT_NAME=lumen-local \
-docker compose --env-file .env.local -f docker-compose.yml -f deploy/docker/docker-compose.local.yml config
+docker compose --env-file .env.local --profile agent-runtime \
+  -f docker-compose.yml -f docker-compose.dev.yml \
+  -f deploy/docker/docker-compose.local.yml config
 ```
+
+The local override renames `agent-runtime` but intentionally does not publish
+port `8090`; inspect it with `docker compose exec agent-runtime ...`.
 
 The production path should continue to use `scripts/install.sh`,
 `scripts/update.sh`, and `scripts/lumenctl.sh`; this file is only an operator

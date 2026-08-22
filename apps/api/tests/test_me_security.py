@@ -429,6 +429,29 @@ async def test_export_batches_write_outside_transactions_and_preserve_layout(
         open_storage_file,
     )
 
+    async def empty_agent_batches(
+        _db: object,
+        _user_id: str,
+    ):
+        if False:
+            yield ()
+
+    monkeypatch.setattr(
+        me_export,
+        "iter_export_agent_session_batches",
+        empty_agent_batches,
+    )
+    monkeypatch.setattr(
+        me_export,
+        "iter_export_agent_run_batches",
+        empty_agent_batches,
+    )
+    monkeypatch.setattr(
+        me_export,
+        "iter_export_agent_tool_call_batches",
+        empty_agent_batches,
+    )
+
     archive_file = GuardedBuffer()
     stats = await me_export.build_export_archive(
         db,  # type: ignore[arg-type]
@@ -442,15 +465,21 @@ async def test_export_batches_write_outside_transactions_and_preserve_layout(
         manifest = json.loads(archive.read("export-manifest.json"))
         assert archive.namelist() == [
             "messages.ndjson",
+            "agent-sessions.ndjson",
+            "agent-runs.ndjson",
+            "agent-tool-calls.ndjson",
             "images/image-1.png",
             "export-manifest.json",
         ]
         assert archive.read("images/image-1.png") == b"image-data"
         assert manifest == {
-            "schema": 1,
+            "schema": 2,
             "complete": True,
             "messages": 1,
             "images": 1,
+            "agent_sessions": 0,
+            "agent_runs": 0,
+            "agent_tool_calls": 0,
         }
 
     assert message_record == {
@@ -595,7 +624,10 @@ async def test_cancel_account_active_tasks_releases_only_queued_holds(
         "streaming_completion_ids": ["comp-streaming"],
         "deferred_generation_ids": [],
         "deferred_completion_ids": [],
-        "active_video_generation_ids": ["video-queued", "video-running"],
+            "active_video_generation_ids": ["video-queued", "video-running"],
+            "agent_runs_redacted": 0,
+            "agent_references_redacted": 0,
+            "agent_tool_calls_redacted": 0,
     }
     assert [call["ref_id"] for call in released] == [
         "gen-queued:retry:1",
@@ -636,6 +668,10 @@ async def test_admin_delete_fences_video_work_and_tombstones_videos(
             _AdminDeleteResult(),
             _AdminDeleteResult(),
             _AdminDeleteResult(rows=[video_generation]),
+            _AdminDeleteResult(),
+            _AdminDeleteResult(),
+            _AdminDeleteResult(),
+            _AdminDeleteResult(),
             _AdminDeleteResult(rowcount=1),
             _AdminDeleteResult(rowcount=0),
         ]
@@ -689,8 +725,11 @@ async def test_admin_delete_fences_video_work_and_tombstones_videos(
                 "streaming_completion_ids": [],
                 "deferred_generation_ids": [],
                 "deferred_completion_ids": [],
-                "active_video_generation_ids": [video_generation.id],
-            },
+                    "active_video_generation_ids": [video_generation.id],
+                    "agent_runs_redacted": 0,
+                    "agent_references_redacted": 0,
+                    "agent_tool_calls_redacted": 0,
+                },
         }
     ]
 

@@ -296,10 +296,12 @@ async def test_runtime_defaults_include_navigation_visibility(
     values = {
         "generation.fast_default": "0",
         "ui.nav.studio_visible": "1",
+        "ui.nav.agent_visible": "1",
         "ui.nav.video_visible": "0",
         "ui.nav.projects_visible": "1",
         "ui.nav.assets_visible": "0",
         "canvas.enabled": "1",
+        "agent.enabled": "1",
     }
 
     async def fake_get_setting(_db, spec):
@@ -311,10 +313,12 @@ async def test_runtime_defaults_include_navigation_visibility(
 
     assert defaults.fast is False
     assert defaults.nav_visibility.studio is True
+    assert defaults.nav_visibility.agent is True
     assert defaults.nav_visibility.video is False
     assert defaults.nav_visibility.projects is True
     assert defaults.nav_visibility.assets is False
     assert defaults.canvas_enabled is True
+    assert defaults.agent_enabled is True
 
 
 @pytest.mark.asyncio
@@ -384,6 +388,7 @@ async def test_login_runtime_defaults_failure_preserves_committed_success(
     assert result.runtime_defaults.canvas_enabled is False
     assert result.runtime_defaults.nav_visibility.model_dump() == {
         "studio": True,
+        "agent": False,
         "video": True,
         "projects": True,
         "assets": True,

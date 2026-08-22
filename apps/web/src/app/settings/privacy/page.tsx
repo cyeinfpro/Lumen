@@ -40,6 +40,8 @@ import { invalidateSessionClientState } from "@/lib/auth/authFailureCoordinator"
 import type { SessionOut } from "@/lib/types";
 import { useChatStore } from "@/store/useChatStore";
 import { useUiStore } from "@/store/useUiStore";
+import { useAgentStore } from "@/store/agent/useAgentStore";
+import { removeAgentDrafts } from "@/store/agent/draftPersistence";
 import { SettingsShell } from "@/components/ui/shell/SettingsShell";
 import { Button } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
@@ -545,6 +547,7 @@ function removeKeys(storage: Storage, keys: readonly string[]): void {
 }
 
 function clearLocalAccountState(queryClient: QueryClient) {
+  removeAgentDrafts(useAgentStore.getState().ownerUserId);
   void invalidateSessionClientState();
   useChatStore.setState({
     currentUserId: null,

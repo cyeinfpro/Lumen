@@ -388,7 +388,7 @@ run_health_checks() {
     fi
     log_info "Web 首页通过。"
 
-    local health_services=("api" "worker" "web")
+    local health_services=("agent-runtime" "api" "worker" "web")
     local shared_env="${SHARED_DIR}/.env"
     if [ -n "$(env_file_get TELEGRAM_BOT_TOKEN "${shared_env}")" ]; then
         health_services+=("tgbot")
@@ -451,6 +451,7 @@ print_summary() {
   API liveness ...... http://127.0.0.1:8000/healthz
   API readiness ..... http://127.0.0.1:8000/readyz
   Worker readiness .. python -m app.worker_health check
+  Agent Runtime ..... backend-only agent-runtime:8090（Agent 关闭时只检查 liveness）
   管理员邮箱 ....... ${INSTALL_ADMIN_EMAIL:-（已存在或非交互模式未设置）}
   Provider 配置 .... 登录后 → 右上角「管理 → 上游 Provider」
                      默认 PROVIDERS=[]，需添加 1 条才能调图像 API

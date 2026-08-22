@@ -29,6 +29,7 @@ from ..services.provider_config import (
     ensure_enabled_provider_proxies,
     ensure_enabled_video_provider_proxies,
 )
+from ..services.agent_health import agent_health_snapshot
 from ..services.redemption_secret import (
     PreviousRedemptionSecretLocked,
     RedemptionSecretRotationLockUnavailable,
@@ -134,6 +135,27 @@ async def _validate_provider_setting_semantics(
         )
 
 
+async def _validate_agent_setting_semantics(
+    db: AsyncSession,
+    pair_map: dict[str, str],
+) -> None:
+    if pair_map.get("agent.enabled") != "1":
+        return
+    snapshot = await agent_health_snapshot(db, enabled_override=True)
+    if snapshot.operational:
+        return
+    raise _http(
+        "agent_runtime_not_ready",
+        "Agent Runtime and tool gateway must be ready before enabling Agent",
+        503,
+        runtime_live=snapshot.runtime_live,
+        runtime_ready=snapshot.runtime_ready,
+        runtime_auth_configured=snapshot.runtime_auth_configured,
+        tool_gateway_configured=snapshot.tool_gateway_configured,
+        reason=snapshot.error_code,
+    )
+
+
 @router.get("", response_model=SystemSettingsOut)
 async def get_settings_endpoint(
     _admin: AdminUser,
@@ -197,6 +219,7 @@ async def put_settings_endpoint(
 
     pair_map = {key: value for key, value in pairs}
     await _validate_provider_setting_semantics(db, pair_map)
+    await _validate_agent_setting_semantics(db, pair_map)
     if "billing.image_size_thresholds" in pair_map:
         await _validate_threshold_pricing_alignment(
             db, pair_map["billing.image_size_thresholds"]

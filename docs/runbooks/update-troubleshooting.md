@@ -19,7 +19,8 @@ unit 和 runner 日志路径渲染到实际目录；先用
 
 生产 `docker-compose.yml` 只接受完整
 `name@sha256:<64 lowercase hex>`。正式 release 的
-`release-manifest.json` 同时声明四个应用镜像以及 Python、Postgres、Redis
+`release-manifest.json` 的 legacy `images` 声明四个原有应用镜像，
+`components.agent-runtime` 声明第五个应用镜像，并记录 Python、Node、Postgres、Redis
 依赖镜像。手工部署可检查：
 
 ```bash
@@ -28,6 +29,23 @@ docker compose --env-file /opt/lumen/shared/.env config --images \
 ```
 
 出现 tag、`latest`、`main`、短 digest 或空输出都必须先修复，不能继续 `up`。
+
+从四镜像安装首次升级后，如果 Runtime 尚未出现，保持两个 Agent 开关为 `0`，
+再次执行同一 stable 更新。第一遍让旧 updater 安装新版脚本；第二遍由新版脚本
+补齐密钥、绑定第五个 digest 并启动 Runtime。不要在第二遍完成前手工启动该
+profile；兼容 fallback 是 API image，不是可用的 Runtime。
+
+若启用 Agent 后 API `/readyz` 失败：
+
+```bash
+docker compose --profile agent-runtime ps agent-runtime
+docker compose --profile agent-runtime logs --tail=120 agent-runtime worker api
+docker compose exec -T agent-runtime node -e \
+  "fetch('http://127.0.0.1:8090/readyz').then(async r=>{console.log(await r.text());process.exit(r.ok?0:1)})"
+```
+
+Runtime `/readyz` 不调用收费模型。检查两个 Agent 密钥、Runtime digest 和后端 DNS；
+不要通过发布宿主端口绕过服务网络。
 
 ## has_update=false 但我知道有新版
 

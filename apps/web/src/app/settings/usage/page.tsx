@@ -314,6 +314,15 @@ function BillingTransparency({
 }) {
   const imageCost = snapshot ? microToRmbText(snapshot.by_kind_30d.image) : "—";
   const outputCost = snapshot ? microToRmbText(snapshot.by_kind_30d.output) : "—";
+  const agentTextCost = snapshot
+    ? microToRmbText(snapshot.by_kind_30d.agent_text ?? 0)
+    : "—";
+  const agentTextToImageCost = snapshot
+    ? microToRmbText(snapshot.by_kind_30d.agent_text_to_image ?? 0)
+    : "—";
+  const agentImageToImageCost = snapshot
+    ? microToRmbText(snapshot.by_kind_30d.agent_image_to_image ?? 0)
+    : "—";
   return (
     <section className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -364,9 +373,12 @@ function BillingTransparency({
             <ReceiptText className="w-4 h-4" />
             <span className="type-caption">近 30 天费用构成</span>
           </div>
-          <div className="mt-3 grid grid-cols-2 gap-3">
+          <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
             <MiniMoney label="图片实际" value={imageCost} />
             <MiniMoney label="对话输出" value={outputCost} />
+            <MiniMoney label="Agent 对话" value={agentTextCost} />
+            <MiniMoney label="Agent 文生图" value={agentTextToImageCost} />
+            <MiniMoney label="Agent 图生图" value={agentImageToImageCost} />
           </div>
         </div>
         <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-4">
@@ -653,6 +665,11 @@ function txLabel(tx: WalletTransactionOut): string {
   if (actual != null && preauth != null) {
     return `实际 ${microToRmbText(actual)} / 预估 ${microToRmbText(preauth)}`;
   }
+  if (tx.ref_type === "agent_run") return "Agent 对话实际扣费";
+  if (meta.source === "agent" && meta.agent_image_mode === "image_to_image") {
+    return "Agent 图生图实际扣费";
+  }
+  if (meta.source === "agent") return "Agent 文生图实际扣费";
   if (tx.kind === "settle") return "图片生成实际扣费";
   if (tx.kind === "charge_completion") return "对话任务实际扣费";
   return "实际扣费";

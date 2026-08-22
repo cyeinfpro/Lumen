@@ -170,8 +170,8 @@ if [ "${LUMEN_UPDATE_BUILD:-0}" = "1" ]; then
     emit_start pull_images   # build 兜底复用 pull_images 阶段，便于后台进度兼容。
     # 为清晰起见，单独发一个 info 行
     emit_info pull_images action "build_images"
-    log_info "[build_images] LUMEN_UPDATE_BUILD=1 → docker compose build api worker web"
-    if ! lumen_compose_in "${NEW_RELEASE}" build api worker web; then
+    log_info "[build_images] LUMEN_UPDATE_BUILD=1 → docker compose build api worker agent-runtime web"
+    if ! lumen_compose_in "${NEW_RELEASE}" build api worker agent-runtime web; then
         log_error "[build_images] docker compose build 失败。"
         emit_fail pull_images 1
         exit 1
@@ -325,6 +325,7 @@ elif [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ]; then
         manifest_args=(
             --service api
             --service worker
+            --service agent-runtime
             --service web
         )
         if [ "${TGBOT_IMAGE_READY}" -eq 1 ]; then

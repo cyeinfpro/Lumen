@@ -148,6 +148,7 @@ def test_parse_provider_item_defaults_and_normalizes_fields():
             "image_jobs_enabled": True,
             "image_streaming_enabled": "true",
             "image_edit_input_transport": " file ",
+            "agent_models": [" gpt-5.6-sol ", "gpt-5.6-sol", "gpt-5.6-mini"],
         },
         index=0,
     )
@@ -163,7 +164,20 @@ def test_parse_provider_item_defaults_and_normalizes_fields():
     assert provider.image_jobs_enabled is True
     assert provider.image_streaming_enabled is True
     assert provider.image_edit_input_transport == "file"
+    assert provider.agent_models == ("gpt-5.6-sol", "gpt-5.6-mini")
     assert provider.purposes == DEFAULT_PROVIDER_PURPOSES
+
+
+def test_parse_provider_item_rejects_invalid_agent_models() -> None:
+    with pytest.raises(ValueError, match="agent_models must be a list"):
+        parse_provider_item(
+            {
+                "base_url": "https://upstream.example",
+                "api_key": "sk-test",
+                "agent_models": "gpt-5.6-sol",
+            },
+            index=0,
+        )
 
 
 def test_parse_provider_item_parses_string_booleans_without_truthy_coercion():

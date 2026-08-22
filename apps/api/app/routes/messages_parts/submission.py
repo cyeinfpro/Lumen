@@ -38,6 +38,7 @@ from ...services.active_user import (
     ActiveUserFenceError,
     active_user_fence_http_error,
 )
+from ...services.agent_conversations import studio_conversation_filter
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,7 @@ async def submit_user_message(
                 Conversation.id == conv_id,
                 Conversation.user_id == user.id,
                 Conversation.deleted_at.is_(None),
+                studio_conversation_filter(),
             )
         )
     ).scalar_one_or_none()

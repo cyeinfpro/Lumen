@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import Field
 from pydantic import model_validator
@@ -18,6 +19,32 @@ _DEFAULT_REDIS_URL = f"redis://:{_DEFAULT_REDIS_PASSWORD}@localhost:6379/0"
 _DEFAULT_IMAGE_JOB_BASE_URL = "https://image-job.example.com"
 _DEFAULT_DATABASE_URL = "postgresql+asyncpg://lumen:lumen@localhost:5432/lumen"
 _DEV_ENVIRONMENTS = frozenset({"dev", "development", "local", "test"})
+
+
+def _internal_service_url(raw: str, *, field: str) -> str:
+    value = (raw or "").strip().rstrip("/")
+    parts = urlsplit(value)
+    if (
+        parts.scheme not in {"http", "https"}
+        or not parts.hostname
+        or parts.username
+        or parts.password
+        or parts.query
+        or parts.fragment
+    ):
+        raise ValueError(f"{field} must be an HTTP(S) service URL without credentials")
+    return value
+
+
+def _agent_proxy_host(raw: str, *, field: str) -> str:
+    value = (raw or "").strip()
+    if (
+        not value
+        or any(char.isspace() or ord(char) < 32 for char in value)
+        or any(char in value for char in "/?#@")
+    ):
+        raise ValueError(f"{field} must be a host name or address")
+    return value
 
 
 def validate_image_job_base_url(raw_base: str) -> str:
@@ -134,6 +161,24 @@ class Settings(BaseSettings):
     # BYOK 用户 API Key 解密主密钥。必须与 API 服务一致。
     byok_api_key_master_secret: str = ""
 
+    # ---------- Pi Agent Runtime (backend-only) ----------
+    agent_runtime_url: str = "http://agent-runtime:8090"
+    agent_runtime_shared_secret: str = Field(default="", repr=False)
+    agent_tool_capability_secret: str = Field(default="", repr=False)
+    agent_tool_gateway_url: str = "http://api:8000/internal/agent"
+    agent_runtime_proxy_bind_host: str = "0.0.0.0"
+    agent_runtime_proxy_advertise_host: str = "worker"
+    agent_runtime_connect_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+    agent_runtime_event_idle_timeout_seconds: float = Field(
+        default=45.0, gt=0, le=300
+    )
+    agent_text_flush_chars: int = Field(default=256, ge=32, le=8192)
+    agent_text_flush_seconds: float = Field(default=0.5, ge=0.1, le=10)
+    agent_max_output_chars: int = Field(default=262144, ge=1024, le=1_000_000)
+    agent_reference_preview_max_bytes: int = Field(
+        default=512 * 1024, ge=64 * 1024, le=2 * 1024 * 1024
+    )
+
     @model_validator(mode="after")
     def validate_runtime(self) -> "Settings":
         if self.edit_race_lanes < 1:
@@ -173,6 +218,31 @@ class Settings(BaseSettings):
                 "BYOK_API_KEY_MASTER_SECRET must be at least 32 characters "
                 "outside development"
             )
+        self.agent_runtime_url = _internal_service_url(
+            self.agent_runtime_url,
+            field="AGENT_RUNTIME_URL",
+        )
+        self.agent_tool_gateway_url = _internal_service_url(
+            self.agent_tool_gateway_url,
+            field="AGENT_TOOL_GATEWAY_URL",
+        )
+        self.agent_runtime_proxy_bind_host = _agent_proxy_host(
+            self.agent_runtime_proxy_bind_host,
+            field="AGENT_RUNTIME_PROXY_BIND_HOST",
+        )
+        self.agent_runtime_proxy_advertise_host = _agent_proxy_host(
+            self.agent_runtime_proxy_advertise_host,
+            field="AGENT_RUNTIME_PROXY_ADVERTISE_HOST",
+        )
+        for field_name in (
+            "agent_runtime_shared_secret",
+            "agent_tool_capability_secret",
+        ):
+            value = str(getattr(self, field_name) or "").strip()
+            if value and len(value.encode("utf-8")) < 32:
+                env_name = field_name.upper()
+                raise ValueError(f"{env_name} must contain at least 32 UTF-8 bytes")
+            setattr(self, field_name, value)
         return self
 
 

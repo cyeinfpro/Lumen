@@ -140,6 +140,7 @@ pull_or_build_images() {
             local manifest_args=(
                 --service api
                 --service worker
+                --service agent-runtime
                 --service web
             )
             if [ "${tgbot_image_ready}" -eq 1 ]; then
@@ -369,10 +370,10 @@ run_bootstrap_admin() {
 }
 
 start_application_services() {
-    emit_step_start containers "启动 API / Worker / Web（compose --wait）"
-    INSTALL_STARTED_SERVICES+=("api" "worker" "web")
-    if ! _install_compose up --pull missing -d --wait api worker web; then
-        log_error "api / worker / web 启动或健康检查失败。"
+    emit_step_start containers "启动 Agent Runtime / API / Worker / Web（compose --wait）"
+    INSTALL_STARTED_SERVICES+=("agent-runtime" "api" "worker" "web")
+    if ! _install_compose up --pull missing -d --wait agent-runtime api worker web; then
+        log_error "agent-runtime / api / worker / web 启动或健康检查失败。"
         exit 1
     fi
 

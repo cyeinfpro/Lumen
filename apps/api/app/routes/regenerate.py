@@ -51,6 +51,7 @@ from ..services.active_user import (
     active_user_fence_http_error,
     lock_active_user_snapshot,
 )
+from ..services.agent_conversations import studio_conversation_filter
 from ..services.generation_queue import (
     release_generation_queue_state,
 )
@@ -202,6 +203,7 @@ async def _lookup_idempotent_regenerate(
                 Message.conversation_id == conv_id,
                 Conversation.user_id == user_id,
                 Conversation.deleted_at.is_(None),
+                studio_conversation_filter(),
                 *alive_filters,
             )
         )
@@ -217,6 +219,7 @@ async def _lookup_idempotent_regenerate(
                 Message.conversation_id == conv_id,
                 Conversation.user_id == user_id,
                 Conversation.deleted_at.is_(None),
+                studio_conversation_filter(),
                 *alive_filters,
             )
         )
@@ -421,6 +424,7 @@ async def _regenerate_messages(
                 Conversation.id == conv_id,
                 Conversation.user_id == user_id,
                 Conversation.deleted_at.is_(None),
+                studio_conversation_filter(),
             )
         )
     ).scalar_one_or_none()
@@ -613,6 +617,7 @@ async def regenerate_message(
                 Conversation.id == conv.id,
                 Conversation.user_id == user.id,
                 Conversation.deleted_at.is_(None),
+                studio_conversation_filter(),
             )
             .with_for_update(of=Conversation)
         )

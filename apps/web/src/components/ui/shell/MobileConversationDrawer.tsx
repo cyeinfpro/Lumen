@@ -3,7 +3,7 @@
 // 移动端只保留抽屉层级与动效，内容统一复用 Sidebar。
 
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { useRef } from "react";
+import { type ReactNode, useRef } from "react";
 import { createPortal } from "react-dom";
 
 import { Sidebar } from "@/components/ui/Sidebar";
@@ -17,11 +17,15 @@ import { DURATION, resolveDrawerMotion } from "@/lib/motion";
 export interface MobileConversationDrawerProps {
   open: boolean;
   onClose: () => void;
+  children?: ReactNode;
+  ariaLabel?: string;
 }
 
 export function MobileConversationDrawer({
   open,
   onClose,
+  children,
+  ariaLabel = "会话列表",
 }: MobileConversationDrawerProps) {
   const portalReady = usePortalReady();
   const reduceMotion = useReducedMotion();
@@ -60,7 +64,7 @@ export function MobileConversationDrawer({
             tabIndex={-1}
             role="dialog"
             aria-modal="true"
-            aria-label="会话列表"
+            aria-label={ariaLabel}
             initial={drawerMotion.panelInitial}
             animate={drawerMotion.panelAnimate}
             exit={drawerMotion.panelExit}
@@ -74,7 +78,7 @@ export function MobileConversationDrawer({
               "pb-[env(safe-area-inset-bottom,0px)] focus-visible:outline-none",
             ].join(" ")}
           >
-            <Sidebar embedded showBrand onNavigate={onClose} />
+            {children ?? <Sidebar embedded showBrand onNavigate={onClose} />}
           </motion.aside>
         </motion.div>
       ) : null}

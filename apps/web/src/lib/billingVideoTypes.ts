@@ -50,6 +50,9 @@ export interface BillingUsageByKindOut {
   cache_creation: number;
   image: number;
   reasoning: number;
+  agent_text: number;
+  agent_text_to_image: number;
+  agent_image_to_image: number;
 }
 
 export interface BillingSnapshotOut {

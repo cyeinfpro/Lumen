@@ -10,11 +10,20 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, cast
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import or_, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import Conversation, Image, Message, User
+from .model_entities import (
+    AgentRun,
+    AgentRunReference,
+    AgentSession,
+    AgentToolCall,
+    Conversation,
+    Image,
+    Message,
+    User,
+)
 
 BYOK_ACCOUNT_MODE = "byok"
 BYOK_DEFAULT_HIDE_DAYS = 3
@@ -142,6 +151,29 @@ def retention_state(
     return "active"
 
 
+async def _agent_retention_tables_available(db: AsyncSession) -> bool:
+    """Support focused legacy SQLite fixtures without weakening production."""
+    get_bind = getattr(db, "get_bind", None)
+    if not callable(get_bind):
+        return True
+    bind = get_bind()
+    if getattr(getattr(bind, "dialect", None), "name", None) != "sqlite":
+        return True
+    rows = await db.execute(
+        text(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name IN ('agent_runs', 'agent_sessions', "
+            "'agent_run_references', 'agent_tool_calls')"
+        )
+    )
+    return set(rows.scalars().all()) == {
+        "agent_runs",
+        "agent_sessions",
+        "agent_run_references",
+        "agent_tool_calls",
+    }
+
+
 async def prune_expired_byok_user_data(
     db: AsyncSession,
     *,
@@ -160,6 +192,9 @@ async def prune_expired_byok_user_data(
             "messages_deleted": 0,
             "images_deleted": 0,
             "conversations_deleted": 0,
+            "agent_runs_redacted": 0,
+            "agent_references_redacted": 0,
+            "agent_tool_calls_redacted": 0,
         }
 
     deleted_at = ensure_aware_utc(now or utcnow())
@@ -168,6 +203,49 @@ async def prune_expired_byok_user_data(
     byok_conversation_ids = select(Conversation.id).where(
         Conversation.user_id.in_(byok_user_ids)
     )
+    expired_agent_run_ids = (
+        select(AgentRun.id)
+        .join(AgentSession, AgentSession.id == AgentRun.agent_session_id)
+        .where(
+            AgentRun.user_id.in_(byok_user_ids),
+            AgentSession.conversation_id.in_(byok_conversation_ids),
+            AgentRun.created_at < cutoff,
+        )
+    )
+
+    # Agent rows are retained as operational billing/idempotency evidence, like
+    # Generation/Completion rows. Remove prompt-bearing snapshots and raw tool
+    # arguments once the corresponding BYOK history enters the delete window.
+    agent_runs_redacted = 0
+    agent_references_redacted = 0
+    agent_tool_calls_redacted = 0
+    if await _agent_retention_tables_available(db):
+        tool_result = await db.execute(
+            update(AgentToolCall)
+            .where(AgentToolCall.agent_run_id.in_(expired_agent_run_ids))
+            .values(arguments_jsonb={}, error_message=None)
+            .execution_options(synchronize_session=False)
+        )
+        reference_result = await db.execute(
+            update(AgentRunReference)
+            .where(AgentRunReference.agent_run_id.in_(expired_agent_run_ids))
+            .values(display_label=None, metadata_jsonb={})
+            .execution_options(synchronize_session=False)
+        )
+        run_result = await db.execute(
+            update(AgentRun)
+            .where(AgentRun.id.in_(expired_agent_run_ids))
+            .values(
+                request_snapshot_jsonb={},
+                system_prompt_snapshot=None,
+                dispatch_jsonb={},
+                error_message=None,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        agent_tool_calls_redacted = int(tool_result.rowcount or 0)
+        agent_references_redacted = int(reference_result.rowcount or 0)
+        agent_runs_redacted = int(run_result.rowcount or 0)
 
     message_result = cast(
         CursorResult[Any],
@@ -212,6 +290,9 @@ async def prune_expired_byok_user_data(
         "messages_deleted": int(message_result.rowcount or 0),
         "images_deleted": int(image_result.rowcount or 0),
         "conversations_deleted": int(conversation_result.rowcount or 0),
+        "agent_runs_redacted": agent_runs_redacted,
+        "agent_references_redacted": agent_references_redacted,
+        "agent_tool_calls_redacted": agent_tool_calls_redacted,
     }
 
 

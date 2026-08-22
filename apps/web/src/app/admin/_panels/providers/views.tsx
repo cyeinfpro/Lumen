@@ -27,6 +27,7 @@ import {
   type PriorityGroup,
   relativeTime,
 } from "./model";
+import type { ProviderModelDiscoveryState } from "./modelDiscovery";
 import { ProviderCard } from "./card";
 import { DraftCard } from "./editor";
 
@@ -376,12 +377,17 @@ export function DraftList({
   deleteConfirmIdx,
   fieldErrors,
   serverKeyHints,
+  modelDiscoveries,
+  currentDefaultModel,
   newCardRef,
   onEdit,
   onUpdate,
   onRemove,
   onMove,
   onDeleteConfirm,
+  onDiscoverModels,
+  onSelectModel,
+  onSetDefaultModel,
 }: {
   drafts: Draft[];
   proxies: ProviderProxyOut[];
@@ -389,12 +395,17 @@ export function DraftList({
   deleteConfirmIdx: number | null;
   fieldErrors: Record<number, FieldErrors>;
   serverKeyHints: Map<string, string>;
+  modelDiscoveries: Record<number, ProviderModelDiscoveryState>;
+  currentDefaultModel: string;
   newCardRef: RefObject<HTMLDivElement | null>;
   onEdit: (idx: number | null) => void;
   onUpdate: (idx: number, patch: Partial<Draft>) => void;
   onRemove: (idx: number) => void;
   onMove: (idx: number, dir: -1 | 1) => void;
   onDeleteConfirm: (idx: number | null) => void;
+  onDiscoverModels: (idx: number) => void;
+  onSelectModel: (idx: number, modelId: string) => void;
+  onSetDefaultModel: (idx: number, enabled: boolean) => void;
 }) {
   if (drafts.length === 0) {
     return (
@@ -420,11 +431,16 @@ export function DraftList({
           errors={fieldErrors[i]}
           isExisting={serverKeyHints.has(d.name.trim())}
           hasExistingKey={Boolean(serverKeyHints.get(d.name.trim())?.trim())}
+          modelDiscovery={modelDiscoveries[d._key]}
+          currentDefaultModel={currentDefaultModel}
           onToggle={() => onEdit(editingIdx === i ? null : i)}
           onUpdate={(patch) => onUpdate(i, patch)}
           onRemove={() => onRemove(i)}
           onMove={(dir) => onMove(i, dir)}
           onDeleteConfirm={(show) => onDeleteConfirm(show ? i : null)}
+          onDiscoverModels={() => void onDiscoverModels(i)}
+          onSelectModel={(modelId) => onSelectModel(i, modelId)}
+          onSetDefaultModel={(enabled) => onSetDefaultModel(i, enabled)}
         />
       ))}
     </div>

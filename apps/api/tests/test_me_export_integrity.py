@@ -82,11 +82,33 @@ async def test_complete_export_manifest_matches_archive(
     ) -> AsyncIterator[tuple[me_export.ExportImageDescriptor, ...]]:
         yield (_image("image-1"), _image("image-2"))
 
+    async def empty_agent_batches(
+        _db: object,
+        _user_id: str,
+    ) -> AsyncIterator[tuple[object, ...]]:
+        if False:
+            yield ()
+
     def open_required(image: me_export.ExportImageDescriptor) -> io.BytesIO:
         return io.BytesIO(f"payload:{image.id}".encode())
 
     monkeypatch.setattr(me_export, "iter_export_message_batches", message_batches)
     monkeypatch.setattr(me_export, "iter_export_image_batches", image_batches)
+    monkeypatch.setattr(
+        me_export,
+        "iter_export_agent_session_batches",
+        empty_agent_batches,
+    )
+    monkeypatch.setattr(
+        me_export,
+        "iter_export_agent_run_batches",
+        empty_agent_batches,
+    )
+    monkeypatch.setattr(
+        me_export,
+        "iter_export_agent_tool_call_batches",
+        empty_agent_batches,
+    )
     monkeypatch.setattr(me_export, "open_export_image_required", open_required)
     output = io.BytesIO()
 
@@ -103,11 +125,17 @@ async def test_complete_export_manifest_matches_archive(
             name for name in archive.namelist() if name.startswith("images/")
         ]
         assert manifest == {
-            "schema": 1,
+            "schema": 2,
             "complete": True,
             "messages": 1,
             "images": 2,
+            "agent_sessions": 0,
+            "agent_runs": 0,
+            "agent_tool_calls": 0,
         }
+        assert archive.read("agent-sessions.ndjson") == b""
+        assert archive.read("agent-runs.ndjson") == b""
+        assert archive.read("agent-tool-calls.ndjson") == b""
         assert len(image_names) == manifest["images"]
         assert archive.read("images/image-1.png") == b"payload:image-1"
         assert archive.read("images/image-2.png") == b"payload:image-2"

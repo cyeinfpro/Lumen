@@ -15,6 +15,8 @@ import type {
   ByokSettingsPatchIn,
   ProviderItemIn,
   ProviderItemOut,
+  ProviderModelsDiscoverIn,
+  ProviderModelsDiscoverOut,
   ProviderProxyIn,
   ProvidersOut,
   ProvidersProbeOut,
@@ -30,6 +32,17 @@ import type {
 // ——— Admin: system settings ———
 
 const SYSTEM_SETTINGS_BASE = "/admin/settings";
+
+export interface AdminAgentHealthOut {
+  enabled: boolean;
+  operational: boolean;
+  runtime_auth_configured: boolean;
+  tool_gateway_configured: boolean;
+  runtime_live: boolean | null;
+  runtime_ready: boolean | null;
+  runtime_version: string | null;
+  error_code: string | null;
+}
 
 export function getSystemSettings(): Promise<SystemSettingsOut> {
   return apiFetch<SystemSettingsOut>(SYSTEM_SETTINGS_BASE, {
@@ -55,6 +68,10 @@ export function getAdminContextHealth(): Promise<AdminContextHealthOut> {
   return apiFetch<AdminContextHealthOut>("/admin/context/health");
 }
 
+export function getAdminAgentHealth(): Promise<AdminAgentHealthOut> {
+  return apiFetch<AdminAgentHealthOut>("/admin/agent/health");
+}
+
 // ——— Admin: providers ———
 
 const PROVIDERS_BASE = "/admin/providers";
@@ -65,14 +82,36 @@ export function getProviders(): Promise<ProvidersOut> {
 
 export async function updateProviders(
   payload:
-    ProviderItemIn[] | { items: ProviderItemIn[]; proxies?: ProviderProxyIn[] },
+    | ProviderItemIn[]
+    | {
+        items: ProviderItemIn[];
+        proxies?: ProviderProxyIn[];
+        default_model?: string;
+      },
 ): Promise<ProvidersOut> {
   const body = Array.isArray(payload)
     ? { items: payload, proxies: [] }
-    : { items: payload.items, proxies: payload.proxies ?? [] };
+    : {
+        items: payload.items,
+        proxies: payload.proxies ?? [],
+        ...("default_model" in payload
+          ? { default_model: payload.default_model }
+          : {}),
+      };
   return apiFetch<ProvidersOut>(PROVIDERS_BASE, {
     method: "PUT",
     body: JSON.stringify(body),
+  });
+}
+
+export function discoverProviderModels(
+  payload: ProviderModelsDiscoverIn,
+  signal?: AbortSignal,
+): Promise<ProviderModelsDiscoverOut> {
+  return apiFetch<ProviderModelsDiscoverOut>("/admin/models/discover", {
+    method: "POST",
+    body: JSON.stringify(payload),
+    signal,
   });
 }
 

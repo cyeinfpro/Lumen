@@ -27,6 +27,7 @@ class LoginIn(BaseModel):
 
 class NavigationVisibilityOut(BaseModel):
     studio: bool = True
+    agent: bool = False
     video: bool = True
     projects: bool = True
     assets: bool = True
@@ -36,6 +37,7 @@ class RuntimeDefaultsOut(BaseModel):
     fast: bool = True
     upload_max_source_bytes: int = 50 * 1024 * 1024
     canvas_enabled: bool = False
+    agent_enabled: bool = False
     nav_visibility: NavigationVisibilityOut = Field(
         default_factory=NavigationVisibilityOut
     )

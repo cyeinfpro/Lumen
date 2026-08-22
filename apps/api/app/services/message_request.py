@@ -19,6 +19,7 @@ from lumen_core.schemas import (
 )
 
 from .active_user import lock_active_user_snapshot
+from .agent_conversations import studio_conversation_filter
 
 
 AsyncCallable = Callable[..., Awaitable[Any]]
@@ -280,6 +281,7 @@ async def persist_message_request(
                     Conversation.id == command.conversation_id,
                     Conversation.user_id == user.id,
                     Conversation.deleted_at.is_(None),
+                    studio_conversation_filter(),
                 )
                 .with_for_update(of=Conversation)
             )
