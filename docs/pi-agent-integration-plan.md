@@ -1,6 +1,6 @@
 # Pi Agent 一级入口与对话/生图集成计划
 
-> 状态：Implemented in v1.2.135
+> 状态：Implemented in v1.2.136
 >
 > 首期范围：新增一级导航 `Agent`，在独立 Agent 会话中使用 Pi 完成文本对话、文生图和图生图。
 >

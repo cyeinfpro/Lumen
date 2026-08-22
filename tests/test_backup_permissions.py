@@ -318,6 +318,54 @@ def _metadata_with_uid(metadata: os.stat_result, user_id: int) -> os.stat_result
     return _metadata_with(metadata, user_id=user_id)
 
 
+def test_fchown_is_skipped_when_owner_and_group_already_match(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "owned"
+    path.write_bytes(b"owned")
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        metadata = os.fstat(descriptor)
+        monkeypatch.setattr(
+            BACKUP_PERMISSIONS.os,
+            "fchown",
+            lambda *_args: pytest.fail("converged ownership must not call fchown"),
+        )
+        BACKUP_PERMISSIONS._fchown_if_needed(  # noqa: SLF001
+            descriptor,
+            metadata.st_uid,
+            metadata.st_gid,
+        )
+    finally:
+        os.close(descriptor)
+
+
+def test_fchown_changes_only_the_mismatched_identity_field(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "owned"
+    path.write_bytes(b"owned")
+    descriptor = os.open(path, os.O_RDONLY)
+    captured: list[tuple[int, int]] = []
+    try:
+        metadata = os.fstat(descriptor)
+        monkeypatch.setattr(
+            BACKUP_PERMISSIONS.os,
+            "fchown",
+            lambda _fd, user_id, group_id: captured.append((user_id, group_id)),
+        )
+        BACKUP_PERMISSIONS._fchown_if_needed(  # noqa: SLF001
+            descriptor,
+            metadata.st_uid,
+            metadata.st_gid + 1,
+        )
+    finally:
+        os.close(descriptor)
+    assert captured == [(-1, metadata.st_gid + 1)]
+
+
 def _identity_has_mode_access(
     path: Path,
     *,
@@ -1252,6 +1300,7 @@ def test_cifs_shared_policy_validates_effective_gid_without_forcing_sgid(
     shared = tmp_path / "shared"
     shared.mkdir()
     shared.chmod(0o770)
+    effective_group_id = shared.stat().st_gid
     descriptor = os.open(shared, BACKUP_PERMISSIONS._DIRECTORY_FLAGS)
     policy = BACKUP_PERMISSIONS._SharedFilesystemPolicy(
         filesystem_type="cifs",
@@ -1261,7 +1310,7 @@ def test_cifs_shared_policy_validates_effective_gid_without_forcing_sgid(
         BACKUP_PERMISSIONS._set_shared_directory_permissions(
             descriptor,
             target_user_id=os.geteuid(),
-            target_group_id=os.getegid(),
+            target_group_id=effective_group_id,
             legacy_owner_ids=frozenset({os.geteuid()}),
             policy=policy,
             label="root",
@@ -1276,12 +1325,12 @@ def test_cifs_shared_policy_validates_effective_gid_without_forcing_sgid(
         shared.stat(),
         mode=0o775,
         user_id=os.geteuid() + 1,
-        group_id=os.getegid(),
+        group_id=effective_group_id,
     )
     BACKUP_PERMISSIONS._validate_final_shared_node(
         BACKUP_PERMISSIONS._node_snapshot(synthetic),
         target_user_id=os.geteuid(),
-        target_group_id=os.getegid(),
+        target_group_id=effective_group_id,
         legacy_owner_ids=frozenset({os.geteuid() + 1}),
         policy=policy,
         directory=True,
@@ -1290,7 +1339,7 @@ def test_cifs_shared_policy_validates_effective_gid_without_forcing_sgid(
 
     wrong_gid = _metadata_with(
         synthetic,
-        group_id=os.getegid() + 1,
+        group_id=effective_group_id + 1,
     )
     with pytest.raises(
         BACKUP_PERMISSIONS.BackupPermissionError,
@@ -1299,7 +1348,7 @@ def test_cifs_shared_policy_validates_effective_gid_without_forcing_sgid(
         BACKUP_PERMISSIONS._validate_final_shared_node(
             BACKUP_PERMISSIONS._node_snapshot(wrong_gid),
             target_user_id=os.geteuid(),
-            target_group_id=os.getegid(),
+            target_group_id=effective_group_id,
             legacy_owner_ids=frozenset({os.geteuid() + 1}),
             policy=policy,
             directory=True,

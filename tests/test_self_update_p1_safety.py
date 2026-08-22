@@ -335,8 +335,10 @@ def test_transaction_lock_releases_on_signal_and_chains_saved_exit_trap(
 set -euo pipefail
 . {shlex.quote(str(LIB))}
 _lumen_self_update_scripts_locked() {{
-    : > {shlex.quote(str(entered))}
-    sleep 60
+    sleep 60 &
+    child_pid=$!
+    printf '%s\n' "${{child_pid}}" > {shlex.quote(str(entered))}
+    wait "${{child_pid}}"
 }}
 trap 'exit 143' TERM
 trap 'printf "%s\\n" saved > {shlex.quote(str(saved_exit))}' EXIT

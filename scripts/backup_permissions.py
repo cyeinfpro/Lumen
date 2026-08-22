@@ -1392,6 +1392,18 @@ def _validate_shared_owner(
         raise BackupPermissionError(f"shared backup {label} owner mismatch")
 
 
+def _fchown_if_needed(
+    descriptor: int,
+    target_user_id: int,
+    target_group_id: int,
+) -> None:
+    metadata = os.fstat(descriptor)
+    user_id = -1 if metadata.st_uid == target_user_id else target_user_id
+    group_id = -1 if metadata.st_gid == target_group_id else target_group_id
+    if user_id != -1 or group_id != -1:
+        os.fchown(descriptor, user_id, group_id)
+
+
 def _set_shared_directory_permissions(
     directory_fd: int,
     *,
@@ -1414,7 +1426,7 @@ def _set_shared_directory_permissions(
         )
     else:
         os.fchmod(directory_fd, _SHARED_DIRECTORY_MODE)
-        os.fchown(directory_fd, target_user_id, target_group_id)
+        _fchown_if_needed(directory_fd, target_user_id, target_group_id)
         os.fchmod(directory_fd, _SHARED_DIRECTORY_MODE)
     final = os.fstat(directory_fd)
     if policy.mount_manages_permissions:
@@ -1461,7 +1473,7 @@ def _set_shared_file_permissions(
         _set_mount_managed_mode(file_fd, _SHARED_FILE_MODE)
     else:
         os.fchmod(file_fd, _SHARED_FILE_MODE)
-        os.fchown(file_fd, target_user_id, target_group_id)
+        _fchown_if_needed(file_fd, target_user_id, target_group_id)
         os.fchmod(file_fd, _SHARED_FILE_MODE)
     final = os.fstat(file_fd)
     if policy.mount_manages_permissions:
@@ -1758,7 +1770,7 @@ def _set_private_file_permissions(
         label=label,
     )
     os.fchmod(journal_fd, _PRIVATE_FILE_MODE)
-    os.fchown(journal_fd, target_user_id, target_group_id)
+    _fchown_if_needed(journal_fd, target_user_id, target_group_id)
     os.fchmod(journal_fd, _PRIVATE_FILE_MODE)
     final = os.fstat(journal_fd)
     if (
@@ -1784,7 +1796,7 @@ def _set_private_directory_permissions(
         label="private recovery directory",
     )
     os.fchmod(recovery_fd, _PRIVATE_DIRECTORY_MODE)
-    os.fchown(recovery_fd, target_user_id, target_group_id)
+    _fchown_if_needed(recovery_fd, target_user_id, target_group_id)
     os.fchmod(recovery_fd, _PRIVATE_DIRECTORY_MODE)
     final = os.fstat(recovery_fd)
     if (
