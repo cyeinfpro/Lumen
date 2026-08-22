@@ -570,6 +570,17 @@ def build_environment(request: dict[str, object]) -> dict[str, str]:
     return env
 
 
+def trusted_update_command(update_script: Path) -> list[str]:
+    script_info = update_script.lstat()
+    if not stat.S_ISREG(script_info.st_mode):
+        raise UpdateRequestError("update script is not a regular file")
+    lumenctl = update_script.with_name("lumenctl.sh")
+    lumenctl_info = lumenctl.lstat()
+    if not stat.S_ISREG(lumenctl_info.st_mode):
+        raise UpdateRequestError("lumenctl entry is not a regular file")
+    return ["/usr/bin/env", "bash", str(lumenctl), "update-lumen"]
+
+
 def _runtime_paths() -> tuple[Path, Path, Path, Path, Path, Path, Path]:
     return (
         Path(os.environ.get("LUMEN_UPDATE_REQUEST", _DEFAULT_REQUEST)),
@@ -997,9 +1008,7 @@ def main(argv: list[str] | None = None) -> int:
                 archived = archive_terminal_journal(journal_path, journal)
                 print(f"update runner archived terminal journal at {archived}", flush=True)
                 journal = None
-        script_info = update_script.stat()
-        if not stat.S_ISREG(script_info.st_mode):
-            raise UpdateRequestError("update script is not a regular file")
+        update_command = trusted_update_command(update_script)
         if not active:
             write_runtime_claim(
                 claim_path,
@@ -1027,7 +1036,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     os.execve(
         "/usr/bin/env",
-        ["/usr/bin/env", "bash", str(update_script)],
+        update_command,
         environment,
     )
     return 127

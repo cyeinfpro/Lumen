@@ -129,6 +129,14 @@ def _journal_request(payload: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _write_update_entry(tmp_path: Path) -> tuple[Path, Path]:
+    update_script = tmp_path / "update.sh"
+    lumenctl = tmp_path / "lumenctl.sh"
+    update_script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    lumenctl.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    return update_script, lumenctl
+
+
 def test_update_runner_builds_fixed_environment_without_path_overrides(
     tmp_path: Path,
 ) -> None:
@@ -209,8 +217,7 @@ def test_active_journal_auto_resumes_with_preserved_stale_request(
         json.dumps({"schema": 2, "status": "running"}),
         encoding="utf-8",
     )
-    update_script = tmp_path / "update.sh"
-    update_script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    update_script, lumenctl = _write_update_entry(tmp_path)
     trigger = tmp_path / "trigger"
     running = tmp_path / "running"
     claim = tmp_path / "claim.json"
@@ -255,6 +262,12 @@ def test_active_journal_auto_resumes_with_preserved_stale_request(
     assert child_env["LUMEN_IMAGE_TAG"] == "v1.2.3"
     assert child_env["LUMEN_UPDATE_JOURNAL"] == str(journal)
     assert child_env["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert captured["argv"] == [
+        "/usr/bin/env",
+        "bash",
+        str(lumenctl),
+        "update-lumen",
+    ]
 
 
 def test_active_post_check_journal_without_request_file_fails_closed(
@@ -279,8 +292,7 @@ def test_active_post_check_journal_without_request_file_fails_closed(
         ),
         encoding="utf-8",
     )
-    update_script = tmp_path / "update.sh"
-    update_script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    update_script, _lumenctl = _write_update_entry(tmp_path)
     executed = False
     monkeypatch.setenv("LUMEN_UPDATE_REQUEST", str(tmp_path / "missing.json"))
     monkeypatch.setenv("LUMEN_UPDATE_JOURNAL", str(journal))
@@ -455,8 +467,7 @@ def test_terminal_journal_is_archived_before_a_different_request_runs(
         ),
         encoding="utf-8",
     )
-    update_script = tmp_path / "update.sh"
-    update_script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    update_script, _lumenctl = _write_update_entry(tmp_path)
     archive = tmp_path / "journal-archive"
     claim = tmp_path / "claim.json"
     receipt = tmp_path / "receipt.json"
@@ -578,10 +589,9 @@ def test_new_update_requires_matching_marker_handoff(
     payload = _request()
     request = tmp_path / "request.json"
     trigger = tmp_path / "trigger"
-    script = tmp_path / "update.sh"
+    script, _lumenctl = _write_update_entry(tmp_path)
     request.write_text(json.dumps(payload), encoding="utf-8")
     _write_trigger(runner, trigger, payload)
-    script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
     for key, path in (
         ("LUMEN_UPDATE_REQUEST", request),
         ("LUMEN_UPDATE_JOURNAL", tmp_path / "journal.json"),
@@ -610,7 +620,7 @@ def test_second_update_runner_cannot_take_live_host_marker(
     request = tmp_path / "request.json"
     trigger = tmp_path / "trigger"
     running = tmp_path / "running"
-    script = tmp_path / "update.sh"
+    script, _lumenctl = _write_update_entry(tmp_path)
     request.write_text(json.dumps(payload), encoding="utf-8")
     _write_trigger(runner, trigger, payload)
     _write_marker(
@@ -647,7 +657,7 @@ def test_update_runner_recovers_crash_after_marker_adoption(
     running = tmp_path / "running"
     receipt = tmp_path / "receipt.json"
     claim = tmp_path / "claim.json"
-    script = tmp_path / "update.sh"
+    script, _lumenctl = _write_update_entry(tmp_path)
     request.write_text(json.dumps(payload), encoding="utf-8")
     _write_trigger(runner, trigger, payload)
     _write_marker(
@@ -713,8 +723,7 @@ def test_failed_recovered_original_is_not_consumed_as_success(
         ),
         encoding="utf-8",
     )
-    script = tmp_path / "update.sh"
-    script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    script, _lumenctl = _write_update_entry(tmp_path)
     for key, path in (
         ("LUMEN_UPDATE_REQUEST", request),
         ("LUMEN_UPDATE_JOURNAL", journal),
