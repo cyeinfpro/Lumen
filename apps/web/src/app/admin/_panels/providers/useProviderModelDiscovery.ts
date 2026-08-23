@@ -44,6 +44,31 @@ function modelDiscoveryError(
   return result.models.length === 0 ? "供应商未返回模型" : null;
 }
 
+function patchedDrafts(
+  current: Draft[] | null,
+  index: number,
+  patch: Partial<Draft>,
+  changesConnection: boolean,
+): Draft[] | null {
+  if (!current?.[index]) return current;
+  const next = [...current];
+  next[index] = {
+    ...next[index],
+    ...(changesConnection
+      ? {
+          agent_models: [],
+          responses_supported: null,
+          vision_supported: null,
+          agent_context_window: 128_000,
+          agent_max_output_tokens: 16_384,
+          agent_reasoning_supported: false,
+        }
+      : {}),
+    ...patch,
+  };
+  return next;
+}
+
 export function useProviderModelDiscovery({
   drafts,
   setDrafts,
@@ -58,6 +83,8 @@ export function useProviderModelDiscovery({
     Record<number, ProviderModelDiscoveryState>
   >({});
   const discoveryControllers = useRef(new Map<number, AbortController>());
+  const draftsRef = useRef<Draft[] | null>(drafts);
+  draftsRef.current = drafts;
   const currentDefaultModel = useMemo(
     () =>
       settingsQuery.data?.items
@@ -96,7 +123,7 @@ export function useProviderModelDiscovery({
 
   const updateDraft = useCallback(
     (index: number, patch: Partial<Draft>) => {
-      const draftKey = drafts?.[index]?._key;
+      const draftKey = draftsRef.current?.[index]?._key;
       const invalidatesDiscovery = [
         "base_url",
         "api_key",
@@ -107,32 +134,28 @@ export function useProviderModelDiscovery({
         Object.prototype.hasOwnProperty.call(patch, key),
       );
       if (invalidatesDiscovery) remove(draftKey);
+      draftsRef.current = patchedDrafts(
+        draftsRef.current,
+        index,
+        patch,
+        changesConnection,
+      );
       setDrafts((current) => {
-        if (!current) return current;
-        const next = [...current];
-        next[index] = {
-          ...next[index],
-          ...(changesConnection
-            ? {
-                agent_models: [],
-                responses_supported: null,
-                vision_supported: null,
-                agent_context_window: 128_000,
-                agent_max_output_tokens: 16_384,
-                agent_reasoning_supported: false,
-              }
-            : {}),
-          ...patch,
-        };
+        const next = patchedDrafts(current, index, patch, changesConnection);
+        draftsRef.current = next;
         return next;
       });
     },
-    [drafts, remove, setDrafts],
+    [remove, setDrafts],
   );
 
   const discover = useCallback(
     async (index: number) => {
-      const draft = modelDiscoveryDraft(drafts, index, serverKeyHints);
+      const draft = modelDiscoveryDraft(
+        draftsRef.current,
+        index,
+        serverKeyHints,
+      );
       if (!draft) return;
       const draftKey = draft._key;
       discoveryControllers.current.get(draftKey)?.abort();
@@ -180,14 +203,16 @@ export function useProviderModelDiscovery({
         );
         if (!selected) return;
         const setAsDefault = selected.id !== currentDefaultModel;
-        setDrafts(
-          (current) =>
+        setDrafts((current) => {
+          const next =
             current?.map((item) =>
               item._key === draftKey
                 ? { ...item, ...modelProfilePatch(selected, result.models) }
                 : item,
-            ) ?? current,
-        );
+            ) ?? current;
+          draftsRef.current = next;
+          return next;
+        });
         setModelDiscoveries((current) => {
           const next = clearDefaultCandidates(current);
           next[draftKey] = {
@@ -217,12 +242,12 @@ export function useProviderModelDiscovery({
         }
       }
     },
-    [currentDefaultModel, drafts, serverKeyHints, setDrafts],
+    [currentDefaultModel, serverKeyHints, setDrafts],
   );
 
   const select = useCallback(
     (index: number, modelId: string) => {
-      const draft = drafts?.[index];
+      const draft = draftsRef.current?.[index];
       if (!draft) return;
       const discovery = modelDiscoveries[draft._key];
       const selected = discovery?.models.find((model) => model.id === modelId);
@@ -234,6 +259,7 @@ export function useProviderModelDiscovery({
           ...next[index],
           ...modelProfilePatch(selected, discovery.models),
         };
+        draftsRef.current = next;
         return next;
       });
       setModelDiscoveries((current) => ({
@@ -245,12 +271,12 @@ export function useProviderModelDiscovery({
         },
       }));
     },
-    [currentDefaultModel, drafts, modelDiscoveries, setDrafts],
+    [currentDefaultModel, modelDiscoveries, setDrafts],
   );
 
   const setDefault = useCallback(
     (index: number, enabled: boolean) => {
-      const draftKey = drafts?.[index]?._key;
+      const draftKey = draftsRef.current?.[index]?._key;
       if (draftKey === undefined) return;
       setModelDiscoveries((current) => {
         const next = enabled ? clearDefaultCandidates(current) : { ...current };
@@ -260,7 +286,7 @@ export function useProviderModelDiscovery({
         return next;
       });
     },
-    [drafts],
+    [],
   );
 
   return {

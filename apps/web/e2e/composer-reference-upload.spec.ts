@@ -138,8 +138,14 @@ test("reference upload expands a collapsed composer and shows the attachment", a
     await expect(page.getByTestId("desktop-primary-nav")).toBeVisible();
   }
   await expect.poll(() => historyCalls).toBeGreaterThan(0);
+  await expect(
+    page.getByText("登录状态确认中，写操作已暂时切换为只读", {
+      exact: true,
+    }),
+  ).toHaveCount(0);
   const uploadButton = page.getByRole("button", { name: "添加参考图" }).first();
   await expect(uploadButton).toBeVisible();
+  await expect(uploadButton).toBeEnabled();
   await expect(page.getByRole("button", { name: "移除参考图" })).toHaveCount(0);
 
   await page
