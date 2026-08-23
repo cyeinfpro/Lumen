@@ -232,6 +232,15 @@ test("partial image, cancellation, and stable account errors remain actionable",
   ).toBeVisible();
 });
 
+test("active Agent snapshot polling stays bounded", async ({ page }) => {
+  const fixture = await installAgentFixture(page, { mode: "active-image" });
+  await openAgent(page);
+  await page.waitForTimeout(2_000);
+  const settledCalls = fixture.snapshotCalls;
+  await page.waitForTimeout(1_000);
+  expect(fixture.snapshotCalls - settledCalls).toBeLessThanOrEqual(4);
+});
+
 test("task tray locates the owning Agent assistant message", async ({
   page,
 }) => {

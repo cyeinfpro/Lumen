@@ -212,6 +212,7 @@ export async function installAgentFixture(
   let images: ReturnType<typeof image>[] = [];
   let lastMessageBody: Record<string, unknown> | null = null;
   let cancelCalls = 0;
+  let snapshotCalls = 0;
 
   if (mode === "active-image" || mode === "cancel") {
     currentRun = run("running", true);
@@ -337,8 +338,12 @@ export async function installAgentFixture(
     if (path === "/api/agent/sessions/session-1" && method === "DELETE") {
       return json(route, { ok: true });
     }
-    if (path.endsWith("/active-run")) return json(route, currentRun);
+    if (path.endsWith("/active-run")) {
+      snapshotCalls += 1;
+      return json(route, currentRun);
+    }
     if (path.endsWith("/messages") && method === "GET") {
+      snapshotCalls += 1;
       return json(route, {
         items: messages,
         runs: messages.length ? [currentRun ?? run(mode === "partial-image" ? "partial" : "succeeded", generations.length > 0)] : [],
@@ -404,6 +409,9 @@ export async function installAgentFixture(
     },
     get cancelCalls() {
       return cancelCalls;
+    },
+    get snapshotCalls() {
+      return snapshotCalls;
     },
   };
 }

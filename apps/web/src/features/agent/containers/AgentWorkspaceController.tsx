@@ -179,7 +179,7 @@ export function AgentWorkspaceController({
       .sort((left, right) => right.created_at.localeCompare(left.created_at));
     return candidates[0] ?? null;
   }, [currentSessionId, runsById]);
-
+  const snapshotPollIntervalMs = activeRun ? 2_000 : 8_000;
   const refreshSnapshot = useCallback(
     async (signal?: AbortSignal) => {
       const sessionId = useAgentStore.getState().currentSessionId;
@@ -210,7 +210,7 @@ export function AgentWorkspaceController({
     const schedule = () => {
       clearTimer();
       if (document.visibilityState !== "visible") return;
-      timer = window.setTimeout(run, activeRun ? 2_000 : 8_000);
+      timer = window.setTimeout(run, snapshotPollIntervalMs);
     };
     async function run() {
       if (running || document.visibilityState !== "visible") return;
@@ -245,7 +245,7 @@ export function AgentWorkspaceController({
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [activeRun, currentSessionId, refreshSnapshot, setRealtimeStatus]);
+  }, [currentSessionId, refreshSnapshot, setRealtimeStatus, snapshotPollIntervalMs]);
 
   const currentGenerationIds = useMemo(
     () =>
