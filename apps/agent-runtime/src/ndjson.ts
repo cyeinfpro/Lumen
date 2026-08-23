@@ -8,22 +8,41 @@ export interface EventWriter {
   readonly bytesWritten: number;
 }
 
-function waitForDrain(response: ServerResponse): Promise<void> {
+const DRAIN_TIMEOUT_MS = 30_000;
+
+function waitForDrain(
+  response: ServerResponse,
+  timeoutMs: number,
+): Promise<void> {
   return new Promise((resolve, reject) => {
+    let settled = false;
     const cleanup = (): void => {
+      clearTimeout(timer);
       response.off("drain", onDrain);
       response.off("close", onClose);
+      response.off("error", onError);
     };
-    const onDrain = (): void => {
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
       cleanup();
-      resolve();
+      if (error) reject(error);
+      else resolve();
     };
+    const onDrain = (): void => finish();
     const onClose = (): void => {
-      cleanup();
-      reject(new Error("NDJSON response closed during backpressure"));
+      finish(new Error("NDJSON response closed during backpressure"));
     };
+    const onError = (): void => {
+      finish(new Error("NDJSON response failed during backpressure"));
+    };
+    const timer = setTimeout(() => {
+      finish(new Error("NDJSON response backpressure timed out"));
+    }, timeoutMs);
+    timer.unref();
     response.once("drain", onDrain);
     response.once("close", onClose);
+    response.once("error", onError);
   });
 }
 
@@ -31,6 +50,8 @@ export class NdjsonEventWriter implements EventWriter {
   private nextSequence = 1;
   private totalBytes = 0;
   private ordinaryEvents = 0;
+  private writeTail: Promise<void> = Promise.resolve();
+  private failure: Error | null = null;
 
   constructor(
     private readonly response: ServerResponse,
@@ -39,6 +60,7 @@ export class NdjsonEventWriter implements EventWriter {
     private readonly maxLineBytes: number,
     private readonly maxStreamBytes: number,
     private readonly maxEvents: number,
+    private readonly drainTimeoutMs: number = DRAIN_TIMEOUT_MS,
   ) {}
 
   get sequence(): number {
@@ -49,34 +71,69 @@ export class NdjsonEventWriter implements EventWriter {
     return this.totalBytes;
   }
 
+  private latchFailure(error: unknown): Error {
+    if (this.failure === null) {
+      this.failure = error instanceof Error
+        ? error
+        : new Error("NDJSON response write failed");
+      this.response.destroy();
+    }
+    return this.failure;
+  }
+
   async emit(
     type: string,
     payload: Record<string, unknown> = {},
     force = false,
   ): Promise<boolean> {
-    const event: RuntimeEvent = {
-      version: 1,
-      type,
-      seq: this.nextSequence,
-      run_id: this.runId,
-      execution_epoch: this.executionEpoch,
-      ...payload,
-    };
-    const line = `${JSON.stringify(event)}\n`;
-    const lineBytes = Buffer.byteLength(line, "utf8");
-    if (lineBytes > this.maxLineBytes) return false;
-    const eventLimit = force ? this.maxEvents : Math.max(1, this.maxEvents - 1);
-    const byteLimit = force
-      ? this.maxStreamBytes
-      : Math.max(this.maxLineBytes, this.maxStreamBytes - this.maxLineBytes);
-    if (this.ordinaryEvents >= eventLimit || this.totalBytes + lineBytes > byteLimit) {
-      return false;
-    }
-    this.nextSequence += 1;
-    this.ordinaryEvents += 1;
-    this.totalBytes += lineBytes;
-    if (!this.response.write(line, "utf8")) await waitForDrain(this.response);
-    return true;
+    if (this.failure !== null) throw this.failure;
+    let accepted = false;
+    const write = this.writeTail.then(async () => {
+      if (this.failure !== null) throw this.failure;
+      const event: RuntimeEvent = {
+        version: 1,
+        type,
+        seq: this.nextSequence,
+        run_id: this.runId,
+        execution_epoch: this.executionEpoch,
+        ...payload,
+      };
+      const line = `${JSON.stringify(event)}\n`;
+      const lineBytes = Buffer.byteLength(line, "utf8");
+      if (lineBytes > this.maxLineBytes) return;
+      const eventLimit = force
+        ? this.maxEvents
+        : Math.max(1, this.maxEvents - 1);
+      const byteLimit = force
+        ? this.maxStreamBytes
+        : this.maxStreamBytes - this.maxLineBytes;
+      if (
+        this.ordinaryEvents >= eventLimit ||
+        this.totalBytes + lineBytes > byteLimit
+      ) {
+        return;
+      }
+      try {
+        if (this.response.destroyed || this.response.writableEnded) {
+          throw new Error("NDJSON response is not writable");
+        }
+        if (!this.response.write(line, "utf8")) {
+          await waitForDrain(this.response, this.drainTimeoutMs);
+        }
+      } catch (error) {
+        throw this.latchFailure(error);
+      }
+      this.nextSequence += 1;
+      this.ordinaryEvents += 1;
+      this.totalBytes += lineBytes;
+      accepted = true;
+    });
+    this.writeTail = write.then(
+      () => undefined,
+      () => undefined,
+    );
+    await write;
+    return accepted;
   }
 }
 

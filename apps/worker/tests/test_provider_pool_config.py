@@ -41,6 +41,24 @@ def test_worker_default_redis_url_matches_password_protected_dev_redis() -> None
     assert Settings().redis_url == "redis://:lumen-redis-dev-password@localhost:6379/0"
 
 
+def test_agent_runtime_idle_budget_has_heartbeat_failure_margin() -> None:
+    settings = Settings()
+    assert settings.agent_runtime_heartbeat_interval_seconds == 15
+    assert settings.agent_runtime_event_idle_timeout_seconds == 90
+    assert settings.agent_runtime_max_events == 4096
+
+    with pytest.raises(ValidationError, match="must exceed twice"):
+        Settings(
+            agent_runtime_heartbeat_interval_seconds=15,
+            agent_runtime_event_idle_timeout_seconds=30,
+        )
+    with pytest.raises(ValidationError, match="at least twice"):
+        Settings(
+            agent_runtime_max_line_bytes=64 * 1024,
+            agent_runtime_max_stream_bytes=64 * 1024,
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "message"),
     [

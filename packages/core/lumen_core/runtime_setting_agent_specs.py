@@ -5,6 +5,10 @@ from __future__ import annotations
 from .runtime_setting_types import SettingSpec
 
 
+AGENT_RUN_TIMEOUT_DEFAULT_SECONDS = 600
+AGENT_RUN_TIMEOUT_MAX_SECONDS = 1500
+
+
 AGENT_SETTINGS: tuple[SettingSpec, ...] = (
     SettingSpec(
         key="agent.enabled",
@@ -96,7 +100,7 @@ AGENT_SETTINGS: tuple[SettingSpec, ...] = (
         parser=int,
         env_fallback="AGENT_RUN_TIMEOUT_SECONDS",
         min_value=10,
-        max_value=1800,
+        max_value=AGENT_RUN_TIMEOUT_MAX_SECONDS,
     ),
     SettingSpec(
         key="agent.tool_timeout_seconds",
@@ -114,9 +118,13 @@ AGENT_SETTINGS: tuple[SettingSpec, ...] = (
         parser=int,
         env_fallback="AGENT_CAPABILITY_TTL_SECONDS",
         min_value=15,
-        max_value=600,
+        max_value=3600,
     ),
 )
 
 
-__all__ = ["AGENT_SETTINGS"]
+__all__ = [
+    "AGENT_RUN_TIMEOUT_DEFAULT_SECONDS",
+    "AGENT_RUN_TIMEOUT_MAX_SECONDS",
+    "AGENT_SETTINGS",
+]

@@ -1,11 +1,18 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import { RuntimeAuthError, RuntimeAuthenticator } from "./auth.js";
-import { loadConfig, type RuntimeConfig } from "./config.js";
-import { parseRuntimeRequest } from "./contracts.js";
+import {
+  loadConfig,
+  type RuntimeConfig,
+  validateRuntimeConfig,
+} from "./config.js";
+import {
+  parseRuntimeRequest,
+  RUNTIME_HEARTBEAT_EVENT,
+} from "./contracts.js";
 import { healthPayload, readinessPayload, RuntimeReadiness } from "./health.js";
 import { RuntimeMetrics } from "./metrics.js";
-import { NdjsonEventWriter } from "./ndjson.js";
+import { NdjsonEventWriter, type EventWriter } from "./ndjson.js";
 import { logRuntime, safeErrorCode } from "./redaction.js";
 import {
   executeAgentRun,
@@ -108,6 +115,72 @@ function writeError(response: ServerResponse, statusCode: number, code: string):
   });
 }
 
+async function waitForStop(stop: AbortSignal, timeoutMs: number): Promise<boolean> {
+  if (stop.aborted) return false;
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (elapsed: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      stop.removeEventListener("abort", onAbort);
+      resolve(elapsed);
+    };
+    const onAbort = (): void => finish(false);
+    const timer = setTimeout(() => finish(true), timeoutMs);
+    timer.unref();
+    stop.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+interface HeartbeatHandle {
+  stop(): Promise<void>;
+}
+
+const NOOP_HEARTBEAT: HeartbeatHandle = {
+  async stop(): Promise<void> {},
+};
+
+function startHeartbeat(
+  writer: EventWriter,
+  intervalMs: number,
+  onFailure: () => void,
+): HeartbeatHandle {
+  const controller = new AbortController();
+  const task = (async (): Promise<void> => {
+    try {
+      while (await waitForStop(controller.signal, intervalMs)) {
+        if (await writer.emit(RUNTIME_HEARTBEAT_EVENT)) continue;
+        onFailure();
+        return;
+      }
+    } catch {
+      onFailure();
+    }
+  })();
+  return {
+    async stop(): Promise<void> {
+      controller.abort();
+      await task;
+    },
+  };
+}
+
+async function emitTerminal(
+  writer: EventWriter,
+  response: ServerResponse,
+  type: string,
+  payload: Record<string, unknown>,
+): Promise<boolean> {
+  try {
+    if (await writer.emit(type, payload, true)) return true;
+  } catch {
+    // The writer latches and destroys the response after transport failure.
+  }
+  if (!response.destroyed) response.destroy();
+  return false;
+}
+
 function authStatus(error: RuntimeAuthError): number {
   return error.code === "agent_runtime_auth_unconfigured" ||
     error.code === "agent_runtime_auth_capacity_exhausted"
@@ -119,6 +192,7 @@ interface ServerOptions {
   readonly config?: RuntimeConfig;
   readonly metrics?: RuntimeMetrics;
   readonly dependencies?: RuntimeDependencies;
+  readonly runTimeoutSignal?: (timeoutMs: number) => AbortSignal;
 }
 
 export function createRuntimeServer(options: ServerOptions = {}): {
@@ -126,7 +200,7 @@ export function createRuntimeServer(options: ServerOptions = {}): {
   readiness: RuntimeReadiness;
   metrics: RuntimeMetrics;
 } {
-  const config = options.config ?? loadConfig();
+  const config = validateRuntimeConfig(options.config ?? loadConfig());
   const metrics = options.metrics ?? new RuntimeMetrics();
   const readiness = new RuntimeReadiness(config);
   const authenticator = new RuntimeAuthenticator(
@@ -235,9 +309,22 @@ export function createRuntimeServer(options: ServerOptions = {}): {
       config.maxEvents,
     );
     let outcome = "failed";
+    const runtimeState: { streamFailed: boolean } = { streamFailed: false };
+    const timeoutSignal = (
+      options.runTimeoutSignal ?? ((timeoutMs) => AbortSignal.timeout(timeoutMs))
+    )(runRequest.limits.run_timeout_seconds * 1000);
+    const signal = AbortSignal.any([abortController.signal, timeoutSignal]);
+    const heartbeat = runRequest.event_features?.includes("heartbeat-v1")
+      ? startHeartbeat(
+          writer,
+          config.heartbeatIntervalSeconds * 1000,
+          () => {
+            runtimeState.streamFailed = true;
+            abortController.abort();
+          },
+        )
+      : NOOP_HEARTBEAT;
     try {
-      const timeoutSignal = AbortSignal.timeout(runRequest.limits.run_timeout_seconds * 1000);
-      const signal = AbortSignal.any([abortController.signal, timeoutSignal]);
       const result = await executeAgentRun(
         runRequest,
         writer,
@@ -245,9 +332,16 @@ export function createRuntimeServer(options: ServerOptions = {}): {
         metrics,
         options.dependencies,
       );
+      await heartbeat.stop();
       const timedOut = timeoutSignal.aborted && !abortController.signal.aborted;
-      const effectiveOutcome = timedOut ? "failed" : result.outcome;
-      const effectiveErrorCode = timedOut ? "agent_run_timeout" : result.errorCode;
+      const effectiveOutcome = timedOut || runtimeState.streamFailed
+        ? "failed"
+        : result.outcome;
+      const effectiveErrorCode = timedOut
+        ? "agent_run_timeout"
+        : runtimeState.streamFailed
+          ? "agent_runtime_error"
+          : result.errorCode;
       outcome = effectiveOutcome;
       const eventType =
         effectiveOutcome === "cancelled"
@@ -255,50 +349,52 @@ export function createRuntimeServer(options: ServerOptions = {}): {
           : effectiveOutcome === "failed"
             ? "run.failed"
             : "run.completed";
-      await writer.emit(
-        eventType,
-        {
-          status: effectiveOutcome,
-          error_code: effectiveErrorCode,
-          usage: result.usage,
-          turn_count: result.turnCount,
-          tool_call_count: result.toolCallCount,
-          provider_dispatch_count: result.providerDispatchCount,
-          provider_completed_count: result.providerCompletedCount,
-        },
-        true,
-      );
+      const terminalWritten = await emitTerminal(writer, response, eventType, {
+        status: effectiveOutcome,
+        error_code: effectiveErrorCode,
+        usage: result.usage,
+        turn_count: result.turnCount,
+        tool_call_count: result.toolCallCount,
+        provider_dispatch_count: result.providerDispatchCount,
+        provider_completed_count: result.providerCompletedCount,
+      });
+      if (!terminalWritten) outcome = "failed";
     } catch (error) {
+      await heartbeat.stop();
       const result = error instanceof RuntimeExecutionError ? error.result : null;
-      outcome = result?.outcome ?? (abortController.signal.aborted ? "cancelled" : "failed");
+      const timedOut = timeoutSignal.aborted && !abortController.signal.aborted;
+      outcome = timedOut || runtimeState.streamFailed
+        ? "failed"
+        : result?.outcome ?? (abortController.signal.aborted ? "cancelled" : "failed");
       const type = outcome === "cancelled"
         ? "run.cancelled"
         : outcome === "partial"
           ? "run.completed"
           : "run.failed";
-      await writer.emit(
-        type,
-        {
-          status: outcome,
-          error_code: result?.errorCode ?? (
-            outcome === "cancelled" ? "agent_cancelled" : "agent_runtime_error"
-          ),
-          usage: result?.usage ?? {
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            cache_write_1h_tokens: 0,
-            reasoning_tokens: 0,
-            total_tokens: 0,
-          },
-          turn_count: result?.turnCount ?? 0,
-          tool_call_count: result?.toolCallCount ?? 0,
-          provider_dispatch_count: result?.providerDispatchCount ?? 0,
-          provider_completed_count: result?.providerCompletedCount ?? 0,
+      const terminalWritten = await emitTerminal(writer, response, type, {
+        status: outcome,
+        error_code: timedOut
+          ? "agent_run_timeout"
+          : runtimeState.streamFailed
+            ? "agent_runtime_error"
+            : result?.errorCode ?? (
+              outcome === "cancelled" ? "agent_cancelled" : "agent_runtime_error"
+            ),
+        usage: result?.usage ?? {
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+          cache_write_1h_tokens: 0,
+          reasoning_tokens: 0,
+          total_tokens: 0,
         },
-        true,
-      ).catch(() => false);
+        turn_count: result?.turnCount ?? 0,
+        tool_call_count: result?.toolCallCount ?? 0,
+        provider_dispatch_count: result?.providerDispatchCount ?? 0,
+        provider_completed_count: result?.providerCompletedCount ?? 0,
+      });
+      if (!terminalWritten) outcome = "failed";
       logRuntime("warn", "agent_runtime.run_failed", {
         run_id: runRequest.run_id,
         execution_epoch: runRequest.execution_epoch,
@@ -306,6 +402,7 @@ export function createRuntimeServer(options: ServerOptions = {}): {
         error_type: error instanceof Error ? error.name : "Error",
       });
     } finally {
+      await heartbeat.stop();
       completed = true;
       request.off("aborted", abortOnDisconnect);
       response.off("close", abortOnDisconnect);

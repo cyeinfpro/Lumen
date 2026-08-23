@@ -22,6 +22,7 @@ from redis.exceptions import BusyLoadingError
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from lumen_core.context_window import warm_tiktoken
+from lumen_core.runtime_setting_agent_specs import AGENT_RUN_TIMEOUT_MAX_SECONDS
 from lumen_core.storage_capacity import build_storage_capacity
 
 from .config import settings
@@ -69,6 +70,7 @@ from .upstream_parts.upstream_impl import build_image_upstream_runtime
 
 _startup_logger = logging.getLogger(__name__)
 _PROVIDER_CRON_TIMEOUT_S = 30.0
+_AGENT_RUN_FINALIZATION_BUDGET_SECONDS = 240
 
 # RedisSettings.from_dsn 只解析 host/port/db/账号密码，其余全部落在 arq 的库
 # 默认值上：conn_timeout=1s、retry_on_timeout=False、retry_on_error=None、
@@ -256,6 +258,9 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
                 settings.agent_runtime_event_idle_timeout_seconds
             ),
             max_request_bytes=settings.agent_runtime_max_request_bytes,
+            max_line_bytes=settings.agent_runtime_max_line_bytes,
+            max_stream_bytes=settings.agent_runtime_max_stream_bytes,
+            max_events=settings.agent_runtime_max_events,
         )
         ctx["agent_runtime_client"] = agent_runtime_client
         lifecycle.own("agent_runtime_client", agent_runtime_client.close)
@@ -373,3 +378,11 @@ class WorkerSettings:
     # Startup hook：观测层 + metrics server
     on_startup = _on_startup
     on_shutdown = _on_shutdown
+
+
+if WorkerSettings.job_timeout <= (
+    AGENT_RUN_TIMEOUT_MAX_SECONDS + _AGENT_RUN_FINALIZATION_BUDGET_SECONDS
+):
+    raise RuntimeError(
+        "ARQ job timeout must leave bounded Agent context/finalization overhead"
+    )

@@ -16,8 +16,12 @@ npm run build
 
 The service requires `AGENT_RUNTIME_SHARED_SECRET` with at least 32 UTF-8 bytes.
 It exposes `GET /healthz`, `GET /readyz`, `GET /metrics`, and the authenticated
-backend-only `POST /v1/runs` NDJSON endpoint. It must not be published on a host
-port or mounted to a repository, media directory, user home, or Pi config path.
+backend-only `POST /v1/runs` NDJSON endpoint. While a run is active it emits a
+bounded `run.heartbeat` event every `AGENT_RUNTIME_HEARTBEAT_INTERVAL_SECONDS`
+(default 15 seconds), including during provider silence and context preparation.
+Heartbeats are enabled only when the Worker advertises `heartbeat-v1`, preserving
+mixed-version rolling upgrades. It must not be published on a host port or mounted to a repository, media
+directory, user home, or Pi config path.
 
 Production Compose keeps one always-running replica on `lumen_backend` with a
 read-only root filesystem, bounded `/tmp`, non-root UID, dropped capabilities,

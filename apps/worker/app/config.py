@@ -169,12 +169,24 @@ class Settings(BaseSettings):
     agent_runtime_proxy_bind_host: str = "0.0.0.0"
     agent_runtime_proxy_advertise_host: str = "worker"
     agent_runtime_connect_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
-    agent_runtime_event_idle_timeout_seconds: float = Field(default=45.0, gt=0, le=300)
+    agent_runtime_heartbeat_interval_seconds: float = Field(default=15.0, ge=1, le=60)
+    agent_runtime_event_idle_timeout_seconds: float = Field(default=90.0, gt=0, le=300)
     agent_runtime_max_request_bytes: int = Field(
         default=64 * 1024 * 1024,
         ge=64 * 1024,
         le=64 * 1024 * 1024,
     )
+    agent_runtime_max_line_bytes: int = Field(
+        default=64 * 1024,
+        ge=1024,
+        le=1024 * 1024,
+    )
+    agent_runtime_max_stream_bytes: int = Field(
+        default=8 * 1024 * 1024,
+        ge=64 * 1024,
+        le=64 * 1024 * 1024,
+    )
+    agent_runtime_max_events: int = Field(default=4096, ge=512, le=20_000)
     agent_text_flush_chars: int = Field(default=256, ge=32, le=8192)
     agent_text_flush_seconds: float = Field(default=0.5, ge=0.1, le=10)
     agent_max_output_chars: int = Field(default=262144, ge=1024, le=1_000_000)
@@ -186,6 +198,19 @@ class Settings(BaseSettings):
     def validate_runtime(self) -> "Settings":
         if self.edit_race_lanes < 1:
             raise ValueError("EDIT_RACE_LANES must be at least 1")
+        if (
+            self.agent_runtime_event_idle_timeout_seconds
+            <= self.agent_runtime_heartbeat_interval_seconds * 2
+        ):
+            raise ValueError(
+                "AGENT_RUNTIME_EVENT_IDLE_TIMEOUT_SECONDS must exceed twice "
+                "AGENT_RUNTIME_HEARTBEAT_INTERVAL_SECONDS"
+            )
+        if self.agent_runtime_max_stream_bytes < self.agent_runtime_max_line_bytes * 2:
+            raise ValueError(
+                "AGENT_RUNTIME_MAX_STREAM_BYTES must be at least twice "
+                "AGENT_RUNTIME_MAX_LINE_BYTES"
+            )
         env = self.app_env.strip().lower()
         is_dev = env in _DEV_ENVIRONMENTS
         self.image_job_base_url = self.image_job_base_url.strip().rstrip("/")

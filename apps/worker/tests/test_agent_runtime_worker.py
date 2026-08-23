@@ -37,6 +37,7 @@ from app.agent_runtime_client import (
     AgentRuntimeLimits,
     AgentRuntimeProviderEnvelope,
     AgentRuntimeRequest,
+    _next_stream_chunk,
     canonical_runtime_request,
     sign_runtime_request,
 )
@@ -46,6 +47,7 @@ from app.tasks.agent_run_parts.orchestrator import _terminal_request
 from app.tasks.agent_run_parts.persistence import _repair_tools
 from lumen_core.model_entities import AgentToolCall, Generation, Message
 from lumen_core.agent_capability import verify_agent_capability
+from lumen_core.runtime_setting_agent_specs import AGENT_RUN_TIMEOUT_MAX_SECONDS
 
 
 TEST_SECRET = "runtime-test-secret-0123456789-abcdef"
@@ -134,11 +136,12 @@ def _terminal_stream() -> bytes:
             _line("run.started", 1, tools=[], runtime_version="pi-0.84.2"),
             _line("provider.dispatched", 2, turn=1),
             _line("provider.response", 3, turn=1, status=200),
-            _line("text.delta", 4, delta="hello"),
-            _line("turn.completed", 5, turn=1, usage=usage, stop_reason="stop"),
+            _line("run.heartbeat", 4),
+            _line("text.delta", 5, delta="hello"),
+            _line("turn.completed", 6, turn=1, usage=usage, stop_reason="stop"),
             _line(
                 "run.completed",
-                6,
+                7,
                 status="succeeded",
                 error_code=None,
                 usage=usage,
@@ -175,6 +178,26 @@ def test_runtime_signing_matches_node_test_vector() -> None:
         )
         == "9529a430573f53c55e9df878ad284705db0cee2b4196cd2c3fc03da45eb09bd2"
     )
+
+
+@pytest.mark.asyncio
+async def test_each_heartbeat_resets_the_worker_idle_budget() -> None:
+    async def delayed_chunks():
+        for sequence in range(1, 4):
+            await asyncio.sleep(0.01)
+            yield _line("run.heartbeat", sequence)
+
+    iterator = delayed_chunks().__aiter__()
+    chunks = [
+        await _next_stream_chunk(
+            iterator,
+            cancel_requested=None,
+            timeout_seconds=0.02,
+        )
+        for _ in range(3)
+    ]
+
+    assert [json.loads(chunk)["seq"] for chunk in chunks] == [1, 2, 3]
 
 
 @pytest.mark.asyncio
@@ -215,7 +238,7 @@ async def test_runtime_client_validates_signed_monotonic_terminal_stream() -> No
     await client.close()
 
     assert starting == 1
-    assert [event.seq for event in events] == list(range(1, 7))
+    assert [event.seq for event in events] == list(range(1, 8))
     assert events[-1].type == "run.completed"
     assert events[2].status == 200
     assert b"provider-secret" in seen["body"]
@@ -231,7 +254,7 @@ async def test_runtime_client_falls_back_once_for_legacy_runtime_contract() -> N
     async def handler(request: httpx.Request) -> httpx.Response:
         payloads.append(json.loads((await request.aread()).decode("utf-8")))
         if len(payloads) == 1:
-            return httpx.Response(400, json={"error": "invalid_runtime_request"})
+            return httpx.Response(422, json={"error": "invalid_runtime_request"})
         return httpx.Response(
             200,
             headers={"content-type": "application/x-ndjson"},
@@ -283,20 +306,18 @@ async def test_runtime_client_falls_back_once_for_legacy_runtime_contract() -> N
     assert len(payloads) == 2
     assert payloads[0]["compaction"]["summary"] == checkpoint_summary
     assert payloads[0]["history"][0]["message_id"] == "history-user-1"
+    assert payloads[0]["event_features"] == ["heartbeat-v1"]
     assert "user_message_id" not in payloads[1]
     assert "compaction" not in payloads[1]
+    assert "event_features" not in payloads[1]
     assert [item["role"] for item in payloads[1]["history"]] == [
         "user",
         "user",
         "user",
     ]
-    assert "".join(
-        item["text"] for item in payloads[1]["history"][:-1]
-    ) == (
+    assert "".join(item["text"] for item in payloads[1]["history"][:-1]) == (
         "The conversation history before this point was compacted into the "
-        "following summary:\n\n<summary>\n"
-        + checkpoint_summary
-        + "\n</summary>"
+        "following summary:\n\n<summary>\n" + checkpoint_summary + "\n</summary>"
     )
     assert payloads[1]["history"][-1] == {
         "role": "user",
@@ -545,9 +566,7 @@ def test_agent_history_projection_omits_image_ids_and_raw_tool_payloads() -> Non
 
 
 @pytest.mark.asyncio
-async def test_gpt_56_agent_envelope_preserves_context_and_defaults_to_max() -> (
-    None
-):
+async def test_gpt_56_agent_envelope_preserves_context_and_defaults_to_max() -> None:
     provider = SimpleNamespace(
         name="provider",
         proxy=None,
@@ -840,7 +859,7 @@ def test_context_packing_rejects_fixed_content_above_model_window() -> None:
 
 
 @pytest.mark.asyncio
-async def test_capability_uses_snapshotted_ttl_without_timeout_extension(
+async def test_capability_ttl_covers_the_complete_run_and_tool_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     added: list[object] = []
@@ -878,9 +897,32 @@ async def test_capability_uses_snapshotted_ttl_without_timeout_extension(
     )
     assert token is not None
     claims = verify_agent_capability(secret, token)
-    assert claims.expires_at - claims.issued_at == 15
+    assert claims.expires_at - claims.issued_at == 960
     grant = added[0]
     assert getattr(grant, "max_redemptions") == 2
+
+
+def test_timeout_with_preserved_text_becomes_partial() -> None:
+    accumulator = AgentRuntimeAccumulator(text="usable partial answer")
+    accumulator.terminal_status = "failed"
+    accumulator.terminal_error_code = "agent_run_timeout"
+    accumulator.provider_dispatch_count = 1
+    accumulator.provider_response_statuses = [200]
+
+    requested, code, _knowledge, _reason = _terminal_request(accumulator)
+
+    assert requested == "failed"
+    assert code == "agent_run_timeout"
+    assert (
+        agent_orchestrator._preserve_partial_text(requested, accumulator) == "partial"
+    )
+
+
+def test_runtime_limits_default_to_ten_minutes() -> None:
+    run = SimpleNamespace(request_snapshot_jsonb={"limits": {}})
+    provider = SimpleNamespace(agent_max_output_tokens=4096)
+
+    assert _runtime_limits(run, provider).run_timeout_seconds == 600  # type: ignore[arg-type]
 
 
 def test_runtime_limits_honor_configured_tool_run_timeout() -> None:
@@ -974,6 +1016,9 @@ async def test_text_flush_keeps_delta_appended_during_database_await(
 
 
 def test_run_agent_is_registered_with_worker_and_outbox_contract() -> None:
+    assert main.WorkerSettings.job_timeout > (
+        AGENT_RUN_TIMEOUT_MAX_SECONDS + main._AGENT_RUN_FINALIZATION_BUDGET_SECONDS  # noqa: SLF001
+    )
     names = {
         getattr(function, "__name__", "") for function in main.WorkerSettings.functions
     }

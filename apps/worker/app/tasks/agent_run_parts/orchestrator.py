@@ -296,6 +296,15 @@ def _terminal_request(
     )
 
 
+def _preserve_partial_text(
+    requested_status: Literal["succeeded", "partial", "failed", "cancelled"],
+    accumulator: AgentRuntimeAccumulator,
+) -> Literal["succeeded", "partial", "failed", "cancelled"]:
+    if requested_status == "failed" and accumulator.text.strip():
+        return "partial"
+    return requested_status
+
+
 async def _post_terminal_hooks(
     _ctx: dict[str, Any],
     *,
@@ -386,6 +395,10 @@ async def _finalize(
             partial_reason = (
                 "tool_result_unknown"
                 if error_code == "agent_tool_result_unknown"
+                else "run_timeout"
+                if error_code == "agent_run_timeout"
+                else "text_before_failure"
+                if accumulator.text.strip()
                 else "side_effect_before_failure"
             )
             agent_partial_runs_total.labels(reason=partial_reason).inc()
@@ -474,6 +487,7 @@ async def _recover_result_unknown(
             "unknown",
             "worker_recovered_post_dispatch",
         )
+    requested = _preserve_partial_text(requested, accumulator)
     await _finalize(
         ctx,
         redis=redis,
@@ -632,6 +646,7 @@ async def _finish_runtime_success(state: _PreparedExecution, attempt: Any) -> No
         force=True,
     )
     requested, code, knowledge, reason = _terminal_request(state.accumulator)
+    requested = _preserve_partial_text(requested, state.accumulator)
     agent_runtime_requests_total.labels(outcome=requested).inc()
     if attempt is not None and requested == "succeeded":
         attempt.report_success()
@@ -662,7 +677,6 @@ async def _finish_runtime_failure(
     state: _PreparedExecution,
     error: AgentRuntimeClientError,
 ) -> None:
-    agent_runtime_requests_total.labels(outcome="failed").inc()
     await _flush_if_needed(
         state.redis,
         run_id=state.claim.run_id,
@@ -692,13 +706,21 @@ async def _finish_runtime_failure(
     agent_runtime_disconnects_total.labels(
         phase="after_provider" if dispatched else "before_provider"
     ).inc()
+    requested_status: Literal["succeeded", "partial", "failed", "cancelled"] = (
+        "cancelled" if error.code == "agent_cancelled" else "failed"
+    )
+    requested_status = _preserve_partial_text(
+        requested_status,
+        state.accumulator,
+    )
+    agent_runtime_requests_total.labels(outcome=requested_status).inc()
     await _finalize(
         state.ctx,
         redis=state.redis,
         claim=state.claim,
         accumulator=state.accumulator,
         build=state.build,
-        requested_status="cancelled" if error.code == "agent_cancelled" else "failed",
+        requested_status=requested_status,
         error_code=error.code,
         knowledge=knowledge,
         reason="runtime_client_failure",

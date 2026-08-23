@@ -14,6 +14,7 @@ export function runtimeRequest(
     user_message_id: "user-message-1",
     assistant_message_id: "message-1",
     trace_id: "0123456789abcdef0123456789abcdef",
+    event_features: ["heartbeat-v1"],
     provider: {
       provider_id: "lumen-test",
       api: "openai-responses",
