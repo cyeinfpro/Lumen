@@ -11,11 +11,14 @@ describe("Runtime contracts", () => {
   it("accepts legacy v1 envelopes without Pi checkpoint fields", () => {
     const legacy = runtimeRequest();
     delete legacy.compaction;
+    delete legacy.event_features;
     const legacyEnvelope = {
       ...legacy,
       history: [{ role: "user" as const, text: "legacy" }],
     };
-    expect(parseRuntimeRequest(legacyEnvelope).compaction).toBeUndefined();
+    const parsed = parseRuntimeRequest(legacyEnvelope);
+    expect(parsed.compaction).toBeUndefined();
+    expect(parsed.event_features).toBeUndefined();
   });
 
   it("rejects extra fields and credential-bearing URLs", () => {

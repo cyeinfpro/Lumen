@@ -15,6 +15,9 @@ from lumen_core.agent_events import agent_channel, agent_event_id
 from lumen_core.context_window import estimate_message_tokens
 from lumen_core.model_entities import AgentRun, OutboxEvent
 from lumen_core.providers_parts.config import parse_provider_json
+from lumen_core.runtime_setting_agent_specs import (
+    AGENT_RUN_TIMEOUT_DEFAULT_SECONDS,
+)
 from lumen_core.runtime_settings import get_spec
 from lumen_core.schema_models import AgentEventEnvelope
 
@@ -40,9 +43,9 @@ AGENT_SETTING_DEFAULTS = MappingProxyType(
         "agent.max_reference_images": 16,
         "agent.max_session_images": 64,
         "agent.max_output_tokens": 4096,
-        "agent.run_timeout_seconds": 180,
+        "agent.run_timeout_seconds": AGENT_RUN_TIMEOUT_DEFAULT_SECONDS,
         "agent.tool_timeout_seconds": 30,
-        "agent.capability_ttl_seconds": 300,
+        "agent.capability_ttl_seconds": 900,
     }
 )
 

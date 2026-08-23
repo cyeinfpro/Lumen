@@ -18,6 +18,8 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.agent_capability import (
+    AGENT_CAPABILITY_MAX_CLOCK_SKEW_SECONDS,
+    AGENT_CAPABILITY_MAX_TTL_SECONDS,
     AgentCapabilityClaims,
     issue_agent_capability,
     new_agent_capability_nonce,
@@ -30,6 +32,10 @@ from lumen_core.byok_retention import (
 )
 from lumen_core.context_window import estimate_text_tokens
 from lumen_core.message_content import public_message_content
+from lumen_core.runtime_setting_agent_specs import (
+    AGENT_RUN_TIMEOUT_DEFAULT_SECONDS,
+    AGENT_RUN_TIMEOUT_MAX_SECONDS,
+)
 from lumen_core.model_base import new_uuid7
 from lumen_core.model_entities import (
     AgentRun,
@@ -150,7 +156,9 @@ def _runtime_limits(run: AgentRun, provider: ResolvedProvider) -> AgentRuntimeLi
         ),
         max_output_tokens=output_tokens,
         run_timeout_seconds=_positive_int(
-            limits.get("run_timeout_seconds"), 180, maximum=1800
+            limits.get("run_timeout_seconds"),
+            AGENT_RUN_TIMEOUT_DEFAULT_SECONDS,
+            maximum=AGENT_RUN_TIMEOUT_MAX_SECONDS,
         ),
         tool_timeout_seconds=_positive_int(
             limits.get("tool_timeout_seconds"), 30, maximum=300
@@ -521,13 +529,7 @@ async def _reference_previews(
     )
     if visible_after is not None:
         image_statement = image_statement.where(Image.created_at >= visible_after)
-    images = list(
-        (
-            await db.execute(image_statement)
-        )
-        .scalars()
-        .all()
-    )
+    images = list((await db.execute(image_statement)).scalars().all())
     images_by_id = {image.id: image for image in images}
     variants = list(
         (
@@ -719,8 +721,23 @@ async def _capability(
     now = int(time.time())
     limits = _snapshot_dict(run, "limits")
     configured_ttl = _positive_int(
-        limits.get("capability_ttl_seconds"), 300, maximum=600
+        limits.get("capability_ttl_seconds"),
+        900,
+        maximum=AGENT_CAPABILITY_MAX_TTL_SECONDS,
     )
+    run_timeout = _positive_int(
+        limits.get("run_timeout_seconds"),
+        AGENT_RUN_TIMEOUT_DEFAULT_SECONDS,
+        maximum=AGENT_RUN_TIMEOUT_MAX_SECONDS,
+    )
+    tool_timeout = _positive_int(limits.get("tool_timeout_seconds"), 30, maximum=300)
+    # A token is also fenced by active run + execution epoch, so extending its
+    # TTL to cover the complete run does not make it usable after termination.
+    minimum_ttl = min(
+        AGENT_CAPABILITY_MAX_TTL_SECONDS,
+        run_timeout + tool_timeout + AGENT_CAPABILITY_MAX_CLOCK_SKEW_SECONDS,
+    )
+    effective_ttl = max(configured_ttl, minimum_ttl)
     capability_id = new_uuid7()
     nonce = new_agent_capability_nonce()
     claims = AgentCapabilityClaims(
@@ -733,7 +750,7 @@ async def _capability(
         allowed_tools=list(tools),
         allowed_reference_labels=[item.reference_label for item in references],
         issued_at=now,
-        expires_at=now + configured_ttl,
+        expires_at=now + effective_ttl,
     )
     db.add(
         AgentCapabilityGrant(
@@ -800,9 +817,7 @@ async def build_agent_context(
         .scalars()
         .all()
     )
-    reference_visible_after = await _reference_visible_after(
-        run.account_mode_snapshot
-    )
+    reference_visible_after = await _reference_visible_after(run.account_mode_snapshot)
     references = await _reference_previews(
         db,
         reference_rows,

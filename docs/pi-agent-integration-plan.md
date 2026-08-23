@@ -586,16 +586,19 @@ agent.max_image_tool_calls = 2
 agent.max_images_per_run = 4
 agent.max_reference_images = 16
 agent.max_session_images = 64
-agent.run_timeout_seconds = 180
+agent.run_timeout_seconds = 600
 agent.tool_timeout_seconds = 30
-agent.capability_ttl_seconds = 300
+agent.capability_ttl_seconds = 900
 ```
+
+`agent.run_timeout_seconds` 可配置范围为 10–1500 秒；ARQ 外层任务保持 1800 秒，为上下文构建、Runtime 交付、终态持久化和账单结算保留 300 秒包络。Worker 在请求中声明 `heartbeat-v1` 后，Runtime 每 15 秒发送一次内部心跳；未声明该能力的旧 Worker 不会收到新事件，保证滚动升级兼容。Worker 的默认事件空闲判定为 90 秒，并要求该值大于心跳间隔的两倍。心跳会更新运行检查点，避免慢首字、长推理和 5 分钟 stale-run 对账把健康任务误判为断流或失联。工具凭证有效期会自动提升到至少覆盖 `run timeout + tool timeout + clock skew`，且仍受 active run 与 execution epoch 双重约束。
 
 达到上限后：
 
 - 停止后续工具执行。
 - 让 Pi 进行一次不带工具的受限收尾；失败则由宿主写明确错误。
 - 已创建 Generation 不取消、不重复创建。
+- 已产生文本或图片副作用时落为 `partial`，保留原始错误码并向用户显示具体恢复提示。
 - 记录 `limit_reason` 指标和审计信息。
 
 ## 10. 图片工具设计

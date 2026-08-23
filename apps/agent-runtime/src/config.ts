@@ -38,10 +38,21 @@ export interface RuntimeConfig {
   readonly maxEvents: number;
   readonly maxConcurrentRuns: number;
   readonly requestBodyTimeoutSeconds: number;
+  readonly heartbeatIntervalSeconds: number;
+}
+
+export function validateRuntimeConfig(config: RuntimeConfig): RuntimeConfig {
+  if (config.maxStreamBytes < config.maxLineBytes * 2) {
+    throw new Error(
+      "AGENT_RUNTIME_MAX_STREAM_BYTES must be at least twice " +
+        "AGENT_RUNTIME_MAX_LINE_BYTES",
+    );
+  }
+  return config;
 }
 
 export function loadConfig(): RuntimeConfig {
-  return {
+  return validateRuntimeConfig({
     host: process.env.AGENT_RUNTIME_HOST?.trim() || "0.0.0.0",
     port: integerEnv("AGENT_RUNTIME_PORT", 8090, 1, 65535),
     sharedSecret: sharedSecret(),
@@ -66,7 +77,7 @@ export function loadConfig(): RuntimeConfig {
       64 * 1024,
       64 * 1024 * 1024,
     ),
-    maxEvents: integerEnv("AGENT_RUNTIME_MAX_EVENTS", 4096, 16, 20_000),
+    maxEvents: integerEnv("AGENT_RUNTIME_MAX_EVENTS", 4096, 512, 20_000),
     maxConcurrentRuns: integerEnv("AGENT_RUNTIME_MAX_CONCURRENT_RUNS", 8, 1, 128),
     requestBodyTimeoutSeconds: integerEnv(
       "AGENT_RUNTIME_REQUEST_BODY_TIMEOUT_SECONDS",
@@ -74,7 +85,13 @@ export function loadConfig(): RuntimeConfig {
       1,
       60,
     ),
-  };
+    heartbeatIntervalSeconds: integerEnv(
+      "AGENT_RUNTIME_HEARTBEAT_INTERVAL_SECONDS",
+      15,
+      1,
+      60,
+    ),
+  });
 }
 
 export const RUNTIME_VERSION = "pi-0.84.2";

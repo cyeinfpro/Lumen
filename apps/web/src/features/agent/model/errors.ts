@@ -19,6 +19,21 @@ const ERROR_PRESENTATIONS: Record<string, AgentErrorPresentation> = {
     detail: "运行时暂不可用，稍后重试。",
     recoverable: true,
   },
+  agent_run_timeout: {
+    title: "运行达到时间上限",
+    detail: "已保留当前结果，可以继续生成。",
+    recoverable: true,
+  },
+  agent_runtime_event_timeout: {
+    title: "运行连接超时",
+    detail: "已保留当前结果，可以继续生成。",
+    recoverable: true,
+  },
+  agent_runtime_disconnected: {
+    title: "运行连接中断",
+    detail: "已保留当前结果，可以继续生成。",
+    recoverable: true,
+  },
   agent_provider_unavailable: {
     title: "对话通道不可用",
     detail: "没有可用的 Agent 对话供应商。",

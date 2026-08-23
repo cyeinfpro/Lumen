@@ -3,6 +3,8 @@ import { Value } from "typebox/value";
 import { isIP } from "node:net";
 
 export const AGENT_TOOL_CREATE_IMAGE = "lumen_create_image";
+export const RUNTIME_HEARTBEAT_EVENT = "run.heartbeat";
+
 export const TERMINAL_EVENT_TYPES = new Set([
   "run.completed",
   "run.failed",
@@ -70,6 +72,12 @@ export const RuntimeRequestSchema = Type.Object(
     user_message_id: Type.Optional(Identifier),
     assistant_message_id: Identifier,
     trace_id: Type.String({ pattern: "^[a-f0-9]{32}$" }),
+    event_features: Type.Optional(
+      Type.Array(Type.Literal("heartbeat-v1"), {
+        maxItems: 1,
+        uniqueItems: true,
+      }),
+    ),
     provider: Type.Object(
       {
         provider_id: Type.String({ minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9._:-]+$" }),

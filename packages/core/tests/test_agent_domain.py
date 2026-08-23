@@ -215,7 +215,7 @@ def test_agent_capability_signing_detects_tamper_expiry_and_future_tokens() -> N
     assert unconfigured.value.code == "agent_capability_unconfigured"
 
     with pytest.raises(ValidationError, match="lifetime"):
-        _claims(expires_at=1_601)
+        _claims(expires_at=4_601)
 
 
 def test_agent_state_and_event_contracts_fence_terminal_transitions() -> None:
@@ -326,6 +326,12 @@ def test_agent_runtime_settings_are_closed_and_bounded() -> None:
         "ui.nav.agent_visible": ("UI_NAV_AGENT_VISIBLE", "0", "1"),
         "agent.max_turns": ("AGENT_MAX_TURNS", "1", "12"),
         "agent.max_output_tokens": ("AGENT_MAX_OUTPUT_TOKENS", "256", "32000"),
+        "agent.run_timeout_seconds": ("AGENT_RUN_TIMEOUT_SECONDS", "10", "1500"),
+        "agent.capability_ttl_seconds": (
+            "AGENT_CAPABILITY_TTL_SECONDS",
+            "15",
+            "3600",
+        ),
     }
     for key, (environment, minimum, maximum) in expected.items():
         spec = get_spec(key)

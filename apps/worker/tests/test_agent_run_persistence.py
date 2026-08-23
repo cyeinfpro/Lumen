@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -343,7 +344,7 @@ async def test_agent_claim_flush_epoch_and_partial_terminal_are_atomic(
 
 
 @pytest.mark.asyncio
-async def test_runtime_partial_preserves_durable_flushed_text_and_error(
+async def test_runtime_timeout_with_durable_text_is_persisted_as_partial(
     agent_db: async_sessionmaker[AsyncSession],
 ) -> None:
     await _seed(agent_db)
@@ -360,12 +361,12 @@ async def test_runtime_partial_preserves_durable_flushed_text_and_error(
         object(),
         run_id=claim.run_id,
         execution_epoch=claim.execution_epoch,
-        requested_status="partial",
+        requested_status="failed",
         text="",
         usage={},
         turn_count=1,
         runtime_tool_count=0,
-        error_code="agent_tool_result_unknown",
+        error_code="agent_run_timeout",
         knowledge="unknown",
         reason="recovered_terminal",
     )
@@ -374,9 +375,51 @@ async def test_runtime_partial_preserves_durable_flushed_text_and_error(
     async with agent_db() as db:
         run = await db.get(AgentRun, claim.run_id)
         message = await db.get(Message, "message-assistant-persist")
-        assert run is not None and run.error_code == "agent_tool_result_unknown"
+        assert run is not None and run.error_code == "agent_run_timeout"
         assert message is not None and message.status == "partial"
         assert message.content["text"] == "durable before restart"
+
+
+@pytest.mark.asyncio
+async def test_runtime_heartbeat_advances_only_the_private_checkpoint(
+    agent_db: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed(agent_db)
+    claim, _started = await persistence.claim_agent_run("run-agent-persist")
+    stale = datetime(2000, 1, 1)
+    async with agent_db() as db:
+        run = await db.get(AgentRun, claim.run_id)
+        assert run is not None
+        run.updated_at = stale
+        await db.commit()
+
+    assert await persistence.record_runtime_checkpoint(
+        claim.run_id,
+        claim.execution_epoch,
+        AgentRuntimeEvent(
+            version=1,
+            type="run.heartbeat",
+            seq=1,
+            run_id=claim.run_id,
+            execution_epoch=claim.execution_epoch,
+        ),
+    )
+
+    async with agent_db() as db:
+        run = await db.get(AgentRun, claim.run_id)
+        assert run is not None
+        assert run.dispatch_jsonb["last_runtime_seq"] == 1
+        assert "runtime_heartbeat_at" in run.dispatch_jsonb
+        assert run.updated_at > stale
+        assert run.last_event_seq == 1
+        public_events = list(
+            (await db.execute(select(OutboxEvent).where(OutboxEvent.kind == "sse")))
+            .scalars()
+            .all()
+        )
+        assert [item.payload["event_name"] for item in public_events] == [
+            "agent.run.started"
+        ]
 
 
 @pytest.mark.asyncio

@@ -184,6 +184,11 @@ test("stable Agent errors expose safe user actions", () => {
     href: "/me/wallet",
     actionLabel: "查看钱包",
   });
+  assert.deepEqual(agentRunErrorPresentation("agent_run_timeout"), {
+    title: "运行达到时间上限",
+    detail: "已保留当前结果，可以继续生成。",
+    recoverable: true,
+  });
   assert.equal(
     agentRunErrorPresentation("internal-secret-error").detail,
     "当前结果已保留，可以重试或新建会话。",

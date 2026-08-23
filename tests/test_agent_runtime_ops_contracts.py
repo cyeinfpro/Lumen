@@ -29,6 +29,8 @@ REQUIRED_AGENT_ENV = {
     "AGENT_TOOL_CAPABILITY_SECRET",
     "AGENT_TOOL_GATEWAY_URL",
     "AGENT_RUNTIME_HEALTH_TIMEOUT_SECONDS",
+    "AGENT_RUNTIME_HEARTBEAT_INTERVAL_SECONDS",
+    "AGENT_RUNTIME_EVENT_IDLE_TIMEOUT_SECONDS",
     "AGENT_RUNTIME_MAX_CONCURRENT_RUNS",
     "AGENT_RUNTIME_REQUEST_BODY_TIMEOUT_SECONDS",
     "LUMEN_AGENT_RUNTIME_IMAGE_REF",
@@ -69,6 +71,10 @@ def test_agent_environment_surface_is_complete_and_closed_by_default() -> None:
     assert values["AGENT_TOOL_CAPABILITY_SECRET"] == ""
     assert values["AGENT_MAX_REFERENCE_IMAGES"] == "16"
     assert values["AGENT_MAX_SESSION_IMAGES"] == "64"
+    assert values["AGENT_RUN_TIMEOUT_SECONDS"] == "600"
+    assert values["AGENT_CAPABILITY_TTL_SECONDS"] == "900"
+    assert values["AGENT_RUNTIME_HEARTBEAT_INTERVAL_SECONDS"] == "15"
+    assert values["AGENT_RUNTIME_EVENT_IDLE_TIMEOUT_SECONDS"] == "90"
     assert values["AGENT_RUNTIME_MAX_REQUEST_BYTES"] == "67108864"
 
 
@@ -95,6 +101,9 @@ def test_agent_runtime_compose_is_private_bounded_and_read_only() -> None:
     assert "noexec" in runtime["tmpfs"][0]
     assert "size=${AGENT_RUNTIME_TMPFS_SIZE:-64m}" in runtime["tmpfs"][0]
     assert runtime["healthcheck"]["test"][0:2] == ["CMD", "node"]
+    assert runtime["environment"]["AGENT_RUNTIME_HEARTBEAT_INTERVAL_SECONDS"] == (
+        "${AGENT_RUNTIME_HEARTBEAT_INTERVAL_SECONDS:-15}"
+    )
 
 
 def test_all_active_compose_variants_account_for_agent_runtime() -> None:

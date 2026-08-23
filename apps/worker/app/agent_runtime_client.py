@@ -40,6 +40,7 @@ RUNTIME_TERMINAL_EVENTS = frozenset({"run.completed", "run.failed", "run.cancell
 RUNTIME_EVENT_TYPES = frozenset(
     {
         "run.started",
+        "run.heartbeat",
         "provider.dispatched",
         "provider.response",
         "text.delta",
@@ -131,6 +132,10 @@ class AgentRuntimeRequest(_StrictModel):
     user_message_id: str = Field(min_length=1, max_length=96)
     assistant_message_id: str = Field(min_length=1, max_length=96)
     trace_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    event_features: list[Literal["heartbeat-v1"]] = Field(
+        default_factory=lambda: ["heartbeat-v1"],
+        max_length=1,
+    )
     provider: AgentRuntimeProviderEnvelope
     system_prompt: str = Field(max_length=65536)
     history: list[AgentRuntimeHistoryMessage] = Field(max_length=2048)
@@ -439,17 +444,15 @@ def _runtime_request_body(request: AgentRuntimeRequest) -> bytes:
 def _legacy_runtime_request_body(
     request: AgentRuntimeRequest,
 ) -> bytes | None:
-    if (
-        len(request.references) > _LEGACY_RUNTIME_MAX_REFERENCES
-        or any(
-            reference.reference_label not in _LEGACY_RUNTIME_REFERENCE_LABELS
-            for reference in request.references
-        )
+    if len(request.references) > _LEGACY_RUNTIME_MAX_REFERENCES or any(
+        reference.reference_label not in _LEGACY_RUNTIME_REFERENCE_LABELS
+        for reference in request.references
     ):
         return None
     payload = request.model_dump(mode="json")
     payload.pop("user_message_id", None)
     payload.pop("compaction", None)
+    payload.pop("event_features", None)
     history = [
         {key: value for key, value in item.items() if key != "message_id"}
         for item in payload.get("history", [])
@@ -584,7 +587,7 @@ class AgentRuntimeClient:
                         if (
                             attempt == 0
                             and len(bodies) == 2
-                            and response.status_code in {400, 413}
+                            and response.status_code in {400, 413, 422}
                         ):
                             continue
                         raise AgentRuntimeClientError(

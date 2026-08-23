@@ -15,11 +15,7 @@ from lumen_core.agent_events import (
     AGENT_RUN_TERMINAL_STATUSES,
     AGENT_TOOL_TERMINAL_STATUSES,
     EV_AGENT_OUTPUT_DELTA,
-    EV_AGENT_RUN_CANCELLED,
-    EV_AGENT_RUN_FAILED,
-    EV_AGENT_RUN_PARTIAL,
     EV_AGENT_RUN_STARTED,
-    EV_AGENT_RUN_SUCCEEDED,
     EV_AGENT_TOOL_FAILED,
     AgentRunStatus,
     AgentToolCallStatus,
@@ -52,6 +48,11 @@ from .compaction_checkpoint import (
     checkpoint_provider_response,
 )
 from .contracts import AGENT_NO_COST_HTTP_STATUSES, AGENT_USAGE_KEYS, AgentClaim
+from .terminal_policy import (
+    has_partial_result as _has_partial_result,
+    terminal_event_name as _terminal_event_name,
+    tool_projection as _tool_projection,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -402,9 +403,9 @@ async def _checkpoint_pi_compaction(
         event.usage.model_dump(mode="json"),
     )
     dispatch["runtime_delivery"] = "compaction_ready"
-    dispatch["provider_completed_count"] = int(
-        dispatch.get("provider_completed_count") or 0
-    ) + event.provider_call_count
+    dispatch["provider_completed_count"] = (
+        int(dispatch.get("provider_completed_count") or 0) + event.provider_call_count
+    )
     dispatch["pi_compaction_count"] = int(dispatch.get("pi_compaction_count") or 0) + 1
     dispatch["pi_compaction_first_kept_message_id"] = event.first_kept_message_id
     dispatch["pi_compaction"] = checkpoint
@@ -422,9 +423,9 @@ def _checkpoint_turn(
         and event.usage.total_tokens > 0
         and event.stop_reason not in {"error", "aborted"}
     ):
-        dispatch["provider_completed_count"] = int(
-            dispatch.get("provider_completed_count") or 0
-        ) + 1
+        dispatch["provider_completed_count"] = (
+            int(dispatch.get("provider_completed_count") or 0) + 1
+        )
     if event.usage is not None:
         run.usage_jsonb = _add_usage(
             run.usage_jsonb,
@@ -469,14 +470,26 @@ def _checkpoint_terminal(
     }
 
 
+async def _checkpoint_runtime_activity(
+    db: AsyncSession,
+    run: AgentRun,
+    dispatch: dict[str, Any],
+    event: AgentRuntimeEvent,
+) -> None:
+    if event.type == "run.heartbeat":
+        dispatch["runtime_heartbeat_at"] = datetime.now(timezone.utc).isoformat()
+        return
+    await _checkpoint_runtime_started(db, run, dispatch, event)
+
+
 async def _apply_runtime_checkpoint(
     db: AsyncSession,
     run: AgentRun,
     dispatch: dict[str, Any],
     event: AgentRuntimeEvent,
 ) -> None:
-    if event.type == "run.started":
-        await _checkpoint_runtime_started(db, run, dispatch, event)
+    if event.type in {"run.started", "run.heartbeat"}:
+        await _checkpoint_runtime_activity(db, run, dispatch, event)
     elif event.type == "provider.dispatched":
         checkpoint_provider_dispatched(dispatch)
     elif event.type == "provider.response":
@@ -498,6 +511,7 @@ async def record_runtime_checkpoint(
 ) -> bool:
     if event.type not in {
         "run.started",
+        "run.heartbeat",
         "provider.dispatched",
         "provider.response",
         "turn.completed",
@@ -629,34 +643,6 @@ def _repair_tools(
         tool.finished_at = now
 
 
-def _tool_projection(tool: AgentToolCall) -> dict[str, Any]:
-    result = tool.result_jsonb if isinstance(tool.result_jsonb, dict) else {}
-    generation_ids = result.get("generation_ids")
-    safe_ids = (
-        [value for value in generation_ids if isinstance(value, str)][:4]
-        if isinstance(generation_ids, list)
-        else []
-    )
-    return {
-        "id": tool.id,
-        "name": tool.name,
-        "label": "Create image",
-        "mode": tool.mode,
-        "status": tool.status,
-        "generation_ids": safe_ids,
-        "generation_count": len(safe_ids),
-        **({"error_code": tool.error_code} if tool.error_code else {}),
-    }
-
-
-def _terminal_event_name(status: str) -> str:
-    return {
-        AgentRunStatus.SUCCEEDED.value: EV_AGENT_RUN_SUCCEEDED,
-        AgentRunStatus.PARTIAL.value: EV_AGENT_RUN_PARTIAL,
-        AgentRunStatus.CANCELLED.value: EV_AGENT_RUN_CANCELLED,
-    }.get(status, EV_AGENT_RUN_FAILED)
-
-
 async def _settle_billing(
     db: AsyncSession,
     *,
@@ -744,9 +730,14 @@ async def finalize_agent_run(
                 and int(tool.generation_count or 0) > 0
                 for tool in tools
             )
+            has_partial_result = _has_partial_result(
+                message,
+                text,
+                has_side_effect=has_side_effect,
+            )
             if requested_status == "partial":
                 final_status = AgentRunStatus.PARTIAL.value
-            elif requested_status == "failed" and has_side_effect:
+            elif requested_status == "failed" and has_partial_result:
                 final_status = AgentRunStatus.PARTIAL.value
             elif requested_status == "cancelled":
                 final_status = AgentRunStatus.CANCELLED.value
