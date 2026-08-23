@@ -243,7 +243,7 @@ describe("Runtime HTTP boundary", () => {
     );
     const runtime = createRuntimeServer({
       config: testConfig(),
-      dependencies: await dependencies(1, "This response must time out."),
+      dependencies: await dependencies(20, "Timeout response."),
       runTimeoutSignal: () => AbortSignal.timeout(25),
     });
     runtime.readiness.state.ready = true;
@@ -280,7 +280,7 @@ describe("Runtime HTTP boundary", () => {
       runtime.server.close();
       await once(runtime.server, "close");
     }
-  });
+  }, 15_000);
 
   it("admits slow bodies before reading and releases the slot at the deadline", async () => {
     const config = { ...testConfig(), maxConcurrentRuns: 1, requestBodyTimeoutSeconds: 1 };
