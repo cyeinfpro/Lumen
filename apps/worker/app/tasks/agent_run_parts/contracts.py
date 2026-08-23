@@ -58,6 +58,7 @@ class AgentRuntimeAccumulator:
     terminal_error_code: str | None = None
     limit_reason: str | None = None
     tool_started_at: dict[str, float] = field(default_factory=dict)
+    pi_compaction_count: int = 0
 
     def apply(self, event: AgentRuntimeEvent) -> None:
         if event.type == "text.delta" and event.delta:
@@ -74,6 +75,11 @@ class AgentRuntimeAccumulator:
             return
         if event.type == "turn.completed":
             self._apply_turn(event)
+            return
+        if event.type == "compaction.completed":
+            self.pi_compaction_count += 1
+            self.provider_completed_count += event.provider_call_count or 0
+            self._add_usage(event.usage.model_dump() if event.usage else {})
             return
         if event.type == "tool.started" and event.name == "lumen_create_image":
             self.runtime_tool_call_count += 1
@@ -97,10 +103,12 @@ class AgentRuntimeAccumulator:
     def _apply_turn(self, event: AgentRuntimeEvent) -> None:
         if event.turn is not None:
             self.turn_count = max(self.turn_count, event.turn)
-            self.provider_completed_count = max(
-                self.provider_completed_count,
-                event.turn,
-            )
+        if (
+            event.usage is not None
+            and event.usage.total_tokens > 0
+            and event.stop_reason not in {"error", "aborted"}
+        ):
+            self.provider_completed_count += 1
         self._add_usage(event.usage.model_dump() if event.usage else {})
 
     def _apply_terminal(self, event: AgentRuntimeEvent) -> None:
@@ -158,8 +166,8 @@ class AgentRuntimeAccumulator:
             self.provider_dispatch_count > 0
             and len(self.provider_response_statuses) >= self.provider_dispatch_count
             and all(
-            status in AGENT_NO_COST_HTTP_STATUSES
-            for status in self.provider_response_statuses
+                status in AGENT_NO_COST_HTTP_STATUSES
+                for status in self.provider_response_statuses
             )
         )
 
@@ -170,8 +178,7 @@ class AgentRuntimeAccumulator:
             return False
         pending_statuses = self.provider_response_statuses[-pending:]
         return len(pending_statuses) < pending or any(
-            status not in AGENT_NO_COST_HTTP_STATUSES
-            for status in pending_statuses
+            status not in AGENT_NO_COST_HTTP_STATUSES for status in pending_statuses
         )
 
 

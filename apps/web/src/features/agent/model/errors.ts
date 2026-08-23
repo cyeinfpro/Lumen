@@ -34,6 +34,16 @@ const ERROR_PRESENTATIONS: Record<string, AgentErrorPresentation> = {
     detail: "当前对话模型不支持参考图。",
     recoverable: false,
   },
+  agent_reasoning_model_unavailable: {
+    title: "推理能力不可用",
+    detail: "当前对话模型不支持所选推理强度。",
+    recoverable: false,
+  },
+  agent_context_window_exceeded: {
+    title: "上下文容量不足",
+    detail: "当前模型无法容纳该会话的完整文本和图片上下文。",
+    recoverable: false,
+  },
   agent_tool_result_unknown: {
     title: "提交结果待确认",
     detail: "不会自动重复有成本的图片请求。",
@@ -46,7 +56,12 @@ const ERROR_PRESENTATIONS: Record<string, AgentErrorPresentation> = {
   },
   agent_reference_limit_reached: {
     title: "参考图超过上限",
-    detail: "Agent 每次最多使用 4 张参考图。",
+    detail: "Agent 每条消息最多使用 16 张参考图。",
+    recoverable: false,
+  },
+  agent_session_reference_limit_reached: {
+    title: "会话图片达到上限",
+    detail: "当前 Agent 会话已保留 64 张图片，请新建会话继续。",
     recoverable: false,
   },
   INSUFFICIENT_BALANCE: {

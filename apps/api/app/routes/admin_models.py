@@ -17,6 +17,7 @@ import httpx
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core.agent_model_profiles import GPT_56_AGENT_CONTEXT_WINDOW
 from lumen_core.providers import (
     DEFAULT_LEGACY_PROVIDER_BASE_URL,
     ProviderDefinition,
@@ -140,6 +141,8 @@ def _known_model_family(
 ) -> tuple[bool | None, bool, int, int] | None:
     value = model_id.strip().lower()
     canonical = value.rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+    if canonical.startswith("gpt-5.6"):
+        return True, True, GPT_56_AGENT_CONTEXT_WINDOW, 16_384
     if canonical.startswith(("gpt-5", "gpt-4.1", "gpt-4o")):
         return True, canonical.startswith("gpt-5"), 128_000, 16_384
     if canonical.startswith(("o1", "o3", "o4")):
@@ -165,7 +168,12 @@ def _model_profile(
     )
     context_window = _bounded_metadata_int(
         item,
-        ("context_window", "context_length", "context_length_tokens", "max_context_length"),
+        (
+            "context_window",
+            "context_length",
+            "context_length_tokens",
+            "max_context_length",
+        ),
         minimum=4096,
         maximum=2_000_000,
     )
@@ -204,9 +212,7 @@ def _model_profile(
         vision_supported=vision if vision is not None else known_vision,
         context_window=context_window or known_context,
         max_output_tokens=max_output_tokens or known_output,
-        reasoning_supported=(
-            reasoning if reasoning is not None else known_reasoning
-        ),
+        reasoning_supported=(reasoning if reasoning is not None else known_reasoning),
         source=(
             "provider"
             if provider_metadata
@@ -356,8 +362,7 @@ async def discover_provider_models(
         (
             provider
             for provider in providers
-            if body.provider_name
-            and provider.name == body.provider_name.strip()
+            if body.provider_name and provider.name == body.provider_name.strip()
         ),
         None,
     )

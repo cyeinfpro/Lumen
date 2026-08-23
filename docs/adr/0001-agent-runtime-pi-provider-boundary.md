@@ -27,12 +27,24 @@ lockfile. Pi `0.84.2` requires Node `>=22.19.0`.
 
 ### State and resources
 
-Each request creates one Pi session with `SessionManager.inMemory()`,
-`SettingsManager.inMemory()`, and a hand-built `ResourceLoader` returning no
-extensions, skills, prompts, themes, or context files. Pi compaction and both Pi
-and provider retries are disabled. Lumen supplies sanitized history and the
-exact system prompt from PostgreSQL; Pi session files are never a product data
-source.
+Each request restores one logical Pi session with
+`SessionManager.inMemory(agent_session_id)`, `SettingsManager.inMemory()`, and a
+hand-built `ResourceLoader` returning no extensions, skills, prompts, themes,
+or context files. Lumen supplies sanitized retained history and the exact
+system prompt from PostgreSQL; Pi session files are never a product data source.
+
+When Pi's native `shouldCompact` threshold is reached before the current prompt,
+the Runtime calls the public `session.compact()` API once. A split turn may use
+at most two summary requests. The returned Pi summary, Lumen first-kept message
+ID, the source run's user-message continuation boundary, usage, source
+run/epoch/event sequence, and token boundary are persisted as a versioned ready
+checkpoint on the source AgentRun. A later run restores it with `appendMessage()` plus `appendCompaction()` at the
+original tree position, so messages after the checkpoint remain eligible for a
+later native compaction. The source run becomes non-replayable as soon as the
+checkpoint is durable: there is no bidirectional acknowledgement barrier before
+the Runtime may dispatch the current prompt. Automatic post-turn and
+overflow-retry compaction are disabled before the user prompt because Lumen
+cannot safely replay streamed text or paid tool side effects.
 
 The Runtime uses `noTools: "builtin"`, an explicit tool allowlist, and checks
 both active and configured tool names after session construction. The only
@@ -57,8 +69,14 @@ requires exactly one terminal event.
 Runtime nonce state is process-local. Production deployment therefore keeps a
 single Runtime replica for this phase. Worker also uses one execution epoch and
 never retries a Runtime invocation after the request may have reached a
-provider. Horizontal Runtime replicas require a durable ticket-redemption
-service before they are supported.
+provider. During a rolling protocol upgrade only, an HTTP 400 or 413 from the
+old Runtime before NDJSON execution permits one same-epoch legacy-envelope
+retry. That envelope prepends the Pi summary to the retained history and is
+constructed only when the complete request still satisfies the old 256-message,
+four-reference, `ref_1..ref_4`, and 8 MiB contract. Otherwise it fails closed;
+timeouts, disconnects, 5xx responses, and any NDJSON response never retry.
+Horizontal Runtime replicas require a durable ticket-redemption service before
+they are supported.
 
 Nonce entries are retained for at least the complete accepted timestamp window
 (`2 * clock_skew + 1` seconds), even when a shorter nonce TTL is configured.
@@ -87,7 +105,12 @@ the only process that creates Generation, wallet hold, and Outbox rows.
 Each token also carries a random nonce backed by an `agent_capability_grants`
 row. API locks that grant with the run, validates every claim binding and
 expiry, and consumes one bounded redemption only for a new tool ordinal. Exact
-receipt replay does not consume another redemption.
+receipt replay does not consume another redemption. GPT Image 2 accepts at
+most 16 selected `ref_N` inputs per call. The session catalog retains at most
+64 owned, visible images with stable labels; ready images and queued/running
+Generation reservations share that limit so asynchronous work cannot overbook
+it. Ownership, readiness, deletion, and BYOK retention visibility are checked
+again when Worker loads preview bytes and when the Tool Gateway redeems labels.
 
 ### Provider and proxy compatibility
 
@@ -125,12 +148,16 @@ does not invoke Pi again. Existing Generation metadata repairs nonterminal tool
 receipts; otherwise the tool becomes `tool_result_unknown`. A successful image
 side effect plus parent failure yields `partial`.
 
-Text usage aggregates Pi turn usage. Exact usage settles the Agent text hold
-from its pinned pricing snapshot. Proven pre-dispatch absence releases it. A
-post-dispatch result with unknown usage settles the reserved hold conservatively.
-Image tool costs remain independent Generation settlements.
-Reasoning and one-hour cache-write breakdowns are preserved. Runtime rejects
-usage outside the selected model context/output bounds, Worker retains
+Text usage aggregates Pi turn usage and pre-prompt Pi compaction usage. A
+compaction checkpoint advances durable provider-completion evidence only after
+Pi returns canonical usage for all one or two underlying summary requests.
+Exact usage settles the Agent text hold from its pinned pricing snapshot, which
+reserves the bounded summary-call budget. Proven pre-dispatch absence releases
+it. A post-dispatch result with unknown usage settles the reserved hold
+conservatively. Image tool costs remain independent Generation settlements.
+Reasoning and one-hour cache-write breakdowns are preserved. Terminal usage
+bounds include the two reserved native-compaction calls. Runtime rejects usage
+outside the selected model context/output bounds, Worker retains
 monotonic completed-turn totals, and settlement falls back to the reserved hold
 if reported usage exceeds the reservation snapshot.
 

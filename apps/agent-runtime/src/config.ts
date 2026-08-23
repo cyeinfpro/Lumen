@@ -55,9 +55,9 @@ export function loadConfig(): RuntimeConfig {
     nonceCacheSize: integerEnv("AGENT_RUNTIME_NONCE_CACHE_SIZE", 10_000, 100, 100_000),
     maxRequestBytes: integerEnv(
       "AGENT_RUNTIME_MAX_REQUEST_BYTES",
-      8 * 1024 * 1024,
+      64 * 1024 * 1024,
       64 * 1024,
-      32 * 1024 * 1024,
+      64 * 1024 * 1024,
     ),
     maxLineBytes: integerEnv("AGENT_RUNTIME_MAX_LINE_BYTES", 64 * 1024, 1024, 1024 * 1024),
     maxStreamBytes: integerEnv(

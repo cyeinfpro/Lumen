@@ -4,7 +4,7 @@
 >
 > 首期范围：新增一级导航 `Agent`，在独立 Agent 会话中使用 Pi 完成文本对话、文生图和图生图。
 >
-> 核心边界：Pi 负责单次 Agent 推理循环和工具选择；Lumen 继续负责用户、会话、记忆、Provider 选择、任务、图片、计费、SSE、恢复和审计。
+> 核心边界：Pi 负责 AgentSession、原生上下文压缩、推理循环、thinking level 和工具生命周期；Lumen 继续负责用户、业务会话事实、记忆、Provider 选择、任务、图片、计费、SSE、恢复和审计。
 
 ## 1. 目标
 
@@ -140,7 +140,7 @@ PostgreSQL / Redis / arq
   v
 Python Worker
   | 选择 Lumen chat provider / BYOK credential
-  | 组装系统提示词、记忆、历史和当前参考图
+  | 组装系统提示词、记忆、完整 Pi retained tail 和会话图片资源
   | 调用内部 Agent Runtime，并消费 NDJSON 事件
   v
 Node agent-runtime
@@ -171,10 +171,11 @@ Node agent-runtime
 
 ### 5.1 Pi 负责
 
-- 根据用户文本和当前参考图决定直接回答或调用图片工具。
-- 执行模型与工具之间的有限轮次循环。
-- 产出流式文本和标准工具事件。
-- 在当前 run 内维护临时 Agent 上下文。
+- 根据用户文本和会话图片资源决定直接回答或调用图片工具。
+- 通过原生 `SessionManager` 维护消息树和 compaction checkpoint。
+- 在当前 prompt 前按原生 `shouldCompact`、`reserveTokens` 和 `keepRecentTokens` 规则自动调用一次 `session.compact()`。
+- 执行模型与工具之间的有限轮次循环并产出标准事件。
+- 原生管理 thinking level，并按模型能力对 `max` 做受控降级。
 - 响应取消信号和宿主设置的轮次/工具上限。
 
 ### 5.2 Lumen 负责
@@ -420,13 +421,13 @@ API 在创建 run 前：
 
 1. 复用现有 attachment normalize、数量、格式、大小和所有权校验。
 2. 固化引用顺序和角色。
-3. 为当前 run 生成稳定标签：`ref_1`、`ref_2` 等。
-4. Worker 生成有界 preview，作为 Pi 当前 prompt 的 image content。
+3. 聚合整个 Agent 会话的历史上传图和已完成 Agent 生成图，去重后生成 run-scoped 标签：`ref_1`、`ref_2` 等。
+4. Worker 生成有界 preview，作为 Pi 原生 prompt image content；会话资源最多保留 64 张。
 5. Runtime 只获得标签、角色、显示名和 preview，不获得存储 key 或原始私有 URL。
-6. 图片工具只接收 `reference_labels`，Runtime 根据当前 run 映射为受控内部请求。
+6. 图片工具一次最多选择 16 个 `reference_labels`，对齐 GPT Image 2 edit 输入上限；Runtime 根据当前 run 映射为受控内部请求。
 7. Tool Gateway 再次验证映射、用户所有权和 execution epoch。
 
-首期图生图只允许使用本轮显式附加的参考图。历史图片必须先由用户点击「用作参考」加入当前 Composer，避免模型在整个账号资产库中自行选择图片。
+历史图片只在所属 Agent 会话内自动延续，不扩展到整个账号素材库。业务数据库保留全部消息和资源；达到 64 张会话资源上限时明确拒绝新增，不静默淘汰旧图。
 
 若当前 chat Provider 不支持 image input：
 
@@ -507,10 +508,10 @@ apps/agent-runtime/tests/
 
 ### 9.2 Session 创建
 
-每个 Agent run 创建独立、内存态 Pi session：
+每个 Agent run 从 Lumen 业务消息和最近的 Pi checkpoint 重建同一逻辑 Agent session：
 
 ```text
-SessionManager.inMemory()
+SessionManager.inMemory(agent_session_id)
 SettingsManager.inMemory(...)
 custom ResourceLoader
 no builtin tools
@@ -524,23 +525,22 @@ customTools = [lumen_create_image]
 - 不加载 extension、skill、prompt template 和 theme。
 - 不把 `cwd` 暴露为可操作文件空间。
 
-Pi session 只用于当前 run。Lumen Postgres 是会话事实源；下一次 run 由 Worker 从 Lumen 安全历史重新构造 Pi messages。
+Lumen Postgres 是业务会话事实源；Pi 原生 pre-prompt compaction 产生的 summary、`firstKeptEntryId` 对应业务 message ID、来源 run 的 user-message continuation boundary、usage 和 token 边界通过 epoch-fenced 事件写入来源 `AgentRun.dispatch_jsonb.pi_compaction`。来源 run 自 checkpoint 持久化起不可重放；后续 run 选择最新 ready checkpoint，在原消息树位置恢复 Pi summary + retained tail。容器本地不持久化 JSONL，也不在持有 Run 行锁时更新 Session 行。
 
 ### 9.3 上下文包
 
-Worker 发送已经裁剪和净化的上下文：
+Worker 发送完整、净化且有传输安全上限的上下文：
 
 ```text
 Lumen Agent 基础系统提示词
   > 用户/管理员系统提示词
   > 账号 profile / constraints
-  > conversation summary
   > 相关账号记忆
-  > 最近 Agent 消息和安全工具摘要
-  > 当前用户文本 + 当前参考图 preview
+  > Pi compaction checkpoint + retained tail（或首次运行的完整历史）
+  > 当前用户文本 + 会话图片 previews
 ```
 
-不允许 Agent Runtime 自己访问 Lumen memory API。上下文 token 预算由 Lumen 计算，Pi 只控制当前 run 新增的模型/工具消息。
+不允许 Agent Runtime 自己访问 Lumen memory API。Worker 不生成 Agent conversation summary，也不按自定义 token 预算裁剪历史；Pi 使用原生 `SessionManager`、`estimateTokens`、`shouldCompact` 和 `session.compact()` 管理上下文。为避免流式文本或付费工具副作用被重复执行，当前 prompt 开始前关闭 post-turn/overflow auto-compaction；超限时失败关闭，不自动重放。
 
 历史转换保留：
 
@@ -549,7 +549,7 @@ Lumen Agent 基础系统提示词
 - 已完成工具调用的名称、参数摘要和结果摘要。
 - 仍在运行的 generation ID 和状态。
 
-不重放原始 base64、不重放过期签名 URL、不注入内部错误堆栈。只有当前用户明确附加的参考图才作为 image content 发送给本轮模型。
+不重放原始文件、不重放过期签名 URL、不注入内部错误堆栈。属于当前 Agent 会话且仍满足所有权/保留期校验的图片才转换为有界 preview，并通过 Pi 原生 image content 发送；Worker 读取 preview 和 Tool Gateway 兑换 label 时都会重新检查所有权、ready、软删除及 BYOK retention。会话 catalog 首次分配稳定 `ref_N`，后续重新附加只更新角色而不重编号；当前可见 ready 图片与 queued/running Generation reservation 共同受 64 张会话上限约束。
 
 ### 9.4 Provider 接入
 
@@ -559,8 +559,9 @@ Lumen 仍是 Provider 选择权威：
 2. 带参考图时只选择支持 image input 的 chat model。
 3. Worker 解析模型、base URL、必要 headers、代理和 BYOK credential。
 4. Runtime 只为当前 run 创建 in-memory provider/model，不写 `auth.json` 或 `models.json`。
-5. Pi 每个 model turn 的 usage、状态和错误回传 Worker。
+5. Pi 每个 model turn 以及 pre-prompt compaction 的 usage、状态和错误回传 Worker；滚动升级中仅旧 Runtime 明确 HTTP 400/413 且尚未进入 NDJSON、完整上下文仍满足旧 256 条历史/4 张参考图/8 MiB 合同时，允许一次包含 Pi summary 的 legacy envelope 降级，否则失败关闭。
 6. Worker 写入 Lumen Provider 健康统计和 Agent 账单。
+7. 明确发现 GPT-5.6 model ID、但供应商未声明 metadata 时使用 `272000` context 家族档案；没有 model catalog 的 wildcard Provider 保持保守 `128000`。Agent reasoning 默认 `max`，Pi 再按具体模型支持的 thinking levels 原生 clamp。
 
 正式实现前必须完成 Phase 0 兼容性验证：
 
@@ -583,9 +584,11 @@ agent.max_turns = 6
 agent.max_tool_calls = 3
 agent.max_image_tool_calls = 2
 agent.max_images_per_run = 4
-agent.max_reference_images = 4
+agent.max_reference_images = 16
+agent.max_session_images = 64
 agent.run_timeout_seconds = 180
 agent.tool_timeout_seconds = 30
+agent.capability_ttl_seconds = 300
 ```
 
 达到上限后：

@@ -153,7 +153,7 @@ def test_gpt_56_profile_uses_conservative_known_family_defaults() -> None:
     assert profile.responses_supported is True
     assert profile.vision_supported is True
     assert profile.reasoning_supported is True
-    assert profile.context_window == 128_000
+    assert profile.context_window == 272_000
     assert profile.max_output_tokens == 16_384
 
     namespaced = admin_models._model_profile(  # noqa: SLF001

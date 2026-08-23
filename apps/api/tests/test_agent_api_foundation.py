@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, AsyncIterator
@@ -25,6 +25,7 @@ from app.services.agent import tools as agent_tools_service
 from app.services.agent import common as agent_common
 from app.services.agent import message_submission as agent_message_service
 from app.services.agent import session_crud as agent_session_crud_service
+from app.services.agent.session_images import session_image_slot_count
 from app.services.agent.common import AgentProviderPreflight, AgentTextReservation
 from lumen_core.agent_capability import AgentCapabilityClaims
 from lumen_core.agent_events import AGENT_TOOL_CREATE_IMAGE, AgentRunStatus
@@ -224,7 +225,8 @@ def _patch_agent_message_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
             "agent.max_tool_calls": 4,
             "agent.max_image_tool_calls": 3,
             "agent.max_images_per_run": 4,
-            "agent.max_reference_images": 4,
+            "agent.max_reference_images": 16,
+            "agent.max_session_images": 64,
             "agent.max_output_tokens": 4096,
             "agent.run_timeout_seconds": 180,
             "agent.tool_timeout_seconds": 30,
@@ -247,6 +249,7 @@ def _patch_agent_message_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
         provider_preflight,
     )
     monkeypatch.setattr(agent_message_service, "reserve_agent_text", reserve_text)
+
     async def valid_reference(_image: Image) -> None:
         return None
 
@@ -368,17 +371,21 @@ async def test_agent_text_reservation_prices_bounded_multi_turn_usage(
         reference_count=2,
     )
     assert reservation.hold_micro == 123_456
-    assert all(tokens.output_tokens == 6 * 4096 for tokens in captured["tokens_seen"])
-    assert max(
-        tokens.input_tokens
-        + tokens.cache_read_tokens
-        + tokens.cache_creation_tokens
-        + tokens.cache_creation_1h_tokens
-        for tokens in captured["tokens_seen"]
-    ) == reservation.billing_snapshot["reserved_input_tokens"]
+    assert all(tokens.output_tokens == 8 * 4096 for tokens in captured["tokens_seen"])
+    assert (
+        max(
+            tokens.input_tokens
+            + tokens.cache_read_tokens
+            + tokens.cache_creation_tokens
+            + tokens.cache_creation_1h_tokens
+            for tokens in captured["tokens_seen"]
+        )
+        == reservation.billing_snapshot["reserved_input_tokens"]
+    )
     assert captured["hold"]["ref_type"] == "agent_run"
     assert captured["hold"]["ref_id"] == "run-1"
     assert reservation.billing_snapshot["max_turns"] == 6
+    assert reservation.billing_snapshot["reserved_provider_calls"] == 8
     assert reservation.billing_snapshot["max_output_tokens"] == 4096
     assert reservation.billing_snapshot["context_window"] == 128_000
 
@@ -489,7 +496,11 @@ async def test_agent_message_is_idempotent_owned_and_hidden_from_studio(
         ]
         persisted = await db.get(AgentRun, first.agent_run.id)
         assert persisted is not None
-        assert persisted.request_snapshot_jsonb["limits"]["capability_ttl_seconds"] == 120
+        assert persisted.reasoning_effort == "max"
+        assert (
+            persisted.request_snapshot_jsonb["limits"]["capability_ttl_seconds"] == 120
+        )
+        assert persisted.request_snapshot_jsonb["limits"]["max_session_images"] == 64
 
         with pytest.raises(HTTPException) as conflict:
             await agent_sessions_service.submit_agent_message(
@@ -637,6 +648,281 @@ async def test_agent_references_preserve_roles_order_and_ownership(
                 request=None,
             )
         assert invalid.value.detail["error"]["code"] == "invalid_attachment"
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_rechecks_reference_retention_before_redemption(
+    db_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_agent_message_dependencies(monkeypatch)
+    async with db_factory() as db:
+        user, session, _conversation = await _seed_session(
+            db,
+            image_ids=("image-expiring",),
+        )
+        submitted = await agent_sessions_service.submit_agent_message(
+            db,
+            session_id=session.id,
+            user=user,
+            body=AgentMessageCreateIn(
+                idempotency_key="retention-reference-run",
+                text="use the image",
+                attachments=[{"image_id": "image-expiring"}],
+            ),
+            request=None,
+        )
+        run = await db.get(AgentRun, submitted.agent_run.id)
+        assert run is not None
+        claims = _capability(run=run, reference_labels=["ref_1"])
+
+        async def hidden_reference(*_args: Any, **_kwargs: Any) -> Any:
+            return Image.created_at > datetime.now(timezone.utc) + timedelta(days=1)
+
+        monkeypatch.setattr(
+            agent_tools_service,
+            "retention_filter",
+            hidden_reference,
+        )
+        with pytest.raises(HTTPException) as hidden:
+            await agent_tools_service._reference_map(  # noqa: SLF001
+                db,
+                run=run,
+                claims=claims,
+                requested_labels=["ref_1"],
+            )
+        assert hidden.value.detail["error"]["code"] == "agent_reference_not_found"
+
+
+@pytest.mark.asyncio
+async def test_agent_session_slots_exclude_retention_hidden_images(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_factory() as db:
+        user, session, _conversation = await _seed_session(
+            db,
+            image_ids=("image-expired", "image-visible"),
+        )
+        expired = await db.get(Image, "image-expired")
+        assert expired is not None
+        expired.created_at = datetime.now(timezone.utc) - timedelta(days=8)
+        await db.commit()
+        visible_after = datetime.now(timezone.utc) - timedelta(days=3)
+
+        slots = await session_image_slot_count(
+            db,
+            session_id=session.id,
+            user_id=user.id,
+            snapshotted_image_ids={"image-expired", "image-visible"},
+            image_visibility_filter=Image.created_at >= visible_after,
+        )
+
+        assert slots == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_session_inherits_all_prior_uploads_and_generated_images(
+    db_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_agent_message_dependencies(monkeypatch)
+    async with db_factory() as db:
+        user, session, _conversation = await _seed_session(
+            db,
+            image_ids=("image-original",),
+        )
+        user_id = user.id
+        session_id = session.id
+        first = await agent_sessions_service.submit_agent_message(
+            db,
+            session_id=session.id,
+            user=user,
+            body=AgentMessageCreateIn(
+                idempotency_key="session-context-1",
+                text="create a revision",
+                attachments=[
+                    {
+                        "image_id": "image-original",
+                        "role": "edit_target",
+                        "label": "Original",
+                    }
+                ],
+            ),
+            request=None,
+        )
+        first_run = await db.get(AgentRun, first.agent_run.id)
+        assert first_run is not None
+        first_run.status = AgentRunStatus.SUCCEEDED.value
+        generation = Generation(
+            id="generation-agent-result",
+            message_id=first.assistant_message.id,
+            user_id=user.id,
+            action="edit",
+            model="gpt-image-2",
+            prompt="revised image",
+            size_requested="1024x1024",
+            aspect_ratio="1:1",
+            input_image_ids=["image-original"],
+            primary_input_image_id="image-original",
+            upstream_request={
+                "source": "agent",
+                "agent_session_id": session.id,
+                "agent_run_id": first.agent_run.id,
+            },
+            status="succeeded",
+            progress_stage="finalizing",
+            idempotency_key="session-context-generation",
+        )
+        db.add(generation)
+        await db.flush()
+        db.add(
+            Image(
+                id="image-agent-result",
+                user_id=user.id,
+                owner_generation_id=generation.id,
+                source="generated",
+                storage_key="u/user-1/image-agent-result.webp",
+                mime="image/webp",
+                width=1024,
+                height=1024,
+                size_bytes=256,
+                sha256="a" * 64,
+                visibility="private",
+                metadata_jsonb={},
+                artifact_status="ready",
+            )
+        )
+        await db.commit()
+
+        pending_generation = Generation(
+            id="generation-agent-pending",
+            message_id=first.assistant_message.id,
+            user_id=user.id,
+            action="edit",
+            model="gpt-image-2",
+            prompt="pending revision",
+            size_requested="1024x1024",
+            aspect_ratio="1:1",
+            input_image_ids=["image-original"],
+            primary_input_image_id="image-original",
+            upstream_request={"source": "agent"},
+            status="queued",
+            progress_stage="queued",
+            idempotency_key="session-context-pending",
+        )
+        db.add(pending_generation)
+        await db.commit()
+        setting_reader = agent_message_service.agent_setting_int
+
+        async def low_session_limit(db_arg: Any, key: str) -> int:
+            if key == "agent.max_session_images":
+                return 2
+            return await setting_reader(db_arg, key)
+
+        monkeypatch.setattr(
+            agent_message_service,
+            "agent_setting_int",
+            low_session_limit,
+        )
+        with pytest.raises(HTTPException) as capacity:
+            await agent_sessions_service.submit_agent_message(
+                db,
+                session_id=session.id,
+                user=user,
+                body=AgentMessageCreateIn(
+                    idempotency_key="session-context-2",
+                    text="make it less sharp",
+                ),
+                request=None,
+            )
+        assert (
+            capacity.value.detail["error"]["code"]
+            == "agent_session_reference_limit_reached"
+        )
+        await db.rollback()
+        pending_generation = await db.get(Generation, "generation-agent-pending")
+        assert pending_generation is not None
+        pending_generation.status = "failed"
+        await db.commit()
+        user = await db.get(User, user_id)
+        session = await db.get(AgentSession, session_id)
+        assert user is not None
+        assert session is not None
+        monkeypatch.setattr(
+            agent_message_service,
+            "agent_setting_int",
+            setting_reader,
+        )
+
+        second = await agent_sessions_service.submit_agent_message(
+            db,
+            session_id=session.id,
+            user=user,
+            body=AgentMessageCreateIn(
+                idempotency_key="session-context-2",
+                text="make it less sharp",
+            ),
+            request=None,
+        )
+
+        assert second.user_message.content["attachments"] == []
+        assert second.agent_run.reasoning_effort == "max"
+        assert [reference.image_id for reference in second.agent_run.references] == [
+            "image-original",
+            "image-agent-result",
+        ]
+        assert [
+            reference.reference_label for reference in second.agent_run.references
+        ] == [
+            "ref_1",
+            "ref_2",
+        ]
+        persisted = await db.get(AgentRun, second.agent_run.id)
+        assert persisted is not None
+        assert persisted.request_snapshot_jsonb["limits"]["max_reference_images"] == 16
+        assert persisted.request_snapshot_jsonb["limits"]["max_session_images"] == 64
+
+        persisted.status = AgentRunStatus.SUCCEEDED.value
+        db.add(
+            Image(
+                id="image-new",
+                user_id=user.id,
+                source="uploaded",
+                storage_key="u/user-1/image-new.png",
+                mime="image/png",
+                width=1024,
+                height=1024,
+                size_bytes=128,
+                sha256="b" * 64,
+                visibility="private",
+                metadata_jsonb={},
+                artifact_status="ready",
+            )
+        )
+        await db.commit()
+        third = await agent_sessions_service.submit_agent_message(
+            db,
+            session_id=session.id,
+            user=user,
+            body=AgentMessageCreateIn(
+                idempotency_key="session-context-3",
+                text="use every session image",
+                attachments=[
+                    {"image_id": "image-new", "role": "subject"},
+                    {"image_id": "image-original", "role": "style"},
+                ],
+            ),
+            request=None,
+        )
+        assert [reference.image_id for reference in third.agent_run.references] == [
+            "image-original",
+            "image-agent-result",
+            "image-new",
+        ]
+        assert [
+            reference.reference_label for reference in third.agent_run.references
+        ] == ["ref_1", "ref_2", "ref_3"]
+        assert third.agent_run.references[0].role == "style"
 
 
 @pytest.mark.asyncio
@@ -790,6 +1076,7 @@ async def test_agent_tool_gateway_creates_one_generation_batch_and_replays_recei
         assert all(item.primary_input_image_id == "image-2" for item in generations)
         assert all(item.size_requested == "1248x1664" for item in generations)
         assert all(item.source == "agent" for item in generations)
+        assert all(item.upstream_request["n"] == 1 for item in generations)
         assert all(item.agent_session_id == session_id for item in generations)
         assert all(item.agent_run_id == run_id for item in generations)
         assert await db.scalar(select(func.count(AgentToolCall.id))) == 1

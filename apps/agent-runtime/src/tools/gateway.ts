@@ -34,6 +34,7 @@ const SAFE_GATEWAY_CODES = new Set([
   "agent_reference_not_allowed",
   "agent_reference_not_found",
   "agent_run_not_active",
+  "agent_session_reference_limit_reached",
   "agent_stale_execution_epoch",
   "agent_tool_limit_reached",
   "agent_tool_not_allowed",

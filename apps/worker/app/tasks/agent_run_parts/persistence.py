@@ -46,6 +46,11 @@ from ...agent_billing import (
 from ...agent_runtime_client import AgentRuntimeEvent
 from ...db import SessionLocal
 from ...sse_publish import publish_event
+from .compaction_checkpoint import (
+    build_pi_compaction_checkpoint,
+    checkpoint_provider_dispatched,
+    checkpoint_provider_response,
+)
 from .contracts import AGENT_NO_COST_HTTP_STATUSES, AGENT_USAGE_KEYS, AgentClaim
 
 
@@ -82,9 +87,7 @@ def _add_usage(current: Any, incoming: Any) -> dict[str, int]:
     left = _canonical_usage(current)
     right = _canonical_usage(incoming)
     result = {
-        key: left[key] + right[key]
-        for key in AGENT_USAGE_KEYS
-        if key != "total_tokens"
+        key: left[key] + right[key] for key in AGENT_USAGE_KEYS if key != "total_tokens"
     }
     result["total_tokens"] = sum(
         result[key]
@@ -199,6 +202,7 @@ async def claim_agent_run(run_id: str) -> tuple[AgentClaim, dict[str, Any] | Non
                 "starting",
                 "provider_dispatched",
                 "provider_response",
+                "compaction_ready",
                 "terminal_received",
                 "unknown",
             }:
@@ -218,7 +222,9 @@ async def claim_agent_run(run_id: str) -> tuple[AgentClaim, dict[str, Any] | Non
                 "attempt": run.attempt,
                 "claimed_at": now.isoformat(),
                 "provider_dispatch_count": 0,
+                "provider_completed_count": 0,
                 "provider_response_statuses": [],
+                "last_runtime_seq": 0,
                 "trace_id": dispatch.get("trace_id") or secrets.token_hex(16),
             }
             message = (
@@ -311,8 +317,7 @@ async def _record_runtime_tool_failure(
     )
     if existing is None:
         identity = (
-            f"{run.id}\n{run.execution_epoch}\n{event.ordinal}\n"
-            f"{event.tool_call_id}"
+            f"{run.id}\n{run.execution_epoch}\n{event.ordinal}\n{event.tool_call_id}"
         ).encode("utf-8")
         request_hash = hashlib.sha256(b"runtime-tool-arguments-unavailable").hexdigest()
         existing = AgentToolCall(
@@ -367,28 +372,42 @@ async def _checkpoint_runtime_started(
     if session is not None:
         session.runtime_version = event.runtime_version
     dispatch["runtime_version"] = event.runtime_version
+    if event.reasoning_effort is not None:
+        dispatch["effective_reasoning_effort"] = event.reasoning_effort
 
 
-def _checkpoint_provider_dispatched(dispatch: dict[str, Any]) -> None:
-    dispatch["runtime_delivery"] = "provider_dispatched"
-    dispatch["provider_dispatch_count"] = (
-        int(dispatch.get("provider_dispatch_count") or 0) + 1
-    )
-
-
-def _checkpoint_provider_response(
+async def _checkpoint_pi_compaction(
+    db: AsyncSession,
+    run: AgentRun,
     dispatch: dict[str, Any],
     event: AgentRuntimeEvent,
 ) -> None:
-    dispatch["runtime_delivery"] = "provider_response"
-    statuses = [
-        value
-        for value in dispatch.get("provider_response_statuses", [])
-        if isinstance(value, int) and not isinstance(value, bool)
-    ]
-    if isinstance(event.status, int) and not isinstance(event.status, bool):
-        statuses.append(event.status)
-    dispatch["provider_response_statuses"] = statuses[-16:]
+    checkpoint = build_pi_compaction_checkpoint(run, event)
+    session = await db.get(AgentSession, run.agent_session_id)
+    if session is None or session.user_id != run.user_id:
+        raise ValueError("Pi compaction session is unavailable")
+    boundary_exists = (
+        await db.execute(
+            select(Message.id).where(
+                Message.id == event.first_kept_message_id,
+                Message.conversation_id == session.conversation_id,
+                Message.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if boundary_exists is None:
+        raise ValueError("Pi compaction boundary is unavailable")
+    run.usage_jsonb = _add_usage(
+        run.usage_jsonb,
+        event.usage.model_dump(mode="json"),
+    )
+    dispatch["runtime_delivery"] = "compaction_ready"
+    dispatch["provider_completed_count"] = int(
+        dispatch.get("provider_completed_count") or 0
+    ) + event.provider_call_count
+    dispatch["pi_compaction_count"] = int(dispatch.get("pi_compaction_count") or 0) + 1
+    dispatch["pi_compaction_first_kept_message_id"] = event.first_kept_message_id
+    dispatch["pi_compaction"] = checkpoint
 
 
 def _checkpoint_turn(
@@ -398,10 +417,14 @@ def _checkpoint_turn(
 ) -> None:
     if event.turn is not None:
         run.turn_count = max(int(run.turn_count or 0), event.turn)
-        dispatch["provider_completed_count"] = max(
-            int(dispatch.get("provider_completed_count") or 0),
-            event.turn,
-        )
+    if (
+        event.usage is not None
+        and event.usage.total_tokens > 0
+        and event.stop_reason not in {"error", "aborted"}
+    ):
+        dispatch["provider_completed_count"] = int(
+            dispatch.get("provider_completed_count") or 0
+        ) + 1
     if event.usage is not None:
         run.usage_jsonb = _add_usage(
             run.usage_jsonb,
@@ -455,11 +478,13 @@ async def _apply_runtime_checkpoint(
     if event.type == "run.started":
         await _checkpoint_runtime_started(db, run, dispatch, event)
     elif event.type == "provider.dispatched":
-        _checkpoint_provider_dispatched(dispatch)
+        checkpoint_provider_dispatched(dispatch)
     elif event.type == "provider.response":
-        _checkpoint_provider_response(dispatch, event)
+        checkpoint_provider_response(dispatch, event)
     elif event.type == "turn.completed":
         _checkpoint_turn(run, dispatch, event)
+    elif event.type == "compaction.completed":
+        await _checkpoint_pi_compaction(db, run, dispatch, event)
     elif event.type == "tool.failed":
         await _record_runtime_tool_failure(db, run=run, event=event)
     else:
@@ -476,6 +501,7 @@ async def record_runtime_checkpoint(
         "provider.dispatched",
         "provider.response",
         "turn.completed",
+        "compaction.completed",
         "tool.failed",
         "run.completed",
         "run.failed",
@@ -496,6 +522,9 @@ async def record_runtime_checkpoint(
             ):
                 return False
             dispatch = _dispatch(run)
+            last_runtime_seq = int(dispatch.get("last_runtime_seq") or 0)
+            if event.seq <= last_runtime_seq:
+                return True
             await _apply_runtime_checkpoint(db, run, dispatch, event)
             dispatch["last_runtime_seq"] = event.seq
             run.dispatch_jsonb = dispatch
@@ -757,7 +786,9 @@ async def finalize_agent_run(
                 elif text.startswith(durable_text):
                     final_text = text
                 else:
-                    final_text = text if len(text) >= len(durable_text) else durable_text
+                    final_text = (
+                        text if len(text) >= len(durable_text) else durable_text
+                    )
                 projected_tools = [_tool_projection(tool) for tool in tools]
                 generation_ids = list(
                     dict.fromkeys(
@@ -894,12 +925,15 @@ async def reconcile_cancelled_agent_hold(run_id: str) -> bool:
             completed_count = int(dispatch.get("provider_completed_count") or 0)
             pending = max(0, dispatch_count - completed_count)
             pending_statuses = response_statuses[-pending:] if pending else []
-            pending_proven_absent = pending > 0 and len(pending_statuses) == pending and all(
-                value in AGENT_NO_COST_HTTP_STATUSES for value in pending_statuses
+            pending_proven_absent = (
+                pending > 0
+                and len(pending_statuses) == pending
+                and all(
+                    value in AGENT_NO_COST_HTTP_STATUSES for value in pending_statuses
+                )
             )
-            unknown = (
-                (pending > 0 and not pending_proven_absent)
-                or (dispatch_count == 0 and delivery in {"starting", "unknown"})
+            unknown = (pending > 0 and not pending_proven_absent) or (
+                dispatch_count == 0 and delivery in {"starting", "unknown"}
             )
             _repair_tools(tools, generations, now=now, unknown=unknown)
             message = (

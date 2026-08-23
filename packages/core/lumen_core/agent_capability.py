@@ -21,6 +21,7 @@ AGENT_CAPABILITY_MIN_SECRET_BYTES = 32
 AGENT_CAPABILITY_MAX_TOKEN_BYTES = 8192
 AGENT_CAPABILITY_MAX_CLOCK_SKEW_SECONDS = 30
 AGENT_CAPABILITY_MAX_TTL_SECONDS = 600
+AGENT_CAPABILITY_MAX_REFERENCE_LABELS = 64
 
 
 class AgentCapabilityClaims(BaseModel):
@@ -35,7 +36,10 @@ class AgentCapabilityClaims(BaseModel):
     agent_session_id: str = Field(min_length=1, max_length=64)
     execution_epoch: int = Field(ge=0)
     allowed_tools: list[str] = Field(min_length=1, max_length=4)
-    allowed_reference_labels: list[str] = Field(default_factory=list, max_length=4)
+    allowed_reference_labels: list[str] = Field(
+        default_factory=list,
+        max_length=AGENT_CAPABILITY_MAX_REFERENCE_LABELS,
+    )
     issued_at: int = Field(ge=0)
     expires_at: int = Field(ge=0)
 
@@ -57,6 +61,12 @@ class AgentCapabilityClaims(BaseModel):
             self.allowed_reference_labels
         ):
             raise ValueError("allowed_reference_labels must be unique")
+        allowed_labels = {
+            f"ref_{index}"
+            for index in range(1, AGENT_CAPABILITY_MAX_REFERENCE_LABELS + 1)
+        }
+        if any(label not in allowed_labels for label in self.allowed_reference_labels):
+            raise ValueError("allowed_reference_labels contains an invalid label")
         return self
 
 
@@ -81,7 +91,10 @@ def _b64encode(value: bytes) -> str:
 
 
 def _b64decode(value: str) -> bytes:
-    if not value or any(ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" for ch in value):
+    if not value or any(
+        ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        for ch in value
+    ):
         raise AgentCapabilityError("agent_capability_invalid", "invalid capability")
     try:
         return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
@@ -124,7 +137,10 @@ def verify_agent_capability(
     now: int | None = None,
 ) -> AgentCapabilityClaims:
     key = _secret_bytes(secret)
-    if not isinstance(token, str) or len(token.encode("utf-8")) > AGENT_CAPABILITY_MAX_TOKEN_BYTES:
+    if (
+        not isinstance(token, str)
+        or len(token.encode("utf-8")) > AGENT_CAPABILITY_MAX_TOKEN_BYTES
+    ):
         raise AgentCapabilityError("agent_capability_invalid", "invalid capability")
     parts = token.split(".")
     if len(parts) != 3 or parts[0] != "v1":

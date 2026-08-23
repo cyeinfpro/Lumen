@@ -11,7 +11,7 @@ import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -19,6 +19,23 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 RUNTIME_REQUEST_PATH = "/v1/runs"
 RUNTIME_AUTH_VERSION = "v1"
+_LEGACY_RUNTIME_MAX_HISTORY = 256
+_LEGACY_RUNTIME_MAX_REFERENCES = 4
+_LEGACY_RUNTIME_MAX_REQUEST_BYTES = 8 * 1024 * 1024
+# Python counts Unicode code points while TypeBox uses UTF-16 code units.
+_LEGACY_RUNTIME_HISTORY_CHUNK_CHARS = 10_000
+_LEGACY_RUNTIME_REFERENCE_LABELS = frozenset(
+    f"ref_{index}" for index in range(1, _LEGACY_RUNTIME_MAX_REFERENCES + 1)
+)
+_PI_COMPACTION_SUMMARY_PREFIX = (
+    "The conversation history before this point was compacted into the "
+    "following summary:\n\n<summary>\n"
+)
+_PI_COMPACTION_SUMMARY_SUFFIX = "\n</summary>"
+_PI_COMPACTION_MAX_PROVIDER_CALLS = 2
+_MAX_RUNTIME_PROVIDER_CALLS = 12 + _PI_COMPACTION_MAX_PROVIDER_CALLS
+_MAX_RUNTIME_INPUT_TOKENS = 2_000_000 * _MAX_RUNTIME_PROVIDER_CALLS
+_MAX_RUNTIME_OUTPUT_TOKENS = 32_000 * _MAX_RUNTIME_PROVIDER_CALLS
 RUNTIME_TERMINAL_EVENTS = frozenset({"run.completed", "run.failed", "run.cancelled"})
 RUNTIME_EVENT_TYPES = frozenset(
     {
@@ -27,6 +44,7 @@ RUNTIME_EVENT_TYPES = frozenset(
         "provider.response",
         "text.delta",
         "turn.completed",
+        "compaction.completed",
         "tool.started",
         "tool.succeeded",
         "tool.failed",
@@ -64,12 +82,20 @@ class AgentRuntimeProviderEnvelope(_StrictModel):
 
 
 class AgentRuntimeHistoryMessage(_StrictModel):
+    message_id: str = Field(min_length=1, max_length=96)
     role: Literal["user", "assistant"]
     text: str = Field(min_length=1, max_length=20000)
 
 
+class AgentRuntimeCompaction(_StrictModel):
+    summary: str = Field(min_length=1, max_length=48000)
+    first_kept_message_id: str = Field(min_length=1, max_length=96)
+    next_message_id: str = Field(min_length=1, max_length=96)
+    tokens_before: int = Field(ge=1, le=2_000_000)
+
+
 class AgentRuntimeReference(_StrictModel):
-    reference_label: str = Field(pattern=r"^ref_[1-4]$")
+    reference_label: str = Field(pattern=r"^ref_(?:[1-9]|[1-5][0-9]|6[0-4])$")
     role: str = Field(min_length=1, max_length=32)
     display_label: str | None = Field(default=None, max_length=80)
     mime_type: Literal["image/png", "image/jpeg", "image/webp"]
@@ -102,13 +128,15 @@ class AgentRuntimeRequest(_StrictModel):
     agent_session_id: str = Field(min_length=1, max_length=96)
     user_id: str = Field(min_length=1, max_length=96)
     execution_epoch: int = Field(ge=1)
+    user_message_id: str = Field(min_length=1, max_length=96)
     assistant_message_id: str = Field(min_length=1, max_length=96)
     trace_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     provider: AgentRuntimeProviderEnvelope
     system_prompt: str = Field(max_length=65536)
-    history: list[AgentRuntimeHistoryMessage] = Field(max_length=256)
+    history: list[AgentRuntimeHistoryMessage] = Field(max_length=2048)
+    compaction: AgentRuntimeCompaction | None = None
     current_prompt: str = Field(min_length=1, max_length=40000)
-    references: list[AgentRuntimeReference] = Field(max_length=4)
+    references: list[AgentRuntimeReference] = Field(max_length=64)
     allowed_tools: list[Literal["lumen_create_image"]] = Field(max_length=1)
     image_defaults: AgentRuntimeImageDefaults
     tool_gateway_url: str | None = Field(default=None, max_length=2048)
@@ -120,6 +148,20 @@ class AgentRuntimeRequest(_StrictModel):
 
     @model_validator(mode="after")
     def validate_bindings(self) -> "AgentRuntimeRequest":
+        history_ids = [message.message_id for message in self.history]
+        if len(set(history_ids)) != len(history_ids):
+            raise ValueError("history message ids must be unique")
+        if (
+            self.compaction is not None
+            and self.compaction.first_kept_message_id not in history_ids
+        ):
+            raise ValueError("compaction boundary is absent from history")
+        if (
+            self.compaction is not None
+            and self.compaction.next_message_id not in history_ids
+            and self.compaction.next_message_id != self.user_message_id
+        ):
+            raise ValueError("compaction continuation is absent from history")
         tools_enabled = bool(self.allowed_tools)
         if tools_enabled != bool(self.tool_gateway_url and self.tool_capability):
             raise ValueError("tool gateway bindings do not match allowed_tools")
@@ -129,13 +171,24 @@ class AgentRuntimeRequest(_StrictModel):
 
 
 class AgentRuntimeUsage(_StrictModel):
-    input_tokens: int = Field(ge=0, le=24_000_000)
-    output_tokens: int = Field(ge=0, le=384_000)
-    cache_read_tokens: int = Field(ge=0, le=24_000_000)
-    cache_write_tokens: int = Field(ge=0, le=24_000_000)
-    cache_write_1h_tokens: int = Field(default=0, ge=0, le=24_000_000)
-    reasoning_tokens: int = Field(default=0, ge=0, le=384_000)
-    total_tokens: int = Field(ge=0, le=24_384_000)
+    input_tokens: int = Field(ge=0, le=_MAX_RUNTIME_INPUT_TOKENS)
+    output_tokens: int = Field(ge=0, le=_MAX_RUNTIME_OUTPUT_TOKENS)
+    cache_read_tokens: int = Field(ge=0, le=_MAX_RUNTIME_INPUT_TOKENS)
+    cache_write_tokens: int = Field(ge=0, le=_MAX_RUNTIME_INPUT_TOKENS)
+    cache_write_1h_tokens: int = Field(
+        default=0,
+        ge=0,
+        le=_MAX_RUNTIME_INPUT_TOKENS,
+    )
+    reasoning_tokens: int = Field(
+        default=0,
+        ge=0,
+        le=_MAX_RUNTIME_OUTPUT_TOKENS,
+    )
+    total_tokens: int = Field(
+        ge=0,
+        le=_MAX_RUNTIME_INPUT_TOKENS + _MAX_RUNTIME_OUTPUT_TOKENS,
+    )
 
     @model_validator(mode="after")
     def validate_breakdown(self) -> "AgentRuntimeUsage":
@@ -178,6 +231,15 @@ class AgentRuntimeEvent(_StrictModel):
     stop_reason: str | None = Field(default=None, max_length=32)
     tools: list[str] | None = Field(default=None, max_length=1)
     runtime_version: str | None = Field(default=None, max_length=64)
+    checkpoint_version: Literal[1] | None = None
+    pi_runtime_version: str | None = Field(default=None, max_length=64)
+    summary: str | None = Field(default=None, max_length=48000)
+    first_kept_message_id: str | None = Field(default=None, max_length=96)
+    tokens_before: int | None = Field(default=None, ge=1, le=2_000_000)
+    provider_call_count: int | None = Field(default=None, ge=1, le=2)
+    reasoning_effort: (
+        Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"] | None
+    ) = None
     provider_dispatch_count: int | None = Field(default=None, ge=0, le=64)
     provider_completed_count: int | None = Field(default=None, ge=0, le=64)
 
@@ -187,6 +249,23 @@ class AgentRuntimeEvent(_StrictModel):
         if value not in RUNTIME_EVENT_TYPES:
             raise ValueError("unsupported Runtime event")
         return value
+
+    @model_validator(mode="after")
+    def validate_compaction(self) -> "AgentRuntimeEvent":
+        fields = (
+            self.checkpoint_version,
+            self.pi_runtime_version,
+            self.summary,
+            self.first_kept_message_id,
+            self.tokens_before,
+            self.provider_call_count,
+            self.usage,
+        )
+        if self.type == "compaction.completed" and any(
+            value is None for value in fields
+        ):
+            raise ValueError("compaction event is incomplete")
+        return self
 
 
 class AgentRuntimeClientError(RuntimeError):
@@ -252,6 +331,12 @@ class _RuntimeEventDecoder:
             raise AgentRuntimeClientError("agent_runtime_event_after_terminal")
         if event.type == "run.started" and not event.runtime_version:
             raise AgentRuntimeClientError("agent_runtime_invalid_event")
+        if event.type == "compaction.completed":
+            allowed_message_ids = {
+                message.message_id for message in self.request.history
+            }
+            if event.first_kept_message_id not in allowed_message_ids:
+                raise AgentRuntimeClientError("agent_runtime_invalid_event")
         if event.type in RUNTIME_TERMINAL_EVENTS:
             if (
                 event.provider_dispatch_count is None
@@ -269,11 +354,14 @@ class _RuntimeEventDecoder:
         if usage is None:
             return
         turn_limit = self.request.limits.max_turns
-        multiplier = 1 if event.type == "turn.completed" else turn_limit
+        if event.type == "compaction.completed":
+            multiplier = event.provider_call_count or 1
+        elif event.type == "turn.completed":
+            multiplier = 1
+        else:
+            multiplier = turn_limit + _PI_COMPACTION_MAX_PROVIDER_CALLS
         input_total = (
-            usage.input_tokens
-            + usage.cache_read_tokens
-            + usage.cache_write_tokens
+            usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
         )
         if input_total > self.request.provider.context_window * multiplier:
             raise AgentRuntimeClientError("agent_runtime_usage_out_of_bounds")
@@ -334,6 +422,67 @@ def canonical_runtime_request(
     ).encode("ascii")
 
 
+def _encoded_runtime_request(payload: dict[str, Any]) -> bytes:
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _runtime_request_body(request: AgentRuntimeRequest) -> bytes:
+    return _encoded_runtime_request(request.model_dump(mode="json"))
+
+
+def _legacy_runtime_request_body(
+    request: AgentRuntimeRequest,
+) -> bytes | None:
+    if (
+        len(request.references) > _LEGACY_RUNTIME_MAX_REFERENCES
+        or any(
+            reference.reference_label not in _LEGACY_RUNTIME_REFERENCE_LABELS
+            for reference in request.references
+        )
+    ):
+        return None
+    payload = request.model_dump(mode="json")
+    payload.pop("user_message_id", None)
+    payload.pop("compaction", None)
+    history = [
+        {key: value for key, value in item.items() if key != "message_id"}
+        for item in payload.get("history", [])
+    ]
+    if request.compaction is not None:
+        summary = (
+            _PI_COMPACTION_SUMMARY_PREFIX
+            + request.compaction.summary
+            + _PI_COMPACTION_SUMMARY_SUFFIX
+        )
+        history = [
+            *(
+                {
+                    "role": "user",
+                    "text": summary[
+                        offset : offset + _LEGACY_RUNTIME_HISTORY_CHUNK_CHARS
+                    ],
+                }
+                for offset in range(
+                    0,
+                    len(summary),
+                    _LEGACY_RUNTIME_HISTORY_CHUNK_CHARS,
+                )
+            ),
+            *history,
+        ]
+    if len(history) > _LEGACY_RUNTIME_MAX_HISTORY:
+        return None
+    payload["history"] = history
+    body = _encoded_runtime_request(payload)
+    return body if len(body) <= _LEGACY_RUNTIME_MAX_REQUEST_BYTES else None
+
+
 def sign_runtime_request(
     secret: str,
     method: str,
@@ -355,6 +504,7 @@ class AgentRuntimeClient:
     shared_secret: str = field(repr=False)
     connect_timeout_seconds: float = 5.0
     event_idle_timeout_seconds: float = 45.0
+    max_request_bytes: int = 64 * 1024 * 1024
     max_line_bytes: int = 64 * 1024
     max_stream_bytes: int = 8 * 1024 * 1024
     max_events: int = 4096
@@ -396,53 +546,62 @@ class AgentRuntimeClient:
             raise AgentRuntimeClientError(
                 "agent_runtime_unconfigured", delivery="proven_absent"
             )
-        body = json.dumps(
-            request.model_dump(mode="json"),
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-            allow_nan=False,
-        ).encode("utf-8")
-        timestamp = str(int(time.time()))
-        nonce = secrets.token_urlsafe(24)
-        signature = sign_runtime_request(
-            self.shared_secret,
-            "POST",
-            RUNTIME_REQUEST_PATH,
-            timestamp,
-            nonce,
-            body,
-        )
+        body = _runtime_request_body(request)
+        if len(body) > self.max_request_bytes:
+            raise AgentRuntimeClientError(
+                "agent_runtime_request_too_large",
+                delivery="proven_absent",
+            )
         if on_request_starting is not None:
             await on_request_starting()
         try:
-            stream_context = self._http().stream(
-                "POST",
-                RUNTIME_REQUEST_PATH,
-                content=body,
-                headers={
-                    "content-type": "application/json",
-                    "x-lumen-agent-timestamp": timestamp,
-                    "x-lumen-agent-nonce": nonce,
-                    "x-lumen-agent-signature": signature,
-                },
-            )
-            async with stream_context as response:
-                if response.status_code != 200:
-                    raise AgentRuntimeClientError(
-                        "agent_runtime_rejected",
-                        delivery="proven_absent",
-                        status_code=response.status_code,
-                    )
-                content_type = response.headers.get("content-type", "").lower()
-                if not content_type.startswith("application/x-ndjson"):
-                    raise AgentRuntimeClientError("agent_runtime_invalid_response")
-                async for event in self._events(
-                    response,
-                    request=request,
-                    cancel_requested=cancel_requested,
-                ):
-                    yield event
+            legacy_body = _legacy_runtime_request_body(request)
+            bodies = (body,) if legacy_body is None else (body, legacy_body)
+            for attempt, candidate_body in enumerate(bodies):
+                timestamp = str(int(time.time()))
+                nonce = secrets.token_urlsafe(24)
+                signature = sign_runtime_request(
+                    self.shared_secret,
+                    "POST",
+                    RUNTIME_REQUEST_PATH,
+                    timestamp,
+                    nonce,
+                    candidate_body,
+                )
+                stream_context = self._http().stream(
+                    "POST",
+                    RUNTIME_REQUEST_PATH,
+                    content=candidate_body,
+                    headers={
+                        "content-type": "application/json",
+                        "x-lumen-agent-timestamp": timestamp,
+                        "x-lumen-agent-nonce": nonce,
+                        "x-lumen-agent-signature": signature,
+                    },
+                )
+                async with stream_context as response:
+                    if response.status_code != 200:
+                        if (
+                            attempt == 0
+                            and len(bodies) == 2
+                            and response.status_code in {400, 413}
+                        ):
+                            continue
+                        raise AgentRuntimeClientError(
+                            "agent_runtime_rejected",
+                            delivery="proven_absent",
+                            status_code=response.status_code,
+                        )
+                    content_type = response.headers.get("content-type", "").lower()
+                    if not content_type.startswith("application/x-ndjson"):
+                        raise AgentRuntimeClientError("agent_runtime_invalid_response")
+                    async for event in self._events(
+                        response,
+                        request=request,
+                        cancel_requested=cancel_requested,
+                    ):
+                        yield event
+                    return
         except AgentRuntimeClientError:
             raise
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
@@ -485,6 +644,7 @@ class AgentRuntimeClient:
 __all__ = [
     "AgentRuntimeClient",
     "AgentRuntimeClientError",
+    "AgentRuntimeCompaction",
     "AgentRuntimeEvent",
     "AgentRuntimeHistoryMessage",
     "AgentRuntimeImageDefaults",

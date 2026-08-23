@@ -19,7 +19,9 @@ export interface ToolRuntimeState {
   imageCalls: number;
   acceptedImages: number;
   successfulCalls: number;
+  failedCalls: number;
   unknownResults: number;
+  lastErrorCode: string | null;
   limitReason: string | null;
 }
 
@@ -47,8 +49,8 @@ export function createImageTool(
       {
         prompt: Type.String({ minLength: 1, maxLength: 10_000 }),
         reference_labels: Type.Optional(
-          Type.Array(Type.String({ pattern: "^ref_[1-4]$" }), {
-            maxItems: 4,
+          Type.Array(Type.String({ pattern: "^ref_(?:[1-9]|[1-5][0-9]|6[0-4])$" }), {
+            maxItems: 16,
             uniqueItems: true,
           }),
         ),
@@ -89,12 +91,6 @@ export function createImageTool(
         toolCallId,
         references.length > 0 ? "image_to_image" : "text_to_image",
       );
-      const allowedReferences = new Set(
-        request.references.map((reference) => reference.reference_label),
-      );
-      if (references.some((label) => !allowedReferences.has(label))) {
-        throw new Error("A requested reference is not available in this run");
-      }
       const requestedCount = params.count ?? request.image_defaults.count;
       if (state.unknownResults > 0) {
         state.limitReason = "tool_result_unknown";
@@ -117,6 +113,18 @@ export function createImageTool(
       }
       state.calls += 1;
       state.imageCalls += 1;
+      const allowedReferences = new Set(
+        request.references.map((reference) => reference.reference_label),
+      );
+      if (references.some((label) => !allowedReferences.has(label))) {
+        state.failedCalls += 1;
+        state.lastErrorCode = "agent_reference_not_found";
+        state.errors.set(toolCallId, {
+          code: "agent_reference_not_found",
+          resultUnknown: false,
+        });
+        throw new Error("A requested reference is not available in this run");
+      }
       let result;
       try {
         result = await gateway(
@@ -131,6 +139,8 @@ export function createImageTool(
           typeof candidate.code === "string" ? candidate.code : "agent_tool_failed";
         const resultUnknown = candidate.resultUnknown === true;
         state.errors.set(toolCallId, { code, resultUnknown });
+        state.failedCalls += 1;
+        state.lastErrorCode = code;
         if (resultUnknown) state.unknownResults += 1;
         throw error;
       }

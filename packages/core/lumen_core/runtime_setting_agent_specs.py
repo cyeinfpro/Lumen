@@ -64,12 +64,21 @@ AGENT_SETTINGS: tuple[SettingSpec, ...] = (
     ),
     SettingSpec(
         key="agent.max_reference_images",
-        description="Maximum explicitly attached references in one Agent run.",
+        description="Maximum reference images explicitly attached to one Agent message.",
         sensitive=False,
         parser=int,
         env_fallback="AGENT_MAX_REFERENCE_IMAGES",
         min_value=0,
-        max_value=4,
+        max_value=16,
+    ),
+    SettingSpec(
+        key="agent.max_session_images",
+        description="Maximum readable image resources retained in one Agent session.",
+        sensitive=False,
+        parser=int,
+        env_fallback="AGENT_MAX_SESSION_IMAGES",
+        min_value=16,
+        max_value=64,
     ),
     SettingSpec(
         key="agent.max_output_tokens",

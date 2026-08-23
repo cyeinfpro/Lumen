@@ -28,17 +28,21 @@ from ..message_submission_billing import billing_allow_negative, billing_enabled
 
 logger = logging.getLogger(__name__)
 
+_AGENT_PI_COMPACTION_RESERVE_CALLS = 2
+
+
 AGENT_SETTING_DEFAULTS = MappingProxyType(
     {
         "agent.max_turns": 6,
         "agent.max_tool_calls": 3,
         "agent.max_image_tool_calls": 2,
         "agent.max_images_per_run": 4,
-        "agent.max_reference_images": 4,
+        "agent.max_reference_images": 16,
+        "agent.max_session_images": 64,
         "agent.max_output_tokens": 4096,
         "agent.run_timeout_seconds": 180,
         "agent.tool_timeout_seconds": 30,
-        "agent.capability_ttl_seconds": 120,
+        "agent.capability_ttl_seconds": 300,
     }
 )
 
@@ -99,6 +103,8 @@ async def wallet_chat_provider_preflight(
     db: AsyncSession,
     *,
     require_vision: bool,
+    require_reasoning: bool = True,
+    minimum_context_window: int = 4096,
 ) -> AgentProviderPreflight:
     providers_spec = get_spec("providers")
     raw = await get_setting(db, providers_spec) if providers_spec is not None else None
@@ -127,6 +133,18 @@ async def wallet_chat_provider_preflight(
             503,
             configuration_errors=len(errors),
         )
+    eligible = [
+        provider
+        for provider in eligible
+        if provider.agent_context_window >= minimum_context_window
+    ]
+    if not eligible:
+        raise http_error(
+            "agent_context_window_exceeded",
+            "no Agent chat provider can carry the complete session context",
+            412,
+            minimum_context_window=minimum_context_window,
+        )
     if require_vision:
         eligible = [
             provider for provider in eligible if provider.vision_supported is True
@@ -137,11 +155,21 @@ async def wallet_chat_provider_preflight(
                 "no configured Agent chat provider has verified image input support",
                 412,
             )
+    if require_reasoning:
+        eligible = [
+            provider for provider in eligible if provider.agent_reasoning_supported
+        ]
+        if not eligible:
+            raise http_error(
+                "agent_reasoning_model_unavailable",
+                "no configured Agent chat provider supports reasoning",
+                412,
+            )
     return AgentProviderPreflight(
         model=model,
         eligible_provider_names=tuple(provider.name for provider in eligible),
-        context_window=max(provider.agent_context_window for provider in eligible),
-        max_output_tokens=max(
+        context_window=min(provider.agent_context_window for provider in eligible),
+        max_output_tokens=min(
             provider.agent_max_output_tokens for provider in eligible
         ),
         reasoning_supported=any(
@@ -194,17 +222,16 @@ async def reserve_agent_text(
         return AgentTextReservation(hold_micro=0, billing_snapshot={})
 
     max_turns = await agent_setting_int(db, "agent.max_turns")
-    configured_output_tokens = await agent_setting_int(
-        db, "agent.max_output_tokens"
-    )
+    configured_output_tokens = await agent_setting_int(db, "agent.max_output_tokens")
     max_output_tokens = min(
         configured_output_tokens,
         max(1, provider_max_output_tokens),
     )
     bounded_context_window = max(4096, min(2_000_000, context_window))
     input_per_turn = max(1, bounded_context_window - max_output_tokens)
-    input_upper = input_per_turn * max_turns
-    output_upper = max_output_tokens * max_turns
+    reserved_provider_calls = max_turns + _AGENT_PI_COMPACTION_RESERVE_CALLS
+    input_upper = input_per_turn * reserved_provider_calls
+    output_upper = max_output_tokens * reserved_provider_calls
     try:
         pricing_snapshot = await billing_core.completion_pricing_snapshot(
             db,
@@ -251,6 +278,7 @@ async def reserve_agent_text(
         "pricing_snapshot": pricing_snapshot,
         "rate_multiplier_x10000": multiplier,
         "max_turns": max_turns,
+        "reserved_provider_calls": reserved_provider_calls,
         "max_output_tokens": max_output_tokens,
         "context_window": bounded_context_window,
         "reference_count": reference_count,
@@ -261,8 +289,7 @@ async def reserve_agent_text(
                 {
                     "text": text,
                     "attachments": [
-                        {"image_id": f"ref-{index}"}
-                        for index in range(reference_count)
+                        {"image_id": f"ref-{index}"} for index in range(reference_count)
                     ],
                 },
             ),

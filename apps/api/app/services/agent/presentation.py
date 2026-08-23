@@ -28,7 +28,12 @@ _PUBLIC_ERROR_MESSAGES = MappingProxyType(
         "agent_provider_unavailable": "Agent provider is unavailable",
         "agent_runtime_unavailable": "Agent runtime is unavailable",
         "agent_vision_model_unavailable": "Image input is unavailable for this model",
+        "agent_reasoning_model_unavailable": "Reasoning is unavailable for this model",
+        "agent_context_window_exceeded": "The model context window is insufficient",
         "agent_tool_result_unknown": "Image submission result is unknown",
+        "agent_tool_failed": "Image submission failed",
+        "agent_reference_not_found": "A referenced image is unavailable",
+        "agent_session_reference_limit_reached": "Agent session image limit reached",
         "INSUFFICIENT_BALANCE": "Insufficient wallet balance",
         "NO_ACTIVE_API_KEY": "No active API key is available",
     }

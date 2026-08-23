@@ -12,8 +12,7 @@ from typing import Any, Literal
 from sqlalchemy import select
 
 from lumen_core.agent_events import AgentRunStatus
-from lumen_core.context_window import estimate_message_tokens
-from lumen_core.model_entities import AgentRun, Conversation, Message
+from lumen_core.model_entities import AgentRun, Message
 
 from ...agent_context import (
     AgentContextBuild,
@@ -48,7 +47,7 @@ from ...observability import (
 from ...provider_pool import text_provider_attempt
 from ...provider_runtime.errors import UpstreamError
 from ...services.billing_cache import get_billing_cache
-from .. import auto_title, context_summary
+from .. import auto_title
 from .contracts import AGENT_USAGE_KEYS, AgentClaim, AgentRuntimeAccumulator
 from .persistence import (
     claim_agent_run,
@@ -204,6 +203,7 @@ async def _prepare_context(
             "provider_api": build.request.provider.api,
             "reference_count": len(build.request.references),
             "history_count": len(build.request.history),
+            "pi_compaction_restored": build.pi_compaction_restored,
         },
     )
     if not current:
@@ -247,9 +247,7 @@ def _terminal_request(
         return "cancelled", "agent_cancelled", knowledge, "runtime_cancelled"
     if accumulator.terminal_status == "partial":
         knowledge = (
-            "unknown"
-            if unresolved or not accumulator.has_exact_usage
-            else "actual"
+            "unknown" if unresolved or not accumulator.has_exact_usage else "actual"
         )
         return (
             "partial",
@@ -299,68 +297,13 @@ def _terminal_request(
 
 
 async def _post_terminal_hooks(
-    ctx: dict[str, Any],
+    _ctx: dict[str, Any],
     *,
     redis: Any,
     conversation_id: str | None,
 ) -> None:
-    if not conversation_id:
-        return
-    await auto_title.maybe_enqueue_auto_title(redis, conversation_id)
-    try:
-        async with SessionLocal() as db:
-            conversation = await db.get(Conversation, conversation_id)
-            if conversation is None or conversation.deleted_at is not None:
-                return
-            boundary = (
-                await db.execute(
-                    select(Message)
-                    .where(
-                        Message.conversation_id == conversation_id,
-                        Message.deleted_at.is_(None),
-                    )
-                    .order_by(Message.created_at.desc(), Message.id.desc())
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
-            if boundary is None:
-                return
-            recent = list(
-                (
-                    await db.execute(
-                        select(Message)
-                        .where(
-                            Message.conversation_id == conversation_id,
-                            Message.deleted_at.is_(None),
-                        )
-                        .order_by(Message.created_at.desc(), Message.id.desc())
-                        .limit(64)
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            estimated_tokens = sum(
-                estimate_message_tokens(message.role, message.content)
-                for message in recent
-            )
-            if len(recent) < 32 and estimated_tokens < 20_000:
-                return
-            await context_summary.ensure_context_summary(
-                db,
-                conversation,
-                boundary,
-                {"redis": redis},
-                force=False,
-                trigger="agent",
-                image_upstream_runtime=ctx.get("image_upstream_runtime"),
-            )
-    except Exception:
-        logger.warning(
-            "agent context summary hook failed conversation=%s",
-            conversation_id,
-            exc_info=True,
-        )
+    if conversation_id:
+        await auto_title.maybe_enqueue_auto_title(redis, conversation_id)
 
 
 async def _finalize(

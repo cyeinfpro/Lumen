@@ -5,13 +5,17 @@ import {
   fauxProvider,
   type AssistantMessage,
   type ImageContent,
+  type Message,
   type Usage,
 } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
+  type CompactionResult,
+  estimateTokens,
   ModelRuntime,
   SessionManager,
   SettingsManager,
+  shouldCompact,
 } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -96,22 +100,33 @@ function tokenValue(value: number | undefined, name: string, maximum: number): n
   return value;
 }
 
-export function boundedTurnUsage(usage: Usage, request: RuntimeRequest): RuntimeUsage {
-  const input = tokenValue(usage.input, "input usage", request.provider.context_window);
+function boundedProviderUsage(
+  usage: Usage,
+  request: RuntimeRequest,
+  providerCallCount: number,
+): RuntimeUsage {
+  if (!Number.isSafeInteger(providerCallCount) || providerCallCount < 1) {
+    throw new Error("invalid provider call count");
+  }
+  const input = tokenValue(
+    usage.input,
+    "input usage",
+    request.provider.context_window * providerCallCount,
+  );
   const output = tokenValue(
     usage.output,
     "output usage",
-    request.limits.max_output_tokens,
+    request.limits.max_output_tokens * providerCallCount,
   );
   const cacheRead = tokenValue(
     usage.cacheRead,
     "cache-read usage",
-    request.provider.context_window,
+    request.provider.context_window * providerCallCount,
   );
   const cacheWrite = tokenValue(
     usage.cacheWrite,
     "cache-write usage",
-    request.provider.context_window,
+    request.provider.context_window * providerCallCount,
   );
   const cacheWrite1h = tokenValue(
     usage.cacheWrite1h,
@@ -119,7 +134,10 @@ export function boundedTurnUsage(usage: Usage, request: RuntimeRequest): Runtime
     cacheWrite,
   );
   const reasoning = tokenValue(usage.reasoning, "reasoning usage", output);
-  if (input + cacheRead + cacheWrite > request.provider.context_window) {
+  if (
+    input + cacheRead + cacheWrite >
+    request.provider.context_window * providerCallCount
+  ) {
     throw new Error("provider input usage exceeds the model context window");
   }
   return {
@@ -131,6 +149,10 @@ export function boundedTurnUsage(usage: Usage, request: RuntimeRequest): Runtime
     reasoning_tokens: reasoning,
     total_tokens: input + output + cacheRead + cacheWrite,
   };
+}
+
+export function boundedTurnUsage(usage: Usage, request: RuntimeRequest): RuntimeUsage {
+  return boundedProviderUsage(usage, request, 1);
 }
 
 function addUsage(target: RuntimeUsage, usage: RuntimeUsage): void {
@@ -153,7 +175,7 @@ function historyMessage(
   item: RuntimeHistoryMessage,
   request: RuntimeRequest,
   timestamp: number,
-): AgentMessage {
+): Message {
   if (item.role === "user") {
     return { role: "user", content: item.text, timestamp };
   }
@@ -169,9 +191,57 @@ function historyMessage(
   };
 }
 
-function historyMessages(request: RuntimeRequest): AgentMessage[] {
+interface SeededPiSession {
+  readonly manager: SessionManager;
+  readonly entryMessageIds: Map<string, string>;
+}
+
+function seedPiSession(request: RuntimeRequest): SeededPiSession {
+  const manager = SessionManager.inMemory("/tmp/lumen-agent-runtime", {
+    id: request.agent_session_id,
+  });
+  const entryMessageIds = new Map<string, string>();
+  const messageEntryIds = new Map<string, string>();
   const start = Date.now() - request.history.length * 2;
-  return request.history.map((item, index) => historyMessage(item, request, start + index));
+  const compaction = request.compaction ?? null;
+  let compactionAppended = false;
+  const appendCompaction = (): boolean => {
+    if (compaction === null) return false;
+    const firstKeptEntryId = messageEntryIds.get(
+      compaction.first_kept_message_id,
+    );
+    if (firstKeptEntryId === undefined) {
+      throw new Error("Pi compaction boundary is unavailable");
+    }
+    manager.appendCompaction(
+      compaction.summary,
+      firstKeptEntryId,
+      compaction.tokens_before,
+    );
+    return true;
+  };
+  for (const [index, item] of request.history.entries()) {
+    const messageId = item.message_id ?? `legacy-history-${String(index + 1)}`;
+    if (compaction?.next_message_id === messageId) {
+      compactionAppended = appendCompaction();
+    }
+    const entryId = manager.appendMessage(
+      historyMessage(item, request, start + index),
+    );
+    entryMessageIds.set(entryId, messageId);
+    messageEntryIds.set(messageId, entryId);
+  }
+  if (
+    compaction !== null &&
+    !compactionAppended &&
+    compaction.next_message_id === request.user_message_id
+  ) {
+    compactionAppended = appendCompaction();
+  }
+  if (compaction !== null && !compactionAppended) {
+    throw new Error("Pi compaction continuation is unavailable");
+  }
+  return { manager, entryMessageIds };
 }
 
 function currentImages(request: RuntimeRequest): ImageContent[] {
@@ -234,7 +304,9 @@ function buildToolState(): ToolRuntimeState {
     imageCalls: 0,
     acceptedImages: 0,
     successfulCalls: 0,
+    failedCalls: 0,
     unknownResults: 0,
+    lastErrorCode: null,
     limitReason: null,
   };
 }
@@ -253,6 +325,7 @@ export async function executeAgentRun(
   let lastAssistant: AssistantMessage | null = null;
   let providerDispatches = 0;
   let providerResponses = 0;
+  let providerCompletions = 0;
   let closingTurn = false;
   const toolStartedAt = new Map<string, bigint>();
 
@@ -268,19 +341,40 @@ export async function executeAgentRun(
     onDispatch,
   );
   const gateway = dependencies.createGateway(request);
+  const nativeCompactionEnabled =
+    request.compaction !== undefined &&
+    request.history.every((message) => message.message_id !== undefined);
+  const compactionReserveTokens = Math.min(
+    16_384,
+    Math.max(1_024, Math.floor(prepared.model.contextWindow / 4)),
+  );
+  const compactionKeepRecentTokens = Math.min(
+    20_000,
+    Math.max(
+      1_024,
+      Math.floor(
+        (prepared.model.contextWindow - compactionReserveTokens) / 2,
+      ),
+    ),
+  );
   const customTools =
     request.allowed_tools.length === 1
       ? [createImageTool(request, gateway, tools)]
       : [];
   const settings = SettingsManager.inMemory({
-    compaction: { enabled: false },
+    compaction: {
+      enabled: nativeCompactionEnabled,
+      reserveTokens: compactionReserveTokens,
+      keepRecentTokens: compactionKeepRecentTokens,
+    },
     retry: { enabled: false, maxRetries: 0, provider: { maxRetries: 0 } },
     transport: "sse",
     defaultTools: [],
     images: { autoResize: false, blockImages: false },
     defaultProjectTrust: "never",
   });
-  const sessionManager = SessionManager.inMemory("/tmp/lumen-agent-runtime");
+  const seededSession = seedPiSession(request);
+  const sessionManager = seededSession.manager;
   const { session } = await createAgentSession({
     cwd: "/tmp/lumen-agent-runtime",
     agentDir: "/tmp/lumen-agent-runtime-empty",
@@ -311,8 +405,6 @@ export async function executeAgentRun(
     throw new Error("Pi tool or session isolation check failed");
   }
 
-  session.agent.state.systemPrompt = request.system_prompt;
-  session.agent.state.messages = historyMessages(request);
   session.agent.toolExecution = "sequential";
   session.agent.transport = "sse";
   session.agent.streamFunction = (model, context, options) =>
@@ -326,6 +418,7 @@ export async function executeAgentRun(
       maxRetryDelayMs: 0,
       timeoutMs: request.limits.run_timeout_seconds * 1000,
       maxTokens: Math.min(
+        options?.maxTokens ?? request.limits.max_output_tokens,
         request.provider.max_output_tokens,
         request.limits.max_output_tokens,
       ),
@@ -338,6 +431,55 @@ export async function executeAgentRun(
         });
       },
     });
+
+  const emitCompactionCheckpoint = async (
+    result: CompactionResult,
+    dispatchCountBefore: number,
+    responseCountBefore: number,
+  ): Promise<void> => {
+    const providerCallCount = providerDispatches - dispatchCountBefore;
+    const responseCount = providerResponses - responseCountBefore;
+    const firstKeptMessageId = seededSession.entryMessageIds.get(
+      result.firstKeptEntryId,
+    );
+    if (
+      firstKeptMessageId === undefined ||
+      result.usage === undefined ||
+      providerCallCount < 1 ||
+      providerCallCount > 2 ||
+      responseCount !== providerCallCount ||
+      Buffer.byteLength(result.summary, "utf8") > 48_000
+    ) {
+      throw new Error("Pi compaction checkpoint is incomplete");
+    }
+    const compactionUsage = boundedProviderUsage(
+      result.usage,
+      request,
+      providerCallCount,
+    );
+    addUsage(usage, compactionUsage);
+    providerCompletions += providerCallCount;
+    await emitOrThrow(writer, "compaction.completed", {
+      checkpoint_version: 1,
+      pi_runtime_version: RUNTIME_VERSION,
+      summary: result.summary,
+      first_kept_message_id: firstKeptMessageId,
+      tokens_before: result.tokensBefore,
+      provider_call_count: providerCallCount,
+      usage: compactionUsage,
+    });
+  };
+
+  let runStarted = false;
+  const emitRunStarted = async (): Promise<void> => {
+    if (runStarted) return;
+    runStarted = true;
+    await emitOrThrow(writer, "run.started", {
+      tools: expectedTools,
+      runtime_version: RUNTIME_VERSION,
+      reasoning_effort: session.thinkingLevel,
+    });
+  };
 
   const previousPrepare = session.agent.prepareNextTurnWithContext;
   session.agent.prepareNextTurnWithContext = async (context, turnSignal) => {
@@ -365,10 +507,7 @@ export async function executeAgentRun(
   const unsubscribe = session.agent.subscribe(async (event: AgentEvent) => {
     if (signal.aborted) session.agent.abort();
     if (event.type === "agent_start") {
-      await emitOrThrow(writer, "run.started", {
-        tools: expectedTools,
-        runtime_version: RUNTIME_VERSION,
-      });
+      await emitRunStarted();
       return;
     }
     if (
@@ -453,6 +592,14 @@ export async function executeAgentRun(
         ? zeroUsage()
         : boundedTurnUsage(message.usage, request);
       addUsage(usage, turnUsage);
+      if (
+        message !== null &&
+        message.stopReason !== "error" &&
+        message.stopReason !== "aborted" &&
+        turnUsage.total_tokens > 0
+      ) {
+        providerCompletions += 1;
+      }
       await emitOrThrow(writer, "turn.completed", {
         turn: turnCount,
         usage: turnUsage,
@@ -461,10 +608,70 @@ export async function executeAgentRun(
     }
   });
 
-  const abortListener = (): void => session.agent.abort();
+  const abortListener = (): void => {
+    session.abortCompaction();
+    session.agent.abort();
+  };
   signal.addEventListener("abort", abortListener, { once: true });
   try {
-    await session.agent.prompt(request.current_prompt, currentImages(request));
+    await emitRunStarted();
+    const images = currentImages(request);
+    const estimateCompleteContext = (): number => [
+      ...session.messages,
+      {
+        role: "user" as const,
+        content: [
+          { type: "text" as const, text: request.system_prompt },
+          { type: "text" as const, text: request.current_prompt },
+          ...images,
+        ],
+        timestamp: Date.now(),
+      },
+    ].reduce((total, message) => total + estimateTokens(message), 0);
+    const compactionSettings = settings.getCompactionSettings();
+    if (
+      nativeCompactionEnabled &&
+      shouldCompact(
+        estimateCompleteContext(),
+        prepared.model.contextWindow,
+        compactionSettings,
+      )
+    ) {
+      const dispatchCountBefore = providerDispatches;
+      const responseCountBefore = providerResponses;
+      let compacted = false;
+      try {
+        const result = await session.compact();
+        await emitCompactionCheckpoint(
+          result,
+          dispatchCountBefore,
+          responseCountBefore,
+        );
+        compacted = true;
+      } catch (error) {
+        if (
+          !(error instanceof Error) ||
+          !/Nothing to compact|Already compacted/u.test(error.message)
+        ) {
+          throw error;
+        }
+      }
+      if (
+        !compacted ||
+        shouldCompact(
+          estimateCompleteContext(),
+          prepared.model.contextWindow,
+          compactionSettings,
+        )
+      ) {
+        throw new Error("Pi native compaction could not fit the Agent context");
+      }
+    }
+    session.setAutoCompactionEnabled(false);
+    await session.prompt(request.current_prompt, {
+      images,
+      expandPromptTemplates: false,
+    });
     if (tools.limitReason !== null) {
       metrics?.limits.labels(tools.limitReason).inc();
       await emitOrThrow(writer, "limit.reached", { reason: tools.limitReason });
@@ -475,22 +682,26 @@ export async function executeAgentRun(
     const errorCode =
       tools.unknownResults > 0
         ? "agent_tool_result_unknown"
-        : terminalErrorCode(lastAssistant);
+        : tools.failedCalls > 0
+          ? tools.lastErrorCode ?? "agent_tool_failed"
+          : terminalErrorCode(lastAssistant);
     return {
       outcome: finalOutcome(errorCode, tools, signal),
       errorCode,
       usage,
       turnCount,
       toolCallCount: tools.calls,
-      providerDispatchCount: Math.max(providerDispatches, turnCount),
-      providerCompletedCount: turnCount,
+      providerDispatchCount: providerDispatches,
+      providerCompletedCount: providerCompletions,
     };
   } catch (error) {
     const errorCode = signal.aborted
       ? "agent_cancelled"
       : tools.unknownResults > 0
         ? "agent_tool_result_unknown"
-        : error instanceof Error && /output limit/iu.test(error.message)
+        : tools.failedCalls > 0
+          ? tools.lastErrorCode ?? "agent_tool_failed"
+          : error instanceof Error && /output limit/iu.test(error.message)
           ? "agent_output_limit_reached"
           : terminalErrorCode(lastAssistant) ?? "agent_runtime_error";
     throw new RuntimeExecutionError(
@@ -500,8 +711,8 @@ export async function executeAgentRun(
         usage,
         turnCount,
         toolCallCount: tools.calls,
-        providerDispatchCount: Math.max(providerDispatches, turnCount),
-        providerCompletedCount: turnCount,
+        providerDispatchCount: providerDispatches,
+        providerCompletedCount: providerCompletions,
       },
       error,
     );

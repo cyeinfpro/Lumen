@@ -2,9 +2,21 @@ import type {
   AgentDraft,
   AgentDraftAttachment,
 } from "@/features/agent/model/contracts";
-import { createAgentDraft } from "@/features/agent/model/contracts";
+import {
+  AGENT_MAX_REFERENCES,
+  createAgentDraft,
+} from "@/features/agent/model/contracts";
 
 const STORAGE_KEY = "lumen.agent.drafts.v1";
+const REASONING_EFFORTS = new Set([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
 
 function ownerStorageKey(ownerUserId: string): string {
   return `${STORAGE_KEY}:${encodeURIComponent(ownerUserId)}`;
@@ -90,7 +102,7 @@ export function deserializeAgentDrafts(
                 item.imageId.length > 0 &&
                 typeof item.role === "string",
             )
-            .slice(0, 4)
+            .slice(0, AGENT_MAX_REFERENCES)
             .map((item, index) => ({
               imageId: item.imageId,
               role: item.role,
@@ -104,7 +116,11 @@ export function deserializeAgentDrafts(
         attachments,
         allowImage: draft.allowImage !== false,
         imageDefaults: draft.imageDefaults,
-        reasoningEffort: draft.reasoningEffort,
+        reasoningEffort:
+          typeof draft.reasoningEffort === "string" &&
+          REASONING_EFFORTS.has(draft.reasoningEffort)
+            ? draft.reasoningEffort
+            : "max",
       });
     }
     return drafts;

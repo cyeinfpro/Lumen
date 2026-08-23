@@ -5,6 +5,7 @@ import math
 from dataclasses import replace
 from typing import Any
 
+from ..agent_model_profiles import default_agent_context_window_for_models
 from ..immutables import immutable_mapping
 from .definitions import (
     AGENT_API_VALUES,
@@ -289,6 +290,7 @@ def parse_provider_item(item: dict[str, Any], *, index: int) -> ProviderDefiniti
         item.get("image_edit_input_transport")
     )
     image_concurrency = _image_concurrency(item.get("image_concurrency", 1))
+    agent_models = _agent_models(item.get("agent_models"))
     return ProviderDefinition(
         name=name,
         base_url=base_url.strip().rstrip("/"),
@@ -318,10 +320,10 @@ def parse_provider_item(item: dict[str, Any], *, index: int) -> ProviderDefiniti
         responses_supported=parse_optional_bool(item.get("responses_supported")),
         vision_supported=parse_optional_bool(item.get("vision_supported")),
         agent_api=_agent_api(item.get("agent_api")),
-        agent_models=_agent_models(item.get("agent_models")),
+        agent_models=agent_models,
         agent_context_window=_bounded_agent_int(
             item.get("agent_context_window"),
-            default=128000,
+            default=default_agent_context_window_for_models(agent_models),
             maximum=2_000_000,
             field="agent_context_window",
         ),

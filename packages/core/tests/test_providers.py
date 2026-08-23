@@ -165,7 +165,20 @@ def test_parse_provider_item_defaults_and_normalizes_fields():
     assert provider.image_streaming_enabled is True
     assert provider.image_edit_input_transport == "file"
     assert provider.agent_models == ("gpt-5.6-sol", "gpt-5.6-mini")
+    assert provider.agent_context_window == 272_000
     assert provider.purposes == DEFAULT_PROVIDER_PURPOSES
+
+
+def test_mixed_agent_model_catalog_keeps_conservative_context_default() -> None:
+    provider = parse_provider_item(
+        {
+            "base_url": "https://upstream.example",
+            "api_key": "sk-test",
+            "agent_models": ["gpt-5.4", "gpt-5.6-sol"],
+        },
+        index=0,
+    )
+    assert provider.agent_context_window == 128_000
 
 
 def test_parse_provider_item_rejects_invalid_agent_models() -> None:

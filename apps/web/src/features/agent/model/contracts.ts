@@ -9,7 +9,7 @@ import type {
   BackendImageMeta,
 } from "@/lib/api/tasks";
 
-export const AGENT_MAX_REFERENCES = 4;
+export const AGENT_MAX_REFERENCES = 16;
 export const AGENT_NEW_DRAFT_KEY = "__new_agent_session__";
 
 export type AgentRunStatus =
@@ -38,7 +38,8 @@ export type AgentReasoningEffort =
   | "low"
   | "medium"
   | "high"
-  | "xhigh";
+  | "xhigh"
+  | "max";
 
 export interface AgentImageDefaults {
   count: number;
@@ -92,6 +93,7 @@ export function createAgentDraft(
     attachments: [],
     allowImage: true,
     ...rest,
+    reasoningEffort: rest.reasoningEffort ?? "max",
     imageDefaults: {
       ...DEFAULT_AGENT_IMAGE_DEFAULTS,
       ...imageDefaults,
