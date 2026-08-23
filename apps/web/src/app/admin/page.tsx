@@ -7,7 +7,12 @@
 // - 用户：搜索 + 角色过滤 + 表格（数字 tabular-nums）+ 加载更多
 // - 子 panel 另见 _panels/*
 
-import { useCallback, useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
@@ -223,6 +228,10 @@ const TABS: TabMeta[] = [
   },
 ];
 
+const subscribeHydration = () => () => {};
+const getClientHydrationSnapshot = () => true;
+const getServerHydrationSnapshot = () => false;
+
 const AUTH_STORAGE_KEYS = new Set([
   "lumen.auth",
   "lumen.session",
@@ -249,6 +258,11 @@ function adminAuthRedirectPath(error: unknown): string | null {
 
 export default function AdminPage() {
   const router = useRouter();
+  const hydrated = useSyncExternalStore(
+    subscribeHydration,
+    getClientHydrationSnapshot,
+    getServerHydrationSnapshot,
+  );
 
   const meQuery = useQuery<MaybeAdminUser>({
     queryKey: ["me"],
@@ -289,7 +303,7 @@ export default function AdminPage() {
     };
   }, [refreshMe]);
 
-  if (isLoadingMe) {
+  if (!hydrated || isLoadingMe) {
     return (
       <div className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-[var(--fg-0)]">
         <div className="max-w-6xl mx-auto px-4 md:px-8 py-6 md:py-10 space-y-5">
