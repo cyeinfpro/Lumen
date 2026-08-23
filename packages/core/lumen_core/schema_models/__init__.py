@@ -39,6 +39,7 @@ from .messaging import (
 from .agent import (
     AGENT_MAX_IMAGES_PER_TOOL,
     AGENT_MAX_REFERENCE_IMAGES,
+    AGENT_MAX_SESSION_IMAGES,
     AgentCreateImageArgumentsIn,
     AgentCreateImageNormalized,
     AgentEventEnvelope,
@@ -310,6 +311,7 @@ __all__ = [
     "ActiveTasksOut",
     "AGENT_MAX_IMAGES_PER_TOOL",
     "AGENT_MAX_REFERENCE_IMAGES",
+    "AGENT_MAX_SESSION_IMAGES",
     "AgentCreateImageArgumentsIn",
     "AgentCreateImageNormalized",
     "AgentEventEnvelope",

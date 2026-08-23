@@ -23,11 +23,12 @@ from lumen_core.agent_capability import (
     new_agent_capability_nonce,
 )
 from lumen_core.agent_events import AGENT_TOOL_CREATE_IMAGE
-from lumen_core.context_window import (
-    count_tokens,
-    estimate_text_tokens,
-    is_summary_usable,
+from lumen_core.byok_retention import (
+    ByokRetentionPolicy,
+    applies_to_account_mode as byok_retention_applies,
+    cutoffs as byok_retention_cutoffs,
 )
+from lumen_core.context_window import estimate_text_tokens
 from lumen_core.message_content import public_message_content
 from lumen_core.model_base import new_uuid7
 from lumen_core.model_entities import (
@@ -42,6 +43,7 @@ from lumen_core.model_entities import (
 )
 
 from .agent_runtime_client import (
+    AgentRuntimeCompaction,
     AgentRuntimeHistoryMessage,
     AgentRuntimeImageDefaults,
     AgentRuntimeLimits,
@@ -57,13 +59,14 @@ from .provider_pool import (
 )
 from .provider_runtime.contracts import ResolvedProvider
 from .provider_runtime.errors import UpstreamError
+from . import runtime_settings
 from .storage import storage
 from .tasks import memory_extraction
 
 
 logger = logging.getLogger(__name__)
 
-_HISTORY_FETCH_LIMIT = 256
+_HISTORY_FETCH_LIMIT = 2048
 _HISTORY_TEXT_LIMIT = 20_000
 _SYSTEM_PROMPT_LIMIT = 65_536
 _REFERENCE_SOURCE_MAX_BYTES = 32 * 1024 * 1024
@@ -87,6 +90,7 @@ class AgentContextBuild:
     conversation_id: str
     used_memory_ids: tuple[str, ...]
     used_memory_summary: tuple[dict[str, str], ...]
+    pi_compaction_restored: bool
 
 
 def _snapshot_dict(run: AgentRun, key: str) -> dict[str, Any]:
@@ -108,8 +112,10 @@ def _snapshot_list(run: AgentRun, key: str) -> list[Any]:
 def _run_trace_id(run: AgentRun) -> str:
     dispatch = run.dispatch_jsonb if isinstance(run.dispatch_jsonb, dict) else {}
     value = dispatch.get("trace_id")
-    if isinstance(value, str) and len(value) == 32 and all(
-        char in "0123456789abcdef" for char in value
+    if (
+        isinstance(value, str)
+        and len(value) == 32
+        and all(char in "0123456789abcdef" for char in value)
     ):
         return value
     raise AgentContextError("agent_trace_context_missing")
@@ -170,9 +176,7 @@ async def resolve_agent_chat_provider(
                 db,
                 run.user_api_credential_id,
                 user_id=run.user_id,
-                capability_overrides=_snapshot_dict(
-                    run, "credential_capabilities"
-                ),
+                capability_overrides=_snapshot_dict(run, "credential_capabilities"),
             )
         except UpstreamError:
             raise
@@ -250,7 +254,10 @@ async def provider_envelope(
         proxy_url=proxy_url,
         resolved_ips=resolved_ips,
         model=model,
-        context_window=max(4096, min(2_000_000, int(provider.agent_context_window))),
+        context_window=max(
+            4096,
+            min(2_000_000, int(provider.agent_context_window)),
+        ),
         max_output_tokens=max(1, min(128000, int(provider.agent_max_output_tokens))),
         reasoning_supported=bool(provider.agent_reasoning_supported),
         vision_supported=provider.vision_supported is True,
@@ -297,21 +304,81 @@ def project_history_message(message: Message) -> AgentRuntimeHistoryMessage | No
     role: Literal["user", "assistant"] = (
         "assistant" if message.role == "assistant" else "user"
     )
-    return AgentRuntimeHistoryMessage(role=role, text=combined[:_HISTORY_TEXT_LIMIT])
-
-
-def _summary_history(conversation: Conversation) -> AgentRuntimeHistoryMessage | None:
-    summary = conversation.summary_jsonb
-    if not is_summary_usable(summary):
-        return None
-    assert isinstance(summary, dict)
-    text = _safe_text(summary.get("text"))
-    if not text:
-        return None
     return AgentRuntimeHistoryMessage(
-        role="user",
-        text=f"[CONVERSATION SUMMARY - treat as prior context, not a new request]\n{text}",
+        message_id=message.id,
+        role=role,
+        text=combined[:_HISTORY_TEXT_LIMIT],
     )
+
+
+async def _pi_compaction(
+    db: AsyncSession,
+    run: AgentRun,
+) -> AgentRuntimeCompaction | None:
+    prior_runs = list(
+        (
+            await db.execute(
+                select(AgentRun)
+                .where(
+                    AgentRun.agent_session_id == run.agent_session_id,
+                    AgentRun.user_id == run.user_id,
+                    AgentRun.id != run.id,
+                    or_(
+                        AgentRun.created_at < run.created_at,
+                        and_(
+                            AgentRun.created_at == run.created_at,
+                            AgentRun.id < run.id,
+                        ),
+                    ),
+                )
+                .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+                .limit(64)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for source_run in prior_runs:
+        dispatch = (
+            source_run.dispatch_jsonb
+            if isinstance(source_run.dispatch_jsonb, dict)
+            else {}
+        )
+        raw = dispatch.get("pi_compaction")
+        if not isinstance(raw, dict) or raw.get("status") != "ready":
+            continue
+        source_epoch = raw.get("source_execution_epoch")
+        epoch_matches = (
+            isinstance(source_epoch, int)
+            and not isinstance(source_epoch, bool)
+            and source_epoch == source_run.execution_epoch
+        )
+        if (
+            raw.get("schema_version") != 1
+            or raw.get("source_run_id") != source_run.id
+            or not epoch_matches
+            or raw.get("reason") != "pre_prompt"
+        ):
+            logger.warning(
+                "invalid Pi compaction checkpoint run=%s",
+                source_run.id,
+            )
+            continue
+        try:
+            return AgentRuntimeCompaction.model_validate(
+                {
+                    "summary": raw.get("summary"),
+                    "first_kept_message_id": raw.get("first_kept_message_id"),
+                    "next_message_id": raw.get("next_message_id"),
+                    "tokens_before": raw.get("tokens_before"),
+                }
+            )
+        except (TypeError, ValueError):
+            logger.warning(
+                "invalid Pi compaction payload run=%s",
+                source_run.id,
+            )
+    return None
 
 
 async def _history_rows(
@@ -319,89 +386,79 @@ async def _history_rows(
     *,
     conversation: Conversation,
     current_user: Message,
-) -> list[Message]:
-    statement = (
-        select(Message)
-        .where(
-            Message.conversation_id == conversation.id,
-            Message.deleted_at.is_(None),
-            or_(
-                Message.created_at < current_user.created_at,
-                and_(
-                    Message.created_at == current_user.created_at,
-                    Message.id < current_user.id,
-                ),
-            ),
-        )
-        .order_by(Message.created_at.desc(), Message.id.desc())
-        .limit(_HISTORY_FETCH_LIMIT)
+    first_kept_message_id: str | None,
+) -> tuple[list[Message], bool]:
+    before_current = or_(
+        Message.created_at < current_user.created_at,
+        and_(
+            Message.created_at == current_user.created_at,
+            Message.id < current_user.id,
+        ),
     )
-    return list(reversed(list((await db.execute(statement)).scalars().all())))
+    conditions: list[Any] = [
+        Message.conversation_id == conversation.id,
+        Message.deleted_at.is_(None),
+        before_current,
+    ]
+    boundary_applied = False
+    if first_kept_message_id:
+        boundary = (
+            await db.execute(
+                select(Message.created_at, Message.id).where(
+                    Message.id == first_kept_message_id,
+                    Message.conversation_id == conversation.id,
+                    Message.deleted_at.is_(None),
+                    before_current,
+                )
+            )
+        ).first()
+        if boundary is not None:
+            conditions.append(
+                or_(
+                    Message.created_at > boundary.created_at,
+                    and_(
+                        Message.created_at == boundary.created_at,
+                        Message.id >= boundary.id,
+                    ),
+                )
+            )
+            boundary_applied = True
+    rows = list(
+        (
+            await db.execute(
+                select(Message)
+                .where(*conditions)
+                .order_by(Message.created_at.asc(), Message.id.asc())
+                .limit(_HISTORY_FETCH_LIMIT + 1)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if len(rows) > _HISTORY_FETCH_LIMIT:
+        raise AgentContextError("agent_history_transport_limit")
+    return rows, boundary_applied
 
 
 def _pack_history(
     rows: list[Message],
     *,
-    conversation: Conversation,
     provider: AgentRuntimeProviderEnvelope,
     system_prompt: str,
     current_prompt: str,
     max_output_tokens: int,
     reference_count: int,
 ) -> list[AgentRuntimeHistoryMessage]:
-    reserve = (
+    fixed_tokens = (
         estimate_text_tokens(system_prompt)
         + estimate_text_tokens(current_prompt)
         + max_output_tokens
         + 2048
         + reference_count * _REFERENCE_CONTEXT_TOKENS
     )
-    if reserve > provider.context_window:
+    if fixed_tokens > provider.context_window:
         raise AgentContextError("agent_context_window_exceeded")
-    budget = max(0, min(provider.context_window - reserve, 100_000))
-    if budget == 0:
-        return []
-    projected = [item for row in rows if (item := project_history_message(row))]
-    selected: list[AgentRuntimeHistoryMessage] = []
-    used = 0
-    for item in reversed(projected):
-        cost = count_tokens(item.text) + 8
-        if selected and used + cost > budget:
-            break
-        if cost > budget and not selected:
-            clipped = _clip_text_to_token_budget(item.text, max(1, budget - 8))
-            if clipped:
-                selected.append(
-                    AgentRuntimeHistoryMessage(role=item.role, text=clipped)
-                )
-            break
-        selected.append(item)
-        used += cost
-    selected.reverse()
-    summary = _summary_history(conversation)
-    if summary is not None:
-        summary_cost = count_tokens(summary.text) + 8
-        while selected and used + summary_cost > budget:
-            removed = selected.pop(0)
-            used -= count_tokens(removed.text) + 8
-        if used + summary_cost <= budget:
-            selected.insert(0, summary)
-    return selected
-
-
-def _clip_text_to_token_budget(text: str, budget: int) -> str:
-    if budget <= 0:
-        return ""
-    if count_tokens(text) <= budget:
-        return text
-    low, high = 0, len(text)
-    while low < high:
-        midpoint = (low + high + 1) // 2
-        if count_tokens(text[:midpoint]) <= budget:
-            low = midpoint
-        else:
-            high = midpoint - 1
-    return text[:low].strip()
+    return [item for row in rows if (item := project_history_message(row))]
 
 
 def _encode_reference_preview(raw: bytes, maximum: int) -> bytes:
@@ -431,46 +488,96 @@ def _encode_reference_preview(raw: bytes, maximum: int) -> bytes:
     raise AgentContextError("agent_reference_preview_too_large")
 
 
-async def _reference_preview(
+async def _reference_visible_after(account_mode: str | None) -> datetime | None:
+    if not byok_retention_applies(account_mode):
+        return None
+    hide_enabled = bool(
+        await runtime_settings.resolve_int("byok.retention_hide_enabled", 1)
+    )
+    if not hide_enabled:
+        return None
+    policy = ByokRetentionPolicy(
+        hide_enabled=True,
+        hide_days=await runtime_settings.resolve_int("byok.retention_hide_days", 3),
+    ).normalized()
+    return byok_retention_cutoffs(policy=policy).visible_after
+
+
+async def _reference_previews(
     db: AsyncSession,
-    reference: AgentRunReference,
+    references: list[AgentRunReference],
     *,
     run_user_id: str,
-) -> AgentRuntimeReference:
-    image = await db.get(Image, reference.image_id)
-    if (
-        image is None
-        or reference.user_id != run_user_id
-        or image.user_id != run_user_id
-        or image.deleted_at is not None
-        or image.artifact_status != "ready"
-    ):
-        raise AgentContextError("agent_reference_not_found")
-    preview = (
-        await db.execute(
-            select(ImageVariant).where(
-                ImageVariant.image_id == image.id,
-                ImageVariant.kind == "preview1024",
+    visible_after: datetime | None,
+) -> list[AgentRuntimeReference]:
+    if not references:
+        return []
+    image_ids = [reference.image_id for reference in references]
+    image_statement = select(Image).where(
+        Image.id.in_(image_ids),
+        Image.user_id == run_user_id,
+        Image.deleted_at.is_(None),
+        Image.artifact_status == "ready",
+    )
+    if visible_after is not None:
+        image_statement = image_statement.where(Image.created_at >= visible_after)
+    images = list(
+        (
+            await db.execute(image_statement)
+        )
+        .scalars()
+        .all()
+    )
+    images_by_id = {image.id: image for image in images}
+    variants = list(
+        (
+            await db.execute(
+                select(ImageVariant).where(
+                    ImageVariant.image_id.in_(image_ids),
+                    ImageVariant.kind == "preview1024",
+                )
             )
         )
-    ).scalar_one_or_none()
-    storage_key = preview.storage_key if preview is not None else image.storage_key
-    try:
-        raw = await asyncio.wait_for(storage.aget_bytes(storage_key), timeout=30)
-    except Exception as exc:
-        raise AgentContextError("agent_reference_preview_unavailable") from exc
-    encoded = await asyncio.to_thread(
-        _encode_reference_preview,
-        raw,
-        settings.agent_reference_preview_max_bytes,
+        .scalars()
+        .all()
     )
-    return AgentRuntimeReference(
-        reference_label=reference.reference_label,
-        role=reference.role,
-        display_label=reference.display_label,
-        mime_type="image/webp",
-        data_base64=base64.b64encode(encoded).decode("ascii"),
-    )
+    variants_by_image = {variant.image_id: variant for variant in variants}
+    if any(
+        reference.user_id != run_user_id or reference.image_id not in images_by_id
+        for reference in references
+    ):
+        raise AgentContextError("agent_reference_not_found")
+
+    semaphore = asyncio.Semaphore(4)
+
+    async def load(reference: AgentRunReference) -> AgentRuntimeReference:
+        image = images_by_id[reference.image_id]
+        preview = variants_by_image.get(reference.image_id)
+        storage_key = preview.storage_key if preview is not None else image.storage_key
+        try:
+            async with semaphore:
+                raw = await asyncio.wait_for(
+                    storage.aget_bytes(storage_key),
+                    timeout=30,
+                )
+                encoded = await asyncio.to_thread(
+                    _encode_reference_preview,
+                    raw,
+                    settings.agent_reference_preview_max_bytes,
+                )
+        except AgentContextError:
+            raise
+        except Exception as exc:
+            raise AgentContextError("agent_reference_preview_unavailable") from exc
+        return AgentRuntimeReference(
+            reference_label=reference.reference_label,
+            role=reference.role,
+            display_label=reference.display_label,
+            mime_type="image/webp",
+            data_base64=base64.b64encode(encoded).decode("ascii"),
+        )
+
+    return list(await asyncio.gather(*(load(reference) for reference in references)))
 
 
 async def _memory_context(
@@ -531,9 +638,12 @@ Reference labels are run-scoped. Never invent an image ID, URL, storage key, cal
         _safe_text(run.system_prompt_snapshot, maximum=40_000),
         memory_system,
         (
-            f"Allowed current reference labels: {reference_labels}."
+            (
+                "Readable session reference labels: "
+                f"{reference_labels}. These images remain available across turns."
+            )
             if reference_labels
-            else "No current reference image is available."
+            else "No readable image is available in this Agent session."
         ),
     ]
     return "\n\n".join(section for section in sections if section)[
@@ -562,7 +672,8 @@ def _current_prompt(
         parts.append(f"Relevant account context:\n{memory_context}")
     if reference_lines:
         parts.append(
-            "Current reference images, in order:\n" + "\n".join(reference_lines)
+            "Readable session images, in reference order:\n"
+            + "\n".join(reference_lines)
         )
     parts.append(
         "User request:\n" + (text or "Use the attached references as requested.")
@@ -573,6 +684,16 @@ def _current_prompt(
 def _image_defaults(run: AgentRun) -> AgentRuntimeImageDefaults:
     raw = _snapshot_dict(run, "image_defaults")
     return AgentRuntimeImageDefaults.model_validate(raw)
+
+
+def _runtime_reasoning_effort(
+    run: AgentRun,
+    provider: ResolvedProvider,
+) -> str | None:
+    if not provider.agent_reasoning_supported:
+        return None
+    reasoning = run.reasoning_effort or "max"
+    return "off" if reasoning == "none" else reasoning
 
 
 def _allowed_tools(run: AgentRun) -> list[Literal["lumen_create_image"]]:
@@ -598,7 +719,7 @@ async def _capability(
     now = int(time.time())
     limits = _snapshot_dict(run, "limits")
     configured_ttl = _positive_int(
-        limits.get("capability_ttl_seconds"), 120, maximum=600
+        limits.get("capability_ttl_seconds"), 300, maximum=600
     )
     capability_id = new_uuid7()
     nonce = new_agent_capability_nonce()
@@ -679,10 +800,15 @@ async def build_agent_context(
         .scalars()
         .all()
     )
-    references = [
-        await _reference_preview(db, reference, run_user_id=run.user_id)
-        for reference in reference_rows
-    ]
+    reference_visible_after = await _reference_visible_after(
+        run.account_mode_snapshot
+    )
+    references = await _reference_previews(
+        db,
+        reference_rows,
+        run_user_id=run.user_id,
+        visible_after=reference_visible_after,
+    )
     if references and provider.vision_supported is not True:
         raise AgentContextError("agent_vision_model_unavailable")
     used_ids, used_summary, memory_system, memory_context = await _memory_context(
@@ -700,13 +826,19 @@ async def build_agent_context(
     current_prompt = _current_prompt(current_user, references, memory_context)
     envelope = await provider_envelope(provider, model=run.model or "")
     limits = _runtime_limits(run, provider)
-    history = _pack_history(
-        await _history_rows(
-            db,
-            conversation=conversation,
-            current_user=current_user,
-        ),
+    compaction = await _pi_compaction(db, run)
+    history_rows, compaction_boundary_applied = await _history_rows(
+        db,
         conversation=conversation,
+        current_user=current_user,
+        first_kept_message_id=(
+            compaction.first_kept_message_id if compaction is not None else None
+        ),
+    )
+    if not compaction_boundary_applied:
+        compaction = None
+    history = _pack_history(
+        history_rows,
         provider=envelope,
         system_prompt=system_prompt,
         current_prompt=current_prompt,
@@ -720,21 +852,19 @@ async def build_agent_context(
         references=references,
         tools=tools,
     )
-    reasoning = run.reasoning_effort
-    if reasoning == "none":
-        reasoning = "off"
-    if not provider.agent_reasoning_supported:
-        reasoning = None
+    reasoning = _runtime_reasoning_effort(run, provider)
     request = AgentRuntimeRequest(
         run_id=run.id,
         agent_session_id=run.agent_session_id,
         user_id=run.user_id,
         execution_epoch=run.execution_epoch,
+        user_message_id=run.user_message_id,
         assistant_message_id=run.assistant_message_id,
         trace_id=_run_trace_id(run),
         provider=envelope,
         system_prompt=system_prompt,
         history=history,
+        compaction=compaction,
         current_prompt=current_prompt,
         references=references,
         allowed_tools=tools,
@@ -750,6 +880,7 @@ async def build_agent_context(
         conversation_id=conversation.id,
         used_memory_ids=tuple(used_ids),
         used_memory_summary=tuple(used_summary),
+        pi_compaction_restored=compaction is not None,
     )
 
 

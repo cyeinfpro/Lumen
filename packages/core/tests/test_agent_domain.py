@@ -66,6 +66,7 @@ def test_agent_input_contracts_are_strict_and_bounded() -> None:
         ],
     )
     assert body.attachments[0].label == "Product"
+    assert body.reasoning_effort == "max"
 
     with pytest.raises(ValidationError):
         AgentMessageCreateIn.model_validate(
@@ -82,6 +83,28 @@ def test_agent_input_contracts_are_strict_and_bounded() -> None:
                 {"image_id": "image-1"},
             ],
         )
+    sixteen = AgentMessageCreateIn(
+        idempotency_key="sixteen-references",
+        text="use every reference",
+        attachments=[{"image_id": f"image-{index}"} for index in range(16)],
+    )
+    assert len(sixteen.attachments) == 16
+    with pytest.raises(ValidationError):
+        AgentMessageCreateIn(
+            idempotency_key="seventeen-references",
+            text="too many references",
+            attachments=[{"image_id": f"image-{index}"} for index in range(17)],
+        )
+    assert (
+        len(
+            AgentCreateImageArgumentsIn(
+                prompt="use every reference",
+                reference_labels=[f"ref_{index}" for index in range(1, 17)],
+            ).reference_labels
+        )
+        == 16
+    )
+
     with pytest.raises(ValidationError):
         AgentToolCreateImageIn.model_validate(
             {
@@ -100,8 +123,10 @@ def test_agent_reference_labels_and_tool_hashes_are_stable() -> None:
         "ref_3",
         "ref_4",
     ]
+    assert stable_reference_label(15) == "ref_16"
+    assert stable_reference_label(63) == "ref_64"
     with pytest.raises(ValueError):
-        stable_reference_label(4)
+        stable_reference_label(64)
 
     defaults = AgentImageDefaultsIn(
         count=2,
@@ -156,6 +181,12 @@ def test_agent_capability_signing_detects_tamper_expiry_and_future_tokens() -> N
     verified = verify_agent_capability(secret, token, now=1_060)
     assert verified.run_id == "run-1"
     assert verified.allowed_reference_labels == ["ref_1", "ref_2"]
+    expanded = _claims(
+        allowed_reference_labels=[f"ref_{index}" for index in range(1, 65)]
+    )
+    assert expanded.allowed_reference_labels[-1] == "ref_64"
+    with pytest.raises(ValueError):
+        _claims(allowed_reference_labels=["ref_65"])
 
     prefix, payload, signature = token.split(".")
     replacement = "A" if payload[-1] != "A" else "B"

@@ -22,7 +22,8 @@ from .messaging import (
 from .video import ImageOut
 
 
-AGENT_MAX_REFERENCE_IMAGES = 4
+AGENT_MAX_REFERENCE_IMAGES = 16
+AGENT_MAX_SESSION_IMAGES = 64
 AGENT_MAX_IMAGES_PER_TOOL = 4
 AGENT_REFERENCE_LABEL_PREFIX = "ref_"
 
@@ -84,8 +85,13 @@ class AgentMessageCreateIn(_StrictAgentIn):
     image_defaults: AgentImageDefaultsIn = Field(default_factory=AgentImageDefaultsIn)
     allow_image: bool = True
     reasoning_effort: (
-        Literal["none", "minimal", "low", "medium", "high", "xhigh"] | None
-    ) = None
+        Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None
+    ) = "max"
+
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def default_reasoning_effort(cls, value: Any) -> Any:
+        return "max" if value is None else value
 
     @model_validator(mode="after")
     def validate_message(self) -> "AgentMessageCreateIn":
@@ -122,8 +128,11 @@ class AgentCreateImageArgumentsIn(_StrictAgentIn):
     def validate_references(self) -> "AgentCreateImageArgumentsIn":
         if len(set(self.reference_labels)) != len(self.reference_labels):
             raise ValueError("reference_labels must be unique")
+        valid_labels = {
+            stable_reference_label(index) for index in range(AGENT_MAX_SESSION_IMAGES)
+        }
         for label in self.reference_labels:
-            if not label.startswith(AGENT_REFERENCE_LABEL_PREFIX):
+            if label not in valid_labels:
                 raise ValueError("invalid reference label")
         return self
 
@@ -191,9 +200,7 @@ class AgentRunOut(BaseModel):
     agent_session_id: str
     user_message_id: str
     assistant_message_id: str
-    status: Literal[
-        "queued", "running", "succeeded", "partial", "failed", "cancelled"
-    ]
+    status: Literal["queued", "running", "succeeded", "partial", "failed", "cancelled"]
     execution_epoch: int
     last_event_seq: int
     idempotency_key: str
@@ -284,7 +291,7 @@ class AgentStatusOut(BaseModel):
 
 
 def stable_reference_label(index: int) -> str:
-    if index < 0 or index >= AGENT_MAX_REFERENCE_IMAGES:
+    if index < 0 or index >= AGENT_MAX_SESSION_IMAGES:
         raise ValueError("reference index out of range")
     return f"{AGENT_REFERENCE_LABEL_PREFIX}{index + 1}"
 
@@ -338,6 +345,7 @@ def agent_tool_semantic_key(
 __all__ = [
     "AGENT_MAX_IMAGES_PER_TOOL",
     "AGENT_MAX_REFERENCE_IMAGES",
+    "AGENT_MAX_SESSION_IMAGES",
     "AgentCreateImageArgumentsIn",
     "AgentCreateImageNormalized",
     "AgentEventEnvelope",

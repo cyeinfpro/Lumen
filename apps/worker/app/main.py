@@ -255,6 +255,7 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
             event_idle_timeout_seconds=(
                 settings.agent_runtime_event_idle_timeout_seconds
             ),
+            max_request_bytes=settings.agent_runtime_max_request_bytes,
         )
         ctx["agent_runtime_client"] = agent_runtime_client
         lifecycle.own("agent_runtime_client", agent_runtime_client.close)

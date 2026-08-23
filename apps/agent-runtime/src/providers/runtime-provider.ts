@@ -31,7 +31,18 @@ function providerApi(api: RuntimeRequest["provider"]["api"]): ProviderStreams {
   }
 }
 
-function runtimeModel(request: RuntimeRequest): Model<string> {
+function extendedThinkingLevelMap(
+  modelId: string,
+): Model<string>["thinkingLevelMap"] | undefined {
+  const canonical = modelId.toLowerCase().split("/").at(-1)?.split(":").at(-1) ?? "";
+  if (!canonical.startsWith("gpt-5.6")) return undefined;
+  return { xhigh: "xhigh", max: "max" };
+}
+
+export function runtimeModel(request: RuntimeRequest): Model<string> {
+  const thinkingLevelMap = request.provider.reasoning_supported
+    ? extendedThinkingLevelMap(request.provider.model)
+    : undefined;
   return {
     id: request.provider.model,
     name: request.provider.model,
@@ -39,6 +50,7 @@ function runtimeModel(request: RuntimeRequest): Model<string> {
     provider: request.provider.provider_id,
     baseUrl: request.provider.base_url,
     reasoning: request.provider.reasoning_supported,
+    ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
     input: request.provider.vision_supported ? ["text", "image"] : ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: request.provider.context_window,

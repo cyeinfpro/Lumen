@@ -37,6 +37,7 @@ function optimisticRun(
   userMessageId: string,
   assistantMessageId: string,
   idempotencyKey: string,
+  reasoningEffort: AgentDraft["reasoningEffort"],
 ): AgentRun {
   const now = new Date().toISOString();
   return {
@@ -49,7 +50,7 @@ function optimisticRun(
     last_event_seq: 0,
     idempotency_key: idempotencyKey,
     model: null,
-    reasoning_effort: null,
+    reasoning_effort: reasoningEffort ?? "max",
     turn_count: 0,
     tool_call_count: 0,
     usage: {},
@@ -151,6 +152,7 @@ export function stageOptimisticSubmission(input: {
     userMessageId,
     assistantMessageId,
     input.idempotencyKey,
+    input.draft.reasoningEffort,
   );
   const [userMessage, assistantMessage] = optimisticMessages(
     input.draft,

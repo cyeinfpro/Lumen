@@ -60,6 +60,7 @@ if (process.env.AGENT_LIVE_CHECK !== "1") {
     agent_session_id: randomUUID(),
     user_id: randomUUID(),
     execution_epoch: 1,
+    user_message_id: randomUUID(),
     assistant_message_id: randomUUID(),
     trace_id: randomUUID().replaceAll("-", ""),
     provider: {
@@ -71,13 +72,14 @@ if (process.env.AGENT_LIVE_CHECK !== "1") {
       model,
       proxy_url: process.env.AGENT_LIVE_PROXY_URL?.trim() || null,
       resolved_ips: [],
-      context_window: Number(process.env.AGENT_LIVE_CONTEXT_WINDOW ?? 128_000),
+      context_window: Number(process.env.AGENT_LIVE_CONTEXT_WINDOW ?? 272_000),
       max_output_tokens: Number(process.env.AGENT_LIVE_MAX_OUTPUT_TOKENS ?? 4096),
       reasoning_supported: true,
       vision_supported: vision,
     },
     system_prompt: systemPrompt,
     history: [],
+    compaction: null,
     current_prompt: process.env.AGENT_LIVE_PROMPT?.trim() || (
       tool
         ? "Call lumen_create_image exactly once with prompt 'Lumen live tool check', then confirm."

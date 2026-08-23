@@ -34,7 +34,7 @@ export function AgentAttachmentTray({
 
   return (
     <div
-      className="grid gap-2 border-b border-[var(--border-subtle)] p-3 sm:grid-cols-2"
+      className="grid max-h-[min(40dvh,24rem)] gap-2 overflow-y-auto border-b border-[var(--border-subtle)] p-3 sm:grid-cols-2"
       aria-label="参考图"
     >
       {attachments.map((attachment, index) => (

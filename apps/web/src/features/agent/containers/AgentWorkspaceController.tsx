@@ -386,7 +386,7 @@ export function AgentWorkspaceController({
         })),
         image_defaults: sendDraft.imageDefaults,
         allow_image: sendDraft.allowImage && toolGatewayConfigured,
-        reasoning_effort: sendDraft.reasoningEffort,
+        reasoning_effort: sendDraft.reasoningEffort ?? "max",
       };
       const result = await postAgentMessageWithTransportRetry(sessionId, body);
       reconcileSubmission({
@@ -494,7 +494,7 @@ export function AgentWorkspaceController({
       height: generation.image.height,
       mime: generation.image.mime,
     });
-    if (!added) setComposerError("最多添加 4 张参考图，且不能重复添加");
+    if (!added) setComposerError("最多添加 16 张参考图，且不能重复添加");
   }, [addDraftAttachment, setComposerError]);
   const pickAsset = useCallback((item: GenerationSummary) => {
     const added = addDraftAttachment(useAgentStore.getState().currentSessionId, {
@@ -507,7 +507,7 @@ export function AgentWorkspaceController({
       height: item.image.height,
       mime: item.image.mime,
     });
-    if (!added) setComposerError("最多添加 4 张参考图，且不能重复添加");
+    if (!added) setComposerError("最多添加 16 张参考图，且不能重复添加");
   }, [addDraftAttachment, setComposerError]);
 
   const continueFrom = useCallback((assistant: AgentAssistantMessage) => {

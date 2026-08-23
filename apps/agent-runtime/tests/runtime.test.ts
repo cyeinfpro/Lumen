@@ -20,10 +20,11 @@ import {
   ToolGatewayError,
   type CreateImageGateway,
 } from "../src/tools/gateway.js";
+import { runtimeModel } from "../src/providers/runtime-provider.js";
 import { runtimeRequest } from "./fixtures.js";
 
 async function fakeDependencies(
-  responses: ReturnType<typeof fauxAssistantMessage>[],
+  responses: Parameters<ReturnType<typeof fauxProvider>["setResponses"]>[0],
   gateway: CreateImageGateway,
   tokensPerSecond = 100_000,
 ): Promise<RuntimeDependencies> {
@@ -42,7 +43,12 @@ async function fakeDependencies(
   });
   modelRuntime.registerNativeProvider(faux.provider);
   return {
-    async prepareProvider() {
+    async prepareProvider(_request, onDispatch) {
+      const streamSimple = modelRuntime.streamSimple.bind(modelRuntime);
+      modelRuntime.streamSimple = (model, context, options) => {
+        void onDispatch();
+        return streamSimple(model, context, options);
+      };
       return {
         modelRuntime,
         model: faux.getModel(),
@@ -55,6 +61,181 @@ async function fakeDependencies(
 }
 
 describe("Pi Runtime execution", () => {
+  it("advertises GPT-5.6 max reasoning to Pi", () => {
+    const request = runtimeRequest({
+      provider: {
+        ...runtimeRequest().provider,
+        model: "openai/gpt-5.6-sol",
+        context_window: 272_000,
+      },
+      reasoning_effort: "max",
+    });
+
+    const model = runtimeModel(request);
+
+    expect(model.contextWindow).toBe(272_000);
+    expect(model.thinkingLevelMap).toMatchObject({
+      xhigh: "xhigh",
+      max: "max",
+    });
+  });
+
+  it("uses Pi native compaction and emits a durable checkpoint", async () => {
+    const dependencies = await fakeDependencies(
+      [
+        fauxAssistantMessage(
+          "## Goal\nPreserve the full creative session.\n\n## Next Steps\n1. Continue.",
+        ),
+        fauxAssistantMessage("Continued after native Pi compaction."),
+      ],
+      async () => {
+        throw new Error("image gateway must not run");
+      },
+    );
+    const history = Array.from({ length: 48 }, (_, index) => ({
+      message_id: `history-${String(index)}`,
+      role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+      text: `history ${String(index)} ${"context ".repeat(1_250)}`,
+    }));
+    const request = runtimeRequest({
+      history,
+      allowed_tools: [],
+      tool_gateway_url: null,
+      tool_capability: null,
+      current_prompt: "Continue the task.",
+    });
+    const writer = new CollectingEventWriter(request.run_id, request.execution_epoch);
+
+    const result = await executeAgentRun(
+      request,
+      writer,
+      new AbortController().signal,
+      undefined,
+      dependencies,
+    );
+
+    expect(result.outcome).toBe("succeeded");
+    expect(writer.events[0]?.type).toBe("run.started");
+    const checkpoint = writer.events.find(
+      (event) => event.type === "compaction.completed",
+    );
+    expect(checkpoint?.checkpoint_version).toBe(1);
+    expect(checkpoint?.pi_runtime_version).toBe("pi-0.84.2");
+    expect(String(checkpoint?.summary)).toContain(
+      "Preserve the full creative session",
+    );
+    expect(typeof checkpoint?.tokens_before).toBe("number");
+    expect(checkpoint?.provider_call_count).toBe(1);
+    expect(typeof checkpoint?.usage).toBe("object");
+    expect(String(checkpoint?.first_kept_message_id)).toMatch(/^history-/u);
+    expect(result.usage.total_tokens).toBeGreaterThan(0);
+  });
+
+  it("places a restored checkpoint before newer messages for repeat compaction", async () => {
+    const dependencies = await fakeDependencies(
+      [
+        fauxAssistantMessage("## Summary\nSecond native summary."),
+        fauxAssistantMessage("## Continuation\nPreserve the latest retained turn."),
+        fauxAssistantMessage("Answer after second compaction."),
+      ],
+      async () => {
+        throw new Error("image gateway must not run");
+      },
+    );
+    const repeated = "context ".repeat(15_000);
+    const request = runtimeRequest({
+      history: [
+        { message_id: "retained-user", role: "user", text: "retained detail" },
+        { message_id: "source-user", role: "user", text: repeated },
+        { message_id: "source-assistant", role: "assistant", text: repeated },
+        { message_id: "later-user", role: "user", text: repeated },
+        { message_id: "later-assistant", role: "assistant", text: repeated },
+      ],
+      compaction: {
+        summary: "## Summary\nPrevious native summary.",
+        first_kept_message_id: "retained-user",
+        next_message_id: "source-user",
+        tokens_before: 120_000,
+      },
+      allowed_tools: [],
+      tool_gateway_url: null,
+      tool_capability: null,
+      current_prompt: "Continue after the second checkpoint.",
+    });
+    const writer = new CollectingEventWriter(request.run_id, request.execution_epoch);
+
+    const result = await executeAgentRun(
+      request,
+      writer,
+      new AbortController().signal,
+      undefined,
+      dependencies,
+    );
+
+    expect(result.outcome).toBe("succeeded");
+    expect(
+      writer.events.filter((event) => event.type === "compaction.completed"),
+    ).toHaveLength(1);
+    expect(
+      writer.events.find((event) => event.type === "compaction.completed"),
+    ).toMatchObject({ provider_call_count: 2 });
+  });
+
+  it("restores a persisted Pi checkpoint with its retained tail", async () => {
+    const dependencies = await fakeDependencies(
+      [
+        (context) => {
+          expect(JSON.stringify(context.messages)).toContain(
+            "Persisted Pi summary",
+          );
+          expect(JSON.stringify(context.messages)).toContain("retained detail");
+          return fauxAssistantMessage("Checkpoint restored.");
+        },
+      ],
+      async () => {
+        throw new Error("image gateway must not run");
+      },
+    );
+    const request = runtimeRequest({
+      history: [
+        {
+          message_id: "retained-user",
+          role: "user",
+          text: "retained detail",
+        },
+        {
+          message_id: "retained-assistant",
+          role: "assistant",
+          text: "retained answer",
+        },
+      ],
+      compaction: {
+        summary: "## Goal\nPersisted Pi summary",
+        first_kept_message_id: "retained-user",
+        next_message_id: "retained-assistant",
+        tokens_before: 260_000,
+      },
+      allowed_tools: [],
+      tool_gateway_url: null,
+      tool_capability: null,
+      current_prompt: "Continue.",
+    });
+    const writer = new CollectingEventWriter(request.run_id, request.execution_epoch);
+
+    const result = await executeAgentRun(
+      request,
+      writer,
+      new AbortController().signal,
+      undefined,
+      dependencies,
+    );
+
+    expect(result.outcome).toBe("succeeded");
+    expect(
+      writer.events.some((event) => event.type === "compaction.completed"),
+    ).toBe(false);
+  });
+
   it("proves text -> lumen tool -> text ordering with exactly one tool", async () => {
     const gatewayCalls: Array<{ id: string; ordinal: number }> = [];
     const dependencies = await fakeDependencies(
@@ -152,6 +333,43 @@ describe("Pi Runtime execution", () => {
     expect(writer.events.find((event) => event.type === "tool.failed")).toMatchObject({
       name: "bash",
       error_code: "agent_tool_not_allowed",
+    });
+  });
+
+  it("fails the run when a requested session reference is unavailable", async () => {
+    const dependencies = await fakeDependencies(
+      [
+        fauxAssistantMessage(
+          fauxToolCall(
+            "lumen_create_image",
+            { prompt: "Revise prior image", reference_labels: ["ref_1"] },
+            { id: "missing-reference" },
+          ),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage("The reference is unavailable."),
+      ],
+      async () => {
+        throw new Error("gateway must not be called");
+      },
+    );
+    const request = runtimeRequest({ references: [] });
+    const writer = new CollectingEventWriter(request.run_id, request.execution_epoch);
+
+    const result = await executeAgentRun(
+      request,
+      writer,
+      new AbortController().signal,
+      undefined,
+      dependencies,
+    );
+
+    expect(result.outcome).toBe("failed");
+    expect(result.errorCode).toBe("agent_reference_not_found");
+    expect(result.toolCallCount).toBe(1);
+    expect(writer.events.find((event) => event.type === "tool.failed")).toMatchObject({
+      error_code: "agent_reference_not_found",
+      result_unknown: false,
     });
   });
 

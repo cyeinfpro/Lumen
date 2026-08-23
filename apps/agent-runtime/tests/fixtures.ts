@@ -11,6 +11,7 @@ export function runtimeRequest(
     agent_session_id: "session-1",
     user_id: "user-1",
     execution_epoch: 1,
+    user_message_id: "user-message-1",
     assistant_message_id: "message-1",
     trace_id: "0123456789abcdef0123456789abcdef",
     provider: {
@@ -29,6 +30,7 @@ export function runtimeRequest(
     },
     system_prompt: "You are Lumen Agent. Use only explicitly registered tools.",
     history: [],
+    compaction: null,
     current_prompt: "Create one square image and then confirm it.",
     references: [],
     allowed_tools: ["lumen_create_image"],

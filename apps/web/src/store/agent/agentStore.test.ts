@@ -68,6 +68,7 @@ test("draft persistence strips URLs and rejects another owner", () => {
   assert.deepEqual(deserializeAgentDrafts(raw, "user-b"), {});
   const restored = deserializeAgentDrafts(raw, "user-a");
   assert.equal(restored.session.attachments[0].role, "product");
+  assert.equal(restored.session.reasoningEffort, "max");
   assert.equal(restored.session.attachments[0].previewUrl, "/api/images/image-a/variants/thumb256");
 });
 
@@ -90,6 +91,32 @@ test("Agent attachments preserve controlled role and order", () => {
     ["two", "style"],
     ["one", "reference"],
   ]);
+});
+
+test("Agent attachment limit matches GPT Image 2 sixteen-image input", () => {
+  useAgentStore.getState().resetForIdentity({ userId: "user-a", epoch: 2 });
+  for (let index = 1; index <= 16; index += 1) {
+    assert.equal(
+      useAgentStore.getState().addDraftAttachment("session-limit", {
+        imageId: `image-${index}`,
+        role: "reference",
+        label: null,
+        name: `image ${index}`,
+        previewUrl: `/image-${index}`,
+      }),
+      true,
+    );
+  }
+  assert.equal(
+    useAgentStore.getState().addDraftAttachment("session-limit", {
+      imageId: "image-17",
+      role: "reference",
+      label: null,
+      name: "image 17",
+      previewUrl: "/image-17",
+    }),
+    false,
+  );
 });
 
 test("successful content clearing preserves sticky image defaults", () => {
@@ -116,6 +143,7 @@ test("successful content clearing preserves sticky image defaults", () => {
   assert.equal(draft.imageDefaults.count, 3);
   assert.equal(draft.imageDefaults.aspect_ratio, "3:4");
   assert.equal(draft.imageDefaults.quality, "4k");
+  assert.equal(draft.reasoningEffort, "max");
 });
 
 test("account deletion removes only the owning persisted Agent drafts", () => {

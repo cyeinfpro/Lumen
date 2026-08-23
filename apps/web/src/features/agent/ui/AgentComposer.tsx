@@ -141,6 +141,9 @@ export function AgentComposer({
       draft={draft}
       disabled={disabled}
       onAllowImageChange={(allowImage) => onDraftChange({ allowImage })}
+      onReasoningEffortChange={(reasoningEffort) =>
+        onDraftChange({ reasoningEffort })
+      }
       onDefaultsChange={onDefaultsChange}
     />
   );
@@ -229,9 +232,9 @@ export function AgentComposer({
                 size="md"
                 variant={settingsOpen ? "secondary" : "ghost"}
                 onClick={() => setSettingsOpen((open) => !open)}
-                aria-label="图片默认设置"
+                aria-label="Agent 设置"
                 aria-expanded={settingsOpen}
-                tooltip="图片默认设置"
+                tooltip="Agent 设置"
               >
                 <Settings2 className="h-4 w-4" aria-hidden />
               </IconButton>
@@ -278,7 +281,7 @@ export function AgentComposer({
           open={settingsOpen}
           onClose={() => setSettingsOpen(false)}
           anchorRef={settingsAnchorRef}
-          ariaLabel="图片默认设置"
+          ariaLabel="Agent 设置"
           align="right"
           maxHeight="min(680px, calc(100dvh - 32px))"
           className="w-[420px] p-0"
@@ -289,7 +292,7 @@ export function AgentComposer({
         <BottomSheet
           open={settingsOpen}
           onClose={() => setSettingsOpen(false)}
-          ariaLabel="图片默认设置"
+          ariaLabel="Agent 设置"
           snapPoints={["82%"]}
         >
           {settings}

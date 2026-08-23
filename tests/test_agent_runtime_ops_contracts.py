@@ -19,6 +19,7 @@ REQUIRED_AGENT_ENV = {
     "AGENT_MAX_IMAGE_TOOL_CALLS",
     "AGENT_MAX_IMAGES_PER_RUN",
     "AGENT_MAX_REFERENCE_IMAGES",
+    "AGENT_MAX_SESSION_IMAGES",
     "AGENT_MAX_OUTPUT_TOKENS",
     "AGENT_RUN_TIMEOUT_SECONDS",
     "AGENT_TOOL_TIMEOUT_SECONDS",
@@ -66,6 +67,9 @@ def test_agent_environment_surface_is_complete_and_closed_by_default() -> None:
     assert values["AGENT_RUNTIME_URL"] == "http://agent-runtime:8090"
     assert values["AGENT_RUNTIME_SHARED_SECRET"] == ""
     assert values["AGENT_TOOL_CAPABILITY_SECRET"] == ""
+    assert values["AGENT_MAX_REFERENCE_IMAGES"] == "16"
+    assert values["AGENT_MAX_SESSION_IMAGES"] == "64"
+    assert values["AGENT_RUNTIME_MAX_REQUEST_BYTES"] == "67108864"
 
 
 def test_agent_runtime_compose_is_private_bounded_and_read_only() -> None:
@@ -81,8 +85,7 @@ def test_agent_runtime_compose_is_private_bounded_and_read_only() -> None:
     assert runtime["cap_drop"] == ["ALL"]
     assert "no-new-privileges:true" in runtime["security_opt"]
     assert runtime["user"] == (
-        "${LUMEN_AGENT_RUNTIME_UID:-1000}:"
-        "${LUMEN_AGENT_RUNTIME_GID:-1000}"
+        "${LUMEN_AGENT_RUNTIME_UID:-1000}:${LUMEN_AGENT_RUNTIME_GID:-1000}"
     )
     assert runtime["stop_signal"] == "SIGTERM"
     assert runtime["stop_grace_period"] == "30s"
@@ -99,9 +102,7 @@ def test_all_active_compose_variants_account_for_agent_runtime() -> None:
         (ROOT / "docker-compose.dev.yml").read_text(encoding="utf-8")
     )
     local = yaml.safe_load(
-        (ROOT / "deploy/docker/docker-compose.local.yml").read_text(
-            encoding="utf-8"
-        )
+        (ROOT / "deploy/docker/docker-compose.local.yml").read_text(encoding="utf-8")
     )
     public_dns = yaml.safe_load(
         (ROOT / "docker-compose.public-dns.yml").read_text(encoding="utf-8")
@@ -117,15 +118,15 @@ def test_all_active_compose_variants_account_for_agent_runtime() -> None:
         "lumen-local-agent-runtime"
     )
     assert public_dns["services"]["agent-runtime"]["dns"]
-    assert blue_green["services"]["agent-runtime"]["profiles"] == [
-        "agent-runtime"
-    ]
+    assert blue_green["services"]["agent-runtime"]["profiles"] == ["agent-runtime"]
     assert "api-green" in blue_green["services"]
     assert blue_green["services"]["api-green"]["networks"] == ["lumen_backend"]
 
 
 def test_release_manifest_keeps_legacy_map_and_adds_runtime_component() -> None:
-    module = _load_module("agent_ops_release_manifest", "scripts/build_release_manifest.py")
+    module = _load_module(
+        "agent_ops_release_manifest", "scripts/build_release_manifest.py"
+    )
     digests = {
         service: f"sha256:{index:064x}"
         for index, service in enumerate(module.SERVICES, start=1)
@@ -174,11 +175,11 @@ def test_release_workflow_builds_signs_attests_and_promotes_five_images() -> Non
     }
     assert "merge-web" in parsed["jobs"]
     assert "expected five signed service digests" in workflow
-    assert 'services=(api worker agent-runtime tgbot web)' in workflow
-    assert 'cosign attest --yes --type spdxjson' in workflow
-    assert 'cosign verify-attestation' in workflow
+    assert "services=(api worker agent-runtime tgbot web)" in workflow
+    assert "cosign attest --yes --type spdxjson" in workflow
+    assert "cosign verify-attestation" in workflow
     assert '--image-digest "agent-runtime=${AGENT_RUNTIME_DIGEST}"' in workflow
-    assert '/tmp/release-sboms/*.spdx.json' in workflow
+    assert "/tmp/release-sboms/*.spdx.json" in workflow
     assert "! touch /app/.lumen-write-probe" in workflow
 
 
@@ -204,7 +205,7 @@ def test_installer_update_and_rollback_manage_agent_runtime_explicitly() -> None
     assert 'required.append("agent-runtime")' in sources["rollback"]
     assert "LUMEN_AGENT_RUNTIME_IMAGE_REF" in sources["rollback"]
     check = (ROOT / "scripts/update/release/check.sh").read_text(encoding="utf-8")
-    assert 'docker inspect lumen-agent-runtime' in check
+    assert "docker inspect lumen-agent-runtime" in check
     assert 'agent_runtime "missing_redeploy_required"' in check
 
 
@@ -240,9 +241,7 @@ def test_live_harnesses_prove_distinct_tool_preflight_and_isolation_contracts() 
     provider_harness = (
         ROOT / "apps/agent-runtime/scripts/live-provider-check.ts"
     ).read_text(encoding="utf-8")
-    full_stack = (ROOT / "apps/web/e2e/agent-live.spec.ts").read_text(
-        encoding="utf-8"
-    )
+    full_stack = (ROOT / "apps/web/e2e/agent-live.spec.ts").read_text(encoding="utf-8")
 
     assert "const systemPrompt = tool" in provider_harness
     assert "call only explicitly registered tools" in provider_harness

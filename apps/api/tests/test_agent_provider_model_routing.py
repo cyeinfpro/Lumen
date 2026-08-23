@@ -61,4 +61,12 @@ async def test_wallet_agent_preflight_filters_providers_by_discovered_models(
 
     assert result.model == "gpt-5.6-sol"
     assert result.eligible_provider_names == ("gpt-56", "legacy-wildcard")
-    assert result.context_window == 256000
+    assert result.context_window == 128000
+
+    large_context = await common.wallet_chat_provider_preflight(
+        object(),  # type: ignore[arg-type]
+        require_vision=False,
+        minimum_context_window=200000,
+    )
+    assert large_context.eligible_provider_names == ("gpt-56",)
+    assert large_context.context_window == 256000

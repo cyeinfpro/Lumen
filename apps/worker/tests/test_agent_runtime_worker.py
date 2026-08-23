@@ -11,6 +11,7 @@ import httpx
 import pytest
 from PIL import Image as PILImage
 
+from app import agent_context as agent_context_module
 from app import main
 from app import observability as worker_observability
 from app.agent_billing import _usage_within_reservation, agent_usage_tokens
@@ -20,13 +21,18 @@ from app.agent_context import (
     _capability,
     _encode_reference_preview,
     _pack_history,
+    _reference_visible_after,
     _runtime_limits,
+    _runtime_reasoning_effort,
     project_history_message,
+    provider_envelope,
 )
 from app.agent_runtime_client import (
     AgentRuntimeClient,
     AgentRuntimeClientError,
+    AgentRuntimeCompaction,
     AgentRuntimeEvent,
+    AgentRuntimeHistoryMessage,
     AgentRuntimeImageDefaults,
     AgentRuntimeLimits,
     AgentRuntimeProviderEnvelope,
@@ -51,6 +57,7 @@ def _request() -> AgentRuntimeRequest:
         agent_session_id="session-1",
         user_id="user-1",
         execution_epoch=1,
+        user_message_id="user-message-1",
         assistant_message_id="message-1",
         trace_id="0123456789abcdef0123456789abcdef",
         provider=AgentRuntimeProviderEnvelope(
@@ -69,6 +76,7 @@ def _request() -> AgentRuntimeRequest:
         ),
         system_prompt="Lumen Agent system prompt",
         history=[],
+        compaction=None,
         current_prompt="Reply briefly",
         references=[],
         allowed_tools=[],
@@ -216,6 +224,208 @@ async def test_runtime_client_validates_signed_monotonic_terminal_stream() -> No
 
 
 @pytest.mark.asyncio
+async def test_runtime_client_falls_back_once_for_legacy_runtime_contract() -> None:
+    payloads: list[dict[str, Any]] = []
+    checkpoint_summary = "😀" * 15_000
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads((await request.aread()).decode("utf-8")))
+        if len(payloads) == 1:
+            return httpx.Response(400, json={"error": "invalid_runtime_request"})
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/x-ndjson"},
+            content=_terminal_stream(),
+        )
+
+    request = _request().model_copy(
+        update={
+            "history": [
+                AgentRuntimeHistoryMessage(
+                    message_id="history-user-1",
+                    role="user",
+                    text="legacy-compatible history",
+                )
+            ],
+            "compaction": AgentRuntimeCompaction(
+                summary=checkpoint_summary,
+                first_kept_message_id="history-user-1",
+                next_message_id="user-message-1",
+                tokens_before=260_000,
+            ),
+        }
+    )
+    client = AgentRuntimeClient(
+        base_url="http://agent-runtime:8090",
+        shared_secret=TEST_SECRET,
+    )
+    client._client = httpx.AsyncClient(  # noqa: SLF001
+        base_url=client.base_url,
+        transport=httpx.MockTransport(handler),
+    )
+    starting = 0
+
+    async def on_starting() -> None:
+        nonlocal starting
+        starting += 1
+
+    events = [
+        event
+        async for event in client.stream(
+            request,
+            on_request_starting=on_starting,
+        )
+    ]
+    await client.close()
+
+    assert starting == 1
+    assert events[-1].type == "run.completed"
+    assert len(payloads) == 2
+    assert payloads[0]["compaction"]["summary"] == checkpoint_summary
+    assert payloads[0]["history"][0]["message_id"] == "history-user-1"
+    assert "user_message_id" not in payloads[1]
+    assert "compaction" not in payloads[1]
+    assert [item["role"] for item in payloads[1]["history"]] == [
+        "user",
+        "user",
+        "user",
+    ]
+    assert "".join(
+        item["text"] for item in payloads[1]["history"][:-1]
+    ) == (
+        "The conversation history before this point was compacted into the "
+        "following summary:\n\n<summary>\n"
+        + checkpoint_summary
+        + "\n</summary>"
+    )
+    assert payloads[1]["history"][-1] == {
+        "role": "user",
+        "text": "legacy-compatible history",
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_client_refuses_lossy_legacy_fallback() -> None:
+    requests = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(400, json={"error": "invalid_runtime_request"})
+
+    request = _request().model_copy(
+        update={
+            "history": [
+                AgentRuntimeHistoryMessage(
+                    message_id=f"history-{index}",
+                    role="user" if index % 2 == 0 else "assistant",
+                    text="complete history",
+                )
+                for index in range(257)
+            ]
+        }
+    )
+    client = AgentRuntimeClient(
+        base_url="http://agent-runtime:8090",
+        shared_secret=TEST_SECRET,
+    )
+    client._client = httpx.AsyncClient(  # noqa: SLF001
+        base_url=client.base_url,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(AgentRuntimeClientError) as captured:
+        _ = [event async for event in client.stream(request)]
+    await client.close()
+
+    assert captured.value.code == "agent_runtime_rejected"
+    assert captured.value.delivery == "proven_absent"
+    assert requests == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("provider_calls", "accepted"), [(7, True), (9, False)])
+async def test_runtime_terminal_usage_includes_compaction_call_budget(
+    provider_calls: int,
+    accepted: bool,
+) -> None:
+    input_tokens = 128_000 * provider_calls
+    usage = {
+        "input_tokens": input_tokens,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "total_tokens": input_tokens,
+    }
+    content = _line(
+        "run.started",
+        1,
+        tools=[],
+        runtime_version="pi-0.84.2",
+    ) + _line(
+        "run.completed",
+        2,
+        status="succeeded",
+        error_code=None,
+        usage=usage,
+        turn_count=6,
+        tool_call_count=0,
+        provider_dispatch_count=provider_calls,
+        provider_completed_count=provider_calls,
+    )
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/x-ndjson"},
+            content=content,
+        )
+
+    client = AgentRuntimeClient(
+        base_url="http://agent-runtime:8090",
+        shared_secret=TEST_SECRET,
+    )
+    client._client = httpx.AsyncClient(  # noqa: SLF001
+        base_url=client.base_url,
+        transport=httpx.MockTransport(handler),
+    )
+    if accepted:
+        events = [event async for event in client.stream(_request())]
+        assert events[-1].type == "run.completed"
+    else:
+        with pytest.raises(AgentRuntimeClientError) as captured:
+            _ = [event async for event in client.stream(_request())]
+        assert captured.value.code == "agent_runtime_usage_out_of_bounds"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_client_rejects_oversized_request_before_delivery() -> None:
+    client = AgentRuntimeClient(
+        base_url="http://agent-runtime:8090",
+        shared_secret=TEST_SECRET,
+        max_request_bytes=128,
+    )
+    starting = 0
+
+    async def on_starting() -> None:
+        nonlocal starting
+        starting += 1
+
+    with pytest.raises(AgentRuntimeClientError) as captured:
+        _ = [
+            event
+            async for event in client.stream(
+                _request(),
+                on_request_starting=on_starting,
+            )
+        ]
+    assert captured.value.code == "agent_runtime_request_too_large"
+    assert captured.value.delivery == "proven_absent"
+    assert starting == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("content", "code"),
     [
@@ -244,6 +454,29 @@ async def test_runtime_client_validates_signed_monotonic_terminal_stream() -> No
         (
             _line("run.started", 1, tools=[]).replace(b"\n", b"\r\n"),
             "agent_runtime_invalid_framing",
+        ),
+        (
+            _line("run.started", 1, tools=[], runtime_version="pi-0.84.2")
+            + _line(
+                "compaction.completed",
+                2,
+                checkpoint_version=1,
+                pi_runtime_version="pi-0.84.2",
+                summary="forged checkpoint",
+                first_kept_message_id="message-outside-request",
+                tokens_before=260_000,
+                provider_call_count=1,
+                usage={
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "cache_read_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "cache_write_1h_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "total_tokens": 2,
+                },
+            ),
+            "agent_runtime_invalid_event",
         ),
     ],
 )
@@ -302,12 +535,51 @@ def test_agent_history_projection_omits_image_ids_and_raw_tool_payloads() -> Non
     projected = project_history_message(message)
 
     assert projected is not None
+    assert projected.message_id == "message-history"
     assert "Image request accepted" in projected.text
     assert "role product" in projected.text
     assert "jobs 2" in projected.text
     assert "private-image-id" not in projected.text
     assert "private tool prompt" not in projected.text
     assert "private stack" not in projected.text
+
+
+@pytest.mark.asyncio
+async def test_gpt_56_agent_envelope_preserves_context_and_defaults_to_max() -> (
+    None
+):
+    provider = SimpleNamespace(
+        name="provider",
+        proxy=None,
+        base_url="https://provider.example/v1",
+        api_key="secret",
+        agent_api="openai-responses",
+        agent_context_window=128_000,
+        agent_max_output_tokens=16_384,
+        agent_reasoning_supported=True,
+        vision_supported=True,
+    )
+
+    envelope = await provider_envelope(provider, model="gpt-5.6-sol")
+    effort = _runtime_reasoning_effort(
+        SimpleNamespace(reasoning_effort=None),
+        provider,
+    )
+
+    assert envelope.context_window == 128_000
+    assert effort == "max"
+    provider.agent_context_window = 272_000
+    assert (
+        await provider_envelope(provider, model="gpt-5.6-sol")
+    ).context_window == 272_000
+    provider.agent_reasoning_supported = False
+    assert (
+        _runtime_reasoning_effort(
+            SimpleNamespace(reasoning_effort="max"),
+            provider,
+        )
+        is None
+    )
 
 
 def test_reference_preview_is_valid_bounded_webp_and_rejects_invalid_bytes() -> None:
@@ -498,6 +770,59 @@ def test_agent_usage_is_monotonic_and_later_unknown_dispatch_stays_unknown() -> 
     )
 
 
+def test_agent_history_is_passed_complete_for_pi_native_compaction() -> None:
+    rows = [
+        Message(
+            id=f"message-{index:03d}",
+            conversation_id="conversation-context",
+            role="assistant" if index % 2 else "user",
+            content={"text": "context " * 1000},
+        )
+        for index in range(130)
+    ]
+    provider = _request().provider.model_copy(
+        update={"context_window": 272_000, "max_output_tokens": 4096}
+    )
+
+    packed = _pack_history(
+        rows,
+        provider=provider,
+        system_prompt="system",
+        current_prompt="current",
+        max_output_tokens=4096,
+        reference_count=0,
+    )
+
+    assert len(packed) == len(rows)
+
+
+@pytest.mark.asyncio
+async def test_agent_reference_retention_is_rechecked_at_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert await _reference_visible_after("wallet") is None
+
+    async def resolve_int(key: str, default: int) -> int:
+        return {
+            "byok.retention_hide_enabled": 1,
+            "byok.retention_hide_days": 3,
+        }.get(key, default)
+
+    monkeypatch.setattr(
+        agent_context_module.runtime_settings,
+        "resolve_int",
+        resolve_int,
+    )
+    before = datetime.now(timezone.utc)
+    visible_after = await _reference_visible_after("byok")
+    after = datetime.now(timezone.utc)
+
+    assert visible_after is not None
+    assert before.timestamp() - visible_after.timestamp() <= 3 * 86400
+    assert after.timestamp() - visible_after.timestamp() >= 3 * 86400
+    assert after.timestamp() - visible_after.timestamp() < 3 * 86400 + 1
+
+
 def test_context_packing_rejects_fixed_content_above_model_window() -> None:
     provider = _request().provider.model_copy(
         update={"context_window": 4096, "max_output_tokens": 2048}
@@ -505,7 +830,6 @@ def test_context_packing_rejects_fixed_content_above_model_window() -> None:
     with pytest.raises(AgentContextError) as captured:
         _pack_history(
             [],
-            conversation=SimpleNamespace(summary_jsonb={}),
             provider=provider,
             system_prompt="system " * 1000,
             current_prompt="current " * 1000,
@@ -529,7 +853,9 @@ async def test_capability_uses_snapshotted_ttl_without_timeout_extension(
             return None
 
     secret = "c" * 48
-    monkeypatch.setattr(agent_orchestrator.settings, "agent_tool_capability_secret", secret)
+    monkeypatch.setattr(
+        agent_orchestrator.settings, "agent_tool_capability_secret", secret
+    )
     # agent_context and orchestrator share the same Settings singleton.
     run = SimpleNamespace(
         id="run-capability",
@@ -570,10 +896,13 @@ def test_runtime_limits_honor_configured_tool_run_timeout() -> None:
     provider = SimpleNamespace(
         agent_max_output_tokens=4096,
     )
-    assert _runtime_limits(  # type: ignore[arg-type]
-        run,
-        provider,
-    ).run_timeout_seconds == 900
+    assert (
+        _runtime_limits(  # type: ignore[arg-type]
+            run,
+            provider,
+        ).run_timeout_seconds
+        == 900
+    )
 
 
 def test_agent_generation_billing_metadata_distinguishes_t2i_and_i2i() -> None:

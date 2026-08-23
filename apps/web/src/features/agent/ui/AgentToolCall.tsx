@@ -13,6 +13,28 @@ const TOOL_STATUS: Record<AgentToolCallContract["status"], string> = {
   timed_out: "提交超时",
 };
 
+const TOOL_ERRORS: Record<string, string> = {
+  agent_image_provider_unavailable: "图片供应商不可用",
+  agent_reference_not_allowed: "参考图不在当前会话中",
+  agent_reference_not_found: "参考图已不可用",
+  agent_session_reference_limit_reached: "会话图片已达上限",
+  agent_tool_limit_reached: "本轮工具调用已达上限",
+  agent_image_limit_reached: "本轮生成数量已达上限",
+  agent_tool_result_unknown: "提交结果仍待确认",
+  INSUFFICIENT_BALANCE: "余额不足",
+  NO_ACTIVE_API_KEY: "API 密钥不可用",
+};
+
+function toolStatusText(tool: AgentToolCallContract): string {
+  if (
+    (tool.status === "failed" || tool.status === "timed_out") &&
+    tool.error_code
+  ) {
+    return TOOL_ERRORS[tool.error_code] ?? "图片请求未能提交";
+  }
+  return TOOL_STATUS[tool.status];
+}
+
 export function AgentToolCall({ tool }: { tool: AgentToolCallContract }) {
   const active = tool.status === "queued" || tool.status === "running";
   const failed = tool.status === "failed" || tool.status === "timed_out";
@@ -35,7 +57,7 @@ export function AgentToolCall({ tool }: { tool: AgentToolCallContract }) {
       <span className="min-w-0 flex-1">
         <span className="block type-label text-[var(--fg-0)]">{mode}</span>
         <span className={cn("block", failed ? "text-[var(--danger-fg)]" : "text-[var(--fg-2)]")}>
-          {TOOL_STATUS[tool.status]}
+          {toolStatusText(tool)}
           {count > 0 ? ` · ${count} 个任务` : ""}
         </span>
       </span>

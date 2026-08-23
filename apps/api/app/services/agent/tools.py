@@ -28,6 +28,7 @@ from lumen_core.model_entities import (
     Conversation,
     Image,
     Message,
+    User,
 )
 from lumen_core.schema_models import (
     AgentImageDefaultsIn,
@@ -61,6 +62,8 @@ from .common import (
     wallet_image_provider_preflight,
 )
 from .presentation import agent_tool_call_out
+from .repository import retention_filter
+from .session_images import session_image_slot_count
 
 
 def _error_code(exc: HTTPException) -> str:
@@ -226,19 +229,23 @@ async def _reference_map(
         raise http_error("agent_reference_not_found", "Agent reference not found", 400)
     selected = [by_label[label] for label in requested_labels]
     if selected:
-        owned_ids = set(
-            (
-                await db.execute(
-                    select(Image.id).where(
-                        Image.id.in_([reference.image_id for reference in selected]),
-                        Image.user_id == run.user_id,
-                        Image.deleted_at.is_(None),
-                    )
-                )
+        user = await db.get(User, run.user_id)
+        if user is None:
+            raise http_error(
+                "agent_reference_not_found",
+                "Agent reference is no longer available",
+                400,
             )
-            .scalars()
-            .all()
+        visible = await retention_filter(db, user, Image.created_at)
+        owned_statement = select(Image.id).where(
+            Image.id.in_([reference.image_id for reference in selected]),
+            Image.user_id == run.user_id,
+            Image.deleted_at.is_(None),
+            Image.artifact_status == "ready",
         )
+        if visible is not None:
+            owned_statement = owned_statement.where(visible)
+        owned_ids = set((await db.execute(owned_statement)).scalars().all())
         if owned_ids != {reference.image_id for reference in selected}:
             raise http_error(
                 "agent_reference_not_found",
@@ -381,6 +388,11 @@ async def _enforce_tool_limits(
         "max_images_per_run",
         await agent_setting_int(db, "agent.max_images_per_run"),
     )
+    max_session_references = _snapshot_limit(
+        limits,
+        "max_session_images",
+        await agent_setting_int(db, "agent.max_session_images"),
+    )
     image_tool_calls = int(
         (
             await db.execute(
@@ -391,6 +403,26 @@ async def _enforce_tool_limits(
             )
         ).scalar_one()
         or 0
+    )
+    reference_image_ids = set(
+        (
+            await db.execute(
+                select(AgentRunReference.image_id).where(
+                    AgentRunReference.agent_run_id == run.id
+                )
+            )
+        ).scalars()
+    )
+    user = await db.get(User, run.user_id)
+    if user is None:
+        raise http_error("agent_snapshot_incomplete", "Agent user is missing", 409)
+    visible = await retention_filter(db, user, Image.created_at)
+    session_image_slots = await session_image_slot_count(
+        db,
+        session_id=run.agent_session_id,
+        user_id=run.user_id,
+        snapshotted_image_ids=reference_image_ids,
+        image_visibility_filter=visible,
     )
     existing_images = int(
         (
@@ -411,6 +443,13 @@ async def _enforce_tool_limits(
         )
     if existing_images + requested_count > max_images_per_run:
         raise http_error("agent_image_limit_reached", "Agent image limit reached", 409)
+    if session_image_slots + requested_count > max_session_references:
+        raise http_error(
+            "agent_session_reference_limit_reached",
+            "Agent session reference image limit reached",
+            409,
+            max_session_images=max_session_references,
+        )
 
 
 async def _create_tool_generation(

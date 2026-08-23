@@ -53,6 +53,7 @@ SEEDANCE_DURATION_ONLINE_REVISION = "0066_seedance_duration_online"
 SEEDANCE_25_1080P_REVISION = "0067_seedance_25_1080p"
 OPENAI_CHAT_DEFAULTS_REVISION = "0068_openai_chat_defaults"
 AGENT_FOUNDATION_REVISION = "0069_agent_foundation"
+AGENT_SESSION_CONTEXT_REVISION = "0070_agent_session_context"
 
 
 @dataclass(frozen=True)
@@ -572,6 +573,7 @@ def test_repair_revision_remains_in_the_single_head_chain() -> None:
     seedance_25_1080p = scripts.get_revision(SEEDANCE_25_1080P_REVISION)
     openai_chat_defaults = scripts.get_revision(OPENAI_CHAT_DEFAULTS_REVISION)
     agent_foundation = scripts.get_revision(AGENT_FOUNDATION_REVISION)
+    agent_session_context = scripts.get_revision(AGENT_SESSION_CONTEXT_REVISION)
 
     assert repair is not None
     assert repair.down_revision == "0056_outbox_due_index"
@@ -599,7 +601,9 @@ def test_repair_revision_remains_in_the_single_head_chain() -> None:
     assert openai_chat_defaults.down_revision == SEEDANCE_25_1080P_REVISION
     assert agent_foundation is not None
     assert agent_foundation.down_revision == OPENAI_CHAT_DEFAULTS_REVISION
-    assert scripts.get_heads() == [AGENT_FOUNDATION_REVISION]
+    assert agent_session_context is not None
+    assert agent_session_context.down_revision == AGENT_FOUNDATION_REVISION
+    assert scripts.get_heads() == [AGENT_SESSION_CONTEXT_REVISION]
 
 
 @pytest.mark.parametrize(

@@ -8,6 +8,16 @@ describe("Runtime contracts", () => {
     expect(parseRuntimeRequest(runtimeRequest()).run_id).toBe("run-1");
   });
 
+  it("accepts legacy v1 envelopes without Pi checkpoint fields", () => {
+    const legacy = runtimeRequest();
+    delete legacy.compaction;
+    const legacyEnvelope = {
+      ...legacy,
+      history: [{ role: "user" as const, text: "legacy" }],
+    };
+    expect(parseRuntimeRequest(legacyEnvelope).compaction).toBeUndefined();
+  });
+
   it("rejects extra fields and credential-bearing URLs", () => {
     expect(() =>
       parseRuntimeRequest({ ...runtimeRequest(), injected: true }),
@@ -49,6 +59,62 @@ describe("Runtime contracts", () => {
         }),
       ),
     ).toThrow(/tool gateway/u);
+  });
+
+  it("accepts session labels through ref_64 and rejects larger catalogs", () => {
+    const reference = {
+      reference_label: "ref_64",
+      role: "reference",
+      display_label: null,
+      mime_type: "image/webp",
+      data_base64: Buffer.from("preview").toString("base64"),
+    } as const;
+    expect(
+      parseRuntimeRequest(runtimeRequest({ references: [reference] })).references[0]
+        ?.reference_label,
+    ).toBe("ref_64");
+    expect(() =>
+      parseRuntimeRequest(
+        runtimeRequest({
+          references: [
+            { ...reference, reference_label: "ref_65" },
+          ],
+        }),
+      ),
+    ).toThrow(/invalid request/u);
+  });
+
+  it("requires Pi compaction boundaries to reference retained history", () => {
+    const history = [
+      { message_id: "message-1", role: "user" as const, text: "old context" },
+      { message_id: "message-2", role: "assistant" as const, text: "reply" },
+    ];
+    expect(
+      parseRuntimeRequest(
+        runtimeRequest({
+          history,
+          compaction: {
+            summary: "## Goal\nKeep working",
+            first_kept_message_id: "message-1",
+            next_message_id: "user-message-1",
+            tokens_before: 260_000,
+          },
+        }),
+      ).compaction?.first_kept_message_id,
+    ).toBe("message-1");
+    expect(() =>
+      parseRuntimeRequest(
+        runtimeRequest({
+          history,
+          compaction: {
+            summary: "missing boundary",
+            first_kept_message_id: "message-missing",
+            next_message_id: "user-message-1",
+            tokens_before: 260_000,
+          },
+        }),
+      ),
+    ).toThrow(/compaction boundary/u);
   });
 
   it("does not combine a proxy path with direct DNS pins", () => {

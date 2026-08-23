@@ -28,7 +28,7 @@ const ReasoningEffort = Type.Union([
 
 export const RuntimeReferenceSchema = Type.Object(
   {
-    reference_label: Type.String({ pattern: "^ref_[1-4]$" }),
+    reference_label: Type.String({ pattern: "^ref_(?:[1-9]|[1-5][0-9]|6[0-4])$" }),
     role: Type.String({ minLength: 1, maxLength: 32 }),
     display_label: Type.Union([Type.String({ maxLength: 80 }), Type.Null()]),
     mime_type: Type.Union([
@@ -43,8 +43,19 @@ export const RuntimeReferenceSchema = Type.Object(
 
 export const RuntimeHistoryMessageSchema = Type.Object(
   {
+    message_id: Type.Optional(Identifier),
     role: Type.Union([Type.Literal("user"), Type.Literal("assistant")]),
     text: Type.String({ minLength: 1, maxLength: 20_000 }),
+  },
+  { additionalProperties: false },
+);
+
+const RuntimeCompactionSchema = Type.Object(
+  {
+    summary: Type.String({ minLength: 1, maxLength: 48_000 }),
+    first_kept_message_id: Identifier,
+    next_message_id: Identifier,
+    tokens_before: Type.Integer({ minimum: 1, maximum: 2_000_000 }),
   },
   { additionalProperties: false },
 );
@@ -56,6 +67,7 @@ export const RuntimeRequestSchema = Type.Object(
     agent_session_id: Identifier,
     user_id: Identifier,
     execution_epoch: Type.Integer({ minimum: 1 }),
+    user_message_id: Type.Optional(Identifier),
     assistant_message_id: Identifier,
     trace_id: Type.String({ pattern: "^[a-f0-9]{32}$" }),
     provider: Type.Object(
@@ -83,9 +95,12 @@ export const RuntimeRequestSchema = Type.Object(
       { additionalProperties: false },
     ),
     system_prompt: LimitedText,
-    history: Type.Array(RuntimeHistoryMessageSchema, { maxItems: 256 }),
+    history: Type.Array(RuntimeHistoryMessageSchema, { maxItems: 2048 }),
+    compaction: Type.Optional(
+      Type.Union([RuntimeCompactionSchema, Type.Null()]),
+    ),
     current_prompt: Type.String({ minLength: 1, maxLength: 40_000 }),
-    references: Type.Array(RuntimeReferenceSchema, { maxItems: 4 }),
+    references: Type.Array(RuntimeReferenceSchema, { maxItems: 64 }),
     allowed_tools: Type.Array(Type.Literal(AGENT_TOOL_CREATE_IMAGE), { maxItems: 1 }),
     image_defaults: Type.Object(
       {
@@ -169,6 +184,22 @@ function validUrl(raw: string, allowedProtocols: ReadonlySet<string>): boolean {
 }
 
 function strictRequestChecks(request: RuntimeRequest): void {
+  const historyIds = request.history
+    .map((message) => message.message_id)
+    .filter((messageId): messageId is string => messageId !== undefined);
+  if (new Set(historyIds).size !== historyIds.length) {
+    throw new Error("duplicate history message id");
+  }
+  if (
+    request.compaction !== undefined &&
+    request.compaction !== null &&
+    (historyIds.length !== request.history.length ||
+      !historyIds.includes(request.compaction.first_kept_message_id) ||
+      (!historyIds.includes(request.compaction.next_message_id) &&
+        request.compaction.next_message_id !== request.user_message_id))
+  ) {
+    throw new Error("compaction boundary is absent from history");
+  }
   const labels = request.references.map((reference) => reference.reference_label);
   if (new Set(labels).size !== labels.length) throw new Error("duplicate reference label");
   if (request.references.length > 0 && !request.provider.vision_supported) {

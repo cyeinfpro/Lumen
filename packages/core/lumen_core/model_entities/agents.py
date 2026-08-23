@@ -78,9 +78,7 @@ class AgentRun(Base, TimestampMixin):
             "last_event_seq >= 0",
             name="ck_agent_runs_event_seq_nonnegative",
         ),
-        CheckConstraint(
-            "turn_count >= 0", name="ck_agent_runs_turn_count_nonnegative"
-        ),
+        CheckConstraint("turn_count >= 0", name="ck_agent_runs_turn_count_nonnegative"),
         CheckConstraint(
             "tool_call_count >= 0",
             name="ck_agent_runs_tool_count_nonnegative",
@@ -149,7 +147,12 @@ class AgentRun(Base, TimestampMixin):
     system_prompt_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
     provider_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    reasoning_effort: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    reasoning_effort: Mapped[str | None] = mapped_column(
+        String(16),
+        nullable=True,
+        default="max",
+        server_default="max",
+    )
     user_api_credential_id: Mapped[str | None] = mapped_column(
         String(36),
         ForeignKey("user_api_credentials.id", ondelete="SET NULL"),
@@ -283,17 +286,13 @@ class AgentToolCall(Base, TimestampMixin):
         UniqueConstraint(
             "agent_run_id", "semantic_key", name="uq_agent_tool_calls_semantic"
         ),
-        UniqueConstraint(
-            "agent_run_id", "ordinal", name="uq_agent_tool_calls_ordinal"
-        ),
+        UniqueConstraint("agent_run_id", "ordinal", name="uq_agent_tool_calls_ordinal"),
         CheckConstraint(
             "status IN ('queued', 'running', 'succeeded', 'failed', "
             "'cancelled', 'timed_out')",
             name="ck_agent_tool_calls_status",
         ),
-        CheckConstraint(
-            "ordinal >= 0", name="ck_agent_tool_calls_ordinal_nonnegative"
-        ),
+        CheckConstraint("ordinal >= 0", name="ck_agent_tool_calls_ordinal_nonnegative"),
         CheckConstraint(
             "execution_epoch >= 0",
             name="ck_agent_tool_calls_epoch_nonnegative",

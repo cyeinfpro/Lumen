@@ -140,7 +140,8 @@ async def _patch_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
             "agent.max_tool_calls": 3,
             "agent.max_image_tool_calls": 2,
             "agent.max_images_per_run": 4,
-            "agent.max_reference_images": 4,
+            "agent.max_reference_images": 16,
+            "agent.max_session_images": 64,
             "agent.max_output_tokens": 4096,
             "agent.run_timeout_seconds": 180,
             "agent.tool_timeout_seconds": 30,
@@ -167,7 +168,9 @@ async def _patch_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(agent_messages, "wallet_chat_provider_preflight", provider)
     monkeypatch.setattr(agent_messages, "reserve_agent_text", reserve)
     monkeypatch.setattr(agent_messages, "agent_setting_int", setting)
-    monkeypatch.setattr(agent_messages, "resolve_system_prompt_for_message", no_system_prompt)
+    monkeypatch.setattr(
+        agent_messages, "resolve_system_prompt_for_message", no_system_prompt
+    )
     monkeypatch.setattr(agent_messages, "write_audit", no_audit)
     monkeypatch.setattr(agent_messages, "publish_agent_events_best_effort", no_publish)
     monkeypatch.setattr(agent_tools, "lock_active_user", no_lock)

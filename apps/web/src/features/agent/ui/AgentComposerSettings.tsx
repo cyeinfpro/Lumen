@@ -2,23 +2,50 @@
 
 import { AspectRatioPicker } from "@/components/ui/composer/shared/AspectRatioPicker";
 import { Select, Switch } from "@/components/ui/primitives";
-import type { AgentDraft, AgentImageDefaults } from "../model/contracts";
+import type {
+  AgentDraft,
+  AgentImageDefaults,
+  AgentReasoningEffort,
+} from "../model/contracts";
 
 export function AgentComposerSettings({
   draft,
   disabled,
   onAllowImageChange,
+  onReasoningEffortChange,
   onDefaultsChange,
 }: {
   draft: AgentDraft;
   disabled: boolean;
   onAllowImageChange: (enabled: boolean) => void;
+  onReasoningEffortChange: (effort: AgentReasoningEffort) => void;
   onDefaultsChange: (patch: Partial<AgentImageDefaults>) => void;
 }) {
   const defaults = draft.imageDefaults;
   const settingsDisabled = disabled || !draft.allowImage;
   return (
     <div className="grid gap-4 p-4">
+      <SettingField label="推理强度">
+        <Select
+          value={draft.reasoningEffort ?? "max"}
+          onChange={(event) =>
+            onReasoningEffortChange(
+              event.target.value as AgentReasoningEffort,
+            )
+          }
+          disabled={disabled}
+          aria-label="Agent 推理强度"
+        >
+          <option value="none">关闭</option>
+          <option value="minimal">极低</option>
+          <option value="low">低</option>
+          <option value="medium">中</option>
+          <option value="high">高</option>
+          <option value="xhigh">超高</option>
+          <option value="max">最大</option>
+        </Select>
+      </SettingField>
+
       <div className="flex min-h-11 items-center justify-between gap-4 border-b border-[var(--border-subtle)] pb-3">
         <div>
           <p className="type-label text-[var(--fg-0)]">允许生图</p>

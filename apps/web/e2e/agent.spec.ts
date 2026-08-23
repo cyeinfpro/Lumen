@@ -99,6 +99,7 @@ test("text reply submits and restores from authoritative snapshots", async ({
     : 0;
   expect(assistantBottom <= (composerBox as DOMRect).top + 1).toBe(true);
   expect(fixture.lastMessageBody?.text).toBe("给我一个产品视觉方向");
+  expect(fixture.lastMessageBody?.reasoning_effort).toBe("max");
   await page.reload();
   await expect(page.getByText("已完成产品视觉方向。")).toBeVisible();
 });

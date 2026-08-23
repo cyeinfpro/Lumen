@@ -139,6 +139,71 @@ async def _seed(factory: async_sessionmaker[AsyncSession]) -> None:
 
 
 @pytest.mark.asyncio
+async def test_pi_compaction_checkpoint_is_epoch_fenced_and_usage_accounted(
+    agent_db: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed(agent_db)
+    claim, _started = await persistence.claim_agent_run("run-agent-persist")
+    event = AgentRuntimeEvent(
+        version=1,
+        type="compaction.completed",
+        seq=2,
+        run_id=claim.run_id,
+        execution_epoch=claim.execution_epoch,
+        checkpoint_version=1,
+        pi_runtime_version="pi-0.84.2",
+        summary="## Goal\nPreserve the complete Agent task context.",
+        first_kept_message_id="message-user-persist",
+        tokens_before=260_000,
+        provider_call_count=1,
+        usage={
+            "input_tokens": 120,
+            "output_tokens": 20,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_write_1h_tokens": 0,
+            "reasoning_tokens": 5,
+            "total_tokens": 140,
+        },
+    )
+
+    assert not await persistence.record_runtime_checkpoint(
+        claim.run_id,
+        claim.execution_epoch + 1,
+        event,
+    )
+    assert await persistence.record_runtime_checkpoint(
+        claim.run_id,
+        claim.execution_epoch,
+        event,
+    )
+    assert await persistence.record_runtime_checkpoint(
+        claim.run_id,
+        claim.execution_epoch,
+        event,
+    )
+
+    async with agent_db() as db:
+        run = await db.get(AgentRun, claim.run_id)
+        assert run is not None
+        checkpoint = run.dispatch_jsonb["pi_compaction"]
+        assert checkpoint["first_kept_message_id"] == "message-user-persist"
+        assert checkpoint["tokens_before"] == 260_000
+        assert checkpoint["next_message_id"] == run.user_message_id
+        assert checkpoint["source_run_id"] == run.id
+        assert checkpoint["source_execution_epoch"] == claim.execution_epoch
+        assert run.usage_jsonb["input_tokens"] == 120
+        assert run.usage_jsonb["reasoning_tokens"] == 5
+        assert run.dispatch_jsonb["pi_compaction_count"] == 1
+        assert run.dispatch_jsonb["provider_completed_count"] == 1
+        assert run.dispatch_jsonb["runtime_delivery"] == "compaction_ready"
+
+    reclaimed, _started = await persistence.claim_agent_run(claim.run_id)
+    assert reclaimed.action == "result_unknown"
+    assert reclaimed.execution_epoch == claim.execution_epoch
+
+
+@pytest.mark.asyncio
 async def test_agent_claim_flush_epoch_and_partial_terminal_are_atomic(
     agent_db: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -395,9 +460,7 @@ async def test_gateway_unreachable_persists_unknown_tool_terminal(
     )
 
     async with agent_db() as db:
-        tool = (
-            await db.execute(select(AgentToolCall))
-        ).scalar_one()
+        tool = (await db.execute(select(AgentToolCall))).scalar_one()
         assert tool.status == "timed_out"
         assert tool.error_code == "agent_tool_result_unknown"
         assert tool.arguments_jsonb == {}
