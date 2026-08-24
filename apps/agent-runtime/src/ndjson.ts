@@ -49,7 +49,6 @@ function waitForDrain(
 export class NdjsonEventWriter implements EventWriter {
   private nextSequence = 1;
   private totalBytes = 0;
-  private ordinaryEvents = 0;
   private writeTail: Promise<void> = Promise.resolve();
   private failure: Error | null = null;
 
@@ -58,8 +57,6 @@ export class NdjsonEventWriter implements EventWriter {
     private readonly runId: string,
     private readonly executionEpoch: number,
     private readonly maxLineBytes: number,
-    private readonly maxStreamBytes: number,
-    private readonly maxEvents: number,
     private readonly drainTimeoutMs: number = DRAIN_TIMEOUT_MS,
   ) {}
 
@@ -86,6 +83,7 @@ export class NdjsonEventWriter implements EventWriter {
     payload: Record<string, unknown> = {},
     force = false,
   ): Promise<boolean> {
+    void force;
     if (this.failure !== null) throw this.failure;
     let accepted = false;
     const write = this.writeTail.then(async () => {
@@ -101,18 +99,6 @@ export class NdjsonEventWriter implements EventWriter {
       const line = `${JSON.stringify(event)}\n`;
       const lineBytes = Buffer.byteLength(line, "utf8");
       if (lineBytes > this.maxLineBytes) return;
-      const eventLimit = force
-        ? this.maxEvents
-        : Math.max(1, this.maxEvents - 1);
-      const byteLimit = force
-        ? this.maxStreamBytes
-        : this.maxStreamBytes - this.maxLineBytes;
-      if (
-        this.ordinaryEvents >= eventLimit ||
-        this.totalBytes + lineBytes > byteLimit
-      ) {
-        return;
-      }
       try {
         if (this.response.destroyed || this.response.writableEnded) {
           throw new Error("NDJSON response is not writable");
@@ -124,7 +110,6 @@ export class NdjsonEventWriter implements EventWriter {
         throw this.latchFailure(error);
       }
       this.nextSequence += 1;
-      this.ordinaryEvents += 1;
       this.totalBytes += lineBytes;
       accepted = true;
     });

@@ -34,20 +34,12 @@ export interface RuntimeConfig {
   readonly nonceCacheSize: number;
   readonly maxRequestBytes: number;
   readonly maxLineBytes: number;
-  readonly maxStreamBytes: number;
-  readonly maxEvents: number;
   readonly maxConcurrentRuns: number;
   readonly requestBodyTimeoutSeconds: number;
   readonly heartbeatIntervalSeconds: number;
 }
 
 export function validateRuntimeConfig(config: RuntimeConfig): RuntimeConfig {
-  if (config.maxStreamBytes < config.maxLineBytes * 2) {
-    throw new Error(
-      "AGENT_RUNTIME_MAX_STREAM_BYTES must be at least twice " +
-        "AGENT_RUNTIME_MAX_LINE_BYTES",
-    );
-  }
   return config;
 }
 
@@ -71,13 +63,6 @@ export function loadConfig(): RuntimeConfig {
       64 * 1024 * 1024,
     ),
     maxLineBytes: integerEnv("AGENT_RUNTIME_MAX_LINE_BYTES", 64 * 1024, 1024, 1024 * 1024),
-    maxStreamBytes: integerEnv(
-      "AGENT_RUNTIME_MAX_STREAM_BYTES",
-      8 * 1024 * 1024,
-      64 * 1024,
-      64 * 1024 * 1024,
-    ),
-    maxEvents: integerEnv("AGENT_RUNTIME_MAX_EVENTS", 4096, 512, 20_000),
     maxConcurrentRuns: integerEnv("AGENT_RUNTIME_MAX_CONCURRENT_RUNS", 8, 1, 128),
     requestBodyTimeoutSeconds: integerEnv(
       "AGENT_RUNTIME_REQUEST_BODY_TIMEOUT_SECONDS",

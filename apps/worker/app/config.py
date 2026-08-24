@@ -181,15 +181,8 @@ class Settings(BaseSettings):
         ge=1024,
         le=1024 * 1024,
     )
-    agent_runtime_max_stream_bytes: int = Field(
-        default=8 * 1024 * 1024,
-        ge=64 * 1024,
-        le=64 * 1024 * 1024,
-    )
-    agent_runtime_max_events: int = Field(default=4096, ge=512, le=20_000)
     agent_text_flush_chars: int = Field(default=256, ge=32, le=8192)
     agent_text_flush_seconds: float = Field(default=0.5, ge=0.1, le=10)
-    agent_max_output_chars: int = Field(default=262144, ge=1024, le=1_000_000)
     agent_reference_preview_max_bytes: int = Field(
         default=128 * 1024, ge=64 * 1024, le=512 * 1024
     )
@@ -205,11 +198,6 @@ class Settings(BaseSettings):
             raise ValueError(
                 "AGENT_RUNTIME_EVENT_IDLE_TIMEOUT_SECONDS must exceed twice "
                 "AGENT_RUNTIME_HEARTBEAT_INTERVAL_SECONDS"
-            )
-        if self.agent_runtime_max_stream_bytes < self.agent_runtime_max_line_bytes * 2:
-            raise ValueError(
-                "AGENT_RUNTIME_MAX_STREAM_BYTES must be at least twice "
-                "AGENT_RUNTIME_MAX_LINE_BYTES"
             )
         env = self.app_env.strip().lower()
         is_dev = env in _DEV_ENVIRONMENTS

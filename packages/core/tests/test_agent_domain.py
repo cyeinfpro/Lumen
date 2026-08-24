@@ -215,7 +215,7 @@ def test_agent_capability_signing_detects_tamper_expiry_and_future_tokens() -> N
     assert unconfigured.value.code == "agent_capability_unconfigured"
 
     with pytest.raises(ValidationError, match="lifetime"):
-        _claims(expires_at=4_601)
+        _claims(expires_at=87_401)
 
 
 def test_agent_state_and_event_contracts_fence_terminal_transitions() -> None:
@@ -324,14 +324,8 @@ def test_agent_runtime_settings_are_closed_and_bounded() -> None:
     expected = {
         "agent.enabled": ("AGENT_ENABLED", "0", "1"),
         "ui.nav.agent_visible": ("UI_NAV_AGENT_VISIBLE", "0", "1"),
-        "agent.max_turns": ("AGENT_MAX_TURNS", "1", "12"),
-        "agent.max_output_tokens": ("AGENT_MAX_OUTPUT_TOKENS", "256", "32000"),
-        "agent.run_timeout_seconds": ("AGENT_RUN_TIMEOUT_SECONDS", "10", "1500"),
-        "agent.capability_ttl_seconds": (
-            "AGENT_CAPABILITY_TTL_SECONDS",
-            "15",
-            "3600",
-        ),
+        "agent.max_image_tool_calls": ("AGENT_MAX_IMAGE_TOOL_CALLS", "0", "8"),
+        "agent.max_images_per_run": ("AGENT_MAX_IMAGES_PER_RUN", "1", "16"),
     }
     for key, (environment, minimum, maximum) in expected.items():
         spec = get_spec(key)
@@ -341,6 +335,15 @@ def test_agent_runtime_settings_are_closed_and_bounded() -> None:
         assert parse_value(spec, maximum) == int(maximum)
         with pytest.raises(ValueError):
             parse_value(spec, str(int(maximum) + 1))
+    for removed in (
+        "agent.max_turns",
+        "agent.max_tool_calls",
+        "agent.max_output_tokens",
+        "agent.run_timeout_seconds",
+        "agent.tool_timeout_seconds",
+        "agent.capability_ttl_seconds",
+    ):
+        assert get_spec(removed) is None
 
 
 def test_provider_contract_carries_verified_vision_capability() -> None:

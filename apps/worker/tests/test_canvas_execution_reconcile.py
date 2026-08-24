@@ -705,7 +705,11 @@ async def test_periodic_reconcile_ignores_redis_availability(
 
 
 def test_worker_registers_canvas_task_and_cron() -> None:
-    assert reconcile.reconcile_canvas_execution in WorkerSettings.functions
+    assert any(
+        getattr(function, "coroutine", function)
+        is reconcile.reconcile_canvas_execution
+        for function in WorkerSettings.functions
+    )
     assert any(
         job.coroutine is reconcile.reconcile_canvas_executions
         for job in WorkerSettings.cron_jobs

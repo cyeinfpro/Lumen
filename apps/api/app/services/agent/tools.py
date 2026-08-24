@@ -372,11 +372,9 @@ async def _enforce_tool_limits(
     run: AgentRun,
     requested_count: int,
 ) -> None:
-    limits = _snapshot_dict(run, "limits")
-    max_tool_calls = _snapshot_limit(
-        limits,
-        "max_tool_calls",
-        await agent_setting_int(db, "agent.max_tool_calls"),
+    limits = _snapshot_dict(run, "tool_policy") or _snapshot_dict(run, "limits")
+    reference_policy = (
+        _snapshot_dict(run, "reference_policy") or _snapshot_dict(run, "limits")
     )
     max_image_tool_calls = _snapshot_limit(
         limits,
@@ -389,7 +387,7 @@ async def _enforce_tool_limits(
         await agent_setting_int(db, "agent.max_images_per_run"),
     )
     max_session_references = _snapshot_limit(
-        limits,
+        reference_policy,
         "max_session_images",
         await agent_setting_int(db, "agent.max_session_images"),
     )
@@ -434,10 +432,7 @@ async def _enforce_tool_limits(
         ).scalar_one()
         or 0
     )
-    if (
-        run.tool_call_count >= max_tool_calls
-        or image_tool_calls >= max_image_tool_calls
-    ):
+    if image_tool_calls >= max_image_tool_calls:
         raise http_error(
             "agent_tool_limit_reached", "Agent tool-call limit reached", 409
         )

@@ -6,7 +6,7 @@ Accepted for the closed-by-default Agent rollout.
 
 ## Context
 
-Lumen needs a bounded model/tool loop without moving product state, provider
+Lumen needs Pi's native model/tool loop without moving product state, provider
 selection, credentials, billing, image generation, or recovery into Pi. The
 Python Worker and the Node Runtime are separate containers, and existing Lumen
 providers may require direct, HTTP-proxy, SOCKS5, or Worker-created SSH SOCKS
@@ -40,11 +40,11 @@ ID, the source run's user-message continuation boundary, usage, source
 run/epoch/event sequence, and token boundary are persisted as a versioned ready
 checkpoint on the source AgentRun. A later run restores it with `appendMessage()` plus `appendCompaction()` at the
 original tree position, so messages after the checkpoint remain eligible for a
-later native compaction. The source run becomes non-replayable as soon as the
-checkpoint is durable: there is no bidirectional acknowledgement barrier before
-the Runtime may dispatch the current prompt. Automatic post-turn and
-overflow-retry compaction are disabled before the user prompt because Lumen
-cannot safely replay streamed text or paid tool side effects.
+later native compaction. Runtime v2 also leaves automatic post-turn and
+overflow-retry compaction enabled. Before a Pi retry, the negotiated
+`text-reset-v1` event replaces the discarded streamed draft in Worker,
+PostgreSQL, SSE, and Web. Paid image submission remains protected by semantic
+idempotency and unknown results are never automatically resubmitted.
 
 The Runtime uses `noTools: "builtin"`, an explicit tool allowlist, and checks
 both active and configured tool names after session construction. The only
@@ -61,20 +61,20 @@ v1\nMETHOD\nPATH\nTIMESTAMP\nNONCE\nSHA256(body)
 
 Runtime enforces clock skew, fixed-length constant-time signature comparison,
 and a bounded one-use nonce cache before parsing credentials or writing NDJSON.
-Requests and responses have byte, line, event, text, turn, tool, image, and wall
-clock limits. NDJSON accepts LF framing only, requires monotonic sequence
+Request bodies and individual response lines have transport bounds. NDJSON has
+no aggregate event/byte lifecycle cutoff; it accepts LF framing only, requires monotonic sequence
 numbers and matching run/epoch identity, honors response backpressure, and
 requires exactly one terminal event.
 
 Runtime nonce state is process-local. Production deployment therefore keeps a
 single Runtime replica for this phase. Worker also uses one execution epoch and
 never retries a Runtime invocation after the request may have reached a
-provider. During a rolling protocol upgrade only, an HTTP 400 or 413 from the
-old Runtime before NDJSON execution permits one same-epoch legacy-envelope
-retry. That envelope prepends the Pi summary to the retained history and is
-constructed only when the complete request still satisfies the old 256-message,
-four-reference, `ref_1..ref_4`, and 8 MiB contract. Otherwise it fails closed;
-timeouts, disconnects, 5xx responses, and any NDJSON response never retry.
+provider. Runtime v2 removes Lumen wall-clock, turn, text-size, and output-token
+lifecycle budgets. A new Worker never downgrades v2 to an old Runtime contract;
+an unsupported Runtime fails before provider dispatch. Deployment updates
+Runtime before Worker, while the new Runtime accepts old Worker v1 requests and
+ignores their lifecycle fields. Disconnects, 5xx responses, and any NDJSON
+response never retry.
 Horizontal Runtime replicas require a durable ticket-redemption service before
 they are supported.
 

@@ -18,7 +18,6 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.agent_capability import (
-    AGENT_CAPABILITY_MAX_CLOCK_SKEW_SECONDS,
     AGENT_CAPABILITY_MAX_TTL_SECONDS,
     AgentCapabilityClaims,
     issue_agent_capability,
@@ -32,10 +31,6 @@ from lumen_core.byok_retention import (
 )
 from lumen_core.context_window import estimate_text_tokens
 from lumen_core.message_content import public_message_content
-from lumen_core.runtime_setting_agent_specs import (
-    AGENT_RUN_TIMEOUT_DEFAULT_SECONDS,
-    AGENT_RUN_TIMEOUT_MAX_SECONDS,
-)
 from lumen_core.model_base import new_uuid7
 from lumen_core.model_entities import (
     AgentRun,
@@ -52,7 +47,7 @@ from .agent_runtime_client import (
     AgentRuntimeCompaction,
     AgentRuntimeHistoryMessage,
     AgentRuntimeImageDefaults,
-    AgentRuntimeLimits,
+    AgentRuntimeToolPolicy,
     AgentRuntimeProviderEnvelope,
     AgentRuntimeReference,
     AgentRuntimeRequest,
@@ -139,31 +134,17 @@ def _nonnegative_int(value: Any, fallback: int, *, maximum: int) -> int:
     return fallback
 
 
-def _runtime_limits(run: AgentRun, provider: ResolvedProvider) -> AgentRuntimeLimits:
-    limits = _snapshot_dict(run, "limits")
-    output_tokens = min(
-        _positive_int(limits.get("max_output_tokens"), 4096, maximum=32000),
-        max(1, int(provider.agent_max_output_tokens)),
-    )
-    return AgentRuntimeLimits(
-        max_turns=_positive_int(limits.get("max_turns"), 6, maximum=12),
-        max_tool_calls=_nonnegative_int(limits.get("max_tool_calls"), 3, maximum=12),
+def _runtime_tool_policy(run: AgentRun) -> AgentRuntimeToolPolicy:
+    policy = _snapshot_dict(run, "tool_policy")
+    if not policy:
+        policy = _snapshot_dict(run, "limits")
+    return AgentRuntimeToolPolicy(
         max_image_tool_calls=_nonnegative_int(
-            limits.get("max_image_tool_calls"), 2, maximum=8
+            policy.get("max_image_tool_calls"), 2, maximum=8
         ),
         max_images_per_run=_positive_int(
-            limits.get("max_images_per_run"), 4, maximum=16
+            policy.get("max_images_per_run"), 4, maximum=16
         ),
-        max_output_tokens=output_tokens,
-        run_timeout_seconds=_positive_int(
-            limits.get("run_timeout_seconds"),
-            AGENT_RUN_TIMEOUT_DEFAULT_SECONDS,
-            maximum=AGENT_RUN_TIMEOUT_MAX_SECONDS,
-        ),
-        tool_timeout_seconds=_positive_int(
-            limits.get("tool_timeout_seconds"), 30, maximum=300
-        ),
-        max_output_chars=settings.agent_max_output_chars,
     )
 
 
@@ -699,6 +680,8 @@ def _runtime_reasoning_effort(
 
 
 def _allowed_tools(run: AgentRun) -> list[Literal["lumen_create_image"]]:
+    if _runtime_tool_policy(run).max_image_tool_calls < 1:
+        return []
     tools = [
         value
         for value in _snapshot_list(run, "allowed_tools")
@@ -719,25 +702,15 @@ async def _capability(
     if len(settings.agent_tool_capability_secret.encode("utf-8")) < 32:
         raise AgentContextError("agent_capability_unconfigured")
     now = int(time.time())
-    limits = _snapshot_dict(run, "limits")
+    limits = _snapshot_dict(run, "security_policy") or _snapshot_dict(run, "limits")
     configured_ttl = _positive_int(
         limits.get("capability_ttl_seconds"),
-        900,
+        AGENT_CAPABILITY_MAX_TTL_SECONDS,
         maximum=AGENT_CAPABILITY_MAX_TTL_SECONDS,
     )
-    run_timeout = _positive_int(
-        limits.get("run_timeout_seconds"),
-        AGENT_RUN_TIMEOUT_DEFAULT_SECONDS,
-        maximum=AGENT_RUN_TIMEOUT_MAX_SECONDS,
-    )
-    tool_timeout = _positive_int(limits.get("tool_timeout_seconds"), 30, maximum=300)
-    # A token is also fenced by active run + execution epoch, so extending its
-    # TTL to cover the complete run does not make it usable after termination.
-    minimum_ttl = min(
-        AGENT_CAPABILITY_MAX_TTL_SECONDS,
-        run_timeout + tool_timeout + AGENT_CAPABILITY_MAX_CLOCK_SKEW_SECONDS,
-    )
-    effective_ttl = max(configured_ttl, minimum_ttl)
+    # Active-run and execution-epoch fences revoke this token at terminal state.
+    # Expiry is defense in depth, not an Agent lifecycle deadline.
+    effective_ttl = configured_ttl
     capability_id = new_uuid7()
     nonce = new_agent_capability_nonce()
     claims = AgentCapabilityClaims(
@@ -764,9 +737,7 @@ async def _capability(
                 claims.expires_at,
                 tz=timezone.utc,
             ),
-            max_redemptions=_nonnegative_int(
-                limits.get("max_tool_calls"), 3, maximum=12
-            ),
+            max_redemptions=_runtime_tool_policy(run).max_image_tool_calls,
             redeemed_count=0,
         )
     )
@@ -840,7 +811,7 @@ async def build_agent_context(
     )
     current_prompt = _current_prompt(current_user, references, memory_context)
     envelope = await provider_envelope(provider, model=run.model or "")
-    limits = _runtime_limits(run, provider)
+    tool_policy = _runtime_tool_policy(run)
     compaction = await _pi_compaction(db, run)
     history_rows, compaction_boundary_applied = await _history_rows(
         db,
@@ -857,7 +828,7 @@ async def build_agent_context(
         provider=envelope,
         system_prompt=system_prompt,
         current_prompt=current_prompt,
-        max_output_tokens=limits.max_output_tokens,
+        max_output_tokens=envelope.max_output_tokens,
         reference_count=len(references),
     )
     tools = _allowed_tools(run)
@@ -887,7 +858,7 @@ async def build_agent_context(
         tool_gateway_url=tool_gateway_url,
         tool_capability=capability,
         reasoning_effort=cast(Any, reasoning),
-        limits=limits,
+        tool_policy=tool_policy,
     )
     return AgentContextBuild(
         request=request,

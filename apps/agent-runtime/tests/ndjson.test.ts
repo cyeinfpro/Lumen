@@ -27,8 +27,6 @@ function writer(
   response: FakeResponse,
   options: {
     maxLineBytes?: number;
-    maxStreamBytes?: number;
-    maxEvents?: number;
     drainTimeoutMs?: number;
   } = {},
 ): NdjsonEventWriter {
@@ -37,8 +35,6 @@ function writer(
     "run-1",
     1,
     options.maxLineBytes ?? 1024,
-    options.maxStreamBytes ?? 64 * 1024,
-    options.maxEvents ?? 100,
     options.drainTimeoutMs ?? 30_000,
   );
 }
@@ -64,17 +60,13 @@ describe("NDJSON event writer", () => {
     );
   });
 
-  it("reserves one event and one maximum line for the terminal frame", async () => {
+  it("does not split a Pi run at an aggregate event or byte budget", async () => {
     const response = new FakeResponse(true);
-    const output = writer(response, {
-      maxLineBytes: 512,
-      maxStreamBytes: 1024,
-      maxEvents: 3,
-    });
+    const output = writer(response, { maxLineBytes: 512 });
 
-    await expect(output.emit("run.started")).resolves.toBe(true);
-    await expect(output.emit("run.heartbeat")).resolves.toBe(true);
-    await expect(output.emit("run.heartbeat")).resolves.toBe(false);
+    for (let index = 0; index < 10_000; index += 1) {
+      await expect(output.emit("run.heartbeat")).resolves.toBe(true);
+    }
     await expect(
       output.emit(
         "run.completed",
@@ -86,7 +78,7 @@ describe("NDJSON event writer", () => {
         true,
       ),
     ).resolves.toBe(true);
-    expect(output.bytesWritten).toBeLessThanOrEqual(1024);
+    expect(response.lines).toHaveLength(10_001);
   });
 
   it("latches backpressure failure and rejects later terminal writes immediately", async () => {

@@ -54,10 +54,7 @@ export function runtimeModel(request: RuntimeRequest): Model<string> {
     input: request.provider.vision_supported ? ["text", "image"] : ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: request.provider.context_window,
-    maxTokens: Math.min(
-      request.provider.max_output_tokens,
-      request.limits.max_output_tokens,
-    ),
+    maxTokens: request.provider.max_output_tokens,
   };
 }
 

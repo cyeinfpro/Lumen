@@ -91,6 +91,7 @@ _REFERENCE_MAX_BYTES = 32 * 1024 * 1024
 _REFERENCE_MAX_PIXELS = 50_000_000
 _REFERENCE_CONTEXT_TOKENS = 2048
 _AGENT_CONTEXT_SAFETY_TOKENS = 8192
+_PI_NATIVE_OUTPUT_RESERVE_TOKENS = 16_384
 
 
 def _read_reference_bytes(image: Image) -> bytes:
@@ -518,15 +519,11 @@ async def _resolve_execution_pin(
         conv=conversation,
         explicit_prompt=None,
     )
-    configured_output_tokens = await agent_setting_int(
-        db,
-        "agent.max_output_tokens",
-    )
     minimum_context_window = (
         estimate_text_tokens(system_prompt or "")
         + estimate_text_tokens(body.text)
         + reference_count * _REFERENCE_CONTEXT_TOKENS
-        + configured_output_tokens
+        + _PI_NATIVE_OUTPUT_RESERVE_TOKENS
         + _AGENT_CONTEXT_SAFETY_TOKENS
     )
     if account_mode == "byok":
@@ -694,18 +691,10 @@ async def _stage_submission(
     )
     db.add(run)
     await db.flush()
-    setting_keys = (
-        "agent.max_turns",
-        "agent.max_tool_calls",
-        "agent.max_image_tool_calls",
-        "agent.max_images_per_run",
-        "agent.max_reference_images",
-        "agent.max_session_images",
-        "agent.max_output_tokens",
-        "agent.run_timeout_seconds",
-        "agent.tool_timeout_seconds",
-        "agent.capability_ttl_seconds",
+    max_image_tool_calls = await agent_setting_int(
+        db, "agent.max_image_tool_calls"
     )
+    max_images_per_run = await agent_setting_int(db, "agent.max_images_per_run")
     run.request_snapshot_jsonb = {
         "image_defaults": body.image_defaults.model_dump(mode="json"),
         "allow_image": body.allow_image,
@@ -718,9 +707,20 @@ async def _stage_submission(
             }
             for item in run_reference_content
         ],
-        "limits": {
-            key.removeprefix("agent."): await agent_setting_int(db, key)
-            for key in setting_keys
+        "execution_policy": "pi-native",
+        "tool_policy": {
+            "max_image_tool_calls": (
+                max_image_tool_calls if body.allow_image else 0
+            ),
+            "max_images_per_run": max_images_per_run,
+        },
+        "reference_policy": {
+            "max_reference_images": await agent_setting_int(
+                db, "agent.max_reference_images"
+            ),
+            "max_session_images": await agent_setting_int(
+                db, "agent.max_session_images"
+            ),
         },
         "eligible_provider_names": list(pin.provider_names),
         "credential_capabilities": (
@@ -750,6 +750,7 @@ async def _stage_submission(
         reference_count=len(references),
         context_window=pin.context_window,
         provider_max_output_tokens=pin.max_output_tokens,
+        max_image_tool_calls=(max_image_tool_calls if body.allow_image else 0),
     )
     run.text_hold_micro = reservation.hold_micro
     run.billing_jsonb = reservation.billing_snapshot

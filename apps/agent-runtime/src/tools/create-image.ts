@@ -1,7 +1,11 @@
 import { Type } from "typebox";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 
-import { AGENT_TOOL_CREATE_IMAGE, type RuntimeRequest } from "../contracts.js";
+import {
+  AGENT_TOOL_CREATE_IMAGE,
+  runtimeToolPolicy,
+  type RuntimeRequest,
+} from "../contracts.js";
 import type { CreateImageGateway } from "./gateway.js";
 
 const AspectRatio = Type.Union(
@@ -39,6 +43,7 @@ export function createImageTool(
   gateway: CreateImageGateway,
   state: ToolRuntimeState,
 ): ToolDefinition {
+  const policy = runtimeToolPolicy(request);
   return defineTool({
     name: AGENT_TOOL_CREATE_IMAGE,
     label: "Create image",
@@ -101,13 +106,12 @@ export function createImageTool(
         throw new Error("A prior image submission is still unconfirmed");
       }
       if (
-        state.calls >= request.limits.max_tool_calls ||
-        state.imageCalls >= request.limits.max_image_tool_calls
+        state.imageCalls >= policy.max_image_tool_calls
       ) {
         state.limitReason = "tool_calls";
         throw new Error("The image tool limit has been reached");
       }
-      if (state.acceptedImages + requestedCount > request.limits.max_images_per_run) {
+      if (state.acceptedImages + requestedCount > policy.max_images_per_run) {
         state.limitReason = "images";
         throw new Error("The image count limit has been reached");
       }

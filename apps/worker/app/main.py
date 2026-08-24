@@ -22,7 +22,6 @@ from redis.exceptions import BusyLoadingError
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from lumen_core.context_window import warm_tiktoken
-from lumen_core.runtime_setting_agent_specs import AGENT_RUN_TIMEOUT_MAX_SECONDS
 from lumen_core.storage_capacity import build_storage_capacity
 
 from .config import settings
@@ -70,7 +69,7 @@ from .upstream_parts.upstream_impl import build_image_upstream_runtime
 
 _startup_logger = logging.getLogger(__name__)
 _PROVIDER_CRON_TIMEOUT_S = 30.0
-_AGENT_RUN_FINALIZATION_BUDGET_SECONDS = 240
+_DEFAULT_JOB_TIMEOUT_SECONDS = 1800
 
 # RedisSettings.from_dsn 只解析 host/port/db/账号密码，其余全部落在 arq 的库
 # 默认值上：conn_timeout=1s、retry_on_timeout=False、retry_on_error=None、
@@ -259,8 +258,6 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
             ),
             max_request_bytes=settings.agent_runtime_max_request_bytes,
             max_line_bytes=settings.agent_runtime_max_line_bytes,
-            max_stream_bytes=settings.agent_runtime_max_stream_bytes,
-            max_events=settings.agent_runtime_max_events,
         )
         ctx["agent_runtime_client"] = agent_runtime_client
         lifecycle.own("agent_runtime_client", agent_runtime_client.close)
@@ -297,20 +294,39 @@ class WorkerSettings:
 
     # Registered task entry points.
     functions = [
-        generation_tasks.run_generation,
-        video_generation_tasks.run_video_generation,
-        video_generation_tasks.run_video_poll,
-        storyboard_assembly_tasks.run_storyboard_assembly,
-        completion_tasks.run_completion,
+        func(generation_tasks.run_generation, timeout=_DEFAULT_JOB_TIMEOUT_SECONDS),
+        func(
+            video_generation_tasks.run_video_generation,
+            timeout=_DEFAULT_JOB_TIMEOUT_SECONDS,
+        ),
+        func(
+            video_generation_tasks.run_video_poll,
+            timeout=_DEFAULT_JOB_TIMEOUT_SECONDS,
+        ),
+        func(
+            storyboard_assembly_tasks.run_storyboard_assembly,
+            timeout=_DEFAULT_JOB_TIMEOUT_SECONDS,
+        ),
+        func(completion_tasks.run_completion, timeout=_DEFAULT_JOB_TIMEOUT_SECONDS),
         agent_run_tasks.run_agent,
-        canvas_reconcile_tasks.reconcile_canvas_execution,
-        outbox_tasks.publish_outbox,
-        auto_title_tasks.auto_title_conversation,
-        context_summary_tasks.manual_compact_conversation,
-        memory_tasks.memory_extract,
-        memory_tasks.memory_reembed,
+        func(
+            canvas_reconcile_tasks.reconcile_canvas_execution,
+            timeout=_DEFAULT_JOB_TIMEOUT_SECONDS,
+        ),
+        func(outbox_tasks.publish_outbox, timeout=_DEFAULT_JOB_TIMEOUT_SECONDS),
+        func(
+            auto_title_tasks.auto_title_conversation,
+            timeout=_DEFAULT_JOB_TIMEOUT_SECONDS,
+        ),
+        func(
+            context_summary_tasks.manual_compact_conversation,
+            timeout=_DEFAULT_JOB_TIMEOUT_SECONDS,
+        ),
+        func(memory_tasks.memory_extract, timeout=_DEFAULT_JOB_TIMEOUT_SECONDS),
+        func(memory_tasks.memory_reembed, timeout=_DEFAULT_JOB_TIMEOUT_SECONDS),
         func(
             volcano_asset_tasks.process_volcano_asset_operation,
+            timeout=_DEFAULT_JOB_TIMEOUT_SECONDS,
             max_tries=1000,
         ),
     ]
@@ -369,10 +385,11 @@ class WorkerSettings:
     # prevents max_jobs from becoming the bottleneck when admins raise
     # image.generation_concurrency from system settings without restarting.
     max_jobs = 64
-    # 4K 图生图（4K 升级后）最糟耗时：主链路 retry × 单次 ~8 min + 备链路 + 解码/落盘
-    # 可达 ~20-25 min；给 1800s（30 min）留缓冲。普通小图/文生图远远跑不到这个上限。
-    # 保持 > _RUN_GENERATION_TIMEOUT_S（1500s），让 task 自己 raise TimeoutError 释放 lease。
-    job_timeout = 1800  # s
+    # Non-Agent jobs retain the prior 1800s guard through per-function/per-cron
+    # registration. Agent is the only function that inherits this None value.
+    # Agent runs use Pi's native lifecycle and therefore have no ARQ wall-clock
+    # deadline. Every non-Agent function and cron entry is bounded explicitly.
+    job_timeout = None
     keep_result = 3600
 
     # Startup hook：观测层 + metrics server
@@ -380,9 +397,6 @@ class WorkerSettings:
     on_shutdown = _on_shutdown
 
 
-if WorkerSettings.job_timeout <= (
-    AGENT_RUN_TIMEOUT_MAX_SECONDS + _AGENT_RUN_FINALIZATION_BUDGET_SECONDS
-):
-    raise RuntimeError(
-        "ARQ job timeout must leave bounded Agent context/finalization overhead"
-    )
+for _cron_job in WorkerSettings.cron_jobs:
+    if _cron_job.timeout_s is None:
+        _cron_job.timeout_s = _DEFAULT_JOB_TIMEOUT_SECONDS

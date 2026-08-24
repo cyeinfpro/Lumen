@@ -27,6 +27,7 @@ async function fakeDependencies(
   responses: Parameters<ReturnType<typeof fauxProvider>["setResponses"]>[0],
   gateway: CreateImageGateway,
   tokensPerSecond = 100_000,
+  observeOptions?: (options: { readonly timeoutMs?: number } | undefined) => void,
 ): Promise<RuntimeDependencies> {
   const faux = fauxProvider({
     provider: "lumen-faux",
@@ -46,6 +47,7 @@ async function fakeDependencies(
     async prepareProvider(_request, onDispatch) {
       const streamSimple = modelRuntime.streamSimple.bind(modelRuntime);
       modelRuntime.streamSimple = (model, context, options) => {
+        observeOptions?.(options);
         void onDispatch();
         return streamSimple(model, context, options);
       };
@@ -67,6 +69,7 @@ describe("Pi Runtime execution", () => {
         ...runtimeRequest().provider,
         model: "openai/gpt-5.6-sol",
         context_window: 272_000,
+        max_output_tokens: 16_384,
       },
       reasoning_effort: "max",
     });
@@ -74,10 +77,69 @@ describe("Pi Runtime execution", () => {
     const model = runtimeModel(request);
 
     expect(model.contextWindow).toBe(272_000);
+    expect(model.maxTokens).toBe(16_384);
     expect(model.thinkingLevelMap).toMatchObject({
       xhigh: "xhigh",
       max: "max",
     });
+  });
+
+  it("treats Pi's provider-native length stop as a settled turn", async () => {
+    const dependencies = await fakeDependencies(
+      [fauxAssistantMessage("Provider-native terminal text.", { stopReason: "length" })],
+      async () => {
+        throw new Error("image gateway must not run");
+      },
+    );
+    const request = runtimeRequest({
+      allowed_tools: [],
+      tool_gateway_url: null,
+      tool_capability: null,
+    });
+    const writer = new CollectingEventWriter(request.run_id, request.execution_epoch);
+
+    const result = await executeAgentRun(
+      request,
+      writer,
+      new AbortController().signal,
+      undefined,
+      dependencies,
+    );
+
+    expect(result.outcome).toBe("succeeded");
+    expect(result.errorCode).toBeNull();
+    expect(writer.events).toContainEqual(
+      expect.objectContaining({ type: "turn.completed", stop_reason: "length" }),
+    );
+  });
+
+  it("uses Pi's native disabled-timeout setting for Provider requests", async () => {
+    let timeoutMs: number | undefined;
+    const dependencies = await fakeDependencies(
+      [fauxAssistantMessage("No host deadline.")],
+      async () => {
+        throw new Error("image gateway must not run");
+      },
+      100_000,
+      (options) => {
+        timeoutMs = options?.timeoutMs;
+      },
+    );
+    const request = runtimeRequest({
+      allowed_tools: [],
+      tool_gateway_url: null,
+      tool_capability: null,
+    });
+
+    await executeAgentRun(
+      request,
+      new CollectingEventWriter(request.run_id, request.execution_epoch),
+      new AbortController().signal,
+      undefined,
+      dependencies,
+    );
+
+    expect(timeoutMs).toBe(2_147_483_647);
   });
 
   it("uses Pi native compaction and emits a durable checkpoint", async () => {
@@ -180,6 +242,84 @@ describe("Pi Runtime execution", () => {
       writer.events.find((event) => event.type === "compaction.completed"),
     ).toMatchObject({ provider_call_count: 2 });
   });
+
+  it("resets streamed text before Pi retries a recoverable length stop", async () => {
+    const dependencies = await fakeDependencies(
+      [
+        fauxAssistantMessage("Discard this truncated draft.", { stopReason: "length" }),
+        fauxAssistantMessage("## Goal\nPreserve context before retry."),
+        fauxAssistantMessage("Complete regenerated answer."),
+      ],
+      async () => {
+        throw new Error("image gateway must not run");
+      },
+    );
+    const history = Array.from({ length: 12 }, (_, index) => ({
+      message_id: `retry-history-${String(index)}`,
+      role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+      text: `history ${String(index)} ${"context ".repeat(1_250)}`,
+    }));
+    const request = runtimeRequest({
+      history,
+      allowed_tools: [],
+      tool_gateway_url: null,
+      tool_capability: null,
+      current_prompt: "Return the complete answer.",
+    });
+    const writer = new CollectingEventWriter(request.run_id, request.execution_epoch);
+
+    const result = await executeAgentRun(
+      request,
+      writer,
+      new AbortController().signal,
+      undefined,
+      dependencies,
+    );
+
+    expect(result.outcome).toBe("succeeded");
+    const resetIndex = writer.events.findIndex((event) => event.type === "text.reset");
+    expect(resetIndex).toBeGreaterThan(0);
+    expect(
+      writer.events.slice(0, resetIndex).some((event) => event.type === "text.delta"),
+    ).toBe(true);
+    expect(
+      writer.events.slice(resetIndex + 1).some((event) => event.type === "text.delta"),
+    ).toBe(true);
+  });
+
+  it("keeps Pi transient-error retry semantics and resets the failed draft", async () => {
+    const dependencies = await fakeDependencies(
+      [
+        fauxAssistantMessage("Discard this transient draft.", {
+          stopReason: "error",
+          errorMessage: "rate limit exceeded",
+        }),
+        fauxAssistantMessage("Answer after Pi retry."),
+      ],
+      async () => {
+        throw new Error("image gateway must not run");
+      },
+    );
+    const request = runtimeRequest({
+      allowed_tools: [],
+      tool_gateway_url: null,
+      tool_capability: null,
+    });
+    const writer = new CollectingEventWriter(request.run_id, request.execution_epoch);
+
+    const result = await executeAgentRun(
+      request,
+      writer,
+      new AbortController().signal,
+      undefined,
+      dependencies,
+    );
+
+    expect(result.outcome).toBe("succeeded");
+    expect(result.errorCode).toBeNull();
+    expect(writer.events.some((event) => event.type === "text.reset")).toBe(true);
+    expect(result.providerDispatchCount).toBe(2);
+  }, 10_000);
 
   it("restores a persisted Pi checkpoint with its retained tail", async () => {
     const dependencies = await fakeDependencies(
@@ -583,7 +723,7 @@ describe("Pi Runtime execution", () => {
       },
     );
     const request = runtimeRequest({
-      limits: { ...runtimeRequest().limits, max_images_per_run: 1 },
+      tool_policy: { ...runtimeRequest().tool_policy, max_images_per_run: 1 },
     });
     const writer = new CollectingEventWriter(request.run_id, request.execution_epoch);
 
@@ -635,7 +775,7 @@ describe("Pi Runtime execution", () => {
       },
     );
     const request = runtimeRequest({
-      limits: { ...runtimeRequest().limits, max_tool_calls: 1 },
+      tool_policy: { ...runtimeRequest().tool_policy, max_image_tool_calls: 1 },
     });
     const writer = new CollectingEventWriter(request.run_id, request.execution_epoch);
 
@@ -653,7 +793,7 @@ describe("Pi Runtime execution", () => {
     );
   });
 
-  it("stops at max turns and switches the final turn to no-tools", async () => {
+  it("lets Pi finish naturally across every business-authorized tool turn", async () => {
     let gatewayCalls = 0;
     const dependencies = await fakeDependencies(
       [
@@ -662,14 +802,15 @@ describe("Pi Runtime execution", () => {
           { stopReason: "toolUse" },
         ),
         fauxAssistantMessage(
-          fauxToolCall("lumen_create_image", { prompt: "blocked" }, { id: "turn-tool-2" }),
+          fauxToolCall("lumen_create_image", { prompt: "second" }, { id: "turn-tool-2" }),
           { stopReason: "toolUse" },
         ),
+        fauxAssistantMessage("Both image jobs were accepted."),
       ],
       async (_id, _ordinal, arguments_) => {
         gatewayCalls += 1;
         return {
-          generation_ids: ["generation-turn-limit"],
+          generation_ids: [`generation-turn-${String(gatewayCalls)}`],
           mode: "text_to_image",
           replayed: false,
           accepted: {
@@ -685,9 +826,7 @@ describe("Pi Runtime execution", () => {
         };
       },
     );
-    const request = runtimeRequest({
-      limits: { ...runtimeRequest().limits, max_turns: 2 },
-    });
+    const request = runtimeRequest();
     const writer = new CollectingEventWriter(request.run_id, request.execution_epoch);
 
     const result = await executeAgentRun(
@@ -698,9 +837,10 @@ describe("Pi Runtime execution", () => {
       dependencies,
     );
 
-    expect(result.turnCount).toBeLessThanOrEqual(2);
-    expect(gatewayCalls).toBe(1);
-    expect(writer.events).toContainEqual(
+    expect(result.outcome).toBe("succeeded");
+    expect(result.turnCount).toBe(3);
+    expect(gatewayCalls).toBe(2);
+    expect(writer.events).not.toContainEqual(
       expect.objectContaining({ type: "limit.reached", reason: "turns" }),
     );
   });

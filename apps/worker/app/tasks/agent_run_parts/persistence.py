@@ -15,6 +15,7 @@ from lumen_core.agent_events import (
     AGENT_RUN_TERMINAL_STATUSES,
     AGENT_TOOL_TERMINAL_STATUSES,
     EV_AGENT_OUTPUT_DELTA,
+    EV_AGENT_OUTPUT_RESET,
     EV_AGENT_RUN_STARTED,
     EV_AGENT_TOOL_FAILED,
     AgentRunStatus,
@@ -552,8 +553,9 @@ async def flush_agent_text(
     execution_epoch: int,
     text: str,
     delta: str,
+    replace: bool = False,
 ) -> bool:
-    if not delta:
+    if not delta and not replace:
         return True
     public: dict[str, Any] | None = None
     async with SessionLocal() as db:
@@ -591,8 +593,10 @@ async def flush_agent_text(
             data = _stage_event(
                 db,
                 run=run,
-                event_name=EV_AGENT_OUTPUT_DELTA,
-                extra={"text_delta": delta},
+                event_name=(
+                    EV_AGENT_OUTPUT_RESET if replace else EV_AGENT_OUTPUT_DELTA
+                ),
+                extra={} if replace else {"text_delta": delta},
             )
             public = _public_event(run, data)
     if public is not None:

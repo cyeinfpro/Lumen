@@ -45,26 +45,6 @@ def agent_usage_tokens(usage: dict[str, Any]) -> UsageTokens:
     )
 
 
-def _usage_within_reservation(
-    snapshot: dict[str, Any],
-    tokens: UsageTokens,
-) -> bool:
-    reserved_input = snapshot.get("reserved_input_tokens")
-    reserved_output = snapshot.get("reserved_output_tokens")
-    if not isinstance(reserved_input, int) or not isinstance(reserved_output, int):
-        return False
-    input_total = (
-        tokens.input_tokens
-        + tokens.cache_read_tokens
-        + tokens.cache_creation_tokens
-    )
-    return (
-        input_total <= max(0, reserved_input)
-        and tokens.output_tokens <= max(0, reserved_output)
-        and tokens.reasoning_tokens <= tokens.output_tokens
-    )
-
-
 def _billing_snapshot(run: AgentRun) -> dict[str, Any]:
     return dict(run.billing_jsonb) if isinstance(run.billing_jsonb, dict) else {}
 
@@ -159,12 +139,6 @@ async def settle_agent_text_actual(
             reason="pricing_snapshot_missing",
         )
     tokens = agent_usage_tokens(usage)
-    if not _usage_within_reservation(snapshot, tokens):
-        return await settle_agent_text_unknown(
-            db,
-            run=run,
-            reason="provider_usage_exceeds_reservation",
-        )
     try:
         breakdown = billing_core.completion_breakdown_from_snapshot(
             pricing,

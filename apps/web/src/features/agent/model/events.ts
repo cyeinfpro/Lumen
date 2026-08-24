@@ -66,7 +66,8 @@ export function applyAgentEvent(
     ]),
   );
   const resetForNewEpoch = event.execution_epoch > run.execution_epoch;
-  const baseText = resetForNewEpoch ? "" : message.text;
+  const resetOutput = event.event_name === "agent.output.reset";
+  const baseText = resetForNewEpoch || resetOutput ? "" : message.text;
   const nextText =
     event.event_name === "agent.output.delta" && event.text_delta
       ? `${baseText}${event.text_delta}`

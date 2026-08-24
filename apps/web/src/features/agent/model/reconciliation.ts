@@ -339,9 +339,21 @@ export function reconcileAgentSnapshot(
   sessionId: string,
 ): ReconciledAgentSnapshot {
   const incomingMessages = adaptAgentMessages(snapshot.items, snapshot.runs);
+  const incomingMessageIds = new Set(incomingMessages.map((message) => message.id));
+  const authoritativeAssistantIds = new Set<string>();
   const runs = { ...existingRuns };
   let retainedMessages = existingMessages;
   for (const run of snapshot.runs) {
+    const existingRun = runs[run.id];
+    if (
+      incomingMessageIds.has(run.assistant_message_id) &&
+      (!existingRun ||
+        run.execution_epoch > existingRun.execution_epoch ||
+        (run.execution_epoch === existingRun.execution_epoch &&
+          run.last_event_seq >= existingRun.last_event_seq))
+    ) {
+      authoritativeAssistantIds.add(run.assistant_message_id);
+    }
     const optimistic = Object.values(runs).find(
       (candidate) =>
         candidate.id.startsWith("optimistic:") &&
@@ -357,6 +369,9 @@ export function reconcileAgentSnapshot(
     }
     runs[run.id] = mergeAgentRun(runs[run.id], run);
   }
+  retainedMessages = retainedMessages.filter(
+    (message) => !authoritativeAssistantIds.has(message.id),
+  );
   return {
     messages: mergeAgentMessageLists(retainedMessages, incomingMessages),
     runs,

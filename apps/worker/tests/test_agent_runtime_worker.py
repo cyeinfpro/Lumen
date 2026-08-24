@@ -14,7 +14,7 @@ from PIL import Image as PILImage
 from app import agent_context as agent_context_module
 from app import main
 from app import observability as worker_observability
-from app.agent_billing import _usage_within_reservation, agent_usage_tokens
+from app.agent_billing import agent_usage_tokens
 from app.billing_parts.helpers import generation_agent_billing_meta
 from app.agent_context import (
     AgentContextError,
@@ -22,7 +22,7 @@ from app.agent_context import (
     _encode_reference_preview,
     _pack_history,
     _reference_visible_after,
-    _runtime_limits,
+    _runtime_tool_policy,
     _runtime_reasoning_effort,
     project_history_message,
     provider_envelope,
@@ -34,7 +34,7 @@ from app.agent_runtime_client import (
     AgentRuntimeEvent,
     AgentRuntimeHistoryMessage,
     AgentRuntimeImageDefaults,
-    AgentRuntimeLimits,
+    AgentRuntimeToolPolicy,
     AgentRuntimeProviderEnvelope,
     AgentRuntimeRequest,
     _next_stream_chunk,
@@ -47,7 +47,6 @@ from app.tasks.agent_run_parts.orchestrator import _terminal_request
 from app.tasks.agent_run_parts.persistence import _repair_tools
 from lumen_core.model_entities import AgentToolCall, Generation, Message
 from lumen_core.agent_capability import verify_agent_capability
-from lumen_core.runtime_setting_agent_specs import AGENT_RUN_TIMEOUT_MAX_SECONDS
 
 
 TEST_SECRET = "runtime-test-secret-0123456789-abcdef"
@@ -93,15 +92,9 @@ def _request() -> AgentRuntimeRequest:
         tool_gateway_url=None,
         tool_capability=None,
         reasoning_effort="low",
-        limits=AgentRuntimeLimits(
-            max_turns=6,
-            max_tool_calls=3,
+        tool_policy=AgentRuntimeToolPolicy(
             max_image_tool_calls=2,
             max_images_per_run=4,
-            max_output_tokens=4096,
-            run_timeout_seconds=180,
-            tool_timeout_seconds=30,
-            max_output_chars=262144,
         ),
     )
 
@@ -247,19 +240,13 @@ async def test_runtime_client_validates_signed_monotonic_terminal_stream() -> No
 
 
 @pytest.mark.asyncio
-async def test_runtime_client_falls_back_once_for_legacy_runtime_contract() -> None:
+async def test_runtime_client_refuses_to_downgrade_pi_native_lifecycle() -> None:
     payloads: list[dict[str, Any]] = []
     checkpoint_summary = "😀" * 15_000
 
     async def handler(request: httpx.Request) -> httpx.Response:
         payloads.append(json.loads((await request.aread()).decode("utf-8")))
-        if len(payloads) == 1:
-            return httpx.Response(422, json={"error": "invalid_runtime_request"})
-        return httpx.Response(
-            200,
-            headers={"content-type": "application/x-ndjson"},
-            content=_terminal_stream(),
-        )
+        return httpx.Response(422, json={"error": "invalid_runtime_request"})
 
     request = _request().model_copy(
         update={
@@ -292,41 +279,32 @@ async def test_runtime_client_falls_back_once_for_legacy_runtime_contract() -> N
         nonlocal starting
         starting += 1
 
-    events = [
-        event
-        async for event in client.stream(
-            request,
-            on_request_starting=on_starting,
-        )
-    ]
+    with pytest.raises(AgentRuntimeClientError) as captured:
+        _ = [
+            event
+            async for event in client.stream(
+                request,
+                on_request_starting=on_starting,
+            )
+        ]
     await client.close()
 
     assert starting == 1
-    assert events[-1].type == "run.completed"
-    assert len(payloads) == 2
+    assert captured.value.code == "agent_runtime_rejected"
+    assert captured.value.delivery == "proven_absent"
+    assert len(payloads) == 1
     assert payloads[0]["compaction"]["summary"] == checkpoint_summary
     assert payloads[0]["history"][0]["message_id"] == "history-user-1"
-    assert payloads[0]["event_features"] == ["heartbeat-v1"]
-    assert "user_message_id" not in payloads[1]
-    assert "compaction" not in payloads[1]
-    assert "event_features" not in payloads[1]
-    assert [item["role"] for item in payloads[1]["history"]] == [
-        "user",
-        "user",
-        "user",
-    ]
-    assert "".join(item["text"] for item in payloads[1]["history"][:-1]) == (
-        "The conversation history before this point was compacted into the "
-        "following summary:\n\n<summary>\n" + checkpoint_summary + "\n</summary>"
-    )
-    assert payloads[1]["history"][-1] == {
-        "role": "user",
-        "text": "legacy-compatible history",
+    assert payloads[0]["version"] == 2
+    assert payloads[0]["event_features"] == ["heartbeat-v1", "text-reset-v1"]
+    assert payloads[0]["tool_policy"] == {
+        "max_image_tool_calls": 2,
+        "max_images_per_run": 4,
     }
 
 
 @pytest.mark.asyncio
-async def test_runtime_client_refuses_lossy_legacy_fallback() -> None:
+async def test_runtime_client_sends_large_v2_history_only_once() -> None:
     requests = 0
 
     async def handler(_request: httpx.Request) -> httpx.Response:
@@ -365,12 +343,16 @@ async def test_runtime_client_refuses_lossy_legacy_fallback() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("provider_calls", "accepted"), [(7, True), (9, False)])
-async def test_runtime_terminal_usage_includes_compaction_call_budget(
+@pytest.mark.parametrize(
+    ("usage_calls", "provider_calls", "accepted"),
+    [(7, 7, True), (8, 7, False)],
+)
+async def test_runtime_terminal_usage_is_bounded_by_reported_provider_calls(
+    usage_calls: int,
     provider_calls: int,
     accepted: bool,
 ) -> None:
-    input_tokens = 128_000 * provider_calls
+    input_tokens = 128_000 * usage_calls
     usage = {
         "input_tokens": input_tokens,
         "output_tokens": 0,
@@ -705,16 +687,6 @@ def test_agent_usage_and_runtime_accumulator_are_cache_aware() -> None:
     accumulator.provider_response_statuses.append(500)
     assert accumulator.response_proves_no_cost is False
 
-    assert _usage_within_reservation(
-        {"reserved_input_tokens": 150, "reserved_output_tokens": 25},
-        detailed,
-    )
-    assert not _usage_within_reservation(
-        {"reserved_input_tokens": 4, "reserved_output_tokens": 25},
-        detailed,
-    )
-
-
 def test_agent_usage_is_monotonic_and_later_unknown_dispatch_stays_unknown() -> None:
     accumulator = AgentRuntimeAccumulator()
     accumulator.apply(
@@ -786,6 +758,52 @@ def test_agent_usage_is_monotonic_and_later_unknown_dispatch_stays_unknown() -> 
         "agent_tool_result_unknown",
         "unknown",
         "runtime_partial",
+    )
+
+
+def test_pi_retry_resets_streamed_text_before_regeneration() -> None:
+    accumulator = AgentRuntimeAccumulator(
+        text="truncated draft",
+        pending_delta="truncated draft",
+    )
+
+    accumulator.apply(
+        AgentRuntimeEvent(
+            version=1,
+            type="text.reset",
+            seq=1,
+            run_id="run-1",
+            execution_epoch=1,
+        )
+    )
+    accumulator.apply(
+        AgentRuntimeEvent(
+            version=1,
+            type="text.delta",
+            seq=2,
+            run_id="run-1",
+            execution_epoch=1,
+            delta="complete answer",
+        )
+    )
+
+    assert accumulator.text == "complete answer"
+    assert accumulator.pending_delta == "complete answer"
+    assert accumulator.text_reset_pending is True
+
+
+def test_unknown_billing_does_not_override_pi_success() -> None:
+    accumulator = AgentRuntimeAccumulator(text="complete answer")
+    accumulator.terminal_status = "succeeded"
+    accumulator.provider_dispatch_count = 2
+    accumulator.provider_completed_count = 1
+    accumulator.provider_response_statuses = [200, 200]
+
+    assert _terminal_request(accumulator) == (
+        "succeeded",
+        None,
+        "unknown",
+        "runtime_success_with_unknown_billing",
     )
 
 
@@ -882,11 +900,11 @@ async def test_capability_ttl_covers_the_complete_run_and_tool_window(
         agent_session_id="session-capability",
         execution_epoch=3,
         request_snapshot_jsonb={
-            "limits": {
-                "capability_ttl_seconds": 15,
-                "run_timeout_seconds": 900,
-                "max_tool_calls": 2,
-            }
+            "security_policy": {"capability_ttl_seconds": 86_400},
+            "tool_policy": {
+                "max_image_tool_calls": 2,
+                "max_images_per_run": 4,
+            },
         },
     )
     _url, token = await _capability(
@@ -897,7 +915,7 @@ async def test_capability_ttl_covers_the_complete_run_and_tool_window(
     )
     assert token is not None
     claims = verify_agent_capability(secret, token)
-    assert claims.expires_at - claims.issued_at == 960
+    assert claims.expires_at - claims.issued_at == 86_400
     grant = added[0]
     assert getattr(grant, "max_redemptions") == 2
 
@@ -918,33 +936,28 @@ def test_timeout_with_preserved_text_becomes_partial() -> None:
     )
 
 
-def test_runtime_limits_default_to_ten_minutes() -> None:
-    run = SimpleNamespace(request_snapshot_jsonb={"limits": {}})
-    provider = SimpleNamespace(agent_max_output_tokens=4096)
+def test_runtime_tool_policy_defaults_without_lifecycle_deadlines() -> None:
+    run = SimpleNamespace(request_snapshot_jsonb={})
 
-    assert _runtime_limits(run, provider).run_timeout_seconds == 600  # type: ignore[arg-type]
+    assert _runtime_tool_policy(run).model_dump() == {  # type: ignore[arg-type]
+        "max_image_tool_calls": 2,
+        "max_images_per_run": 4,
+    }
 
 
-def test_runtime_limits_honor_configured_tool_run_timeout() -> None:
+def test_runtime_tool_policy_restores_legacy_snapshots() -> None:
     run = SimpleNamespace(
         request_snapshot_jsonb={
             "limits": {
-                "run_timeout_seconds": 900,
-                "max_output_tokens": 4096,
+                "max_image_tool_calls": 3,
+                "max_images_per_run": 6,
             },
-            "allowed_tools": ["lumen_create_image"],
         }
     )
-    provider = SimpleNamespace(
-        agent_max_output_tokens=4096,
-    )
-    assert (
-        _runtime_limits(  # type: ignore[arg-type]
-            run,
-            provider,
-        ).run_timeout_seconds
-        == 900
-    )
+    assert _runtime_tool_policy(run).model_dump() == {  # type: ignore[arg-type]
+        "max_image_tool_calls": 3,
+        "max_images_per_run": 6,
+    }
 
 
 def test_agent_generation_billing_metadata_distinguishes_t2i_and_i2i() -> None:
@@ -977,7 +990,7 @@ async def test_text_flush_keeps_delta_appended_during_database_await(
 ) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
-    snapshots: list[tuple[str, str]] = []
+    snapshots: list[tuple[str, str, bool]] = []
 
     async def flush(
         _redis: object,
@@ -986,10 +999,11 @@ async def test_text_flush_keeps_delta_appended_during_database_await(
         execution_epoch: int,
         text: str,
         delta: str,
+        replace: bool = False,
     ) -> bool:
         assert run_id == "run-1"
         assert execution_epoch == 1
-        snapshots.append((text, delta))
+        snapshots.append((text, delta, replace))
         entered.set()
         await release.wait()
         return True
@@ -1011,16 +1025,24 @@ async def test_text_flush_keeps_delta_appended_during_database_await(
     release.set()
 
     assert await task is True
-    assert snapshots == [("first", "first")]
+    assert snapshots == [("first", "first", False)]
     assert accumulator.pending_delta == "second"
 
 
 def test_run_agent_is_registered_with_worker_and_outbox_contract() -> None:
-    assert main.WorkerSettings.job_timeout > (
-        AGENT_RUN_TIMEOUT_MAX_SECONDS + main._AGENT_RUN_FINALIZATION_BUDGET_SECONDS  # noqa: SLF001
-    )
+    assert main.WorkerSettings.job_timeout is None
+    agent_functions = [
+        function
+        for function in main.WorkerSettings.functions
+        if getattr(function, "__name__", getattr(function, "name", ""))
+        == "run_agent"
+    ]
+    assert len(agent_functions) == 1
+    assert getattr(agent_functions[0], "timeout_s", None) is None
+    assert all(job.timeout_s is not None for job in main.WorkerSettings.cron_jobs)
     names = {
-        getattr(function, "__name__", "") for function in main.WorkerSettings.functions
+        getattr(function, "__name__", getattr(function, "name", ""))
+        for function in main.WorkerSettings.functions
     }
     assert "run_agent" in names
     assert any(
