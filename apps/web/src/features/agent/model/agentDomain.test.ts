@@ -9,6 +9,7 @@ const {
   mergeAgentMessage,
   mergeAgentRun,
   projectAgentGenerations,
+  reconcileAgentSnapshot,
 } = await import(new URL("./reconciliation.ts", import.meta.url).href);
 const { agentRunErrorPresentation } = await import(
   new URL("./errors.ts", import.meta.url).href
@@ -118,6 +119,34 @@ test("accepted deltas append once and terminal Agent runs remain monotonic", () 
   );
 });
 
+test("Pi recovery resets a truncated draft before regenerated deltas", () => {
+  const reset = applyAgentEvent(run(), assistant(), {
+    agent_session_id: "session-1",
+    agent_run_id: "run-1",
+    assistant_message_id: "assistant-1",
+    execution_epoch: 2,
+    event_seq: 5,
+    event_name: "agent.output.reset",
+  });
+  assert.equal(reset.accepted, true);
+  if (!reset.accepted) return;
+  assert.equal(reset.nextMessage.text, "");
+
+  const regenerated = applyAgentEvent(reset.nextRun, reset.nextMessage, {
+    agent_session_id: "session-1",
+    agent_run_id: "run-1",
+    assistant_message_id: "assistant-1",
+    execution_epoch: 2,
+    event_seq: 6,
+    event_name: "agent.output.delta",
+    text_delta: "完整新答案",
+  });
+  assert.equal(regenerated.accepted, true);
+  if (regenerated.accepted) {
+    assert.equal(regenerated.nextMessage.text, "完整新答案");
+  }
+});
+
 test("snapshot reconciliation preserves longer partial text", () => {
   const merged = mergeAgentMessage(
     assistant({ text: "已保留的部分文本和更多内容", status: "partial", partial: true }),
@@ -129,6 +158,34 @@ test("snapshot reconciliation preserves longer partial text", () => {
     assert.equal(merged.status, "partial");
     assert.equal(merged.partial, true);
   }
+});
+
+test("a current snapshot keeps Pi text reset authoritative", () => {
+  const currentRun = run({ last_event_seq: 5 });
+  const reconciled = reconcileAgentSnapshot(
+    [assistant({ text: "截断旧稿" })],
+    { "run-1": currentRun },
+    {
+      items: [
+        {
+          id: "assistant-1",
+          role: "assistant",
+          content: { text: "", agent_run_id: "run-1" },
+          parent_message_id: "user-1",
+          status: "running",
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      runs: [run({ last_event_seq: 6 })],
+      generations: [],
+      images: [],
+    },
+    "session-1",
+  );
+
+  const message = reconciled.messages[0];
+  assert.equal(message?.role, "assistant");
+  if (message?.role === "assistant") assert.equal(message.text, "");
 });
 
 test("Agent generation projection links images and filters foreign sources", () => {

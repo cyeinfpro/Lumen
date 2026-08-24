@@ -221,16 +221,10 @@ def _patch_agent_message_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
 
     async def setting(_db: Any, key: str, _default: int | None = None) -> int:
         return {
-            "agent.max_turns": 6,
-            "agent.max_tool_calls": 4,
             "agent.max_image_tool_calls": 3,
             "agent.max_images_per_run": 4,
             "agent.max_reference_images": 16,
             "agent.max_session_images": 64,
-            "agent.max_output_tokens": 4096,
-            "agent.run_timeout_seconds": 180,
-            "agent.tool_timeout_seconds": 30,
-            "agent.capability_ttl_seconds": 120,
         }[key]
 
     async def no_audit(*_args: Any, **_kwargs: Any) -> bool:
@@ -301,16 +295,13 @@ def _capability(
 
 
 @pytest.mark.asyncio
-async def test_agent_text_reservation_prices_bounded_multi_turn_usage(
+async def test_agent_text_reservation_uses_pi_native_model_and_tool_shape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
 
     async def enabled(_db: Any) -> bool:
         return True
-
-    async def setting(_db: Any, key: str, _default: int | None = None) -> int:
-        return {"agent.max_turns": 6, "agent.max_output_tokens": 4096}[key]
 
     async def pricing_snapshot(_db: Any, *, model: str) -> dict[str, Any]:
         assert model == "gpt-agent-test"
@@ -345,7 +336,6 @@ async def test_agent_text_reservation_prices_bounded_multi_turn_usage(
         return True
 
     monkeypatch.setattr(agent_common, "billing_enabled", enabled)
-    monkeypatch.setattr(agent_common, "agent_setting_int", setting)
     monkeypatch.setattr(
         agent_common.billing_core,
         "completion_pricing_snapshot",
@@ -369,6 +359,8 @@ async def test_agent_text_reservation_prices_bounded_multi_turn_usage(
         model="gpt-agent-test",
         text="create a campaign",
         reference_count=2,
+        provider_max_output_tokens=4096,
+        max_image_tool_calls=2,
     )
     assert reservation.hold_micro == 123_456
     assert all(tokens.output_tokens == 8 * 4096 for tokens in captured["tokens_seen"])
@@ -384,7 +376,8 @@ async def test_agent_text_reservation_prices_bounded_multi_turn_usage(
     )
     assert captured["hold"]["ref_type"] == "agent_run"
     assert captured["hold"]["ref_id"] == "run-1"
-    assert reservation.billing_snapshot["max_turns"] == 6
+    assert reservation.billing_snapshot["execution_policy"] == "pi-native"
+    assert reservation.billing_snapshot["native_tool_turns"] == 2
     assert reservation.billing_snapshot["reserved_provider_calls"] == 8
     assert reservation.billing_snapshot["max_output_tokens"] == 4096
     assert reservation.billing_snapshot["context_window"] == 128_000
@@ -497,10 +490,15 @@ async def test_agent_message_is_idempotent_owned_and_hidden_from_studio(
         persisted = await db.get(AgentRun, first.agent_run.id)
         assert persisted is not None
         assert persisted.reasoning_effort == "max"
-        assert (
-            persisted.request_snapshot_jsonb["limits"]["capability_ttl_seconds"] == 120
-        )
-        assert persisted.request_snapshot_jsonb["limits"]["max_session_images"] == 64
+        assert persisted.request_snapshot_jsonb["execution_policy"] == "pi-native"
+        assert persisted.request_snapshot_jsonb["tool_policy"] == {
+            "max_image_tool_calls": 3,
+            "max_images_per_run": 4,
+        }
+        assert persisted.request_snapshot_jsonb["reference_policy"] == {
+            "max_reference_images": 16,
+            "max_session_images": 64,
+        }
 
         with pytest.raises(HTTPException) as conflict:
             await agent_sessions_service.submit_agent_message(
@@ -879,8 +877,10 @@ async def test_agent_session_inherits_all_prior_uploads_and_generated_images(
         ]
         persisted = await db.get(AgentRun, second.agent_run.id)
         assert persisted is not None
-        assert persisted.request_snapshot_jsonb["limits"]["max_reference_images"] == 16
-        assert persisted.request_snapshot_jsonb["limits"]["max_session_images"] == 64
+        assert persisted.request_snapshot_jsonb["reference_policy"] == {
+            "max_reference_images": 16,
+            "max_session_images": 64,
+        }
 
         persisted.status = AgentRunStatus.SUCCEEDED.value
         db.add(

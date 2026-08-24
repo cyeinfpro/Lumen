@@ -1,6 +1,6 @@
 # Lumen Agent Runtime
 
-Private Node service that executes one bounded Pi agent run for the Python
+Private Node service that executes one Pi-native agent run for the Python
 Worker. PostgreSQL remains the product state source; this service uses only
 in-memory Pi sessions, settings, credentials, and model catalogs.
 
@@ -16,11 +16,17 @@ npm run build
 
 The service requires `AGENT_RUNTIME_SHARED_SECRET` with at least 32 UTF-8 bytes.
 It exposes `GET /healthz`, `GET /readyz`, `GET /metrics`, and the authenticated
-backend-only `POST /v1/runs` NDJSON endpoint. While a run is active it emits a
-bounded `run.heartbeat` event every `AGENT_RUNTIME_HEARTBEAT_INTERVAL_SECONDS`
+backend-only `POST /v1/runs` NDJSON endpoint. Runtime request v2 contains no
+Lumen wall-clock, turn, text-size, or output-token lifecycle budget. Pi's
+`session.prompt()` / `agent_end` lifecycle, provider-native model metadata, and
+explicit user cancellation are authoritative. Pi's supported
+`httpIdleTimeoutMs: 0` setting disables the SDK request deadline. While a run is active it emits a
+`run.heartbeat` event every `AGENT_RUNTIME_HEARTBEAT_INTERVAL_SECONDS`
 (default 15 seconds), including during provider silence and context preparation.
-Heartbeats are enabled only when the Worker advertises `heartbeat-v1`, preserving
-mixed-version rolling upgrades. It must not be published on a host port or mounted to a repository, media
+Heartbeats are enabled only when the Worker advertises `heartbeat-v1`. A v2
+Worker also advertises `text-reset-v1`, allowing Pi's native compaction recovery
+to replace a discarded truncated draft before regenerated deltas arrive. It must
+not be published on a host port or mounted to a repository, media
 directory, user home, or Pi config path.
 
 Production Compose keeps one always-running replica on `lumen_backend` with a

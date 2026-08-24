@@ -10,6 +10,7 @@ import {
 } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
+  type AgentSessionEvent,
   type CompactionResult,
   estimateTokens,
   ModelRuntime,
@@ -20,6 +21,8 @@ import {
 
 import {
   AGENT_TOOL_CREATE_IMAGE,
+  RUNTIME_TEXT_RESET_EVENT,
+  runtimeToolPolicy,
   type RuntimeHistoryMessage,
   type RuntimeRequest,
   type RuntimeUsage,
@@ -116,7 +119,7 @@ function boundedProviderUsage(
   const output = tokenValue(
     usage.output,
     "output usage",
-    request.limits.max_output_tokens * providerCallCount,
+    request.provider.max_output_tokens * providerCallCount,
   );
   const cacheRead = tokenValue(
     usage.cacheRead,
@@ -261,7 +264,7 @@ function terminalErrorCode(message: AssistantMessage | null): string | null {
     return null;
   }
   if (message.stopReason === "aborted") return "agent_cancelled";
-  if (message.stopReason === "length") return "agent_output_limit_reached";
+  if (message.stopReason === "length") return null;
   return "agent_provider_error";
 }
 
@@ -290,7 +293,7 @@ async function emitOrThrow(
   payload: Record<string, unknown> = {},
 ): Promise<void> {
   if (!(await writer.emit(type, payload))) {
-    throw new Error("Agent Runtime output limit reached");
+    throw new Error("Agent Runtime event could not be emitted");
   }
 }
 
@@ -320,16 +323,33 @@ export async function executeAgentRun(
 ): Promise<ExecuteResult> {
   const usage = zeroUsage();
   const tools = buildToolState();
+  const toolPolicy = runtimeToolPolicy(request);
   let turnCount = 0;
-  let outputChars = 0;
   let lastAssistant: AssistantMessage | null = null;
   let providerDispatches = 0;
   let providerResponses = 0;
   let providerCompletions = 0;
-  let closingTurn = false;
   const toolStartedAt = new Map<string, bigint>();
+  let sessionEventTail: Promise<void> = Promise.resolve();
+  let sessionEventFailure: unknown = null;
+
+  const enqueueSessionEvent = (work: () => Promise<void>): void => {
+    sessionEventTail = sessionEventTail
+      .then(work)
+      .catch((error: unknown) => {
+        sessionEventFailure = error;
+      });
+  };
+  const drainSessionEvents = async (): Promise<void> => {
+    await sessionEventTail;
+    if (sessionEventFailure instanceof Error) throw sessionEventFailure;
+    if (sessionEventFailure !== null) {
+      throw new Error("Agent Runtime session event failed");
+    }
+  };
 
   const onDispatch = async (): Promise<void> => {
+    await drainSessionEvents();
     providerDispatches += 1;
     metrics?.providerRequests.labels("dispatch", "sent").inc();
     await emitOrThrow(writer, "provider.dispatched", {
@@ -367,7 +387,13 @@ export async function executeAgentRun(
       reserveTokens: compactionReserveTokens,
       keepRecentTokens: compactionKeepRecentTokens,
     },
-    retry: { enabled: false, maxRetries: 0, provider: { maxRetries: 0 } },
+    retry: {
+      enabled: true,
+      maxRetries: 3,
+      baseDelayMs: 2_000,
+      provider: { maxRetries: 0, maxRetryDelayMs: 60_000 },
+    },
+    httpIdleTimeoutMs: 0,
     transport: "sse",
     defaultTools: [],
     images: { autoResize: false, blockImages: false },
@@ -407,6 +433,10 @@ export async function executeAgentRun(
 
   session.agent.toolExecution = "sequential";
   session.agent.transport = "sse";
+  const httpIdleTimeoutMs = settings.getHttpIdleTimeoutMs();
+  const providerTimeoutMs = httpIdleTimeoutMs === 0
+    ? 2_147_483_647
+    : httpIdleTimeoutMs;
   session.agent.streamFunction = (model, context, options) =>
     prepared.modelRuntime.streamSimple(model, context, {
       ...options,
@@ -414,14 +444,8 @@ export async function executeAgentRun(
       headers: request.provider.headers,
       fetch: prepared.transport.fetch,
       transport: "sse",
+      timeoutMs: providerTimeoutMs,
       maxRetries: 0,
-      maxRetryDelayMs: 0,
-      timeoutMs: request.limits.run_timeout_seconds * 1000,
-      maxTokens: Math.min(
-        options?.maxTokens ?? request.limits.max_output_tokens,
-        request.provider.max_output_tokens,
-        request.limits.max_output_tokens,
-      ),
       onResponse: async (response) => {
         providerResponses += 1;
         metrics?.providerRequests.labels("response", String(response.status)).inc();
@@ -439,9 +463,9 @@ export async function executeAgentRun(
   ): Promise<void> => {
     const providerCallCount = providerDispatches - dispatchCountBefore;
     const responseCount = providerResponses - responseCountBefore;
-    const firstKeptMessageId = seededSession.entryMessageIds.get(
-      result.firstKeptEntryId,
-    );
+    const firstKeptMessageId =
+      seededSession.entryMessageIds.get(result.firstKeptEntryId) ??
+      request.user_message_id;
     if (
       firstKeptMessageId === undefined ||
       result.usage === undefined ||
@@ -485,23 +509,24 @@ export async function executeAgentRun(
   session.agent.prepareNextTurnWithContext = async (context, turnSignal) => {
     const previous = await previousPrepare?.(context, turnSignal);
     const baseContext = previous?.context ?? context.context;
-    const needsClosingTurn =
+    const toolCapacityExhausted =
       context.toolResults.length > 0 &&
-      (turnCount >= request.limits.max_turns - 1 || tools.limitReason !== null);
-    if (!needsClosingTurn) return previous;
-    closingTurn = true;
+      (tools.limitReason !== null ||
+        tools.imageCalls >= toolPolicy.max_image_tool_calls ||
+        tools.acceptedImages >= toolPolicy.max_images_per_run);
+    if (!toolCapacityExhausted) return previous;
+    tools.limitReason ??=
+      tools.imageCalls >= toolPolicy.max_image_tool_calls
+        ? "tool_calls"
+        : "images";
     return {
       ...previous,
       context: {
         ...baseContext,
         tools: [],
-        systemPrompt: `${baseContext.systemPrompt}\n\nConclude now without calling any tool. Briefly report accepted asynchronous image jobs and any limitation.`,
+        systemPrompt: `${baseContext.systemPrompt}\n\nNo image tool is available for the remainder of this prompt. Conclude naturally and briefly report any accepted asynchronous image jobs.`,
       },
     };
-  };
-  session.agent.shouldStopAfterTurn = (context) => {
-    if (turnCount >= request.limits.max_turns) return true;
-    return closingTurn && context.toolResults.length === 0;
   };
 
   const unsubscribe = session.agent.subscribe(async (event: AgentEvent) => {
@@ -515,11 +540,6 @@ export async function executeAgentRun(
       event.assistantMessageEvent.type === "text_delta"
     ) {
       const delta = event.assistantMessageEvent.delta;
-      outputChars += delta.length;
-      if (outputChars > request.limits.max_output_chars) {
-        session.agent.abort();
-        throw new Error("Agent Runtime text output limit reached");
-      }
       for (let offset = 0; offset < delta.length; offset += 8192) {
         await emitOrThrow(writer, "text.delta", {
           delta: delta.slice(offset, offset + 8192),
@@ -608,6 +628,47 @@ export async function executeAgentRun(
     }
   });
 
+  let compactionStart:
+    | { providerDispatches: number; providerResponses: number }
+    | null = null;
+  const unsubscribeSession = session.subscribe((event: AgentSessionEvent) => {
+    if (
+      event.type === "auto_retry_start" &&
+      request.event_features?.includes("text-reset-v1")
+    ) {
+      enqueueSessionEvent(async () => {
+        await emitOrThrow(writer, RUNTIME_TEXT_RESET_EVENT);
+      });
+      return;
+    }
+    if (event.type === "compaction_start" && event.reason !== "manual") {
+      compactionStart = { providerDispatches, providerResponses };
+      return;
+    }
+    if (
+      event.type !== "compaction_end" ||
+      event.reason === "manual" ||
+      event.result === undefined
+    ) {
+      return;
+    }
+    const start = compactionStart ?? { providerDispatches, providerResponses };
+    compactionStart = null;
+    enqueueSessionEvent(async () => {
+      await emitCompactionCheckpoint(
+        event.result as CompactionResult,
+        start.providerDispatches,
+        start.providerResponses,
+      );
+      if (
+        event.willRetry &&
+        request.event_features?.includes("text-reset-v1")
+      ) {
+        await emitOrThrow(writer, RUNTIME_TEXT_RESET_EVENT);
+      }
+    });
+  });
+
   const abortListener = (): void => {
     session.abortCompaction();
     session.agent.abort();
@@ -667,17 +728,15 @@ export async function executeAgentRun(
         throw new Error("Pi native compaction could not fit the Agent context");
       }
     }
-    session.setAutoCompactionEnabled(false);
+    session.setAutoCompactionEnabled(request.version === 2);
     await session.prompt(request.current_prompt, {
       images,
       expandPromptTemplates: false,
     });
+    await drainSessionEvents();
     if (tools.limitReason !== null) {
       metrics?.limits.labels(tools.limitReason).inc();
       await emitOrThrow(writer, "limit.reached", { reason: tools.limitReason });
-    } else if (turnCount >= request.limits.max_turns) {
-      metrics?.limits.labels("turns").inc();
-      await emitOrThrow(writer, "limit.reached", { reason: "turns" });
     }
     const errorCode =
       tools.unknownResults > 0
@@ -701,8 +760,6 @@ export async function executeAgentRun(
         ? "agent_tool_result_unknown"
         : tools.failedCalls > 0
           ? tools.lastErrorCode ?? "agent_tool_failed"
-          : error instanceof Error && /output limit/iu.test(error.message)
-          ? "agent_output_limit_reached"
           : terminalErrorCode(lastAssistant) ?? "agent_runtime_error";
     throw new RuntimeExecutionError(
       {
@@ -719,6 +776,7 @@ export async function executeAgentRun(
   } finally {
     signal.removeEventListener("abort", abortListener);
     unsubscribe();
+    unsubscribeSession();
     session.dispose();
     await prepared.close();
   }

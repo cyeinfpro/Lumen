@@ -20,7 +20,9 @@ AGENT_CAPABILITY_VERSION = 1
 AGENT_CAPABILITY_MIN_SECRET_BYTES = 32
 AGENT_CAPABILITY_MAX_TOKEN_BYTES = 8192
 AGENT_CAPABILITY_MAX_CLOCK_SKEW_SECONDS = 30
-AGENT_CAPABILITY_MAX_TTL_SECONDS = 3600
+# Tool tokens are also revoked by the active-run and execution-epoch database
+# fences. This expiry limits replay exposure without acting as a run deadline.
+AGENT_CAPABILITY_MAX_TTL_SECONDS = 24 * 60 * 60
 AGENT_CAPABILITY_MAX_REFERENCE_LABELS = 64
 
 

@@ -136,16 +136,10 @@ async def _patch_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
 
     async def setting(_db: Any, key: str, _default: int | None = None) -> int:
         return {
-            "agent.max_turns": 6,
-            "agent.max_tool_calls": 3,
             "agent.max_image_tool_calls": 2,
             "agent.max_images_per_run": 4,
             "agent.max_reference_images": 16,
             "agent.max_session_images": 64,
-            "agent.max_output_tokens": 4096,
-            "agent.run_timeout_seconds": 180,
-            "agent.tool_timeout_seconds": 30,
-            "agent.capability_ttl_seconds": 120,
         }[key]
 
     async def no_audit(*_args: Any, **_kwargs: Any) -> bool:

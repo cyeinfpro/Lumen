@@ -19,23 +19,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 RUNTIME_REQUEST_PATH = "/v1/runs"
 RUNTIME_AUTH_VERSION = "v1"
-_LEGACY_RUNTIME_MAX_HISTORY = 256
-_LEGACY_RUNTIME_MAX_REFERENCES = 4
-_LEGACY_RUNTIME_MAX_REQUEST_BYTES = 8 * 1024 * 1024
-# Python counts Unicode code points while TypeBox uses UTF-16 code units.
-_LEGACY_RUNTIME_HISTORY_CHUNK_CHARS = 10_000
-_LEGACY_RUNTIME_REFERENCE_LABELS = frozenset(
-    f"ref_{index}" for index in range(1, _LEGACY_RUNTIME_MAX_REFERENCES + 1)
-)
-_PI_COMPACTION_SUMMARY_PREFIX = (
-    "The conversation history before this point was compacted into the "
-    "following summary:\n\n<summary>\n"
-)
-_PI_COMPACTION_SUMMARY_SUFFIX = "\n</summary>"
-_PI_COMPACTION_MAX_PROVIDER_CALLS = 2
-_MAX_RUNTIME_PROVIDER_CALLS = 12 + _PI_COMPACTION_MAX_PROVIDER_CALLS
-_MAX_RUNTIME_INPUT_TOKENS = 2_000_000 * _MAX_RUNTIME_PROVIDER_CALLS
-_MAX_RUNTIME_OUTPUT_TOKENS = 32_000 * _MAX_RUNTIME_PROVIDER_CALLS
 RUNTIME_TERMINAL_EVENTS = frozenset({"run.completed", "run.failed", "run.cancelled"})
 RUNTIME_EVENT_TYPES = frozenset(
     {
@@ -44,6 +27,7 @@ RUNTIME_EVENT_TYPES = frozenset(
         "provider.dispatched",
         "provider.response",
         "text.delta",
+        "text.reset",
         "turn.completed",
         "compaction.completed",
         "tool.started",
@@ -112,19 +96,13 @@ class AgentRuntimeImageDefaults(_StrictModel):
     output_format: Literal["png", "jpeg", "webp"]
 
 
-class AgentRuntimeLimits(_StrictModel):
-    max_turns: int = Field(ge=1, le=12)
-    max_tool_calls: int = Field(ge=0, le=12)
+class AgentRuntimeToolPolicy(_StrictModel):
     max_image_tool_calls: int = Field(ge=0, le=8)
     max_images_per_run: int = Field(ge=1, le=16)
-    max_output_tokens: int = Field(ge=1, le=32000)
-    run_timeout_seconds: int = Field(ge=10, le=1800)
-    tool_timeout_seconds: int = Field(ge=5, le=300)
-    max_output_chars: int = Field(ge=1024, le=1_000_000)
 
 
 class AgentRuntimeRequest(_StrictModel):
-    version: Literal[1] = 1
+    version: Literal[2] = 2
     run_id: str = Field(min_length=1, max_length=96)
     agent_session_id: str = Field(min_length=1, max_length=96)
     user_id: str = Field(min_length=1, max_length=96)
@@ -132,9 +110,10 @@ class AgentRuntimeRequest(_StrictModel):
     user_message_id: str = Field(min_length=1, max_length=96)
     assistant_message_id: str = Field(min_length=1, max_length=96)
     trace_id: str = Field(pattern=r"^[a-f0-9]{32}$")
-    event_features: list[Literal["heartbeat-v1"]] = Field(
-        default_factory=lambda: ["heartbeat-v1"],
-        max_length=1,
+    event_features: list[Literal["heartbeat-v1", "text-reset-v1"]] = Field(
+        default_factory=lambda: ["heartbeat-v1", "text-reset-v1"],
+        min_length=2,
+        max_length=2,
     )
     provider: AgentRuntimeProviderEnvelope
     system_prompt: str = Field(max_length=65536)
@@ -149,7 +128,7 @@ class AgentRuntimeRequest(_StrictModel):
     reasoning_effort: (
         Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"] | None
     ) = None
-    limits: AgentRuntimeLimits
+    tool_policy: AgentRuntimeToolPolicy
 
     @model_validator(mode="after")
     def validate_bindings(self) -> "AgentRuntimeRequest":
@@ -172,27 +151,28 @@ class AgentRuntimeRequest(_StrictModel):
             raise ValueError("tool gateway bindings do not match allowed_tools")
         if self.references and not self.provider.vision_supported:
             raise ValueError("reference images require a vision-capable provider")
+        if set(self.event_features) != {"heartbeat-v1", "text-reset-v1"}:
+            raise ValueError("Pi-native Runtime features are incomplete")
+        if self.allowed_tools and self.tool_policy.max_image_tool_calls < 1:
+            raise ValueError("image tool requires a positive call allowance")
         return self
 
 
 class AgentRuntimeUsage(_StrictModel):
-    input_tokens: int = Field(ge=0, le=_MAX_RUNTIME_INPUT_TOKENS)
-    output_tokens: int = Field(ge=0, le=_MAX_RUNTIME_OUTPUT_TOKENS)
-    cache_read_tokens: int = Field(ge=0, le=_MAX_RUNTIME_INPUT_TOKENS)
-    cache_write_tokens: int = Field(ge=0, le=_MAX_RUNTIME_INPUT_TOKENS)
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    cache_read_tokens: int = Field(ge=0)
+    cache_write_tokens: int = Field(ge=0)
     cache_write_1h_tokens: int = Field(
         default=0,
         ge=0,
-        le=_MAX_RUNTIME_INPUT_TOKENS,
     )
     reasoning_tokens: int = Field(
         default=0,
         ge=0,
-        le=_MAX_RUNTIME_OUTPUT_TOKENS,
     )
     total_tokens: int = Field(
         ge=0,
-        le=_MAX_RUNTIME_INPUT_TOKENS + _MAX_RUNTIME_OUTPUT_TOKENS,
     )
 
     @model_validator(mode="after")
@@ -222,11 +202,11 @@ class AgentRuntimeEvent(_StrictModel):
     status: str | int | None = None
     error_code: str | None = Field(default=None, max_length=64)
     usage: AgentRuntimeUsage | None = None
-    turn: int | None = Field(default=None, ge=1, le=64)
-    turn_count: int | None = Field(default=None, ge=0, le=64)
-    tool_call_count: int | None = Field(default=None, ge=0, le=64)
+    turn: int | None = Field(default=None, ge=1)
+    turn_count: int | None = Field(default=None, ge=0)
+    tool_call_count: int | None = Field(default=None, ge=0)
     tool_call_id: str | None = Field(default=None, max_length=128)
-    ordinal: int | None = Field(default=None, ge=0, le=64)
+    ordinal: int | None = Field(default=None, ge=0)
     name: str | None = Field(default=None, max_length=64)
     mode: str | None = Field(default=None, max_length=32)
     generation_ids: list[str] | None = Field(default=None, max_length=4)
@@ -245,8 +225,8 @@ class AgentRuntimeEvent(_StrictModel):
     reasoning_effort: (
         Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"] | None
     ) = None
-    provider_dispatch_count: int | None = Field(default=None, ge=0, le=64)
-    provider_completed_count: int | None = Field(default=None, ge=0, le=64)
+    provider_dispatch_count: int | None = Field(default=None, ge=0)
+    provider_completed_count: int | None = Field(default=None, ge=0)
 
     @field_validator("type")
     @classmethod
@@ -291,18 +271,11 @@ class AgentRuntimeClientError(RuntimeError):
 class _RuntimeEventDecoder:
     request: AgentRuntimeRequest
     max_line_bytes: int
-    max_stream_bytes: int
-    max_events: int
     buffer: bytearray = field(default_factory=bytearray)
-    total_bytes: int = 0
-    event_count: int = 0
     expected_seq: int = 1
     terminal_seen: bool = False
 
     def feed(self, chunk: bytes) -> list[AgentRuntimeEvent]:
-        self.total_bytes += len(chunk)
-        if self.total_bytes > self.max_stream_bytes:
-            raise AgentRuntimeClientError("agent_runtime_stream_too_large")
         self.buffer.extend(chunk)
         events: list[AgentRuntimeEvent] = []
         while (newline := self.buffer.find(b"\n")) >= 0:
@@ -323,9 +296,6 @@ class _RuntimeEventDecoder:
             event = AgentRuntimeEvent.model_validate(raw_event)
         except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
             raise AgentRuntimeClientError("agent_runtime_invalid_event") from exc
-        self.event_count += 1
-        if self.event_count > self.max_events:
-            raise AgentRuntimeClientError("agent_runtime_event_limit")
         if (
             event.run_id != self.request.run_id
             or event.execution_epoch != self.request.execution_epoch
@@ -340,6 +310,7 @@ class _RuntimeEventDecoder:
             allowed_message_ids = {
                 message.message_id for message in self.request.history
             }
+            allowed_message_ids.add(self.request.user_message_id)
             if event.first_kept_message_id not in allowed_message_ids:
                 raise AgentRuntimeClientError("agent_runtime_invalid_event")
         if event.type in RUNTIME_TERMINAL_EVENTS:
@@ -358,19 +329,22 @@ class _RuntimeEventDecoder:
         usage = event.usage
         if usage is None:
             return
-        turn_limit = self.request.limits.max_turns
         if event.type == "compaction.completed":
             multiplier = event.provider_call_count or 1
         elif event.type == "turn.completed":
             multiplier = 1
         else:
-            multiplier = turn_limit + _PI_COMPACTION_MAX_PROVIDER_CALLS
+            multiplier = max(
+                1,
+                event.provider_completed_count or 0,
+                event.provider_dispatch_count or 0,
+            )
         input_total = (
             usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
         )
         if input_total > self.request.provider.context_window * multiplier:
             raise AgentRuntimeClientError("agent_runtime_usage_out_of_bounds")
-        if usage.output_tokens > self.request.limits.max_output_tokens * multiplier:
+        if usage.output_tokens > self.request.provider.max_output_tokens * multiplier:
             raise AgentRuntimeClientError("agent_runtime_usage_out_of_bounds")
 
     def finish(self) -> None:
@@ -441,51 +415,6 @@ def _runtime_request_body(request: AgentRuntimeRequest) -> bytes:
     return _encoded_runtime_request(request.model_dump(mode="json"))
 
 
-def _legacy_runtime_request_body(
-    request: AgentRuntimeRequest,
-) -> bytes | None:
-    if len(request.references) > _LEGACY_RUNTIME_MAX_REFERENCES or any(
-        reference.reference_label not in _LEGACY_RUNTIME_REFERENCE_LABELS
-        for reference in request.references
-    ):
-        return None
-    payload = request.model_dump(mode="json")
-    payload.pop("user_message_id", None)
-    payload.pop("compaction", None)
-    payload.pop("event_features", None)
-    history = [
-        {key: value for key, value in item.items() if key != "message_id"}
-        for item in payload.get("history", [])
-    ]
-    if request.compaction is not None:
-        summary = (
-            _PI_COMPACTION_SUMMARY_PREFIX
-            + request.compaction.summary
-            + _PI_COMPACTION_SUMMARY_SUFFIX
-        )
-        history = [
-            *(
-                {
-                    "role": "user",
-                    "text": summary[
-                        offset : offset + _LEGACY_RUNTIME_HISTORY_CHUNK_CHARS
-                    ],
-                }
-                for offset in range(
-                    0,
-                    len(summary),
-                    _LEGACY_RUNTIME_HISTORY_CHUNK_CHARS,
-                )
-            ),
-            *history,
-        ]
-    if len(history) > _LEGACY_RUNTIME_MAX_HISTORY:
-        return None
-    payload["history"] = history
-    body = _encoded_runtime_request(payload)
-    return body if len(body) <= _LEGACY_RUNTIME_MAX_REQUEST_BYTES else None
-
-
 def sign_runtime_request(
     secret: str,
     method: str,
@@ -509,8 +438,6 @@ class AgentRuntimeClient:
     event_idle_timeout_seconds: float = 45.0
     max_request_bytes: int = 64 * 1024 * 1024
     max_line_bytes: int = 64 * 1024
-    max_stream_bytes: int = 8 * 1024 * 1024
-    max_events: int = 4096
     _client: httpx.AsyncClient | None = field(default=None, init=False, repr=False)
 
     @property
@@ -558,53 +485,43 @@ class AgentRuntimeClient:
         if on_request_starting is not None:
             await on_request_starting()
         try:
-            legacy_body = _legacy_runtime_request_body(request)
-            bodies = (body,) if legacy_body is None else (body, legacy_body)
-            for attempt, candidate_body in enumerate(bodies):
-                timestamp = str(int(time.time()))
-                nonce = secrets.token_urlsafe(24)
-                signature = sign_runtime_request(
-                    self.shared_secret,
-                    "POST",
-                    RUNTIME_REQUEST_PATH,
-                    timestamp,
-                    nonce,
-                    candidate_body,
-                )
-                stream_context = self._http().stream(
-                    "POST",
-                    RUNTIME_REQUEST_PATH,
-                    content=candidate_body,
-                    headers={
-                        "content-type": "application/json",
-                        "x-lumen-agent-timestamp": timestamp,
-                        "x-lumen-agent-nonce": nonce,
-                        "x-lumen-agent-signature": signature,
-                    },
-                )
-                async with stream_context as response:
-                    if response.status_code != 200:
-                        if (
-                            attempt == 0
-                            and len(bodies) == 2
-                            and response.status_code in {400, 413, 422}
-                        ):
-                            continue
-                        raise AgentRuntimeClientError(
-                            "agent_runtime_rejected",
-                            delivery="proven_absent",
-                            status_code=response.status_code,
-                        )
-                    content_type = response.headers.get("content-type", "").lower()
-                    if not content_type.startswith("application/x-ndjson"):
-                        raise AgentRuntimeClientError("agent_runtime_invalid_response")
-                    async for event in self._events(
-                        response,
-                        request=request,
-                        cancel_requested=cancel_requested,
-                    ):
-                        yield event
-                    return
+            timestamp = str(int(time.time()))
+            nonce = secrets.token_urlsafe(24)
+            signature = sign_runtime_request(
+                self.shared_secret,
+                "POST",
+                RUNTIME_REQUEST_PATH,
+                timestamp,
+                nonce,
+                body,
+            )
+            stream_context = self._http().stream(
+                "POST",
+                RUNTIME_REQUEST_PATH,
+                content=body,
+                headers={
+                    "content-type": "application/json",
+                    "x-lumen-agent-timestamp": timestamp,
+                    "x-lumen-agent-nonce": nonce,
+                    "x-lumen-agent-signature": signature,
+                },
+            )
+            async with stream_context as response:
+                if response.status_code != 200:
+                    raise AgentRuntimeClientError(
+                        "agent_runtime_rejected",
+                        delivery="proven_absent",
+                        status_code=response.status_code,
+                    )
+                content_type = response.headers.get("content-type", "").lower()
+                if not content_type.startswith("application/x-ndjson"):
+                    raise AgentRuntimeClientError("agent_runtime_invalid_response")
+                async for event in self._events(
+                    response,
+                    request=request,
+                    cancel_requested=cancel_requested,
+                ):
+                    yield event
         except AgentRuntimeClientError:
             raise
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
@@ -627,8 +544,6 @@ class AgentRuntimeClient:
         decoder = _RuntimeEventDecoder(
             request=request,
             max_line_bytes=self.max_line_bytes,
-            max_stream_bytes=self.max_stream_bytes,
-            max_events=self.max_events,
         )
         while True:
             try:
@@ -651,7 +566,7 @@ __all__ = [
     "AgentRuntimeEvent",
     "AgentRuntimeHistoryMessage",
     "AgentRuntimeImageDefaults",
-    "AgentRuntimeLimits",
+    "AgentRuntimeToolPolicy",
     "AgentRuntimeProviderEnvelope",
     "AgentRuntimeReference",
     "AgentRuntimeRequest",

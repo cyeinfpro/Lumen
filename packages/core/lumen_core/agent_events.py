@@ -100,6 +100,7 @@ AGENT_TOOL_TRANSITIONS: Mapping[str, frozenset[str]] = immutable_mapping(
 EV_AGENT_RUN_QUEUED = "agent.run.queued"
 EV_AGENT_RUN_STARTED = "agent.run.started"
 EV_AGENT_OUTPUT_DELTA = "agent.output.delta"
+EV_AGENT_OUTPUT_RESET = "agent.output.reset"
 EV_AGENT_TOOL_STARTED = "agent.tool.started"
 EV_AGENT_TOOL_UPDATED = "agent.tool.updated"
 EV_AGENT_TOOL_SUCCEEDED = "agent.tool.succeeded"
@@ -114,6 +115,7 @@ AGENT_EVENT_NAMES = frozenset(
         EV_AGENT_RUN_QUEUED,
         EV_AGENT_RUN_STARTED,
         EV_AGENT_OUTPUT_DELTA,
+        EV_AGENT_OUTPUT_RESET,
         EV_AGENT_TOOL_STARTED,
         EV_AGENT_TOOL_UPDATED,
         EV_AGENT_TOOL_SUCCEEDED,
@@ -159,6 +161,7 @@ __all__ = [
     "AgentRunStatus",
     "AgentToolCallStatus",
     "EV_AGENT_OUTPUT_DELTA",
+    "EV_AGENT_OUTPUT_RESET",
     "EV_AGENT_RUN_CANCELLED",
     "EV_AGENT_RUN_FAILED",
     "EV_AGENT_RUN_PARTIAL",

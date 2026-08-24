@@ -14,7 +14,6 @@ import {
 } from "lucide-react";
 import type { SystemSettingItem } from "@/lib/types";
 import { CANVAS_ENABLED_KEY, CANVAS_SETTING_META } from "../canvasSettingMeta";
-import { AGENT_TIMEOUT_SETTING_META } from "./agentSettingMeta";
 
 export type Op = { kind: "set"; value: string } | { kind: "clear" };
 
@@ -226,7 +225,6 @@ export const SETTING_META: Record<string, SettingMeta> = {
     warning: "开启后 Agent API 会接受真实请求并产生对话或图片费用。",
     keywords: ["agent", "enabled", "runtime", "worker", "智能体"],
   },
-  ...AGENT_TIMEOUT_SETTING_META,
   [UI_NAV_VIDEO_VISIBLE_KEY]: {
     group: "ui",
     title: "显示视频入口",

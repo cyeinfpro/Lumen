@@ -15,9 +15,6 @@ from lumen_core.agent_events import agent_channel, agent_event_id
 from lumen_core.context_window import estimate_message_tokens
 from lumen_core.model_entities import AgentRun, OutboxEvent
 from lumen_core.providers_parts.config import parse_provider_json
-from lumen_core.runtime_setting_agent_specs import (
-    AGENT_RUN_TIMEOUT_DEFAULT_SECONDS,
-)
 from lumen_core.runtime_settings import get_spec
 from lumen_core.schema_models import AgentEventEnvelope
 
@@ -32,20 +29,15 @@ from ..message_submission_billing import billing_allow_negative, billing_enabled
 logger = logging.getLogger(__name__)
 
 _AGENT_PI_COMPACTION_RESERVE_CALLS = 2
+_AGENT_PI_RETRY_RESERVE_CALLS = 3
 
 
 AGENT_SETTING_DEFAULTS = MappingProxyType(
     {
-        "agent.max_turns": 6,
-        "agent.max_tool_calls": 3,
         "agent.max_image_tool_calls": 2,
         "agent.max_images_per_run": 4,
         "agent.max_reference_images": 16,
         "agent.max_session_images": 64,
-        "agent.max_output_tokens": 4096,
-        "agent.run_timeout_seconds": AGENT_RUN_TIMEOUT_DEFAULT_SECONDS,
-        "agent.tool_timeout_seconds": 30,
-        "agent.capability_ttl_seconds": 900,
     }
 )
 
@@ -220,19 +212,21 @@ async def reserve_agent_text(
     reference_count: int,
     context_window: int = 128_000,
     provider_max_output_tokens: int = 32_000,
+    max_image_tool_calls: int = 0,
 ) -> AgentTextReservation:
     if account_mode != "wallet" or not await billing_enabled(db):
         return AgentTextReservation(hold_micro=0, billing_snapshot={})
 
-    max_turns = await agent_setting_int(db, "agent.max_turns")
-    configured_output_tokens = await agent_setting_int(db, "agent.max_output_tokens")
-    max_output_tokens = min(
-        configured_output_tokens,
-        max(1, provider_max_output_tokens),
-    )
+    max_output_tokens = max(1, provider_max_output_tokens)
     bounded_context_window = max(4096, min(2_000_000, context_window))
     input_per_turn = max(1, bounded_context_window - max_output_tokens)
-    reserved_provider_calls = max_turns + _AGENT_PI_COMPACTION_RESERVE_CALLS
+    native_tool_turns = max(0, min(8, max_image_tool_calls))
+    reserved_provider_calls = (
+        1
+        + native_tool_turns
+        + _AGENT_PI_COMPACTION_RESERVE_CALLS
+        + _AGENT_PI_RETRY_RESERVE_CALLS
+    )
     input_upper = input_per_turn * reserved_provider_calls
     output_upper = max_output_tokens * reserved_provider_calls
     try:
@@ -280,7 +274,8 @@ async def reserve_agent_text(
     snapshot = {
         "pricing_snapshot": pricing_snapshot,
         "rate_multiplier_x10000": multiplier,
-        "max_turns": max_turns,
+        "execution_policy": "pi-native",
+        "native_tool_turns": native_tool_turns,
         "reserved_provider_calls": reserved_provider_calls,
         "max_output_tokens": max_output_tokens,
         "context_window": bounded_context_window,
@@ -326,7 +321,7 @@ async def reserve_agent_text(
                 "amount_micro": hold_micro,
                 "balance_after": transaction.balance_after,
                 "hold_after": transaction.hold_after,
-                "max_turns": max_turns,
+                "execution_policy": "pi-native",
                 "max_output_tokens": max_output_tokens,
             },
             autocommit=False,

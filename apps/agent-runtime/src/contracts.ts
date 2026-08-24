@@ -4,6 +4,7 @@ import { isIP } from "node:net";
 
 export const AGENT_TOOL_CREATE_IMAGE = "lumen_create_image";
 export const RUNTIME_HEARTBEAT_EVENT = "run.heartbeat";
+export const RUNTIME_TEXT_RESET_EVENT = "text.reset";
 
 export const TERMINAL_EVENT_TYPES = new Set([
   "run.completed",
@@ -62,23 +63,27 @@ const RuntimeCompactionSchema = Type.Object(
   { additionalProperties: false },
 );
 
-export const RuntimeRequestSchema = Type.Object(
-  {
-    version: Type.Literal(1),
-    run_id: Identifier,
-    agent_session_id: Identifier,
-    user_id: Identifier,
-    execution_epoch: Type.Integer({ minimum: 1 }),
-    user_message_id: Type.Optional(Identifier),
-    assistant_message_id: Identifier,
-    trace_id: Type.String({ pattern: "^[a-f0-9]{32}$" }),
-    event_features: Type.Optional(
-      Type.Array(Type.Literal("heartbeat-v1"), {
-        maxItems: 1,
+const RuntimeRequestSharedFields = {
+  run_id: Identifier,
+  agent_session_id: Identifier,
+  user_id: Identifier,
+  execution_epoch: Type.Integer({ minimum: 1 }),
+  user_message_id: Type.Optional(Identifier),
+  assistant_message_id: Identifier,
+  trace_id: Type.String({ pattern: "^[a-f0-9]{32}$" }),
+  event_features: Type.Optional(
+    Type.Array(
+      Type.Union([
+        Type.Literal("heartbeat-v1"),
+        Type.Literal("text-reset-v1"),
+      ]),
+      {
+        maxItems: 2,
         uniqueItems: true,
-      }),
+      },
     ),
-    provider: Type.Object(
+  ),
+  provider: Type.Object(
       {
         provider_id: Type.String({ minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9._:-]+$" }),
         api: ProviderApi,
@@ -136,25 +141,64 @@ export const RuntimeRequestSchema = Type.Object(
     ),
     tool_gateway_url: Type.Union([Type.String({ minLength: 8, maxLength: 2048 }), Type.Null()]),
     tool_capability: Type.Union([Type.String({ minLength: 32, maxLength: 8192 }), Type.Null()]),
-    reasoning_effort: Type.Union([ReasoningEffort, Type.Null()]),
-    limits: Type.Object(
-      {
-        max_turns: Type.Integer({ minimum: 1, maximum: 12 }),
-        max_tool_calls: Type.Integer({ minimum: 0, maximum: 12 }),
-        max_image_tool_calls: Type.Integer({ minimum: 0, maximum: 8 }),
-        max_images_per_run: Type.Integer({ minimum: 1, maximum: 16 }),
-        max_output_tokens: Type.Integer({ minimum: 1, maximum: 32_000 }),
-        run_timeout_seconds: Type.Integer({ minimum: 10, maximum: 1800 }),
-        tool_timeout_seconds: Type.Integer({ minimum: 5, maximum: 300 }),
-        max_output_chars: Type.Integer({ minimum: 1024, maximum: 1_000_000 }),
-      },
-      { additionalProperties: false },
-    ),
+  reasoning_effort: Type.Union([ReasoningEffort, Type.Null()]),
+} as const;
+
+const LegacyRuntimeLimitsSchema = Type.Object(
+  {
+    max_turns: Type.Integer({ minimum: 1, maximum: 12 }),
+    max_tool_calls: Type.Integer({ minimum: 0, maximum: 12 }),
+    max_image_tool_calls: Type.Integer({ minimum: 0, maximum: 8 }),
+    max_images_per_run: Type.Integer({ minimum: 1, maximum: 16 }),
+    max_output_tokens: Type.Integer({ minimum: 1, maximum: 32_000 }),
+    run_timeout_seconds: Type.Integer({ minimum: 10, maximum: 1800 }),
+    tool_timeout_seconds: Type.Integer({ minimum: 5, maximum: 300 }),
+    max_output_chars: Type.Integer({ minimum: 1024, maximum: 1_000_000 }),
   },
   { additionalProperties: false },
 );
 
+export const RuntimeToolPolicySchema = Type.Object(
+  {
+    max_image_tool_calls: Type.Integer({ minimum: 0, maximum: 8 }),
+    max_images_per_run: Type.Integer({ minimum: 1, maximum: 16 }),
+  },
+  { additionalProperties: false },
+);
+
+const RuntimeRequestV1Schema = Type.Object(
+  {
+    version: Type.Literal(1),
+    ...RuntimeRequestSharedFields,
+    limits: LegacyRuntimeLimitsSchema,
+  },
+  { additionalProperties: false },
+);
+
+const RuntimeRequestV2Schema = Type.Object(
+  {
+    version: Type.Literal(2),
+    ...RuntimeRequestSharedFields,
+    user_message_id: Identifier,
+    event_features: Type.Array(
+      Type.Union([
+        Type.Literal("heartbeat-v1"),
+        Type.Literal("text-reset-v1"),
+      ]),
+      { minItems: 2, maxItems: 2, uniqueItems: true },
+    ),
+    tool_policy: RuntimeToolPolicySchema,
+  },
+  { additionalProperties: false },
+);
+
+export const RuntimeRequestSchema = Type.Union([
+  RuntimeRequestV1Schema,
+  RuntimeRequestV2Schema,
+]);
+
 export type RuntimeRequest = Static<typeof RuntimeRequestSchema>;
+export type RuntimeToolPolicy = Static<typeof RuntimeToolPolicySchema>;
 export type RuntimeReference = Static<typeof RuntimeReferenceSchema>;
 export type RuntimeHistoryMessage = Static<typeof RuntimeHistoryMessageSchema>;
 
@@ -213,12 +257,29 @@ function strictRequestChecks(request: RuntimeRequest): void {
   if (request.references.length > 0 && !request.provider.vision_supported) {
     throw new Error("provider does not support reference images");
   }
-  if (request.limits.max_output_tokens > request.provider.max_output_tokens) {
+  if (
+    request.version === 1 &&
+    request.limits.max_output_tokens > request.provider.max_output_tokens
+  ) {
     throw new Error("requested output limit exceeds provider capability");
   }
   const toolsEnabled = request.allowed_tools.length === 1;
   if (toolsEnabled !== Boolean(request.tool_gateway_url && request.tool_capability)) {
     throw new Error("tool gateway and capability must match the tool allowlist");
+  }
+  if (
+    request.version === 2 &&
+    (!request.event_features.includes("heartbeat-v1") ||
+      !request.event_features.includes("text-reset-v1"))
+  ) {
+    throw new Error("Pi-native Runtime features are incomplete");
+  }
+  if (
+    request.version === 2 &&
+    toolsEnabled &&
+    request.tool_policy.max_image_tool_calls === 0
+  ) {
+    throw new Error("image tool requires a positive call allowance");
   }
   if (!validUrl(request.provider.base_url, new Set(["http:", "https:"]))) {
     throw new Error("invalid provider base URL");
@@ -257,6 +318,18 @@ function strictRequestChecks(request: RuntimeRequest): void {
       throw new Error("reference preview exceeds the byte limit");
     }
   }
+}
+
+export function runtimeToolPolicy(request: RuntimeRequest): RuntimeToolPolicy {
+  return request.version === 2
+    ? request.tool_policy
+    : {
+        max_image_tool_calls: Math.min(
+          request.limits.max_tool_calls,
+          request.limits.max_image_tool_calls,
+        ),
+        max_images_per_run: request.limits.max_images_per_run,
+      };
 }
 
 export function parseRuntimeRequest(value: unknown): RuntimeRequest {

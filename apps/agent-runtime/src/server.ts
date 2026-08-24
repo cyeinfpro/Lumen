@@ -192,7 +192,6 @@ interface ServerOptions {
   readonly config?: RuntimeConfig;
   readonly metrics?: RuntimeMetrics;
   readonly dependencies?: RuntimeDependencies;
-  readonly runTimeoutSignal?: (timeoutMs: number) => AbortSignal;
 }
 
 export function createRuntimeServer(options: ServerOptions = {}): {
@@ -305,15 +304,9 @@ export function createRuntimeServer(options: ServerOptions = {}): {
       runRequest.run_id,
       runRequest.execution_epoch,
       config.maxLineBytes,
-      config.maxStreamBytes,
-      config.maxEvents,
     );
     let outcome = "failed";
     const runtimeState: { streamFailed: boolean } = { streamFailed: false };
-    const timeoutSignal = (
-      options.runTimeoutSignal ?? ((timeoutMs) => AbortSignal.timeout(timeoutMs))
-    )(runRequest.limits.run_timeout_seconds * 1000);
-    const signal = AbortSignal.any([abortController.signal, timeoutSignal]);
     const heartbeat = runRequest.event_features?.includes("heartbeat-v1")
       ? startHeartbeat(
           writer,
@@ -328,20 +321,17 @@ export function createRuntimeServer(options: ServerOptions = {}): {
       const result = await executeAgentRun(
         runRequest,
         writer,
-        signal,
+        abortController.signal,
         metrics,
         options.dependencies,
       );
       await heartbeat.stop();
-      const timedOut = timeoutSignal.aborted && !abortController.signal.aborted;
-      const effectiveOutcome = timedOut || runtimeState.streamFailed
+      const effectiveOutcome = runtimeState.streamFailed
         ? "failed"
         : result.outcome;
-      const effectiveErrorCode = timedOut
-        ? "agent_run_timeout"
-        : runtimeState.streamFailed
-          ? "agent_runtime_error"
-          : result.errorCode;
+      const effectiveErrorCode = runtimeState.streamFailed
+        ? "agent_runtime_error"
+        : result.errorCode;
       outcome = effectiveOutcome;
       const eventType =
         effectiveOutcome === "cancelled"
@@ -362,8 +352,7 @@ export function createRuntimeServer(options: ServerOptions = {}): {
     } catch (error) {
       await heartbeat.stop();
       const result = error instanceof RuntimeExecutionError ? error.result : null;
-      const timedOut = timeoutSignal.aborted && !abortController.signal.aborted;
-      outcome = timedOut || runtimeState.streamFailed
+      outcome = runtimeState.streamFailed
         ? "failed"
         : result?.outcome ?? (abortController.signal.aborted ? "cancelled" : "failed");
       const type = outcome === "cancelled"
@@ -373,13 +362,11 @@ export function createRuntimeServer(options: ServerOptions = {}): {
           : "run.failed";
       const terminalWritten = await emitTerminal(writer, response, type, {
         status: outcome,
-        error_code: timedOut
-          ? "agent_run_timeout"
-          : runtimeState.streamFailed
-            ? "agent_runtime_error"
-            : result?.errorCode ?? (
-              outcome === "cancelled" ? "agent_cancelled" : "agent_runtime_error"
-            ),
+        error_code: runtimeState.streamFailed
+          ? "agent_runtime_error"
+          : result?.errorCode ?? (
+            outcome === "cancelled" ? "agent_cancelled" : "agent_runtime_error"
+          ),
         usage: result?.usage ?? {
           input_tokens: 0,
           output_tokens: 0,

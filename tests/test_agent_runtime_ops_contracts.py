@@ -14,16 +14,10 @@ WORKFLOW = ROOT / ".github/workflows/docker-release.yml"
 REQUIRED_AGENT_ENV = {
     "AGENT_ENABLED",
     "UI_NAV_AGENT_VISIBLE",
-    "AGENT_MAX_TURNS",
-    "AGENT_MAX_TOOL_CALLS",
     "AGENT_MAX_IMAGE_TOOL_CALLS",
     "AGENT_MAX_IMAGES_PER_RUN",
     "AGENT_MAX_REFERENCE_IMAGES",
     "AGENT_MAX_SESSION_IMAGES",
-    "AGENT_MAX_OUTPUT_TOKENS",
-    "AGENT_RUN_TIMEOUT_SECONDS",
-    "AGENT_TOOL_TIMEOUT_SECONDS",
-    "AGENT_CAPABILITY_TTL_SECONDS",
     "AGENT_RUNTIME_URL",
     "AGENT_RUNTIME_SHARED_SECRET",
     "AGENT_TOOL_CAPABILITY_SECRET",
@@ -71,8 +65,6 @@ def test_agent_environment_surface_is_complete_and_closed_by_default() -> None:
     assert values["AGENT_TOOL_CAPABILITY_SECRET"] == ""
     assert values["AGENT_MAX_REFERENCE_IMAGES"] == "16"
     assert values["AGENT_MAX_SESSION_IMAGES"] == "64"
-    assert values["AGENT_RUN_TIMEOUT_SECONDS"] == "600"
-    assert values["AGENT_CAPABILITY_TTL_SECONDS"] == "900"
     assert values["AGENT_RUNTIME_HEARTBEAT_INTERVAL_SECONDS"] == "15"
     assert values["AGENT_RUNTIME_EVENT_IDLE_TIMEOUT_SECONDS"] == "90"
     assert values["AGENT_RUNTIME_MAX_REQUEST_BYTES"] == "67108864"

@@ -55,7 +55,7 @@ if (process.env.AGENT_LIVE_CHECK !== "1") {
     ? "You are a Lumen Agent Runtime compatibility probe. Follow the exact user request and call only explicitly registered tools."
     : "You are a Lumen Agent Runtime compatibility probe. Follow the exact user request and do not call tools.";
   const request: RuntimeRequest = {
-    version: 1,
+    version: 2,
     run_id: runId,
     agent_session_id: randomUUID(),
     user_id: randomUUID(),
@@ -63,6 +63,7 @@ if (process.env.AGENT_LIVE_CHECK !== "1") {
     user_message_id: randomUUID(),
     assistant_message_id: randomUUID(),
     trace_id: randomUUID().replaceAll("-", ""),
+    event_features: ["heartbeat-v1", "text-reset-v1"],
     provider: {
       provider_id: "lumen-live-check",
       api: api as "openai-responses" | "openai-completions" | "anthropic-messages",
@@ -100,20 +101,16 @@ if (process.env.AGENT_LIVE_CHECK !== "1") {
       output_format: "webp",
     },
     reasoning_effort: "low",
-    limits: {
-      max_turns: 2,
-      max_tool_calls: tool ? 1 : 0,
+    tool_policy: {
       max_image_tool_calls: tool ? 1 : 0,
       max_images_per_run: 1,
-      max_output_tokens: Number(process.env.AGENT_LIVE_MAX_OUTPUT_TOKENS ?? 4096),
-      run_timeout_seconds: Number(process.env.AGENT_LIVE_TIMEOUT_SECONDS ?? 120),
-      tool_timeout_seconds: 30,
-      max_output_chars: 64_000,
     },
   };
   const validatedRequest = parseRuntimeRequest(request);
   const writer = new CollectingEventWriter(runId, validatedRequest.execution_epoch);
-  const timeout = AbortSignal.timeout(validatedRequest.limits.run_timeout_seconds * 1000);
+  const timeout = AbortSignal.timeout(
+    Number(process.env.AGENT_LIVE_TIMEOUT_SECONDS ?? 120) * 1000,
+  );
   const abortController = new AbortController();
   const abortDelay = scenario === "abort"
     ? Number(process.env.AGENT_LIVE_ABORT_AFTER_MS ?? 250)
@@ -161,7 +158,11 @@ if (process.env.AGENT_LIVE_CHECK !== "1") {
           ? statuses.some((status) => typeof status === "number" && status >= 500) &&
             result.outcome !== "succeeded"
           : scenario === "truncated"
-            ? result.outcome !== "succeeded"
+            ? result.outcome === "succeeded" &&
+              writer.events.some(
+                (event) =>
+                  event.type === "turn.completed" && event.stop_reason === "length",
+              )
             : scenario === "reasoning"
               ? result.outcome === "succeeded" && result.usage.reasoning_tokens > 0
               : scenario === "tool"

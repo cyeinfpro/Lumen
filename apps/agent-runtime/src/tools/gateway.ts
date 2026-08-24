@@ -123,10 +123,6 @@ export function createImageGateway(request: RuntimeRequest): CreateImageGateway 
   const gatewayUrl = request.tool_gateway_url;
   const capability = request.tool_capability;
   return async (toolCallId, ordinal, arguments_, signal) => {
-    const timeoutSignal = AbortSignal.timeout(request.limits.tool_timeout_seconds * 1000);
-    const combinedSignal = signal
-      ? AbortSignal.any([signal, timeoutSignal])
-      : timeoutSignal;
     let response: Response;
     try {
       response = await fetch(gatewayUrl, {
@@ -141,7 +137,7 @@ export function createImageGateway(request: RuntimeRequest): CreateImageGateway 
           execution_epoch: request.execution_epoch,
           arguments: arguments_,
         }),
-        signal: combinedSignal,
+        ...(signal ? { signal } : {}),
       });
     } catch {
       throw new ToolGatewayError("agent_tool_result_unknown", true);

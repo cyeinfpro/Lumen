@@ -540,7 +540,7 @@ Lumen Agent 基础系统提示词
   > 当前用户文本 + 会话图片 previews
 ```
 
-不允许 Agent Runtime 自己访问 Lumen memory API。Worker 不生成 Agent conversation summary，也不按自定义 token 预算裁剪历史；Pi 使用原生 `SessionManager`、`estimateTokens`、`shouldCompact` 和 `session.compact()` 管理上下文。为避免流式文本或付费工具副作用被重复执行，当前 prompt 开始前关闭 post-turn/overflow auto-compaction；超限时失败关闭，不自动重放。
+不允许 Agent Runtime 自己访问 Lumen memory API。Worker 不生成 Agent conversation summary，也不按自定义 token 预算裁剪历史；Pi 使用原生 `SessionManager`、`estimateTokens`、`shouldCompact` 和 `session.compact()` 管理上下文。Runtime 保持 Pi 的 post-turn/overflow auto-compaction 与一次原生恢复重试。恢复重试前 Runtime 发送协商式 `text.reset`，Worker 在同一事务中替换持久文本并向 Web 发布 `agent.output.reset`，避免把被 Pi 丢弃的截断草稿与重生成答案拼接。图片提交继续依赖语义幂等键，未知结果不自动重放。
 
 历史转换保留：
 
@@ -559,7 +559,7 @@ Lumen 仍是 Provider 选择权威：
 2. 带参考图时只选择支持 image input 的 chat model。
 3. Worker 解析模型、base URL、必要 headers、代理和 BYOK credential。
 4. Runtime 只为当前 run 创建 in-memory provider/model，不写 `auth.json` 或 `models.json`。
-5. Pi 每个 model turn 以及 pre-prompt compaction 的 usage、状态和错误回传 Worker；滚动升级中仅旧 Runtime 明确 HTTP 400/413 且尚未进入 NDJSON、完整上下文仍满足旧 256 条历史/4 张参考图/8 MiB 合同时，允许一次包含 Pi summary 的 legacy envelope 降级，否则失败关闭。
+5. Pi 每个 model turn 以及 compaction 的 usage、状态和错误回传 Worker。Runtime v2 不包含 Lumen 生命周期预算；新 Worker 不降级到会重新引入硬预算的旧 Runtime。滚动升级必须先更新 Runtime，再更新 Worker；新 Runtime 仍可接收旧 Worker 的 v1 envelope，但忽略其中的生命周期上限。
 6. Worker 写入 Lumen Provider 健康统计和 Agent 账单。
 7. 明确发现 GPT-5.6 model ID、但供应商未声明 metadata 时使用 `272000` context 家族档案；没有 model catalog 的 wildcard Provider 保持保守 `128000`。Agent reasoning 默认 `max`，Pi 再按具体模型支持的 thinking levels 原生 clamp。
 
@@ -575,31 +575,31 @@ Lumen 仍是 Provider 选择权威：
 
 若 Pi 默认 transport 无法复用某类代理，先实现受测的自定义 provider transport；不得静默绕过代理，也不得回退到前端提供 API key。
 
-### 9.5 运行上限
+### 9.5 Pi 原生生命周期与业务配额
 
-首期默认：
+Agent 运行不设置 Lumen wall-clock、turn、正文字符或额外 output-token 上限。生命周期由 Pi 原生状态机决定：
 
 ```text
-agent.max_turns = 6
-agent.max_tool_calls = 3
+session.prompt()
+  -> Pi model/tool loop
+  -> Pi auto-compaction / recoverable-length retry
+  -> agent_end / agent_settled
+```
+
+`provider.max_output_tokens` 只映射为 Pi model metadata 的 `maxTokens`，代表供应商单次调用能力，不是 Lumen run budget。Provider 返回 `stopReason=length` 时按 Pi 原生语义结算；满足 Pi 的 recoverable-length 条件时由 Pi 压缩并重试一次。Runtime 通过 Pi 原生 `httpIdleTimeoutMs: 0` 关闭 Provider SDK 请求时限，避免默认 5 分钟限制重新切断长推理。
+
+Agent ARQ 函数不设置 wall-clock timeout；同一 Worker 的其他任务仍各自保留 1800 秒保护。Runtime 只在用户取消、HTTP 对端断开或真实传输/Provider 错误时 abort。Runtime 每 15 秒发送心跳，Worker 的事件空闲判定为 90 秒并要求大于心跳间隔两倍；心跳更新运行检查点，防止慢首字、长推理或压缩被 stale-run 对账误判。
+
+Lumen 只保留有真实业务含义的图片副作用配额：
+
+```text
 agent.max_image_tool_calls = 2
 agent.max_images_per_run = 4
 agent.max_reference_images = 16
 agent.max_session_images = 64
-agent.run_timeout_seconds = 600
-agent.tool_timeout_seconds = 30
-agent.capability_ttl_seconds = 900
 ```
 
-`agent.run_timeout_seconds` 可配置范围为 10–1500 秒；ARQ 外层任务保持 1800 秒，为上下文构建、Runtime 交付、终态持久化和账单结算保留 300 秒包络。Worker 在请求中声明 `heartbeat-v1` 后，Runtime 每 15 秒发送一次内部心跳；未声明该能力的旧 Worker 不会收到新事件，保证滚动升级兼容。Worker 的默认事件空闲判定为 90 秒，并要求该值大于心跳间隔的两倍。心跳会更新运行检查点，避免慢首字、长推理和 5 分钟 stale-run 对账把健康任务误判为断流或失联。工具凭证有效期会自动提升到至少覆盖 `run timeout + tool timeout + clock skew`，且仍受 active run 与 execution epoch 双重约束。
-
-达到上限后：
-
-- 停止后续工具执行。
-- 让 Pi 进行一次不带工具的受限收尾；失败则由宿主写明确错误。
-- 已创建 Generation 不取消、不重复创建。
-- 已产生文本或图片副作用时落为 `partial`，保留原始错误码并向用户显示具体恢复提示。
-- 记录 `limit_reason` 指标和审计信息。
+图片额度用完后，Runtime 从下一轮 Pi context 中撤下图片工具，让 Pi 自然完成，不调用 `shouldStopAfterTurn`。钱包 hold 只负责准入并按“一个自然文本轮次 + 已授权图片工具轮次 + Pi compaction/retry reserve”估算；可信终态 usage 始终按实际值结算，即使超过 hold 估算也不会改写为 unknown 或截断 Agent。工具 capability 还受 active run、execution epoch 和数据库 redemption 次数约束；其加密过期是纵深防御，不作为 Agent 运行时限。
 
 ## 10. 图片工具设计
 
@@ -1087,7 +1087,7 @@ apps/agent-runtime/
 - Pi NDJSON event 映射和 delta flush。
 - agent/tool 终态保证。
 - provider pre-dispatch failure 与 post-dispatch unknown。
-- Runtime 断流、timeout、abort、stale epoch。
+- Runtime 断流、心跳空闲判定、用户 abort、stale epoch。
 - 工具提交后断流不重复图片。
 - Agent 文本计费守恒。
 - memory/context packing token 预算。
@@ -1095,7 +1095,7 @@ apps/agent-runtime/
 - 只有 allowlist 工具可调用。
 - reference labels 无法越权。
 - 文本模型不能接收带图 run。
-- max turns/tools/images/references/timeout。
+- Pi 原生 length/overflow recovery、`text.reset`、图片工具/数量/参考图业务配额。
 - secret 不进入日志、错误和 session state。
 
 ### 17.3 Web
@@ -1205,7 +1205,7 @@ execution_epoch
 | --- | --- | --- |
 | 两套会话事实源 | 历史漂移、恢复困难 | Pi session 只用 in-memory，Postgres 唯一权威 |
 | Pi 工具权限过大 | 服务器文件或命令泄露 | 关闭 built-ins/资源发现，只注册图片工具 |
-| Agent 循环失控 | token 和图片成本失控 | turn/tool/image 上限、预授权、timeout、无工具收尾 |
+| Agent 循环失控 | token 和图片成本失控 | Pi 原生模型能力、实际 usage 结算、图片副作用配额、额度耗尽后撤下工具、用户取消 |
 | Runtime 重试重复生图 | 重复扣费和资产 | run/tool/generation 三层幂等，unknown 不重放 |
 | Agent 等待子任务 | Worker 队列饥饿 | 图片工具提交即返回，Generation 独立完成 |
 | Provider/代理不兼容 | Agent 无法使用现有供应商 | Phase 0 验证，不通过先做自定义 transport |
@@ -1215,7 +1215,7 @@ execution_epoch
 | Agent/Studio 会话串页 | 错投消息、状态污染 | `agent_sessions` 隔离 + 独立 API/query/store |
 | 六个移动 Tab 过密 | 标签或命中区重叠 | 320px 起布局测试，不缩小到 44px 以下 |
 | 图片成功但最终文本失败 | 已付费结果不可见 | `partial` 终态 + 图片继续显示 + fallback 文案 |
-| Runtime 成为新单点 | Agent 不可用 | 健康检查、重启、超时、明确降级；不影响其他入口 |
+| Runtime 成为新单点 | Agent 不可用 | 健康检查、重启、心跳与断流检测、明确失败；不影响其他入口 |
 
 ## 21. 验收标准
 

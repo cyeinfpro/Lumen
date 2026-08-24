@@ -5,16 +5,36 @@ import { runtimeRequest } from "./fixtures.js";
 
 describe("Runtime contracts", () => {
   it("accepts the strict Worker envelope", () => {
-    expect(parseRuntimeRequest(runtimeRequest()).run_id).toBe("run-1");
+    const parsed = parseRuntimeRequest(runtimeRequest());
+    expect(parsed.run_id).toBe("run-1");
+    expect(parsed.version).toBe(2);
+    expect("limits" in parsed).toBe(false);
   });
 
   it("accepts legacy v1 envelopes without Pi checkpoint fields", () => {
-    const legacy = runtimeRequest();
-    delete legacy.compaction;
-    delete legacy.event_features;
+    const {
+      tool_policy: _toolPolicy,
+      compaction: _compaction,
+      event_features: _eventFeatures,
+      ...current
+    } = runtimeRequest();
+    void _toolPolicy;
+    void _compaction;
+    void _eventFeatures;
     const legacyEnvelope = {
-      ...legacy,
+      ...current,
+      version: 1 as const,
       history: [{ role: "user" as const, text: "legacy" }],
+      limits: {
+        max_turns: 6,
+        max_tool_calls: 3,
+        max_image_tool_calls: 2,
+        max_images_per_run: 4,
+        max_output_tokens: 4096,
+        run_timeout_seconds: 600,
+        tool_timeout_seconds: 30,
+        max_output_chars: 262_144,
+      },
     };
     const parsed = parseRuntimeRequest(legacyEnvelope);
     expect(parsed.compaction).toBeUndefined();

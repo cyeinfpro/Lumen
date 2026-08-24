@@ -1,12 +1,14 @@
 import type { RuntimeRequest } from "../src/contracts.js";
 
+type RuntimeRequestV2 = Extract<RuntimeRequest, { version: 2 }>;
+
 export const TEST_SECRET = "runtime-test-secret-0123456789-abcdef";
 
 export function runtimeRequest(
-  overrides: Partial<RuntimeRequest> = {},
-): RuntimeRequest {
-  const base: RuntimeRequest = {
-    version: 1,
+  overrides: Partial<RuntimeRequestV2> = {},
+): RuntimeRequestV2 {
+  const base: RuntimeRequestV2 = {
+    version: 2,
     run_id: "run-1",
     agent_session_id: "session-1",
     user_id: "user-1",
@@ -14,7 +16,7 @@ export function runtimeRequest(
     user_message_id: "user-message-1",
     assistant_message_id: "message-1",
     trace_id: "0123456789abcdef0123456789abcdef",
-    event_features: ["heartbeat-v1"],
+    event_features: ["heartbeat-v1", "text-reset-v1"],
     provider: {
       provider_id: "lumen-test",
       api: "openai-responses",
@@ -46,15 +48,9 @@ export function runtimeRequest(
     tool_gateway_url: "http://api:8000/internal/agent/runs/run-1/tools/create-image",
     tool_capability: "capability-test-token-with-more-than-32-characters",
     reasoning_effort: "low",
-    limits: {
-      max_turns: 6,
-      max_tool_calls: 3,
+    tool_policy: {
       max_image_tool_calls: 2,
       max_images_per_run: 4,
-      max_output_tokens: 4096,
-      run_timeout_seconds: 30,
-      tool_timeout_seconds: 10,
-      max_output_chars: 64_000,
     },
   };
   return { ...base, ...overrides };

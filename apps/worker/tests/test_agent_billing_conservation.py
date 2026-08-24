@@ -185,6 +185,41 @@ async def test_agent_hold_to_actual_settlement_conserves_wallet_and_replays_once
 
 
 @pytest.mark.asyncio
+async def test_known_pi_usage_is_settled_in_full_above_the_admission_hold(
+    billing_db: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _run("agent-native-overrun", 1_000)
+    await _hold(billing_db, run_id=run.id, amount=run.text_hold_micro)
+
+    async def disallow_negative() -> bool:
+        return False
+
+    monkeypatch.setattr(worker_billing, "allow_negative_balance", disallow_negative)
+    usage = {
+        "input_tokens": 0,
+        "output_tokens": 20_000,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "cache_write_1h_tokens": 0,
+        "reasoning_tokens": 0,
+    }
+    async with billing_db() as db:
+        async with db.begin():
+            result = await settle_agent_text_actual(db, run=run, usage=usage)
+
+    assert result.action == "settled"
+    assert result.actual_micro == 40_000
+    wallet, transactions = await _wallet_and_transactions(billing_db)
+    assert (wallet.balance_micro, wallet.hold_micro, wallet.lifetime_spend_micro) == (
+        60_000,
+        0,
+        40_000,
+    )
+    assert transactions[-1].meta["unauthorized_micro"] == 39_000
+
+
+@pytest.mark.asyncio
 async def test_agent_proven_absent_release_restores_full_hold(
     billing_db: async_sessionmaker[AsyncSession],
 ) -> None:

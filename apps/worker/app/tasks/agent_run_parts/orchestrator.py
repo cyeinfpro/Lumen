@@ -114,7 +114,7 @@ async def _flush_if_needed(
     force: bool = False,
 ) -> bool:
     async with accumulator.flush_lock:
-        if not accumulator.pending_delta:
+        if not accumulator.pending_delta and not accumulator.text_reset_pending:
             return True
         now = asyncio.get_running_loop().time()
         if not force and (
@@ -124,14 +124,18 @@ async def _flush_if_needed(
             return True
         delta = accumulator.pending_delta
         text_snapshot = accumulator.text
+        replace = accumulator.text_reset_pending
         current = await flush_agent_text(
             redis,
             run_id=run_id,
             execution_epoch=execution_epoch,
             text=text_snapshot,
             delta=delta,
+            replace=replace,
         )
         if current:
+            if replace:
+                accumulator.text_reset_pending = False
             if accumulator.pending_delta.startswith(delta):
                 accumulator.pending_delta = accumulator.pending_delta[len(delta) :]
             accumulator.last_flush_at = now
@@ -258,10 +262,10 @@ def _terminal_request(
     if accumulator.terminal_status == "succeeded":
         if unresolved:
             return (
-                "failed",
-                "agent_result_unknown",
+                "succeeded",
+                None,
                 "unknown",
-                "runtime_success_with_unresolved_dispatch",
+                "runtime_success_with_unknown_billing",
             )
         return "succeeded", None, "actual", "runtime_success"
     if accumulator.has_exact_usage and not unresolved:

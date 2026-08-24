@@ -4,11 +4,6 @@ from __future__ import annotations
 
 from .runtime_setting_types import SettingSpec
 
-
-AGENT_RUN_TIMEOUT_DEFAULT_SECONDS = 600
-AGENT_RUN_TIMEOUT_MAX_SECONDS = 1500
-
-
 AGENT_SETTINGS: tuple[SettingSpec, ...] = (
     SettingSpec(
         key="agent.enabled",
@@ -29,24 +24,6 @@ AGENT_SETTINGS: tuple[SettingSpec, ...] = (
         min_value=0,
         max_value=1,
         allowed_values=("0", "1"),
-    ),
-    SettingSpec(
-        key="agent.max_turns",
-        description="Maximum model turns in one Agent run.",
-        sensitive=False,
-        parser=int,
-        env_fallback="AGENT_MAX_TURNS",
-        min_value=1,
-        max_value=12,
-    ),
-    SettingSpec(
-        key="agent.max_tool_calls",
-        description="Maximum total tool calls in one Agent run.",
-        sensitive=False,
-        parser=int,
-        env_fallback="AGENT_MAX_TOOL_CALLS",
-        min_value=0,
-        max_value=12,
     ),
     SettingSpec(
         key="agent.max_image_tool_calls",
@@ -84,47 +61,7 @@ AGENT_SETTINGS: tuple[SettingSpec, ...] = (
         min_value=16,
         max_value=64,
     ),
-    SettingSpec(
-        key="agent.max_output_tokens",
-        description="Per-turn output token ceiling used for Agent reservation.",
-        sensitive=False,
-        parser=int,
-        env_fallback="AGENT_MAX_OUTPUT_TOKENS",
-        min_value=256,
-        max_value=32000,
-    ),
-    SettingSpec(
-        key="agent.run_timeout_seconds",
-        description="Wall-clock timeout for one Agent run.",
-        sensitive=False,
-        parser=int,
-        env_fallback="AGENT_RUN_TIMEOUT_SECONDS",
-        min_value=10,
-        max_value=AGENT_RUN_TIMEOUT_MAX_SECONDS,
-    ),
-    SettingSpec(
-        key="agent.tool_timeout_seconds",
-        description="Timeout for one Agent tool gateway request.",
-        sensitive=False,
-        parser=int,
-        env_fallback="AGENT_TOOL_TIMEOUT_SECONDS",
-        min_value=5,
-        max_value=300,
-    ),
-    SettingSpec(
-        key="agent.capability_ttl_seconds",
-        description="Lifetime of run-scoped Agent tool capabilities.",
-        sensitive=False,
-        parser=int,
-        env_fallback="AGENT_CAPABILITY_TTL_SECONDS",
-        min_value=15,
-        max_value=3600,
-    ),
 )
 
 
-__all__ = [
-    "AGENT_RUN_TIMEOUT_DEFAULT_SECONDS",
-    "AGENT_RUN_TIMEOUT_MAX_SECONDS",
-    "AGENT_SETTINGS",
-]
+__all__ = ["AGENT_SETTINGS"]

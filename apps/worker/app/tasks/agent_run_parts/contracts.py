@@ -37,6 +37,7 @@ class AgentRuntimeAccumulator:
     flush_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     text: str = ""
     pending_delta: str = ""
+    text_reset_pending: bool = False
     last_flush_at: float = 0.0
     usage: dict[str, int] = field(
         default_factory=lambda: {
@@ -61,6 +62,11 @@ class AgentRuntimeAccumulator:
     pi_compaction_count: int = 0
 
     def apply(self, event: AgentRuntimeEvent) -> None:
+        if event.type == "text.reset":
+            self.text = ""
+            self.pending_delta = ""
+            self.text_reset_pending = True
+            return
         if event.type == "text.delta" and event.delta:
             self.text += event.delta
             self.pending_delta += event.delta

@@ -64,8 +64,6 @@ function testConfig(): RuntimeConfig {
     nonceCacheSize: 100,
     maxRequestBytes: 8 * 1024 * 1024,
     maxLineBytes: 64 * 1024,
-    maxStreamBytes: 8 * 1024 * 1024,
-    maxEvents: 4096,
     maxConcurrentRuns: 2,
     requestBodyTimeoutSeconds: 2,
     heartbeatIntervalSeconds: 1,
@@ -73,18 +71,6 @@ function testConfig(): RuntimeConfig {
 }
 
 describe("Runtime HTTP boundary", () => {
-  it("rejects framing limits that cannot reserve a terminal event", () => {
-    expect(() =>
-      createRuntimeServer({
-        config: {
-          ...testConfig(),
-          maxLineBytes: 64 * 1024,
-          maxStreamBytes: 64 * 1024,
-        },
-      }),
-    ).toThrow(/at least twice/u);
-  });
-
   it("streams one terminal event and rejects a replayed nonce", async () => {
     const request = runtimeRequest({
       allowed_tools: [],
@@ -218,64 +204,6 @@ describe("Runtime HTTP boundary", () => {
         events.map((_event, index) => index + 1),
       );
       expect(events.at(-1)?.type).toBe("run.completed");
-    } finally {
-      runtime.server.close();
-      await once(runtime.server, "close");
-    }
-  }, 15_000);
-
-  it("classifies host timeout as agent_run_timeout on every execution path", async () => {
-    const request = runtimeRequest({
-      allowed_tools: [],
-      tool_gateway_url: null,
-      tool_capability: null,
-    });
-    const body = Buffer.from(JSON.stringify(request), "utf8");
-    const timestamp = String(Math.floor(Date.now() / 1000));
-    const nonce = "http-timeout-nonce-0001";
-    const signature = signRuntimeRequest(
-      TEST_SECRET,
-      "POST",
-      "/v1/runs",
-      timestamp,
-      nonce,
-      body,
-    );
-    const runtime = createRuntimeServer({
-      config: testConfig(),
-      dependencies: await dependencies(20, "Timeout response."),
-      runTimeoutSignal: () => AbortSignal.timeout(25),
-    });
-    runtime.readiness.state.ready = true;
-    runtime.readiness.state.checkedAt = new Date().toISOString();
-    runtime.server.listen(0, "127.0.0.1");
-    await once(runtime.server, "listening");
-    const address = runtime.server.address() as AddressInfo;
-    try {
-      const response = await fetch(
-        `http://127.0.0.1:${String(address.port)}/v1/runs`,
-        {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            [AUTH_TIMESTAMP_HEADER]: timestamp,
-            [AUTH_NONCE_HEADER]: nonce,
-            [AUTH_SIGNATURE_HEADER]: signature,
-          },
-          body,
-        },
-      );
-      const events = (await response.text())
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line) as {
-          type: string;
-          error_code?: string;
-        });
-      expect(events.at(-1)).toMatchObject({
-        type: "run.failed",
-        error_code: "agent_run_timeout",
-      });
     } finally {
       runtime.server.close();
       await once(runtime.server, "close");

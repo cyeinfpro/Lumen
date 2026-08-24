@@ -296,6 +296,7 @@ export const AGENT_EVENT_NAMES = [
   "agent.run.queued",
   "agent.run.started",
   "agent.output.delta",
+  "agent.output.reset",
   "agent.tool.started",
   "agent.tool.updated",
   "agent.tool.succeeded",
