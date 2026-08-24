@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 import pytest
+from arq.worker import Worker
 from PIL import Image as PILImage
 
 from app import agent_context as agent_context_module
@@ -1030,7 +1031,7 @@ async def test_text_flush_keeps_delta_appended_during_database_await(
 
 
 def test_run_agent_is_registered_with_worker_and_outbox_contract() -> None:
-    assert main.WorkerSettings.job_timeout is None
+    assert main.WorkerSettings.job_timeout == 1800
     agent_functions = [
         function
         for function in main.WorkerSettings.functions
@@ -1038,8 +1039,21 @@ def test_run_agent_is_registered_with_worker_and_outbox_contract() -> None:
         == "run_agent"
     ]
     assert len(agent_functions) == 1
-    assert getattr(agent_functions[0], "timeout_s", None) is None
-    assert all(job.timeout_s is not None for job in main.WorkerSettings.cron_jobs)
+    assert (
+        getattr(agent_functions[0], "timeout_s", None)
+        == main._PI_NATIVE_ARQ_TIMEOUT_SECONDS  # noqa: SLF001
+    )
+    worker = Worker(
+        functions=main.WorkerSettings.functions,
+        cron_jobs=main.WorkerSettings.cron_jobs,
+        job_timeout=main.WorkerSettings.job_timeout,
+        burst=True,
+        handle_signals=False,
+    )
+    assert worker.job_timeout_s == 1800
+    assert worker.in_progress_timeout_s == (
+        main._PI_NATIVE_ARQ_TIMEOUT_SECONDS + 10  # noqa: SLF001
+    )
     names = {
         getattr(function, "__name__", getattr(function, "name", ""))
         for function in main.WorkerSettings.functions

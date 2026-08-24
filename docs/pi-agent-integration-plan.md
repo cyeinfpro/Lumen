@@ -588,7 +588,7 @@ session.prompt()
 
 `provider.max_output_tokens` 只映射为 Pi model metadata 的 `maxTokens`，代表供应商单次调用能力，不是 Lumen run budget。Provider 返回 `stopReason=length` 时按 Pi 原生语义结算；满足 Pi 的 recoverable-length 条件时由 Pi 压缩并重试一次。Runtime 通过 Pi 原生 `httpIdleTimeoutMs: 0` 关闭 Provider SDK 请求时限，避免默认 5 分钟限制重新切断长推理。
 
-Agent ARQ 函数不设置 wall-clock timeout；同一 Worker 的其他任务仍各自保留 1800 秒保护。Runtime 只在用户取消、HTTP 对端断开或真实传输/Provider 错误时 abort。Runtime 每 15 秒发送心跳，Worker 的事件空闲判定为 90 秒并要求大于心跳间隔两倍；心跳更新运行检查点，防止慢首字、长推理或压缩被 stale-run 对账误判。
+Agent ARQ 函数不使用可达的 wall-clock timeout；由于 ARQ 构造器要求数值，该函数单独使用与 Pi 禁用 Provider timeout 同义的 max-int 哨兵，其他任务继续继承 1800 秒保护。Runtime 只在用户取消、HTTP 对端断开或真实传输/Provider 错误时 abort。Runtime 每 15 秒发送心跳，Worker 的事件空闲判定为 90 秒并要求大于心跳间隔两倍；心跳更新运行检查点，防止慢首字、长推理或压缩被 stale-run 对账误判。
 
 Lumen 只保留有真实业务含义的图片副作用配额：
 
