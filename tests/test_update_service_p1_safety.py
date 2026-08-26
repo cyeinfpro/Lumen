@@ -812,8 +812,8 @@ def test_restart_records_tgbot_as_required_when_it_starts_the_service(
     assert result.returncode == 0, result.stderr + result.stdout
     assert events.read_text(encoding="utf-8").splitlines() == [
         "start:agent-runtime",
-        "start:api",
         "start:worker",
+        "start:api",
         "start:web",
         "start:tgbot",
     ]
