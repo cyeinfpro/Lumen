@@ -12,7 +12,7 @@
 - chat_tools: chat tool status normalization
 """
 
-__version__ = "1.2.148"
+__version__ = "1.2.149"
 
 from . import (  # noqa: F401
     agent_capability,
