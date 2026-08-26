@@ -14,6 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Check repository Agent instruction targets
+        run: |
+          test -r MEMORY.md
+          git ls-files --error-unmatch MEMORY.md
       - name: Check version consistency
         run: python3 scripts/version.py check
       - name: Check upload body size config

@@ -23,8 +23,8 @@ from ...video_upstream_service import (
 
 
 async def provider_config():
-    raw_video = await video_ports().runtime_settings.resolve("video.providers")
-    raw_shared = await video_ports().runtime_settings.resolve("providers")
+    raw_video = await video_ports().provider.runtime_settings.resolve("video.providers")
+    raw_shared = await video_ports().provider.runtime_settings.resolve("providers")
     providers, _proxies, errors = parse_video_provider_config_json(
         raw_video,
         shared_provider_raw=raw_shared,
@@ -103,8 +103,10 @@ def persist_provider_snapshot(
         "base_url": provider.base_url.rstrip("/"),
         "proxy_name": provider.proxy_name,
         "upstream_model": upstream_model,
-        "binding_fingerprint": video_ports()._provider_binding_fingerprint(provider),
-        "captured_at": video_ports()._now().isoformat(),
+        "binding_fingerprint": video_ports().provider._provider_binding_fingerprint(
+            provider
+        ),
+        "captured_at": video_ports().operations._now().isoformat(),
     }
     generation.upstream_request = request
 
@@ -114,20 +116,20 @@ def _validate_provider_identity(
     provider: Any,
 ) -> None:
     if generation.provider_kind and provider.kind != generation.provider_kind:
-        raise video_ports()._provider_binding_error(
+        raise video_ports().provider._provider_binding_error(
             generation,
             "persisted video provider kind no longer matches configuration",
             current_provider_name=provider.name,
         )
-    snapshot = video_ports()._provider_snapshot(generation)
+    snapshot = video_ports().provider._provider_snapshot(generation)
     if snapshot.get("provider_name") not in {None, provider.name}:
-        raise video_ports()._provider_binding_error(
+        raise video_ports().provider._provider_binding_error(
             generation,
             "video provider snapshot name does not match persisted provider",
             current_provider_name=provider.name,
         )
     if snapshot.get("provider_kind") not in {None, provider.kind}:
-        raise video_ports()._provider_binding_error(
+        raise video_ports().provider._provider_binding_error(
             generation,
             "video provider snapshot kind no longer matches configuration",
             current_provider_name=provider.name,
@@ -140,12 +142,12 @@ def _validate_submitted_provider_binding(
 ) -> None:
     if not generation.provider_task_id:
         return
-    snapshot = video_ports()._provider_snapshot(generation)
+    snapshot = video_ports().provider._provider_snapshot(generation)
     snapshot_base_url = snapshot.get("base_url")
     if isinstance(snapshot_base_url, str) and snapshot_base_url.rstrip(
         "/"
     ) != provider.base_url.rstrip("/"):
-        raise video_ports()._provider_binding_error(
+        raise video_ports().provider._provider_binding_error(
             generation,
             "video provider endpoint changed after task submission",
             current_provider_name=provider.name,
@@ -153,8 +155,10 @@ def _validate_submitted_provider_binding(
     snapshot_binding = snapshot.get("binding_fingerprint")
     if isinstance(
         snapshot_binding, str
-    ) and snapshot_binding != video_ports()._provider_binding_fingerprint(provider):
-        raise video_ports()._provider_binding_error(
+    ) and snapshot_binding != video_ports().provider._provider_binding_fingerprint(
+        provider
+    ):
+        raise video_ports().provider._provider_binding_error(
             generation,
             "video provider credentials or route changed after task submission",
             current_provider_name=provider.name,
@@ -169,7 +173,7 @@ def _validate_provider_support(
         return
     if provider.supports(generation.model, generation.action):
         return
-    raise video_ports()._provider_binding_error(
+    raise video_ports().provider._provider_binding_error(
         generation,
         "persisted video provider is no longer enabled for this request",
         current_provider_name=provider.name,
@@ -188,17 +192,17 @@ def _configured_provider(
         _validate_submitted_provider_binding(generation, provider)
         _validate_provider_support(generation, provider)
         return provider
-    raise video_ports()._provider_binding_error(
+    raise video_ports().provider._provider_binding_error(
         generation,
         "persisted video provider is no longer configured; refusing provider switch",
     )
 
 
 async def provider_for_generation(generation: VideoGeneration):
-    providers = await video_ports()._provider_config()
+    providers = await video_ports().provider._provider_config()
     provider_name = (generation.provider_name or "").strip()
     if generation.provider_task_id and not provider_name:
-        raise video_ports()._provider_binding_error(
+        raise video_ports().provider._provider_binding_error(
             generation,
             "submitted video task has no persisted provider identity",
         )
@@ -236,7 +240,7 @@ async def input_image_bytes(
             await commit()
     if not key:
         raise RuntimeError("i2v input image storage key missing")
-    return await video_ports().storage.aget_bytes(key), mime
+    return await video_ports().store.storage.aget_bytes(key), mime
 
 
 def input_image_url(generation: VideoGeneration) -> str | None:
@@ -299,11 +303,11 @@ async def _reference_image_bytes(
     if not storage_key:
         return None
     if not clean_url:
-        return await video_ports().storage.aget_bytes(storage_key)
+        return await video_ports().store.storage.aget_bytes(storage_key)
     try:
-        return await video_ports().storage.aget_bytes(storage_key)
+        return await video_ports().store.storage.aget_bytes(storage_key)
     except Exception:
-        video_ports().logger.warning(
+        video_ports().operations.logger.warning(
             "reference image variant bytes unavailable; "
             "falling back to url storage_key=%s",
             storage_key,
@@ -350,7 +354,7 @@ async def _reference_media_from_item(
         else None
     )
     if kind == "image" and data is None and not clean_url and storage_key:
-        data = await video_ports().storage.aget_bytes(storage_key)
+        data = await video_ports().store.storage.aget_bytes(storage_key)
     return VideoReferenceMedia(  # type: ignore[arg-type]
         kind=kind,
         data=data,

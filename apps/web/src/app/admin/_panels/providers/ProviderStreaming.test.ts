@@ -31,6 +31,7 @@ const provider: ProviderItemOut = {
   agent_context_window: 200_000,
   agent_max_output_tokens: 8192,
   agent_reasoning_supported: false,
+  agent_thinking_level_map: { xhigh: "high", max: "high" },
   image_generations_supported: null,
   image_responses_supported: true,
 };
@@ -43,6 +44,7 @@ test("provider drafts preserve streaming and default it off", () => {
   strictEqual(providerOutToIn(provider).agent_api, "anthropic-messages");
   strictEqual(providerOutToIn(provider).agent_context_window, 200_000);
   strictEqual(providerOutToIn(provider).agent_reasoning_supported, false);
+  strictEqual(providerOutToIn(provider).agent_thinking_level_map?.max, "high");
 });
 
 test("provider save payload and editor expose image streaming", () => {
@@ -65,6 +67,7 @@ test("provider save payload and editor expose image streaming", () => {
   );
   match(editorSource, /label="流式生图"/);
   match(agentCapabilitiesSource, /label="图片输入"/);
+  match(stateSource, /agent_thinking_level_map/);
   match(
     editorSource,
     /支持 Images API stream，最终图片事件到达后立即结束等待。/,

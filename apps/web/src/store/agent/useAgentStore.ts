@@ -22,6 +22,7 @@ import {
   mergeAgentRun,
   reconcileAgentSnapshot,
 } from "@/features/agent/model/reconciliation";
+import { mergeAgentGeneration } from "@/features/agent/containers/agentRealtime";
 import type { Generation } from "@/lib/types";
 import type { PrivateIdentitySnapshot } from "@/lib/auth/privateIdentityEpoch";
 import { loadAgentDrafts, saveAgentDrafts } from "./draftPersistence";
@@ -170,14 +171,30 @@ function createAgentStore() {
         const sessions = { ...state.sessions };
         const messagesBySession = { ...state.messagesBySession };
         const draftsBySession = { ...state.draftsBySession };
+        const runsById = { ...state.runsById };
+        const generationsById = { ...state.generationsById };
+        const generationSessionIds = { ...state.generationSessionIds };
         delete sessions[sessionId];
         delete messagesBySession[sessionId];
         delete draftsBySession[sessionId];
+        for (const [runId, run] of Object.entries(runsById)) {
+          if (run.agent_session_id === sessionId) delete runsById[runId];
+        }
+        for (const [generationId, ownerSessionId] of Object.entries(
+          generationSessionIds,
+        )) {
+          if (ownerSessionId !== sessionId) continue;
+          delete generationSessionIds[generationId];
+          delete generationsById[generationId];
+        }
         persist(state, draftsBySession);
         return {
           sessions,
           messagesBySession,
           draftsBySession,
+          runsById,
+          generationsById,
+          generationSessionIds,
           sessionOrder: state.sessionOrder.filter((id) => id !== sessionId),
           currentSessionId:
             state.currentSessionId === sessionId ? null : state.currentSessionId,
@@ -196,7 +213,10 @@ function createAgentStore() {
         for (const [generationId, generation] of Object.entries(
           reconciled.generations.byId,
         )) {
-          generationsById[generationId] = generation;
+          generationsById[generationId] = mergeAgentGeneration(
+            generationsById[generationId],
+            generation,
+          );
           generationSessionIds[generationId] = sessionId;
         }
         return {

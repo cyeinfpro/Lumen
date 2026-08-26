@@ -12,11 +12,19 @@ from lumen_core.agent_capability import (
     AgentCapabilityError,
     verify_agent_capability,
 )
-from lumen_core.schema_models import AgentToolCreateImageIn, AgentToolCreateImageOut
+from lumen_core.schema_models import (
+    AgentProviderDispatchIn,
+    AgentProviderDispatchOut,
+    AgentToolCreateImageIn,
+    AgentToolCreateImageOut,
+)
 
 from ..config import settings
 from ..db import get_db
-from ..services.agent.tools import submit_create_image_tool
+from ..services.agent.tools import (
+    authorize_provider_dispatch,
+    submit_create_image_tool,
+)
 
 
 router = APIRouter(prefix="/internal/agent", tags=["internal-agent"])
@@ -63,6 +71,24 @@ async def post_internal_agent_create_image(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AgentToolCreateImageOut:
     return await submit_create_image_tool(
+        db,
+        run_id=run_id,
+        claims=claims,
+        body=body,
+    )
+
+
+@router.post(
+    "/runs/{run_id}/provider-dispatch",
+    response_model=AgentProviderDispatchOut,
+)
+async def post_internal_agent_provider_dispatch(
+    run_id: str,
+    body: AgentProviderDispatchIn,
+    claims: Annotated[AgentCapabilityClaims, Depends(require_agent_capability)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AgentProviderDispatchOut:
+    return await authorize_provider_dispatch(
         db,
         run_id=run_id,
         claims=claims,

@@ -35,6 +35,11 @@ _PUBLIC_ERROR_MESSAGES = MappingProxyType(
         "agent_context_window_exceeded": "The model context window is insufficient",
         "agent_tool_result_unknown": "Image submission result is unknown",
         "agent_tool_failed": "Image submission failed",
+        "agent_tool_limit_reached": "Agent image tool limit reached",
+        "agent_image_limit_reached": "Agent image count limit reached",
+        "agent_output_truncated": "Model output reached its length limit",
+        "agent_safety_budget_reached": "Agent safety budget reached",
+        "agent_runtime_shutdown": "Agent runtime stopped for maintenance",
         "agent_reference_not_found": "A referenced image is unavailable",
         "agent_session_reference_limit_reached": "Agent session image limit reached",
         "INSUFFICIENT_BALANCE": "Insufficient wallet balance",
@@ -92,8 +97,24 @@ def agent_run_out(
     *,
     references: list[AgentRunReference] | None = None,
     tool_calls: list[AgentToolCall] | None = None,
+    is_latest: bool = False,
 ) -> AgentRunOut:
     usage = run.usage_jsonb if isinstance(run.usage_jsonb, dict) else {}
+    dispatch = run.dispatch_jsonb if isinstance(run.dispatch_jsonb, dict) else {}
+    memory_state = dispatch.get("memory_state")
+    if memory_state not in {"disabled", "empty", "ready", "degraded"}:
+        memory_state = None
+    continuable = (
+        is_latest
+        and run.status == "partial"
+        and run.error_code
+        in {
+            "agent_output_truncated",
+            "agent_safety_budget_reached",
+            "agent_runtime_disconnected",
+            "agent_runtime_event_timeout",
+        }
+    )
     return AgentRunOut(
         id=run.id,
         agent_session_id=run.agent_session_id,
@@ -105,6 +126,8 @@ def agent_run_out(
         idempotency_key=run.idempotency_key,
         model=run.model,
         reasoning_effort=run.reasoning_effort,
+        memory_state=memory_state,
+        continuable=continuable,
         turn_count=run.turn_count,
         tool_call_count=run.tool_call_count,
         usage=usage,

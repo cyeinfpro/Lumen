@@ -281,6 +281,9 @@ function generationFromBackend(generation: BackendGeneration): Generation {
     trace_id: generation.trace_id,
     attachment_roles: generation.attachment_roles,
     attempt: generation.attempt,
+    created_at: generation.created_at
+      ? Date.parse(generation.created_at)
+      : undefined,
     started_at: generation.started_at
       ? Date.parse(generation.started_at)
       : Date.now(),

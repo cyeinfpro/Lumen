@@ -86,12 +86,7 @@ class AgentMessageCreateIn(_StrictAgentIn):
     allow_image: bool = True
     reasoning_effort: (
         Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None
-    ) = "max"
-
-    @field_validator("reasoning_effort", mode="before")
-    @classmethod
-    def default_reasoning_effort(cls, value: Any) -> Any:
-        return "max" if value is None else value
+    ) = None
 
     @model_validator(mode="after")
     def validate_message(self) -> "AgentMessageCreateIn":
@@ -168,6 +163,16 @@ class AgentToolCreateImageIn(_StrictAgentIn):
     arguments: AgentCreateImageArgumentsIn
 
 
+class AgentProviderDispatchIn(_StrictAgentIn):
+    dispatch_ordinal: int = Field(ge=1, le=128)
+    execution_epoch: int = Field(ge=0)
+
+
+class AgentProviderDispatchOut(BaseModel):
+    permit_id: str = Field(min_length=1, max_length=192)
+    dispatch_ordinal: int = Field(ge=1, le=128)
+
+
 class AgentReferenceOut(BaseModel):
     id: str
     image_id: str
@@ -206,6 +211,8 @@ class AgentRunOut(BaseModel):
     idempotency_key: str
     model: str | None = None
     reasoning_effort: str | None = None
+    memory_state: Literal["disabled", "empty", "ready", "degraded"] | None = None
+    continuable: bool = False
     turn_count: int
     tool_call_count: int
     usage: dict[str, Any] = Field(default_factory=dict)
@@ -261,10 +268,34 @@ class AgentMessageCreateOut(BaseModel):
 
 class AgentToolCreateImageOut(BaseModel):
     tool_call: AgentToolCallOut
-    generation_ids: list[str] = Field(default_factory=list)
+    generation_ids: list[str] = Field(
+        min_length=1, max_length=AGENT_MAX_IMAGES_PER_TOOL
+    )
     mode: Literal["text_to_image", "image_to_image"]
     accepted: AgentCreateImageNormalized
     replayed: bool = False
+    pi_tool_call_id: str = Field(min_length=1, max_length=128)
+    ordinal: int = Field(ge=0)
+    request_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class AgentRunContinueIn(_StrictAgentIn):
+    idempotency_key: str = Field(min_length=1, max_length=96)
+
+
+class AgentSessionImageOut(BaseModel):
+    image_id: str
+    reference_label: str
+    role: str
+    display_label: str | None = None
+    source: str
+    active: bool
+
+
+class AgentSessionImageListOut(BaseModel):
+    items: list[AgentSessionImageOut]
+    used: int
+    maximum: int
 
 
 class AgentEventEnvelope(_StrictAgentIn):
@@ -355,11 +386,16 @@ __all__ = [
     "AgentMessageListOut",
     "AgentReferenceIn",
     "AgentReferenceOut",
+    "AgentProviderDispatchIn",
+    "AgentProviderDispatchOut",
     "AgentRunOut",
+    "AgentRunContinueIn",
     "AgentSessionCreateIn",
     "AgentSessionListOut",
     "AgentSessionOut",
     "AgentSessionPatchIn",
+    "AgentSessionImageListOut",
+    "AgentSessionImageOut",
     "AgentStatusOut",
     "AgentToolCallOut",
     "AgentToolCreateImageIn",

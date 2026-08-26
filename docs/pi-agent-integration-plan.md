@@ -561,7 +561,7 @@ Lumen 仍是 Provider 选择权威：
 4. Runtime 只为当前 run 创建 in-memory provider/model，不写 `auth.json` 或 `models.json`。
 5. Pi 每个 model turn 以及 compaction 的 usage、状态和错误回传 Worker。Runtime v2 不包含 Lumen 生命周期预算；新 Worker 不降级到会重新引入硬预算的旧 Runtime。滚动升级必须先更新 Runtime，再更新 Worker；新 Runtime 仍可接收旧 Worker 的 v1 envelope，但忽略其中的生命周期上限。
 6. Worker 写入 Lumen Provider 健康统计和 Agent 账单。
-7. 明确发现 GPT-5.6 model ID、但供应商未声明 metadata 时使用 `272000` context 家族档案；没有 model catalog 的 wildcard Provider 保持保守 `128000`。Agent reasoning 默认 `max`，Pi 再按具体模型支持的 thinking levels 原生 clamp。
+7. 上下文和 thinking level 能力由选定供应商的显式 metadata 声明；没有 model catalog 的 wildcard Provider 保持保守 `128000`。Agent reasoning 默认 `auto`，仅在用户明确选择时向 Pi 传具体等级。
 
 正式实现前必须完成 Phase 0 兼容性验证：
 
@@ -577,7 +577,7 @@ Lumen 仍是 Provider 选择权威：
 
 ### 9.5 Pi 原生生命周期与业务配额
 
-Agent 运行不设置 Lumen wall-clock、turn、正文字符或额外 output-token 上限。生命周期由 Pi 原生状态机决定：
+Agent 正常生命周期仍由 Pi 原生状态机决定；Runtime 只在外围设置服务端不可提高的事故熔断上限，包括 wall-clock、turn、Provider dispatch、累计 usage、事件字节和重复工具签名：
 
 ```text
 session.prompt()
@@ -599,7 +599,7 @@ agent.max_reference_images = 16
 agent.max_session_images = 64
 ```
 
-图片额度用完后，Runtime 从下一轮 Pi context 中撤下图片工具，让 Pi 自然完成，不调用 `shouldStopAfterTurn`。钱包 hold 只负责准入并按“一个自然文本轮次 + 已授权图片工具轮次 + Pi compaction/retry reserve”估算；可信终态 usage 始终按实际值结算，即使超过 hold 估算也不会改写为 unknown 或截断 Agent。工具 capability 还受 active run、execution epoch 和数据库 redemption 次数约束；其加密过期是纵深防御，不作为 Agent 运行时限。
+图片额度用完后，Runtime 从下一轮 Pi context 中撤下图片工具，让 Pi 自然完成。外围熔断通过 Pi 的 `shouldStopAfterTurn` 和 dispatch 前检查工作，触发时保留可信 usage、文本和已接受副作用，并以 `agent_safety_budget_reached` 收口。钱包 hold 只负责准入并按“一个自然文本轮次 + 已授权图片工具轮次 + Pi compaction/retry reserve”估算；可信终态 usage 始终按实际值结算。工具 capability 还受 active run、execution epoch 和数据库 redemption 次数约束，默认 24 小时 TTL 长于 Runtime 六小时 wall-clock 熔断。
 
 ## 10. 图片工具设计
 

@@ -14,6 +14,23 @@ fi
 # Docker / docker compose 可用
 lumen_require_docker_access
 
+# v1.2.147 shipped 64 MiB as the exact Agent Runtime default. Converge only
+# that legacy value; every other operator override is preserved. Operators who
+# intentionally retained 64 MiB can opt out explicitly before update.
+AGENT_RUNTIME_REQUEST_LIMIT="$(
+    lumen_env_value AGENT_RUNTIME_MAX_REQUEST_BYTES "${SHARED_ENV}" 2>/dev/null || true
+)"
+if [ "${AGENT_RUNTIME_REQUEST_LIMIT}" = "67108864" ] \
+        && [ "${LUMEN_PRESERVE_LEGACY_AGENT_RUNTIME_MAX_REQUEST_BYTES:-0}" != "1" ]; then
+    if ! lumen_set_env_value_in_file \
+            "${SHARED_ENV}" AGENT_RUNTIME_MAX_REQUEST_BYTES 16777216; then
+        log_error "[preflight] 无法迁移旧 Agent Runtime 请求上限。"
+        emit_fail preflight 1
+        exit 1
+    fi
+    emit_info preflight agent_runtime_max_request_bytes "legacy_default_migrated"
+fi
+
 # 磁盘 ≥ 5GB
 DISK_FREE_GB="$(disk_free_gb_opt)"
 emit_info preflight disk_free_gb "${DISK_FREE_GB}"

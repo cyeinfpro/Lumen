@@ -10,6 +10,23 @@ export interface EventWriter {
 
 const DRAIN_TIMEOUT_MS = 30_000;
 
+function runtimeEvent(
+  type: string,
+  sequence: number,
+  runId: string,
+  executionEpoch: number,
+  payload: Record<string, unknown>,
+): RuntimeEvent {
+  return {
+    ...payload,
+    version: 1,
+    type,
+    seq: sequence,
+    run_id: runId,
+    execution_epoch: executionEpoch,
+  };
+}
+
 function waitForDrain(
   response: ServerResponse,
   timeoutMs: number,
@@ -88,14 +105,13 @@ export class NdjsonEventWriter implements EventWriter {
     let accepted = false;
     const write = this.writeTail.then(async () => {
       if (this.failure !== null) throw this.failure;
-      const event: RuntimeEvent = {
-        version: 1,
+      const event = runtimeEvent(
         type,
-        seq: this.nextSequence,
-        run_id: this.runId,
-        execution_epoch: this.executionEpoch,
-        ...payload,
-      };
+        this.nextSequence,
+        this.runId,
+        this.executionEpoch,
+        payload,
+      );
       const line = `${JSON.stringify(event)}\n`;
       const lineBytes = Buffer.byteLength(line, "utf8");
       if (lineBytes > this.maxLineBytes) return;
@@ -145,14 +161,13 @@ export class CollectingEventWriter implements EventWriter {
     force = false,
   ): Promise<boolean> {
     void force;
-    const event: RuntimeEvent = {
-      version: 1,
+    const event = runtimeEvent(
       type,
-      seq: this.events.length + 1,
-      run_id: this.runId,
-      execution_epoch: this.executionEpoch,
-      ...payload,
-    };
+      this.events.length + 1,
+      this.runId,
+      this.executionEpoch,
+      payload,
+    );
     this.events.push(event);
     this.totalBytes += Buffer.byteLength(JSON.stringify(event), "utf8") + 1;
     return true;

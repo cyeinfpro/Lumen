@@ -4,6 +4,7 @@ import type {
   AgentDraftAttachment,
   AgentMessage,
 } from "../../features/agent/model/contracts";
+import type { Generation } from "../../lib/types";
 import "../chat/moduleResolution.test-helper.mjs";
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
@@ -68,8 +69,29 @@ test("draft persistence strips URLs and rejects another owner", () => {
   assert.deepEqual(deserializeAgentDrafts(raw, "user-b"), {});
   const restored = deserializeAgentDrafts(raw, "user-a");
   assert.equal(restored.session.attachments[0].role, "product");
-  assert.equal(restored.session.reasoningEffort, "max");
+  assert.equal(restored.session.reasoningEffort, "auto");
   assert.equal(restored.session.attachments[0].previewUrl, "/api/images/image-a/variants/thumb256");
+});
+
+test("legacy v1 default max reasoning migrates to Auto", () => {
+  const raw = JSON.stringify({
+    version: 1,
+    ownerUserId: "user-a",
+    drafts: {
+      session: {
+        text: "",
+        attachments: [],
+        allowImage: true,
+        imageDefaults: {},
+        reasoningEffort: "max",
+      },
+    },
+  });
+
+  assert.equal(
+    deserializeAgentDrafts(raw, "user-a").session.reasoningEffort,
+    "auto",
+  );
 });
 
 test("Agent attachments preserve controlled role and order", () => {
@@ -143,7 +165,7 @@ test("successful content clearing preserves sticky image defaults", () => {
   assert.equal(draft.imageDefaults.count, 3);
   assert.equal(draft.imageDefaults.aspect_ratio, "3:4");
   assert.equal(draft.imageDefaults.quality, "4k");
-  assert.equal(draft.reasoningEffort, "max");
+  assert.equal(draft.reasoningEffort, "auto");
 });
 
 test("account deletion removes only the owning persisted Agent drafts", () => {
@@ -166,6 +188,43 @@ test("identity reset clears user A messages and loads only matching drafts", () 
   assert.equal(useAgentStore.getState().ownerUserId, "user-b");
   assert.deepEqual(useAgentStore.getState().messagesBySession, {});
   assert.deepEqual(useAgentStore.getState().draftsBySession, {});
+});
+
+test("deleting an Agent session prunes owned runs and generations", () => {
+  useAgentStore.getState().resetForIdentity({ userId: "user-a", epoch: 4 });
+  const generation = {
+    id: "generation-1",
+    message_id: "assistant-1",
+    action: "generate",
+    prompt: "prompt",
+    size_requested: "1024x1024",
+    aspect_ratio: "1:1",
+    input_image_ids: [],
+    primary_input_image_id: null,
+    status: "running",
+    stage: "rendering",
+    attempt: 0,
+    started_at: 1,
+  } satisfies Generation;
+  useAgentStore.setState({
+    sessions: {
+      "session-1": { id: "session-1" } as never,
+      "session-2": { id: "session-2" } as never,
+    },
+    sessionOrder: ["session-1", "session-2"],
+    runsById: {
+      "run-1": { id: "run-1", agent_session_id: "session-1" } as never,
+      "run-2": { id: "run-2", agent_session_id: "session-2" } as never,
+    },
+    generationsById: { "generation-1": generation },
+    generationSessionIds: { "generation-1": "session-1" },
+  });
+
+  useAgentStore.getState().removeSession("session-1");
+
+  assert.deepEqual(Object.keys(useAgentStore.getState().runsById), ["run-2"]);
+  assert.deepEqual(useAgentStore.getState().generationsById, {});
+  assert.deepEqual(useAgentStore.getState().generationSessionIds, {});
 });
 
 test("optimistic submission reconciliation removes temporary messages exactly once", () => {

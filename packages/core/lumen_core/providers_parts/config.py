@@ -236,6 +236,27 @@ def _agent_models(raw: Any) -> tuple[str, ...]:
     return tuple(models)
 
 
+def _agent_thinking_level_map(raw: Any) -> dict[str, str | None] | None:
+    if raw in (None, ""):
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("agent_thinking_level_map must be an object")
+    allowed = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+    result: dict[str, str | None] = {}
+    for key, value in raw.items():
+        if key not in allowed:
+            raise ValueError("agent_thinking_level_map contains an unsupported level")
+        if value is None:
+            result[key] = None
+            continue
+        if not isinstance(value, str) or not value.strip() or len(value.strip()) > 32:
+            raise ValueError(
+                "agent_thinking_level_map values must be short strings or null"
+            )
+        result[key] = value.strip()
+    return result or None
+
+
 def _image_jobs_endpoint(item: dict[str, Any]) -> tuple[str, bool]:
     raw_endpoint = item.get("image_jobs_endpoint")
     endpoint = raw_endpoint.strip().lower() if isinstance(raw_endpoint, str) else "auto"
@@ -337,6 +358,9 @@ def parse_provider_item(item: dict[str, Any], *, index: int) -> ProviderDefiniti
             item.get("agent_reasoning_supported"),
             default=True,
             field="agent_reasoning_supported",
+        ),
+        agent_thinking_level_map=_agent_thinking_level_map(
+            item.get("agent_thinking_level_map")
         ),
         image_generations_supported=parse_optional_bool(
             item.get("image_generations_supported")

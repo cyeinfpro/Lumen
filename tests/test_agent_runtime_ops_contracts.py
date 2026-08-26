@@ -22,11 +22,25 @@ REQUIRED_AGENT_ENV = {
     "AGENT_RUNTIME_SHARED_SECRET",
     "AGENT_TOOL_CAPABILITY_SECRET",
     "AGENT_TOOL_GATEWAY_URL",
+    "AGENT_INTERNAL_CALLBACK_BASE_URL",
     "AGENT_RUNTIME_HEALTH_TIMEOUT_SECONDS",
     "AGENT_RUNTIME_HEARTBEAT_INTERVAL_SECONDS",
     "AGENT_RUNTIME_EVENT_IDLE_TIMEOUT_SECONDS",
+    "AGENT_RUNTIME_MAX_REQUEST_BYTES",
+    "AGENT_RUNTIME_MAX_LINE_BYTES",
     "AGENT_RUNTIME_MAX_CONCURRENT_RUNS",
+    "AGENT_RUNTIME_MAX_CONCURRENT_BODY_READS",
+    "AGENT_RUNTIME_MAX_INFLIGHT_REQUEST_BYTES",
     "AGENT_RUNTIME_REQUEST_BODY_TIMEOUT_SECONDS",
+    "AGENT_RUNTIME_TOOL_GATEWAY_TIMEOUT_SECONDS",
+    "AGENT_RUNTIME_TOOL_GATEWAY_MAX_RESPONSE_BYTES",
+    "AGENT_RUNTIME_MAX_RUN_SECONDS",
+    "AGENT_RUNTIME_MAX_PROVIDER_DISPATCHES",
+    "AGENT_RUNTIME_MAX_TURNS",
+    "AGENT_RUNTIME_MAX_TOTAL_TOKENS",
+    "AGENT_RUNTIME_MAX_EVENT_BYTES",
+    "AGENT_RUNTIME_MAX_REPEATED_TOOL_CALLS",
+    "AGENT_RUNTIME_SHUTDOWN_GRACE_SECONDS",
     "LUMEN_AGENT_RUNTIME_IMAGE_REF",
 }
 
@@ -63,11 +77,21 @@ def test_agent_environment_surface_is_complete_and_closed_by_default() -> None:
     assert values["AGENT_RUNTIME_URL"] == "http://agent-runtime:8090"
     assert values["AGENT_RUNTIME_SHARED_SECRET"] == ""
     assert values["AGENT_TOOL_CAPABILITY_SECRET"] == ""
+    assert values["AGENT_INTERNAL_CALLBACK_BASE_URL"] == (
+        "http://api:8000/internal/agent"
+    )
     assert values["AGENT_MAX_REFERENCE_IMAGES"] == "16"
     assert values["AGENT_MAX_SESSION_IMAGES"] == "64"
     assert values["AGENT_RUNTIME_HEARTBEAT_INTERVAL_SECONDS"] == "15"
     assert values["AGENT_RUNTIME_EVENT_IDLE_TIMEOUT_SECONDS"] == "90"
-    assert values["AGENT_RUNTIME_MAX_REQUEST_BYTES"] == "67108864"
+    assert values["AGENT_RUNTIME_MAX_REQUEST_BYTES"] == "16777216"
+
+
+def test_update_migrates_only_the_exact_legacy_agent_request_default() -> None:
+    source = (ROOT / "scripts/update/backup/preflight.sh").read_text(encoding="utf-8")
+    assert 'AGENT_RUNTIME_REQUEST_LIMIT}" = "67108864"' in source
+    assert "AGENT_RUNTIME_MAX_REQUEST_BYTES 16777216" in source
+    assert "LUMEN_PRESERVE_LEGACY_AGENT_RUNTIME_MAX_REQUEST_BYTES" in source
 
 
 def test_agent_runtime_compose_is_private_bounded_and_read_only() -> None:
@@ -96,6 +120,12 @@ def test_agent_runtime_compose_is_private_bounded_and_read_only() -> None:
     assert runtime["environment"]["AGENT_RUNTIME_HEARTBEAT_INTERVAL_SECONDS"] == (
         "${AGENT_RUNTIME_HEARTBEAT_INTERVAL_SECONDS:-15}"
     )
+    assert runtime["environment"]["AGENT_RUNTIME_MAX_CONCURRENT_BODY_READS"] == (
+        "${AGENT_RUNTIME_MAX_CONCURRENT_BODY_READS:-16}"
+    )
+    assert runtime["environment"]["AGENT_RUNTIME_SHUTDOWN_GRACE_SECONDS"] == (
+        "${AGENT_RUNTIME_SHUTDOWN_GRACE_SECONDS:-20}"
+    )
 
 
 def test_all_active_compose_variants_account_for_agent_runtime() -> None:
@@ -122,6 +152,12 @@ def test_all_active_compose_variants_account_for_agent_runtime() -> None:
     assert blue_green["services"]["agent-runtime"]["profiles"] == ["agent-runtime"]
     assert "api-green" in blue_green["services"]
     assert blue_green["services"]["api-green"]["networks"] == ["lumen_backend"]
+    assert (
+        blue_green["services"]["api-green"]["environment"][
+            "AGENT_INTERNAL_CALLBACK_BASE_URL"
+        ]
+        == "http://api-green:8000/internal/agent"
+    )
 
 
 def test_release_manifest_keeps_legacy_map_and_adds_runtime_component() -> None:
@@ -200,7 +236,7 @@ def test_installer_update_and_rollback_manage_agent_runtime_explicitly() -> None
     }
 
     assert "agent-runtime api worker web" in sources["install"]
-    assert "_target_services=(agent-runtime api worker web)" in sources["update"]
+    assert "_target_services=(agent-runtime worker api web)" in sources["update"]
     assert "HEALTH_SERVICES=(agent-runtime api worker web)" in sources["health"]
     assert "agent-runtime api worker web" in sources["cli"]
     assert 'required.append("agent-runtime")' in sources["rollback"]

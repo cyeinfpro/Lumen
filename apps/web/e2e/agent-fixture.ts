@@ -20,6 +20,8 @@ export interface AgentFixtureOptions {
   userId?: string;
   archived?: boolean;
   omitSessionFromList?: boolean;
+  sessionCount?: number;
+  generationCount?: number;
 }
 
 function imageDefaults() {
@@ -54,12 +56,14 @@ function tool(status: "running" | "succeeded" = "succeeded") {
 function run(
   status: "queued" | "running" | "succeeded" | "partial" | "failed" | "cancelled",
   withTool = false,
+  sessionId = "session-1",
 ) {
+  const suffix = sessionId.replace(/^session-/u, "") || "1";
   return {
-    id: "run-1",
-    agent_session_id: "session-1",
-    user_message_id: "user-1",
-    assistant_message_id: "assistant-1",
+    id: `run-${suffix}`,
+    agent_session_id: sessionId,
+    user_message_id: `user-${suffix}`,
+    assistant_message_id: `assistant-${suffix}`,
     status,
     execution_epoch: 1,
     last_event_seq: status === "running" ? 3 : 8,
@@ -72,6 +76,7 @@ function run(
     error_code: status === "partial" ? "agent_runtime_unavailable" : null,
     error_message:
       status === "partial" ? "Agent runtime is unavailable" : null,
+    continuable: status === "partial" || status === "failed",
     started_at: NOW,
     finished_at: status === "running" || status === "queued" ? null : NOW,
     cancel_requested_at: null,
@@ -82,11 +87,17 @@ function run(
   };
 }
 
-function messagePair(text: string, status: ReturnType<typeof run>["status"], withTool = false) {
+function messagePair(
+  text: string,
+  status: ReturnType<typeof run>["status"],
+  withTool = false,
+  sessionId = "session-1",
+) {
+  const suffix = sessionId.replace(/^session-/u, "") || "1";
   return [
     {
-      id: "user-1",
-      conversation_id: "conversation-1",
+      id: `user-${suffix}`,
+      conversation_id: `conversation-${suffix}`,
       role: "user",
       content: { source: "agent", text: "创建产品视觉" },
       intent: "agent",
@@ -95,12 +106,12 @@ function messagePair(text: string, status: ReturnType<typeof run>["status"], wit
       created_at: NOW,
     },
     {
-      id: "assistant-1",
-      conversation_id: "conversation-1",
+      id: `assistant-${suffix}`,
+      conversation_id: `conversation-${suffix}`,
       role: "assistant",
       content: {
         source: "agent",
-        agent_run_id: "run-1",
+        agent_run_id: `run-${suffix}`,
         text,
         tool_calls: withTool
           ? [
@@ -119,18 +130,23 @@ function messagePair(text: string, status: ReturnType<typeof run>["status"], wit
       },
       intent: "agent",
       status,
-      parent_message_id: "user-1",
+      parent_message_id: `user-${suffix}`,
       created_at: NOW,
     },
   ];
 }
 
-function generation(status: "running" | "succeeded") {
+function generation(
+  status: "running" | "succeeded",
+  index = 1,
+  sessionId = "session-1",
+) {
+  const suffix = sessionId.replace(/^session-/u, "") || "1";
   return {
-    id: "generation-1",
-    message_id: "assistant-1",
-    agent_session_id: "session-1",
-    agent_run_id: "run-1",
+    id: `generation-${index}`,
+    message_id: `assistant-${suffix}`,
+    agent_session_id: sessionId,
+    agent_run_id: `run-${suffix}`,
     agent_tool_call_id: "tool-1",
     action: "generate",
     prompt: "明亮产品主图",
@@ -168,14 +184,32 @@ function image() {
   };
 }
 
+function studioConversation() {
+  return {
+    id: "studio-conversation-1",
+    title: "Fixture conversation",
+    pinned: false,
+    archived: false,
+    memory_disabled: false,
+    active_scope_id: null,
+    last_activity_at: NOW,
+    default_params: {},
+    default_system: null,
+    default_system_prompt_id: null,
+    created_at: NOW,
+  };
+}
+
 function session(
   activeRun: ReturnType<typeof run> | null = null,
   archived = false,
+  sessionId = "session-1",
 ) {
+  const suffix = sessionId.replace(/^session-/u, "") || "1";
   return {
-    id: "session-1",
-    conversation_id: "conversation-1",
-    title: "产品视觉",
+    id: sessionId,
+    conversation_id: `conversation-${suffix}`,
+    title: suffix === "1" ? "产品视觉" : `产品视觉 ${suffix}`,
     pinned: false,
     archived,
     memory_disabled: false,
@@ -206,6 +240,10 @@ export async function installAgentFixture(
 ) {
   const mode = options.mode ?? "text";
   const userId = options.userId ?? "user-a";
+  const sessionIds = Array.from(
+    { length: Math.max(1, options.sessionCount ?? 1) },
+    (_value, index) => `session-${index + 1}`,
+  );
   let currentRun: ReturnType<typeof run> | null = null;
   let messages: ReturnType<typeof messagePair> = [];
   let generations: ReturnType<typeof generation>[] = [];
@@ -213,11 +251,16 @@ export async function installAgentFixture(
   let lastMessageBody: Record<string, unknown> | null = null;
   let cancelCalls = 0;
   let snapshotCalls = 0;
+  let continuationCalls = 0;
+  let lastContinuationBody: Record<string, unknown> | null = null;
 
   if (mode === "active-image" || mode === "cancel") {
     currentRun = run("running", true);
     messages = messagePair("图片任务已提交。", "running", true);
-    generations = [generation("running")];
+    generations = Array.from(
+      { length: Math.max(1, options.generationCount ?? 1) },
+      (_value, index) => generation("running", index + 1),
+    );
   }
   if (mode === "partial-image") {
     messages = messagePair("图片已提交，但最终回复中断。", "partial", true);
@@ -310,6 +353,24 @@ export async function installAgentFixture(
       });
     }
     if (path === "/api/auth/csrf") return json(route, { csrf_token: "fixture-csrf" });
+    if (path === "/api/conversations" && method === "GET") {
+      return json(route, { items: [studioConversation()], next_cursor: null });
+    }
+    if (path === "/api/conversations/studio-conversation-1" && method === "GET") {
+      return json(route, studioConversation());
+    }
+    if (
+      path === "/api/conversations/studio-conversation-1/messages" &&
+      method === "GET"
+    ) {
+      return json(route, {
+        items: [],
+        generations: [],
+        completions: [],
+        images: [],
+        next_cursor: null,
+      });
+    }
     if (path === "/api/agent/status") {
       return json(route, { enabled: true, tool_gateway_configured: true });
     }
@@ -321,29 +382,62 @@ export async function installAgentFixture(
       return json(route, {
         items: options.omitSessionFromList
           ? []
-          : [session(currentRun, options.archived)],
+          : sessionIds.map((sessionId) =>
+              session(
+                sessionId === "session-1" ? currentRun : null,
+                options.archived,
+                sessionId,
+              ),
+            ),
         next_cursor: null,
       });
     }
     if (path === "/api/agent/sessions" && method === "POST") {
       return json(route, session(null, options.archived));
     }
-    if (path === "/api/agent/sessions/session-1" && method === "GET") {
-      return json(route, session(currentRun, options.archived));
+    const sessionMatch = path.match(/^\/api\/agent\/sessions\/(session-\d+)$/u);
+    if (sessionMatch && method === "GET") {
+      const sessionId = sessionMatch[1];
+      return json(
+        route,
+        session(
+          sessionId === "session-1" ? currentRun : null,
+          options.archived,
+          sessionId,
+        ),
+      );
     }
-    if (path === "/api/agent/sessions/session-1" && method === "PATCH") {
+    if (sessionMatch && method === "PATCH") {
+      const sessionId = sessionMatch[1];
       const patch = request.postDataJSON() as Record<string, unknown>;
-      return json(route, { ...session(currentRun, options.archived), ...patch });
+      return json(route, {
+        ...session(
+          sessionId === "session-1" ? currentRun : null,
+          options.archived,
+          sessionId,
+        ),
+        ...patch,
+      });
     }
-    if (path === "/api/agent/sessions/session-1" && method === "DELETE") {
+    if (sessionMatch && method === "DELETE") {
       return json(route, { ok: true });
     }
     if (path.endsWith("/active-run")) {
       snapshotCalls += 1;
-      return json(route, currentRun);
+      return json(route, path.includes("/session-1/") ? currentRun : null);
     }
     if (path.endsWith("/messages") && method === "GET") {
       snapshotCalls += 1;
+      if (!path.includes("/session-1/")) {
+        return json(route, {
+          items: [],
+          runs: [],
+          next_cursor: null,
+          generations: [],
+          completions: [],
+          images: [],
+        });
+      }
       return json(route, {
         items: messages,
         runs: messages.length ? [currentRun ?? run(mode === "partial-image" ? "partial" : "succeeded", generations.length > 0)] : [],
@@ -381,6 +475,18 @@ export async function installAgentFixture(
       messages = messagePair("图片任务已提交。", "cancelled", true);
       return json(route, run("cancelled", true));
     }
+    if (path === "/api/agent/runs/run-1/continue" && method === "POST") {
+      continuationCalls += 1;
+      lastContinuationBody = request.postDataJSON() as Record<string, unknown>;
+      return json(route, {
+        ...run("queued", false),
+        id: "run-continue",
+        user_message_id: "user-continue",
+        assistant_message_id: "assistant-continue",
+        idempotency_key: lastContinuationBody.idempotency_key,
+        continuable: false,
+      });
+    }
     if (path === "/api/tasks" || path === "/api/tasks/mine/active") {
       const task = {
         kind: "generation",
@@ -412,6 +518,12 @@ export async function installAgentFixture(
     },
     get snapshotCalls() {
       return snapshotCalls;
+    },
+    get continuationCalls() {
+      return continuationCalls;
+    },
+    get lastContinuationBody() {
+      return lastContinuationBody;
     },
   };
 }

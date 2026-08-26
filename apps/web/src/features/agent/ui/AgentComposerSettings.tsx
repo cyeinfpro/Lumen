@@ -27,7 +27,7 @@ export function AgentComposerSettings({
     <div className="grid gap-4 p-4">
       <SettingField label="推理强度">
         <Select
-          value={draft.reasoningEffort ?? "max"}
+          value={draft.reasoningEffort ?? "auto"}
           onChange={(event) =>
             onReasoningEffortChange(
               event.target.value as AgentReasoningEffort,
@@ -36,6 +36,7 @@ export function AgentComposerSettings({
           disabled={disabled}
           aria-label="Agent 推理强度"
         >
+          <option value="auto">自动</option>
           <option value="none">关闭</option>
           <option value="minimal">极低</option>
           <option value="low">低</option>

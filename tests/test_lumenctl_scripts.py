@@ -2119,6 +2119,11 @@ fi
 if [ "${1:-}" = "rm" ]; then
   exit 0
 fi
+if [ "${1:-}" = "inspect" ] && [ "${2:-}" = "--format" ] \
+    && [ "${4:-}" = "lumen-worker" ]; then
+  printf 'sha256:%s\\n' "$(printf 'b%.0s' {1..64})"
+  exit 0
+fi
 if [ "${1:-}" = "image" ] && [ "${2:-}" = "inspect" ]; then
   shift 2
   if [ "${1:-}" = "--format" ]; then
@@ -2290,9 +2295,9 @@ esac
         deploy_root / "releases" / retained[0] / "scripts" / "fallback-main-marker"
     ).read_text(encoding="utf-8") == "main-source\n"
     assert (tmp_path / "docker-failed-once").is_file()
-    assert (tmp_path / "fallback-source-state").read_text(
-        encoding="utf-8"
-    ).strip() == "main-source|1.2.99"
+    assert (tmp_path / "fallback-source-state").read_text(encoding="utf-8").strip() == (
+        "main-source|1.2.99"
+    ), result.stderr + result.stdout
     assert "已用 v1.2.44 回滚成功" not in result.stderr
     assert "rollback：更新前 release 服务恢复失败" in result.stderr
     assert "rollback：readiness 或恢复步骤失败" in result.stderr
@@ -2973,7 +2978,7 @@ def test_update_script_runs_docker_compose_pull_migrate_up_phases() -> None:
     # restart_services: fast 模式使用 --no-deps，因此必须先把 API 启动并等到
     # healthy，再启动依赖 API 的 worker / web。否则 Web 可能缓存旧 Docker DNS
     # 地址，令更新完成后仍持续 502。
-    assert "_target_services=(agent-runtime api worker web)" in text
+    assert "_target_services=(agent-runtime worker api web)" in text
     assert "for _svc in api web" in text
     assert 'lumen_update_start_bound_service "${CURRENT_LINK}" "${_svc}"' in text
     assert 'compose_up_service "${compose_dir}" "${service}"' in text
@@ -3182,8 +3187,7 @@ def test_update_script_supports_optional_local_build_when_env_set() -> None:
     assert "build api worker agent-runtime web" in text
     # build 路径仍走 lumen_compose_in（不直接 systemctl）
     assert (
-        'lumen_compose_in "${NEW_RELEASE}" build api worker agent-runtime web'
-        in text
+        'lumen_compose_in "${NEW_RELEASE}" build api worker agent-runtime web' in text
     )
     assert "LUMEN_UPDATE_BUILD=1 已完成本地 build，跳过远程 pull" in text
 

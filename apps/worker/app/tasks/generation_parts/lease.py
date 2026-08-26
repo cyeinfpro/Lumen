@@ -3,11 +3,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
 from dataclasses import replace
 from typing import Any
 
 from ...task_cancellation import scoped_cancellation_requested
+from ...observability import generation_lease_secondary_refresh_failures_total
 from .errors import LeaseLost
 from .queue import (
     IMAGE_QUEUE_ACTIVE_KEY,
@@ -234,6 +234,7 @@ async def _renew_generation_lease_once(
     extra_lease_keys: list[str] | None,
     image_provider_name: str | None,
 ) -> bool:
+    del ttl_s, extra_lease_keys, image_provider_name
     renewed = await redis.eval(
         RENEW_LEASE_LUA,
         1,
@@ -243,18 +244,44 @@ async def _renew_generation_lease_once(
     )
     if int(renewed or 0) == 0:
         return False
-    for key in extra_lease_keys or []:
-        await redis.expire(key, LEASE_TTL_S)
-    with suppress(Exception):
-        await redis.expire(image_inflight_key(task_id), LEASE_TTL_S * 4)
-    if image_provider_name:
-        await _refresh_image_queue_ownership(
-            redis,
-            task_id=task_id,
-            image_provider_name=image_provider_name,
-            ttl_s=ttl_s,
-        )
     return True
+
+
+async def _refresh_generation_lease_metadata(
+    redis: Any,
+    *,
+    task_id: str,
+    extra_lease_keys: list[str] | None,
+    image_provider_name: str | None,
+    ttl_s: float,
+) -> None:
+    for key in extra_lease_keys or []:
+        try:
+            await redis.expire(key, LEASE_TTL_S)
+        except Exception:  # noqa: BLE001
+            generation_lease_secondary_refresh_failures_total.labels(kind="extra").inc()
+            logger.warning(
+                "secondary lease key refresh failed task=%s kind=extra",
+                task_id,
+            )
+    try:
+        await redis.expire(image_inflight_key(task_id), LEASE_TTL_S * 4)
+    except Exception:  # noqa: BLE001
+        generation_lease_secondary_refresh_failures_total.labels(kind="inflight").inc()
+    if image_provider_name:
+        try:
+            await _refresh_image_queue_ownership(
+                redis,
+                task_id=task_id,
+                image_provider_name=image_provider_name,
+                ttl_s=ttl_s,
+            )
+        except Exception:  # noqa: BLE001
+            generation_lease_secondary_refresh_failures_total.labels(kind="queue").inc()
+            logger.warning(
+                "secondary queue ownership refresh failed task=%s",
+                task_id,
+            )
 
 
 async def lease_renewer(
@@ -308,6 +335,25 @@ async def lease_renewer(
                     )
                     return
                 renewal_deadline = now() + ttl_s - safety_s
+                try:
+                    await asyncio.wait_for(
+                        _refresh_generation_lease_metadata(
+                            redis,
+                            task_id=task_id,
+                            extra_lease_keys=extra_lease_keys,
+                            image_provider_name=image_provider_name,
+                            ttl_s=ttl_s,
+                        ),
+                        timeout=max(0.1, min(1.0, renew_every_s or 1.0)),
+                    )
+                except TimeoutError:
+                    generation_lease_secondary_refresh_failures_total.labels(
+                        kind="timeout"
+                    ).inc()
+                    logger.warning(
+                        "secondary lease metadata refresh timed out task=%s",
+                        task_id,
+                    )
                 await sleep_fn(
                     min(
                         renew_every_s,

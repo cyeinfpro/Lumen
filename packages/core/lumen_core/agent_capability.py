@@ -37,7 +37,7 @@ class AgentCapabilityClaims(BaseModel):
     user_id: str = Field(min_length=1, max_length=64)
     agent_session_id: str = Field(min_length=1, max_length=64)
     execution_epoch: int = Field(ge=0)
-    allowed_tools: list[str] = Field(min_length=1, max_length=4)
+    allowed_tools: list[str] = Field(default_factory=list, max_length=4)
     allowed_reference_labels: list[str] = Field(
         default_factory=list,
         max_length=AGENT_CAPABILITY_MAX_REFERENCE_LABELS,

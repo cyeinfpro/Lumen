@@ -164,6 +164,7 @@ class ProviderConfig:
     agent_context_window: int = 128000
     agent_max_output_tokens: int = 16384
     agent_reasoning_supported: bool = True
+    agent_thinking_level_map: dict[str, str | None] | None = None
     image_generations_supported: bool | None = None
     image_responses_supported: bool | None = None
 
@@ -231,6 +232,7 @@ class ResolvedProvider:
     agent_context_window: int = 128000
     agent_max_output_tokens: int = 16384
     agent_reasoning_supported: bool = True
+    agent_thinking_level_map: dict[str, str | None] | None = None
     image_generations_supported: bool | None = None
     image_responses_supported: bool | None = None
     text_circuit_state: str = field(default="closed", repr=False, compare=False)

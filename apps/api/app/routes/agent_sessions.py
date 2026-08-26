@@ -14,6 +14,7 @@ from lumen_core.schema_models import (
     AgentRunOut,
     AgentSessionCreateIn,
     AgentSessionListOut,
+    AgentSessionImageListOut,
     AgentSessionOut,
     AgentSessionPatchIn,
     AgentStatusOut,
@@ -25,6 +26,10 @@ from ..deps import CurrentUser, verify_csrf
 from ..ratelimit import MESSAGES_LIMITER
 from ..redis_client import get_redis
 from ..services.agent.runs import get_active_agent_run_snapshot
+from ..services.agent.session_images import (
+    eject_agent_session_image,
+    list_agent_session_images,
+)
 from ..services.agent.sessions import agent_session_services
 
 
@@ -191,6 +196,41 @@ async def get_agent_active_run(
     return await get_active_agent_run_snapshot(
         db,
         session_id=session_id,
+        user=user,
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/images",
+    response_model=AgentSessionImageListOut,
+)
+async def get_agent_session_images(
+    session_id: str,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AgentSessionImageListOut:
+    return await list_agent_session_images(
+        db,
+        session_id=session_id,
+        user=user,
+    )
+
+
+@router.delete(
+    "/sessions/{session_id}/images/{image_id}",
+    response_model=AgentSessionImageListOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def delete_agent_session_image(
+    session_id: str,
+    image_id: str,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AgentSessionImageListOut:
+    return await eject_agent_session_image(
+        db,
+        session_id=session_id,
+        image_id=image_id,
         user=user,
     )
 

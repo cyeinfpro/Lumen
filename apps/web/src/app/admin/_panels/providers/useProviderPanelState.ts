@@ -195,6 +195,9 @@ function providerAgentPayload(draft: Draft) {
       Math.min(128_000, Number(draft.agent_max_output_tokens) || 16_384),
     ),
     agent_reasoning_supported: draft.agent_reasoning_supported !== false,
+    agent_thinking_level_map: draft.agent_thinking_level_map
+      ? { ...draft.agent_thinking_level_map }
+      : null,
     image_generations_supported: draft.image_generations_supported ?? null,
     image_responses_supported: draft.image_responses_supported ?? null,
   };

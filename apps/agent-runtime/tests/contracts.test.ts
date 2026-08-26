@@ -11,6 +11,51 @@ describe("Runtime contracts", () => {
     expect("limits" in parsed).toBe(false);
   });
 
+  it("accepts receiver-first v3 typed history and provider metadata", () => {
+    const parsed = parseRuntimeRequest({
+      ...runtimeRequest(),
+      version: 3,
+      operation: "prompt",
+      tool_receipt_version: 2,
+      provider: {
+        ...runtimeRequest().provider,
+        thinking_level_map: { max: "max" },
+      },
+      history: [
+        {
+          message_id: "assistant-history",
+          role: "assistant",
+          text: "tool turn",
+          api: "openai-responses",
+          provider_id: "provider-history",
+          model: "model-history",
+          stop_reason: "toolUse",
+          tool_calls: [
+            {
+              id: "tool-1",
+              name: "lumen_create_image",
+              arguments: { prompt: "x" },
+            },
+          ],
+          tool_results: [
+            {
+              tool_call_id: "tool-1",
+              name: "lumen_create_image",
+              text: '{"status":"succeeded"}',
+              is_error: false,
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(parsed.version).toBe(3);
+    expect(parsed.history[0]).toMatchObject({
+      provider_id: "provider-history",
+      tool_calls: [{ id: "tool-1" }],
+    });
+  });
+
   it("accepts legacy v1 envelopes without Pi checkpoint fields", () => {
     const {
       tool_policy: _toolPolicy,
@@ -105,6 +150,23 @@ describe("Runtime contracts", () => {
         }),
       ),
     ).toThrow(/invalid request/u);
+  });
+
+  it("preserves the legacy v2 reference envelope while v3 enforces turn scope", () => {
+    const references = Array.from({ length: 17 }, (_, index) => ({
+      reference_label: `ref_${String(index + 1)}`,
+      role: "reference",
+      display_label: null,
+      mime_type: "image/webp",
+      data_base64: Buffer.from("preview").toString("base64"),
+    }));
+    expect(parseRuntimeRequest({ ...runtimeRequest(), references }).version).toBe(2);
+    expect(() => parseRuntimeRequest({
+      ...runtimeRequest(),
+      version: 3,
+      operation: "prompt",
+      references,
+    })).toThrow(/current turn reference limit/u);
   });
 
   it("requires Pi compaction boundaries to reference retained history", () => {

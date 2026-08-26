@@ -165,7 +165,7 @@ function AgentAssistantTurn({
             <AgentRunStatus
               run={run}
               onContinue={
-                run.status === "failed" || run.status === "partial"
+                run.continuable === true
                   ? () => onContinue(message)
                   : undefined
               }

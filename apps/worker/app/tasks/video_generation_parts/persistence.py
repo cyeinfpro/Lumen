@@ -93,21 +93,21 @@ async def finish_success(
     artifact_fence: _VideoArtifactFence | None = None
     try:
         if generation.cancel_requested_at is not None:
-            await video_ports()._finish_terminal_failure(
+            await video_ports().billing_events._finish_terminal_failure(
                 session,
                 redis,
                 generation,
-                video_ports()._cancelled_poll_during_finalization(poll),
+                video_ports().operations._cancelled_poll_during_finalization(poll),
                 fallback_error_message="video task cancelled by user",
                 lease_lost=lease_lost,
             )
             return
         active_adapter = adapter
         if active_adapter is None:
-            provider = await video_ports()._provider_for_generation(generation)
+            provider = await video_ports().provider._provider_for_generation(generation)
             release_provider_name = release_provider_name or provider.name
-            active_adapter = video_ports().adapter_for_provider(provider)
-        video_ports()._raise_if_video_lease_lost(
+            active_adapter = video_ports().provider.adapter_for_provider(provider)
+        video_ports().lease_queue._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost before fetching-state commit",
         )
@@ -118,20 +118,22 @@ async def finish_success(
             poll,
         )
         if release_provider_name:
-            await video_ports()._release_provider_slot(
+            await video_ports().lease_queue._release_provider_slot(
                 redis,
                 release_provider_name,
                 generation.id,
             )
             release_provider_slot = False
-        video_ports()._raise_if_video_lease_lost(
+        video_ports().lease_queue._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost before fetching event",
         )
-        await video_ports()._publish(redis, generation, EV_VIDEO_FETCHING)
+        await video_ports().billing_events._publish(
+            redis, generation, EV_VIDEO_FETCHING
+        )
 
         def ensure_active() -> None:
-            video_ports()._raise_if_video_lease_lost(
+            video_ports().lease_queue._raise_if_video_lease_lost(
                 lease_lost,
                 "video poll lease lost during result download",
             )
@@ -148,17 +150,17 @@ async def finish_success(
         if artifact_fence is None:
             release_provider_slot = False
             if generation.cancel_requested_at is not None:
-                await video_ports()._finish_terminal_failure(
+                await video_ports().billing_events._finish_terminal_failure(
                     session,
                     redis,
                     generation,
-                    video_ports()._cancelled_poll_during_finalization(poll),
+                    video_ports().operations._cancelled_poll_during_finalization(poll),
                     fallback_error_message="video task cancelled by user",
                     lease_lost=lease_lost,
                 )
             return
         artifact_attempt_id = artifact_fence.artifact_attempt_id
-        stored = await video_ports()._store_video_asset(
+        stored = await video_ports().operations._store_video_asset(
             generation,
             downloaded,
             lease_lost=lease_lost,
@@ -185,7 +187,7 @@ async def finish_success(
         if stored is not None and cleanup_created_artifacts:
             rolled_back = await rollback_artifact_transaction(
                 session,
-                logger=video_ports().logger,
+                logger=video_ports().operations.logger,
                 label=f"video artifact cleanup task={generation.id}",
             )
             if rolled_back and artifact_fence is not None:
@@ -196,14 +198,14 @@ async def finish_success(
                     lease_lost=lease_lost,
                 )
             elif not rolled_back:
-                video_ports().logger.error(
+                video_ports().operations.logger.error(
                     "video artifact cleanup deferred because rollback was not "
                     "confirmed task=%s keys=%s",
                     generation.id,
                     stored.created_storage_keys,
                 )
             else:
-                video_ports().logger.error(
+                video_ports().operations.logger.error(
                     "video artifact cleanup deferred because durable ownership "
                     "was not established task=%s keys=%s",
                     generation.id,
@@ -216,7 +218,7 @@ async def finish_success(
         ):
             # Compatibility audit marker:
             # _release_provider_slot(redis, release_provider_name, generation.id)
-            await video_ports()._release_provider_slot(
+            await video_ports().lease_queue._release_provider_slot(
                 redis,
                 release_provider_name,
                 generation.id,
@@ -243,20 +245,20 @@ async def finish_terminal_failure(
     release_provider_slot = False
     terminal_committed = False
     try:
-        if generation.status in video_ports()._TERMINAL_STATUSES:
+        if generation.status in video_ports().policy._TERMINAL_STATUSES:
             return
-        video_ports()._raise_if_video_lease_lost(
+        video_ports().lease_queue._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost before terminal billing",
         )
         release_provider_slot = True
-        resolution = await video_ports().resolve_video_billing(
+        resolution = await video_ports().billing_events.resolve_video_billing(
             session,
             generation,
             poll_result=poll,
             reason=billing_reason or poll.status,
         )
-        video_ports()._raise_if_video_lease_lost(
+        video_ports().lease_queue._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost before terminal mutation",
         )
@@ -275,7 +277,7 @@ async def finish_terminal_failure(
         generation.upstream_response = poll.raw
         generation.error_code = poll.failure_class or poll.status
         generation.error_message = (
-            fallback_error_message or video_ports()._error_message(poll)
+            fallback_error_message or video_ports().billing_events._error_message(poll)
         )
         generation.billed_tokens = resolution.actual_tokens
         generation.billed_cost_micro = resolution.actual_micro
@@ -283,8 +285,8 @@ async def finish_terminal_failure(
             **(generation.diagnostics or {}),
             "billing_decision": resolution.decision,
         }
-        generation.finished_at = video_ports()._now()
-        video_ports()._queue_video_event(
+        generation.finished_at = video_ports().operations._now()
+        video_ports().billing_events._queue_video_event(
             session,
             generation,
             (
@@ -293,13 +295,13 @@ async def finish_terminal_failure(
                 else EV_VIDEO_FAILED
             ),
         )
-        video_ports()._raise_if_video_lease_lost(
+        video_ports().lease_queue._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost before terminal commit",
         )
         await session.commit()
         terminal_committed = True
-        await video_ports().worker_flush_balance_cache(session)
+        await video_ports().billing_events.worker_flush_balance_cache(session)
     finally:
         lease_still_owned = lease_lost is None or not lease_lost.is_set()
         if (
@@ -309,7 +311,7 @@ async def finish_terminal_failure(
         ):
             # Compatibility audit marker:
             # _release_provider_slot(redis, release_provider_name, generation.id)
-            await video_ports()._release_provider_slot(
+            await video_ports().lease_queue._release_provider_slot(
                 redis,
                 release_provider_name,
                 generation.id,
@@ -367,12 +369,15 @@ async def delete_video_storage_keys(
     if not unique_keys:
         return
     results = await asyncio.gather(
-        *(asyncio.to_thread(video_ports().storage.delete, key) for key in unique_keys),
+        *(
+            asyncio.to_thread(video_ports().store.storage.delete, key)
+            for key in unique_keys
+        ),
         return_exceptions=True,
     )
     for key, result in zip(unique_keys, results, strict=False):
         if isinstance(result, BaseException):
-            video_ports().logger.warning(
+            video_ports().operations.logger.warning(
                 "video artifact cleanup failed key=%s err=%s",
                 key,
                 result,
@@ -396,7 +401,7 @@ async def _cleanup_unadopted_video_storage_keys(
     if not keys:
         return
     if fence is None:
-        video_ports().logger.error(
+        video_ports().operations.logger.error(
             "video artifact cleanup deferred without durable ownership task=%s keys=%s",
             generation_id,
             keys,
@@ -433,9 +438,11 @@ async def put_video_storage_bytes(
     track_created: bool,
 ) -> bool:
     if not track_created:
-        await video_ports().storage.aput_bytes(key, data)
+        await video_ports().store.storage.aput_bytes(key, data)
         return False
-    result = await asyncio.to_thread(video_ports().storage.put_bytes_result, key, data)
+    result = await asyncio.to_thread(
+        video_ports().store.storage.put_bytes_result, key, data
+    )
     return bool(result.created)
 
 
@@ -443,7 +450,7 @@ def _byte_write_operation(
     key: str,
     data: bytes,
 ) -> StorageWriteOperation:
-    storage = video_ports().storage
+    storage = video_ports().store.storage
 
     def write() -> bool:
         result = storage.put_bytes_result(
@@ -467,7 +474,7 @@ def _poster_write_operation(
     diagnostics: dict[str, Any],
     stored: list[bool],
 ) -> StorageWriteOperation:
-    storage = video_ports().storage
+    storage = video_ports().store.storage
 
     def write() -> bool:
         try:
@@ -510,7 +517,7 @@ async def _store_byte_artifacts_with_capacity(
                 stored=poster_stored,
             )
         )
-    created_keys = await video_ports().storage_writes.write_operations(operations)
+    created_keys = await video_ports().store.storage_writes.write_operations(operations)
     return created_keys, poster_key if poster_stored else None
 
 
@@ -526,7 +533,7 @@ def _stored_video_from_bytes(
 ) -> StoredVideo:
     sha = hashlib.sha256(video_bytes).hexdigest()
     video = Video(
-        id=video_ports().new_uuid7(),
+        id=video_ports().store.new_uuid7(),
         user_id=generation.user_id,
         owner_generation_id=generation.id,
         storage_key=video_key,
@@ -563,22 +570,22 @@ async def store_video_asset(
         artifact_attempt_id=artifact_attempt_id,
     )
     if isinstance(data, DownloadedVideo):
-        return await video_ports()._store_downloaded_video_asset(
+        return await video_ports().store._store_downloaded_video_asset(
             generation,
             data,
             lease_lost=lease_lost,
             artifact_attempt_id=artifact_attempt_id,
         )
     processed, diagnostics = await asyncio.to_thread(
-        video_ports()._postprocess_video_bytes,
+        video_ports().store._postprocess_video_bytes,
         data,
     )
-    video_ports()._raise_if_video_lease_lost(
+    video_ports().lease_queue._raise_if_video_lease_lost(
         lease_lost,
         "video poll lease lost after byte video postprocess",
     )
     extension = str(processed.get("extension") or ".mp4")
-    video_key, poster_key = video_ports()._video_artifact_keys(
+    video_key, poster_key = video_ports().store._video_artifact_keys(
         generation,
         extension,
         artifact_attempt_id=artifact_attempt_id,
@@ -587,12 +594,12 @@ async def store_video_asset(
     track_created = artifact_attempt_id is not None
     created_keys: list[str] = []
     try:
-        video_ports()._raise_if_video_lease_lost(
+        video_ports().lease_queue._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost before byte artifact storage",
         )
         poster_bytes = processed.get("poster_bytes")
-        if video_ports().storage_writes is not None:
+        if video_ports().store.storage_writes is not None:
             (
                 created_keys,
                 poster_storage_key,
@@ -604,7 +611,7 @@ async def store_video_asset(
                 diagnostics=diagnostics,
             )
         else:
-            if await video_ports()._put_video_storage_bytes(
+            if await video_ports().store._put_video_storage_bytes(
                 video_key,
                 video_bytes,
                 track_created=track_created,
@@ -613,7 +620,7 @@ async def store_video_asset(
             poster_storage_key = None
             if poster_bytes:
                 try:
-                    if await video_ports()._put_video_storage_bytes(
+                    if await video_ports().store._put_video_storage_bytes(
                         poster_key,
                         poster_bytes,
                         track_created=track_created,
@@ -624,7 +631,7 @@ async def store_video_asset(
                     raise
                 except Exception as exc:  # noqa: BLE001
                     diagnostics["poster_store_error"] = str(exc)[:500]
-        video_ports()._raise_if_video_lease_lost(
+        video_ports().lease_queue._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost after byte artifact storage",
         )
@@ -660,9 +667,9 @@ async def _copy_processed_video(
 ) -> bool:
     try:
         write_result = await asyncio.to_thread(
-            video_ports().copy_video_file_exclusive_result,
+            video_ports().store.copy_video_file_exclusive_result,
             processed.path,
-            video_ports().storage.path_for(video_key),
+            video_ports().store.storage.path_for(video_key),
             expected_sha256=processed.sha256,
             expected_size=processed.size_bytes,
         )
@@ -678,8 +685,8 @@ def _file_copy_operation(
     *,
     video_key: str,
 ) -> StorageWriteOperation:
-    storage = video_ports().storage
-    copy_file = video_ports().copy_video_file_exclusive_result
+    storage = video_ports().store.storage
+    copy_file = video_ports().store.copy_video_file_exclusive_result
 
     def write() -> bool:
         try:
@@ -720,7 +727,7 @@ async def _store_file_artifacts_with_capacity(
                 stored=poster_stored,
             )
         )
-    created_keys = await video_ports().storage_writes.write_operations(operations)
+    created_keys = await video_ports().store.storage_writes.write_operations(operations)
     return created_keys, poster_key if poster_stored else None
 
 
@@ -734,7 +741,7 @@ async def _store_processed_poster(
     if not processed.poster_bytes:
         return None
     try:
-        if await video_ports()._put_video_storage_bytes(
+        if await video_ports().store._put_video_storage_bytes(
             poster_key,
             processed.poster_bytes,
             track_created=True,
@@ -758,7 +765,7 @@ def _stored_video_from_file(
     created_keys: list[str],
 ) -> StoredVideo:
     video = Video(
-        id=video_ports().new_uuid7(),
+        id=video_ports().store.new_uuid7(),
         user_id=generation.user_id,
         owner_generation_id=generation.id,
         storage_key=video_key,
@@ -797,25 +804,25 @@ async def store_downloaded_video_asset(
         artifact_attempt_id=artifact_attempt_id,
     )
     try:
-        video_ports()._raise_if_video_lease_lost(
+        video_ports().lease_queue._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost before video postprocess",
         )
         processed = await asyncio.to_thread(
-            video_ports()._postprocess_video_file,
+            video_ports().store._postprocess_video_file,
             downloaded,
         )
-        video_ports()._raise_if_video_lease_lost(
+        video_ports().lease_queue._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost after video postprocess",
         )
-        video_key, poster_key = video_ports()._video_artifact_keys(
+        video_key, poster_key = video_ports().store._video_artifact_keys(
             generation,
             processed.extension,
             artifact_attempt_id=artifact_attempt_id,
         )
         diagnostics = dict(processed.metadata)
-        if video_ports().storage_writes is not None:
+        if video_ports().store.storage_writes is not None:
             (
                 created_keys,
                 poster_storage_key,
@@ -834,7 +841,7 @@ async def store_downloaded_video_asset(
                 diagnostics=diagnostics,
                 created_keys=created_keys,
             )
-        video_ports()._raise_if_video_lease_lost(
+        video_ports().lease_queue._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost after video artifact storage",
         )

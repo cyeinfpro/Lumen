@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -49,6 +50,15 @@ class AgentSession(Base, TimestampMixin):
     )
     runtime_version: Mapped[str] = mapped_column(
         String(64), nullable=False, default="", server_default=""
+    )
+    active_pi_compaction_run_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True
+    )
+    active_pi_compaction_schema_version: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    active_pi_compaction_event_seq: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True
     )
 
 
@@ -126,6 +136,9 @@ class AgentRun(Base, TimestampMixin):
     assistant_message_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("messages.id", ondelete="CASCADE"), nullable=False
     )
+    continuation_source_run_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True
+    )
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="queued", server_default="queued"
     )
@@ -150,8 +163,8 @@ class AgentRun(Base, TimestampMixin):
     reasoning_effort: Mapped[str | None] = mapped_column(
         String(16),
         nullable=True,
-        default="max",
-        server_default="max",
+        default=None,
+        server_default=None,
     )
     user_api_credential_id: Mapped[str | None] = mapped_column(
         String(36),
@@ -228,6 +241,43 @@ class AgentRunReference(Base, TimestampMixin):
     display_label: Mapped[str | None] = mapped_column(String(80), nullable=True)
     metadata_jsonb: Mapped[dict[str, Any]] = mapped_column(
         JsonType(), nullable=False, default=dict, server_default="{}"
+    )
+
+
+class AgentSessionImage(Base, TimestampMixin):
+    __tablename__ = "agent_session_images"
+    __table_args__ = (
+        UniqueConstraint(
+            "agent_session_id", "image_id", name="uq_agent_session_images_image"
+        ),
+        UniqueConstraint(
+            "agent_session_id",
+            "reference_label",
+            name="uq_agent_session_images_label",
+        ),
+        Index("ix_agent_session_images_active", "agent_session_id", "active"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
+    agent_session_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("agent_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    image_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("images.id", ondelete="RESTRICT"), nullable=False
+    )
+    reference_label: Mapped[str] = mapped_column(String(16), nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    display_label: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    source: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="history", server_default="history"
+    )
+    active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
     )
 
 
@@ -343,6 +393,7 @@ __all__ = [
     "AgentCapabilityGrant",
     "AgentRun",
     "AgentRunReference",
+    "AgentSessionImage",
     "AgentSession",
     "AgentToolCall",
 ]

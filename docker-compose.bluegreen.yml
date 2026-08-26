@@ -66,6 +66,7 @@ services:
       REDIS_URL: "${REDIS_URL:-redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0}"
       DATABASE_URL: "${DATABASE_URL:-postgresql+asyncpg://${DB_USER:?Set DB_USER in .env}:${DB_PASSWORD:?Set DB_PASSWORD in .env}@postgres:5432/${DB_NAME:?Set DB_NAME in .env}}"
       LUMEN_UPDATE_VIA_TRIGGER: "1"
+      AGENT_INTERNAL_CALLBACK_BASE_URL: "http://api-green:8000/internal/agent"
     volumes:
       - ${LUMEN_DATA_ROOT:-/opt/lumendata}/storage:/opt/lumendata/storage
       - ${LUMEN_DATA_ROOT:-/opt/lumendata}/backup:/opt/lumendata/backup

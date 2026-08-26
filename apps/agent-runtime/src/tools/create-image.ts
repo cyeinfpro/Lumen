@@ -6,7 +6,7 @@ import {
   runtimeToolPolicy,
   type RuntimeRequest,
 } from "../contracts.js";
-import type { CreateImageGateway } from "./gateway.js";
+import { ToolGatewayError, type CreateImageGateway } from "./gateway.js";
 
 const AspectRatio = Type.Union(
   ["1:1", "16:9", "9:16", "21:9", "9:21", "10:7", "7:10", "4:5", "3:4", "4:3", "3:2", "2:3"].map(
@@ -36,6 +36,22 @@ export function ordinalFor(state: ToolRuntimeState, toolCallId: string): number 
   state.nextOrdinal += 1;
   state.ordinals.set(toolCallId, ordinal);
   return ordinal;
+}
+
+function rejectTool(
+  state: ToolRuntimeState,
+  toolCallId: string,
+  code: string,
+  resultUnknown = false,
+): never {
+  if (!state.errors.has(toolCallId)) {
+    state.calls += 1;
+    state.failedCalls += 1;
+    state.lastErrorCode = code;
+    state.errors.set(toolCallId, { code, resultUnknown });
+    if (resultUnknown) state.unknownResults += 1;
+  }
+  throw new ToolGatewayError(code, resultUnknown);
 }
 
 export function createImageTool(
@@ -99,21 +115,30 @@ export function createImageTool(
       const requestedCount = params.count ?? request.image_defaults.count;
       if (state.unknownResults > 0) {
         state.limitReason = "tool_result_unknown";
-        state.errors.set(toolCallId, {
-          code: "agent_tool_result_unknown",
-          resultUnknown: true,
-        });
-        throw new Error("A prior image submission is still unconfirmed");
+        rejectTool(
+          state,
+          toolCallId,
+          "agent_tool_result_unknown",
+          true,
+        );
       }
       if (
         state.imageCalls >= policy.max_image_tool_calls
       ) {
         state.limitReason = "tool_calls";
-        throw new Error("The image tool limit has been reached");
+        rejectTool(
+          state,
+          toolCallId,
+          "agent_tool_limit_reached",
+        );
       }
       if (state.acceptedImages + requestedCount > policy.max_images_per_run) {
         state.limitReason = "images";
-        throw new Error("The image count limit has been reached");
+        rejectTool(
+          state,
+          toolCallId,
+          "agent_image_limit_reached",
+        );
       }
       state.calls += 1;
       state.imageCalls += 1;
@@ -121,13 +146,12 @@ export function createImageTool(
         request.references.map((reference) => reference.reference_label),
       );
       if (references.some((label) => !allowedReferences.has(label))) {
-        state.failedCalls += 1;
-        state.lastErrorCode = "agent_reference_not_found";
-        state.errors.set(toolCallId, {
-          code: "agent_reference_not_found",
-          resultUnknown: false,
-        });
-        throw new Error("A requested reference is not available in this run");
+        state.calls -= 1;
+        rejectTool(
+          state,
+          toolCallId,
+          "agent_reference_not_found",
+        );
       }
       let result;
       try {
@@ -142,10 +166,12 @@ export function createImageTool(
         const code =
           typeof candidate.code === "string" ? candidate.code : "agent_tool_failed";
         const resultUnknown = candidate.resultUnknown === true;
-        state.errors.set(toolCallId, { code, resultUnknown });
-        state.failedCalls += 1;
-        state.lastErrorCode = code;
-        if (resultUnknown) state.unknownResults += 1;
+        if (!state.errors.has(toolCallId)) {
+          state.errors.set(toolCallId, { code, resultUnknown });
+          state.failedCalls += 1;
+          state.lastErrorCode = code;
+          if (resultUnknown) state.unknownResults += 1;
+        }
         throw error;
       }
       state.acceptedImages += result.generation_ids.length;

@@ -11,7 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.tasks.agent_run_parts import persistence
+from app import agent_context
 from app.agent_runtime_client import AgentRuntimeEvent
+from lumen_core.agent_dispatch import PROVIDER_DISPATCH_AUTHORIZED_COUNT_KEY
 from lumen_core.model_base import Base
 from lumen_core.model_entities import (
     AgentRun,
@@ -151,10 +153,13 @@ async def test_pi_compaction_checkpoint_is_epoch_fenced_and_usage_accounted(
         seq=2,
         run_id=claim.run_id,
         execution_epoch=claim.execution_epoch,
-        checkpoint_version=1,
+        checkpoint_version=2,
         pi_runtime_version="pi-0.84.2",
         summary="## Goal\nPreserve the complete Agent task context.",
         first_kept_message_id="message-user-persist",
+        next_message_id="message-user-persist",
+        phase="pre_prompt",
+        session_revision=17,
         tokens_before=260_000,
         provider_call_count=1,
         usage={
@@ -198,10 +203,102 @@ async def test_pi_compaction_checkpoint_is_epoch_fenced_and_usage_accounted(
         assert run.dispatch_jsonb["pi_compaction_count"] == 1
         assert run.dispatch_jsonb["provider_completed_count"] == 1
         assert run.dispatch_jsonb["runtime_delivery"] == "compaction_ready"
+        session = await db.get(AgentSession, run.agent_session_id)
+        assert session is not None
+        assert session.active_pi_compaction_run_id == run.id
+        assert session.active_pi_compaction_schema_version == 2
+        assert session.active_pi_compaction_event_seq == event.seq
 
     reclaimed, _started = await persistence.claim_agent_run(claim.run_id)
     assert reclaimed.action == "result_unknown"
     assert reclaimed.execution_epoch == claim.execution_epoch
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_restore_survives_source_cancel_and_rejects_legacy_v1(
+    agent_db: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed(agent_db)
+    claim, _started = await persistence.claim_agent_run("run-agent-persist")
+    event = AgentRuntimeEvent(
+        version=1,
+        type="compaction.completed",
+        seq=2,
+        run_id=claim.run_id,
+        execution_epoch=claim.execution_epoch,
+        checkpoint_version=2,
+        pi_runtime_version="pi-0.84.2",
+        summary="durable summary",
+        first_kept_message_id="message-user-persist",
+        next_message_id="message-user-next",
+        phase="pre_prompt",
+        tokens_before=10_000,
+        provider_call_count=1,
+        usage={
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_write_1h_tokens": 0,
+            "reasoning_tokens": 0,
+            "total_tokens": 12,
+        },
+    )
+    assert await persistence.record_runtime_checkpoint(
+        claim.run_id, claim.execution_epoch, event
+    )
+
+    async with agent_db() as db:
+        source = await db.get(AgentRun, claim.run_id)
+        session = await db.get(AgentSession, "session-agent-persist")
+        assert source is not None and session is not None
+        source.status = "cancelled"
+        source.execution_epoch += 1
+        next_user = Message(
+            id="message-user-next",
+            conversation_id="conversation-agent-persist",
+            role="user",
+            content={"text": "continue"},
+            intent="agent",
+        )
+        next_assistant = Message(
+            id="message-assistant-next",
+            conversation_id="conversation-agent-persist",
+            role="assistant",
+            content={"text": ""},
+            parent_message_id=next_user.id,
+            intent="agent",
+        )
+        next_run = AgentRun(
+            id="run-agent-next",
+            agent_session_id=session.id,
+            user_id=source.user_id,
+            user_message_id=next_user.id,
+            assistant_message_id=next_assistant.id,
+            status="queued",
+            idempotency_key="next-key",
+            request_fingerprint="e" * 64,
+            request_snapshot_jsonb={},
+            account_mode_snapshot="byok",
+        )
+        db.add_all([next_user, next_assistant, next_run])
+        await db.flush()
+
+        restored = await agent_context._pi_compaction(db, next_run)
+        assert restored is not None
+        assert restored.summary == "durable summary"
+
+        dispatch = dict(source.dispatch_jsonb)
+        checkpoint = dict(dispatch["pi_compaction"])
+        checkpoint["schema_version"] = 1
+        checkpoint.pop("placement_contract", None)
+        dispatch["pi_compaction"] = checkpoint
+        source.dispatch_jsonb = dispatch
+        session.active_pi_compaction_schema_version = 1
+        session.active_pi_compaction_event_seq = checkpoint["source_event_seq"]
+
+        assert await agent_context._pi_compaction(db, next_run) is None
+        assert session.active_pi_compaction_run_id is None
 
 
 @pytest.mark.asyncio
@@ -550,7 +647,7 @@ async def test_cancellation_after_later_dispatch_settles_unknown_not_prior_actua
         "reasoning_tokens": 0,
         "total_tokens": 6,
     }
-    events = (
+    completed_events = (
         AgentRuntimeEvent(
             version=1,
             type="provider.dispatched",
@@ -567,15 +664,8 @@ async def test_cancellation_after_later_dispatch_settles_unknown_not_prior_actua
             turn=1,
             usage=zero,
         ),
-        AgentRuntimeEvent(
-            version=1,
-            type="provider.dispatched",
-            seq=3,
-            run_id=claim.run_id,
-            execution_epoch=claim.execution_epoch,
-        ),
     )
-    for event in events:
+    for event in completed_events:
         assert await persistence.record_runtime_checkpoint(
             claim.run_id,
             claim.execution_epoch,
@@ -589,6 +679,23 @@ async def test_cancellation_after_later_dispatch_settles_unknown_not_prior_actua
             run.execution_epoch += 1
             run.text_hold_micro = 100
             run.billing_jsonb = {"state": "held"}
+            dispatch = dict(run.dispatch_jsonb)
+            dispatch[PROVIDER_DISPATCH_AUTHORIZED_COUNT_KEY] = 2
+            dispatch["provider_response_statuses"] = [429]
+            run.dispatch_jsonb = dispatch
+
+    stale_dispatch = AgentRuntimeEvent(
+        version=1,
+        type="provider.dispatched",
+        seq=3,
+        run_id=claim.run_id,
+        execution_epoch=claim.execution_epoch,
+    )
+    assert not await persistence.record_runtime_checkpoint(
+        claim.run_id,
+        claim.execution_epoch,
+        stale_dispatch,
+    )
 
     calls: list[str] = []
 
@@ -605,3 +712,23 @@ async def test_cancellation_after_later_dispatch_settles_unknown_not_prior_actua
 
     assert await persistence.reconcile_cancelled_agent_hold(claim.run_id)
     assert calls == ["unknown"]
+
+
+@pytest.mark.asyncio
+async def test_authorized_dispatch_forces_result_unknown_recovery(
+    agent_db: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed(agent_db)
+    claim, _started = await persistence.claim_agent_run("run-agent-persist")
+    async with agent_db() as db:
+        async with db.begin():
+            run = await db.get(AgentRun, claim.run_id)
+            assert run is not None
+            dispatch = dict(run.dispatch_jsonb)
+            dispatch[PROVIDER_DISPATCH_AUTHORIZED_COUNT_KEY] = 1
+            run.dispatch_jsonb = dispatch
+
+    reclaimed, _started = await persistence.claim_agent_run(claim.run_id)
+
+    assert reclaimed.action == "result_unknown"
+    assert reclaimed.execution_epoch == claim.execution_epoch

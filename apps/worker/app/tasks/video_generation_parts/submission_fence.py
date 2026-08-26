@@ -20,9 +20,7 @@ async def _lock_submit_user(
 ) -> User | None:
     """Lock the account before the task row, matching account-deletion order."""
     return (
-        await session.execute(
-            select(User).where(User.id == user_id).with_for_update()
-        )
+        await session.execute(select(User).where(User.id == user_id).with_for_update())
     ).scalar_one_or_none()
 
 
@@ -33,11 +31,11 @@ async def _cancel_inactive_user_pre_submit(
     reason: str,
     record_submit_delivery: Callable[..., None],
 ) -> None:
-    now = video_ports()._now()
+    now = video_ports().operations._now()
     generation.cancel_requested_at = (
         getattr(generation, "cancel_requested_at", None) or now
     )
-    diagnostics = video_ports()._generation_diagnostics(generation)
+    diagnostics = video_ports().operations._generation_diagnostics(generation)
     diagnostics["pre_submit_cancellation_reason"] = reason
     generation.diagnostics = diagnostics
     record_submit_delivery(
@@ -45,9 +43,9 @@ async def _cancel_inactive_user_pre_submit(
         state="proven_absent",
         reason=reason,
     )
-    await video_ports()._mark_pre_submit_canceled(session, generation)
+    await video_ports().operations._mark_pre_submit_canceled(session, generation)
     await session.commit()
-    await video_ports().worker_flush_balance_cache(session)
+    await video_ports().billing_events.worker_flush_balance_cache(session)
 
 
 async def relock_pre_submit_dispatch(
@@ -71,14 +69,14 @@ async def relock_pre_submit_dispatch(
         )
     ).scalar_one_or_none()
     if generation is None:
-        video_ports().logger.warning(
+        video_ports().operations.logger.warning(
             "video submit dispatch fenced out task=%s epoch=%s",
             task_id,
             submission_epoch,
         )
         return None
     if generation.user_id != user_id:
-        video_ports().logger.error(
+        video_ports().operations.logger.error(
             "video submit dispatch user mismatch task=%s epoch=%s",
             task_id,
             submission_epoch,
@@ -96,7 +94,7 @@ async def relock_pre_submit_dispatch(
                 record_submit_delivery=record_submit_delivery,
             )
         else:
-            video_ports().logger.info(
+            video_ports().operations.logger.info(
                 "video submit dispatch blocked by inactive user task=%s epoch=%s "
                 "status=%s",
                 task_id,
@@ -114,11 +112,13 @@ async def relock_pre_submit_dispatch(
                 state="proven_absent",
                 reason="cancellation_fence_before_upstream",
             )
-            await video_ports()._mark_pre_submit_canceled(session, generation)
+            await video_ports().operations._mark_pre_submit_canceled(
+                session, generation
+            )
             await session.commit()
-            await video_ports().worker_flush_balance_cache(session)
+            await video_ports().billing_events.worker_flush_balance_cache(session)
         else:
-            video_ports().logger.info(
+            video_ports().operations.logger.info(
                 "video submit dispatch canceled task=%s epoch=%s status=%s",
                 task_id,
                 submission_epoch,
@@ -129,7 +129,7 @@ async def relock_pre_submit_dispatch(
         generation.status != VideoGenerationStatus.SUBMITTING.value
         or generation.provider_task_id
     ):
-        video_ports().logger.warning(
+        video_ports().operations.logger.warning(
             "video submit dispatch state fenced out task=%s epoch=%s status=%s",
             task_id,
             submission_epoch,

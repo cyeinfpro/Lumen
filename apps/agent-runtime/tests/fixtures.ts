@@ -1,6 +1,7 @@
 import type { RuntimeRequest } from "../src/contracts.js";
 
 type RuntimeRequestV2 = Extract<RuntimeRequest, { version: 2 }>;
+type RuntimeRequestV3 = Extract<RuntimeRequest, { version: 3 }>;
 
 export const TEST_SECRET = "runtime-test-secret-0123456789-abcdef";
 
@@ -54,4 +55,15 @@ export function runtimeRequest(
     },
   };
   return { ...base, ...overrides };
+}
+
+export function runtimeRequestV3(
+  overrides: Partial<RuntimeRequestV3> = {},
+): RuntimeRequestV3 {
+  return {
+    ...runtimeRequest(),
+    version: 3,
+    operation: "prompt",
+    ...overrides,
+  };
 }

@@ -45,7 +45,8 @@ def _runtime_ports(
     **changes: Any,
 ) -> Any:
     runtime = build_video_generation_runtime(storage_writes=coordinator)
-    return replace(runtime.ports, storage=storage, **changes)
+    store = replace(runtime.ports.store, storage=storage, **changes)
+    return replace(runtime.ports, store=store)
 
 
 @pytest.mark.asyncio

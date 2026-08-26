@@ -99,6 +99,34 @@ async def test_invalid_strategy_and_round_robin_outage_fail_closed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_round_robin_is_independent_per_candidate_pool() -> None:
+    class Redis(_Redis):
+        def __init__(self) -> None:
+            super().__init__()
+            self.counters: dict[str, int] = {}
+
+        async def incr(self, key: str) -> int:
+            self.counters[key] = self.counters.get(key, 0) + 1
+            return self.counters[key]
+
+    redis = Redis()
+    pool_a = [_proxy("a"), _proxy("b")]
+    pool_b = [_proxy("c"), _proxy("d"), _proxy("e")]
+    selected_a: list[str] = []
+    selected_b: list[str] = []
+    for _index in range(3):
+        picked_a = await proxy_pool.pick_proxy(redis, pool_a, strategy="round_robin")
+        picked_b = await proxy_pool.pick_proxy(redis, pool_b, strategy="round_robin")
+        assert picked_a is not None and picked_b is not None
+        selected_a.append(picked_a.name)
+        selected_b.append(picked_b.name)
+
+    assert selected_a == ["a", "b", "a"]
+    assert selected_b == ["c", "d", "e"]
+    assert len(redis.counters) == 2
+
+
+@pytest.mark.asyncio
 async def test_runtime_config_does_not_fall_back_to_direct_when_pool_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

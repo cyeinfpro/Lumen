@@ -2,20 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
-import io
-import os
-import stat
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
-from types import MappingProxyType
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from PIL import Image as PILImage
-from fastapi import HTTPException
 
 from lumen_core.agent_events import (
     AGENT_RUN_ACTIVE_STATUSES,
@@ -23,13 +16,12 @@ from lumen_core.agent_events import (
     EV_AGENT_RUN_QUEUED,
     AgentRunStatus,
 )
-from lumen_core.agent_model_profiles import default_agent_context_window
 from lumen_core.constants import MessageStatus, Role
-from lumen_core.context_window import estimate_text_tokens
 from lumen_core.model_base import new_uuid7
 from lumen_core.model_entities import (
     AgentRun,
     AgentRunReference,
+    AgentSessionImage,
     AgentSession,
     Conversation,
     Generation,
@@ -49,27 +41,20 @@ from lumen_core.schema_models import (
 from ...audit import hash_email, request_ip_hash, write_audit
 from ...config import settings
 from ...deps import durable_session_id_from_db
-from .. import storage_files
 from ..active_user import (
     ActiveUserFenceError,
     account_mode_from_user,
     active_user_fence_http_error,
     lock_active_user_snapshot,
 )
-from ..message_submission_prompting import (
-    TaskCredentialPin,
-    resolve_system_prompt_for_message,
-    resolve_task_credential_pin,
-)
 from .common import (
+    agent_provider_call_budget,
     agent_setting_int,
-    byok_vision_supported,
     http_error,
     publish_agent_events_best_effort,
     reserve_agent_text,
     stage_agent_event,
     stage_agent_run_dispatch,
-    wallet_chat_provider_preflight,
 )
 from .repository import (
     get_owned_agent_session,
@@ -78,118 +63,19 @@ from .repository import (
 )
 from .session_images import session_image_slot_count
 from .presentation import agent_default_params
-
-
-_REFERENCE_MIME_FORMATS = MappingProxyType(
-    {
-        "image/png": "PNG",
-        "image/jpeg": "JPEG",
-        "image/webp": "WEBP",
-    }
+from .reference_validation import (
+    validate_reference_artifact as _validate_reference_artifact,
+    validate_reference_images,
 )
-_REFERENCE_MAX_BYTES = 32 * 1024 * 1024
-_REFERENCE_MAX_PIXELS = 50_000_000
-_REFERENCE_CONTEXT_TOKENS = 2048
-_AGENT_CONTEXT_SAFETY_TOKENS = 8192
+from .submission_planning import (
+    ContinuationPlan as AgentContinuationSubmission,
+    ExecutionPin as _ExecutionPin,
+    SubmissionReference as _SessionReference,
+    resolve_execution_pin as _resolve_execution_pin,
+)
+
+
 _PI_NATIVE_OUTPUT_RESERVE_TOKENS = 16_384
-
-
-def _read_reference_bytes(image: Image) -> bytes:
-    path = storage_files.resolve_storage_path(
-        settings.storage_root,
-        image.storage_key,
-        error_factory=lambda code, message, status: http_error(
-            "invalid_attachment", message, status, reason=code
-        ),
-    )
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode):
-            raise http_error(
-                "invalid_attachment",
-                "reference image artifact is not a regular file",
-                422,
-            )
-        if metadata.st_size > _REFERENCE_MAX_BYTES:
-            raise http_error("invalid_attachment", "reference image is too large", 422)
-        with os.fdopen(descriptor, "rb", closefd=False) as source:
-            raw = source.read(_REFERENCE_MAX_BYTES + 1)
-    finally:
-        os.close(descriptor)
-    if len(raw) > _REFERENCE_MAX_BYTES:
-        raise http_error("invalid_attachment", "reference image is too large", 422)
-    return raw
-
-
-async def _validate_reference_artifact(image: Image) -> None:
-    if image.artifact_status != "ready":
-        raise http_error(
-            "agent_reference_not_ready",
-            "reference image is not ready",
-            409,
-        )
-    if (
-        image.mime not in _REFERENCE_MIME_FORMATS
-        or image.size_bytes < 1
-        or image.size_bytes > _REFERENCE_MAX_BYTES
-        or image.width < 1
-        or image.height < 1
-        or image.width * image.height > _REFERENCE_MAX_PIXELS
-    ):
-        raise http_error(
-            "invalid_attachment",
-            "reference image metadata is invalid",
-            422,
-        )
-    try:
-        raw = await asyncio.wait_for(
-            asyncio.to_thread(_read_reference_bytes, image),
-            timeout=10,
-        )
-        with PILImage.open(io.BytesIO(raw)) as decoded:
-            if decoded.format != _REFERENCE_MIME_FORMATS[image.mime]:
-                raise ValueError("reference image format does not match its MIME type")
-            if decoded.width * decoded.height > _REFERENCE_MAX_PIXELS:
-                raise ValueError("reference image exceeds the pixel limit")
-            decoded.verify()
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise http_error(
-            "invalid_attachment",
-            "reference image could not be decoded",
-            422,
-        ) from exc
-
-
-async def _validate_reference_images(
-    db: AsyncSession,
-    *,
-    user: User,
-    image_ids: list[str],
-) -> None:
-    if not image_ids:
-        return
-    statement = select(Image).where(
-        Image.id.in_(image_ids),
-        Image.user_id == user.id,
-        Image.deleted_at.is_(None),
-    )
-    visible = await retention_filter(db, user, Image.created_at)
-    if visible is not None:
-        statement = statement.where(visible)
-    rows = list((await db.execute(statement)).scalars().all())
-    if {image.id for image in rows} != set(image_ids):
-        raise http_error(
-            "invalid_attachment",
-            "one or more reference images are not owned or were deleted",
-            400,
-        )
-    by_id = {image.id: image for image in rows}
-    for image_id in image_ids:
-        await _validate_reference_artifact(by_id[image_id])
 
 
 async def _idempotent_agent_message(
@@ -250,33 +136,6 @@ async def _idempotent_agent_message(
 
 
 @dataclass(frozen=True, slots=True)
-class _ExecutionPin:
-    model: str
-    provider_names: tuple[str, ...]
-    credential: TaskCredentialPin | None
-    system_prompt: str | None
-    context_window: int
-    max_output_tokens: int
-    reasoning_supported: bool
-
-
-def _capability_int(
-    capabilities: dict[str, Any] | None,
-    key: str,
-    default: int,
-    maximum: int,
-) -> int:
-    raw = capabilities.get(key) if isinstance(capabilities, dict) else None
-    if isinstance(raw, bool):
-        return default
-    try:
-        value = int(raw) if raw is not None else default
-    except (TypeError, ValueError):
-        return default
-    return max(1, min(maximum, value))
-
-
-@dataclass(frozen=True, slots=True)
 class _StagedSubmission:
     user_message: Message
     assistant_message: Message
@@ -285,57 +144,97 @@ class _StagedSubmission:
 
 
 @dataclass(frozen=True, slots=True)
-class _SessionReference:
-    image_id: str
-    reference_label: str
-    role: str
-    label: str | None
-    source: str
+class _SnapshotInput:
+    body: AgentMessageCreateIn
+    pin: _ExecutionPin
+    catalog_references: tuple[_SessionReference, ...]
+    run_reference_content: tuple[dict[str, Any], ...]
+    max_image_tool_calls: int
+    max_images_per_run: int
 
 
-def _next_reference_label(used_labels: set[str]) -> str:
-    for index in range(AGENT_MAX_SESSION_IMAGES):
-        label = stable_reference_label(index)
-        if label not in used_labels:
-            used_labels.add(label)
-            return label
-    raise http_error(
-        "agent_session_reference_limit_reached",
-        "Agent session reference image limit reached",
-        422,
-        max_session_images=AGENT_MAX_SESSION_IMAGES,
-    )
+async def _request_snapshot(
+    db: AsyncSession,
+    value: _SnapshotInput,
+) -> dict[str, Any]:
+    body = value.body
+    credential = value.pin.credential
+    continuation = value.pin.continuation
+    return {
+        "runtime_request_version": 3,
+        "image_defaults": body.image_defaults.model_dump(mode="json"),
+        "allow_image": body.allow_image,
+        "allowed_tools": [AGENT_TOOL_CREATE_IMAGE] if body.allow_image else [],
+        "references": [
+            {
+                "reference_label": item["reference_label"],
+                "role": item["role"],
+                "display_label": item["label"],
+            }
+            for item in value.run_reference_content
+        ],
+        "session_catalog": [
+            {
+                "image_id": reference.image_id,
+                "reference_label": reference.reference_label,
+                "role": reference.role,
+                "display_label": reference.label,
+            }
+            for reference in value.catalog_references
+        ],
+        "execution_policy": "pi-native",
+        "tool_policy": {
+            "max_image_tool_calls": (
+                value.max_image_tool_calls if body.allow_image else 0
+            ),
+            "max_images_per_run": value.max_images_per_run,
+        },
+        "provider_dispatch": {
+            "version": 1,
+            "max_dispatches": agent_provider_call_budget(
+                value.max_image_tool_calls if body.allow_image else 0
+            ),
+        },
+        "context_plan": {
+            "version": 1,
+            "mode": value.pin.context_plan,
+            "estimated_input_tokens": value.pin.estimated_input_tokens,
+            "context_window": value.pin.context_window,
+            "max_output_tokens": value.pin.max_output_tokens,
+        },
+        "internal_agent_callback_base_url": settings.agent_internal_callback_base_url,
+        "tool_receipt": {"version": 2},
+        "reference_policy": {
+            "max_reference_images": await agent_setting_int(
+                db, "agent.max_reference_images"
+            ),
+            "max_session_images": await agent_setting_int(
+                db, "agent.max_session_images"
+            ),
+        },
+        "eligible_provider_names": list(value.pin.provider_names),
+        "credential_capabilities": (
+            dict(credential.capabilities_jsonb or {}) if credential else {}
+        ),
+        **(
+            {
+                "operation": "continue",
+                "continuation_source_run_id": continuation.source_run_id,
+            }
+            if continuation
+            else {}
+        ),
+    }
 
 
-def _append_session_reference(
-    references: list[_SessionReference],
-    index_by_image: dict[str, int],
-    used_labels: set[str],
-    *,
-    image_id: str,
-    role: str,
-    label: str | None,
-    source: str,
-    preferred_reference_label: str | None = None,
-) -> None:
-    if image_id in index_by_image:
-        return
-    reference_label = (
-        preferred_reference_label
-        if preferred_reference_label and preferred_reference_label not in used_labels
-        else _next_reference_label(used_labels)
-    )
-    used_labels.add(reference_label)
-    index_by_image[image_id] = len(references)
-    references.append(
-        _SessionReference(
-            image_id=image_id,
-            reference_label=reference_label,
-            role=role,
-            label=label,
-            source=source,
-        )
-    )
+@dataclass(frozen=True, slots=True)
+class _SubmissionReferences:
+    catalog: tuple[_SessionReference, ...]
+    turn: tuple[_SessionReference, ...]
+
+
+def _apply_image_visibility(statement: Any, visible: Any | None) -> Any:
+    return statement if visible is None else statement.where(visible)
 
 
 async def _session_references(
@@ -345,9 +244,90 @@ async def _session_references(
     user: User,
     body: AgentMessageCreateIn,
 ) -> list[_SessionReference]:
-    references: list[_SessionReference] = []
-    index_by_image: dict[str, int] = {}
-    used_labels: set[str] = set()
+    catalog_rows = list(
+        (
+            await db.execute(
+                select(AgentSessionImage).where(
+                    AgentSessionImage.agent_session_id == session.id,
+                    AgentSessionImage.user_id == user.id,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    catalog_by_image = {row.image_id: row for row in catalog_rows}
+    used_labels = {row.reference_label for row in catalog_rows}
+
+    async def allocate(
+        *,
+        image_id: str,
+        role: str,
+        display_label: str | None,
+        source: str,
+        active: bool,
+        preferred_label: str | None = None,
+    ) -> AgentSessionImage | None:
+        existing = catalog_by_image.get(image_id)
+        if existing is not None:
+            if active:
+                existing.active = True
+                existing.role = role
+                existing.display_label = display_label
+                existing.source = source
+            return existing
+        label = preferred_label if preferred_label not in used_labels else None
+        if label is None:
+            label = next(
+                (
+                    stable_reference_label(index)
+                    for index in range(AGENT_MAX_SESSION_IMAGES)
+                    if stable_reference_label(index) not in used_labels
+                ),
+                None,
+            )
+        if label is None and active:
+            reusable = next((row for row in catalog_rows if not row.active), None)
+            if reusable is not None:
+                label = reusable.reference_label
+                catalog_rows.remove(reusable)
+                catalog_by_image.pop(reusable.image_id, None)
+                await db.delete(reusable)
+                await db.flush()
+        if label is None:
+            return None
+        used_labels.add(label)
+        row = AgentSessionImage(
+            agent_session_id=session.id,
+            user_id=user.id,
+            image_id=image_id,
+            reference_label=label,
+            role=role,
+            display_label=display_label,
+            source=source,
+            active=active,
+        )
+        db.add(row)
+        catalog_rows.append(row)
+        catalog_by_image[image_id] = row
+        return row
+
+    # Explicit selections have priority over lazy history/output backfill.
+    for attachment in body.attachments:
+        row = await allocate(
+            image_id=attachment.image_id,
+            role=attachment.role,
+            display_label=attachment.label,
+            source="current",
+            active=True,
+        )
+        if row is None:
+            raise http_error(
+                "agent_session_reference_limit_reached",
+                "Agent session reference image limit reached",
+                422,
+                max_session_images=AGENT_MAX_SESSION_IMAGES,
+            )
 
     historical_statement = (
         select(AgentRunReference)
@@ -361,18 +341,24 @@ async def _session_references(
             Image.deleted_at.is_(None),
             Image.artifact_status == "ready",
         )
-        .order_by(
-            AgentRun.created_at.asc(),
-            AgentRun.id.asc(),
-            AgentRunReference.ordinal.asc(),
-        )
+        .order_by(AgentRun.created_at, AgentRun.id, AgentRunReference.ordinal)
     )
-    historical_visible = await retention_filter(db, user, Image.created_at)
-    if historical_visible is not None:
-        historical_statement = historical_statement.where(historical_visible)
-    historical_rows = list((await db.execute(historical_statement)).scalars().all())
+    visible = await retention_filter(db, user, Image.created_at)
+    historical_statement = _apply_image_visibility(historical_statement, visible)
+    historical = list((await db.execute(historical_statement)).scalars().all())
+    for reference in historical:
+        if reference.image_id in catalog_by_image:
+            continue
+        await allocate(
+            image_id=reference.image_id,
+            role=reference.role,
+            display_label=reference.display_label,
+            source="history",
+            active=True,
+            preferred_label=reference.reference_label,
+        )
 
-    prior_assistant_ids = select(AgentRun.assistant_message_id).where(
+    assistant_ids = select(AgentRun.assistant_message_id).where(
         AgentRun.agent_session_id == session.id,
         AgentRun.user_id == user.id,
     )
@@ -381,60 +367,40 @@ async def _session_references(
         .join(Generation, Generation.id == Image.owner_generation_id)
         .where(
             Generation.user_id == user.id,
-            Generation.message_id.in_(prior_assistant_ids),
+            Generation.message_id.in_(assistant_ids),
             Generation.status == "succeeded",
             Image.user_id == user.id,
             Image.deleted_at.is_(None),
             Image.artifact_status == "ready",
         )
-        .order_by(Generation.created_at.asc(), Generation.id.asc(), Image.id.asc())
+        .order_by(Generation.created_at, Generation.id, Image.id)
     )
-    generated_visible = await retention_filter(db, user, Image.created_at)
-    if generated_visible is not None:
-        generated_statement = generated_statement.where(generated_visible)
-    generated_rows = list((await db.execute(generated_statement)).scalars().all())
-
-    for reference in historical_rows:
-        _append_session_reference(
-            references,
-            index_by_image,
-            used_labels,
-            image_id=reference.image_id,
-            role=reference.role,
-            label=reference.display_label,
-            source="history",
-            preferred_reference_label=reference.reference_label,
-        )
-    for image in generated_rows:
-        _append_session_reference(
-            references,
-            index_by_image,
-            used_labels,
+    generated_statement = _apply_image_visibility(generated_statement, visible)
+    for image in (await db.execute(generated_statement)).scalars():
+        if image.id in catalog_by_image:
+            continue
+        await allocate(
             image_id=image.id,
             role="reference",
-            label="Agent result",
+            display_label="Agent result",
             source="generated",
+            active=False,
         )
-    for attachment in body.attachments:
-        existing_index = index_by_image.get(attachment.image_id)
-        if existing_index is None:
-            _append_session_reference(
-                references,
-                index_by_image,
-                used_labels,
-                image_id=attachment.image_id,
-                role=attachment.role,
-                label=attachment.label,
-                source="current",
-            )
-            continue
-        references[existing_index] = replace(
-            references[existing_index],
-            role=attachment.role,
-            label=attachment.label,
-            source="current",
+
+    active_rows = sorted(
+        (row for row in catalog_rows if row.active),
+        key=lambda row: int(row.reference_label.removeprefix("ref_")),
+    )
+    return [
+        _SessionReference(
+            image_id=row.image_id,
+            reference_label=row.reference_label,
+            role=row.role,
+            label=row.display_label,
+            source=row.source,
         )
-    return references
+        for row in active_rows
+    ]
 
 
 async def _validate_submission_slot(
@@ -443,7 +409,7 @@ async def _validate_submission_slot(
     session: AgentSession,
     user: User,
     body: AgentMessageCreateIn,
-) -> list[_SessionReference]:
+) -> _SubmissionReferences:
     active_run_id = (
         await db.execute(
             select(AgentRun.id).where(
@@ -467,10 +433,11 @@ async def _validate_submission_slot(
             422,
             max_reference_images=max_references,
         )
-    await _validate_reference_images(
+    await validate_reference_images(
         db,
         user=user,
         image_ids=[attachment.image_id for attachment in body.attachments],
+        artifact_validator=_validate_reference_artifact,
     )
     references = await _session_references(
         db,
@@ -495,101 +462,9 @@ async def _validate_submission_slot(
             max_session_images=max_session_images,
             reference_images=session_image_slots,
         )
-    return references
-
-
-async def _resolve_execution_pin(
-    db: AsyncSession,
-    *,
-    user_id: str,
-    user: User,
-    account_mode: str,
-    conversation: Conversation,
-    body: AgentMessageCreateIn,
-    reference_count: int,
-) -> _ExecutionPin:
-    credential: TaskCredentialPin | None = None
-    provider_names: tuple[str, ...] = ()
-    references_required = reference_count > 0
-    reasoning_requested = (body.reasoning_effort or "max") != "none"
-    system_prompt = await resolve_system_prompt_for_message(
-        db,
-        user_id=user_id,
-        default_system_prompt_id=user.default_system_prompt_id,
-        conv=conversation,
-        explicit_prompt=None,
-    )
-    minimum_context_window = (
-        estimate_text_tokens(system_prompt or "")
-        + estimate_text_tokens(body.text)
-        + reference_count * _REFERENCE_CONTEXT_TOKENS
-        + _PI_NATIVE_OUTPUT_RESERVE_TOKENS
-        + _AGENT_CONTEXT_SAFETY_TOKENS
-    )
-    if account_mode == "byok":
-        credential = await resolve_task_credential_pin(
-            db, user_id, "chat", account_mode
-        )
-        if references_required and not byok_vision_supported(
-            credential.capabilities_jsonb
-        ):
-            raise http_error(
-                "agent_vision_model_unavailable",
-                "the active API key has no verified image input capability",
-                412,
-            )
-        model = credential.default_chat_model
-        context_window = _capability_int(
-            credential.capabilities_jsonb,
-            "agent_context_window",
-            default_agent_context_window(model),
-            2_000_000,
-        )
-        max_output_tokens = _capability_int(
-            credential.capabilities_jsonb,
-            "agent_max_output_tokens",
-            16_384,
-            128_000,
-        )
-        reasoning_supported = (
-            not isinstance(credential.capabilities_jsonb, dict)
-            or credential.capabilities_jsonb.get("agent_reasoning_supported")
-            is not False
-        )
-        if reasoning_requested and not reasoning_supported:
-            raise http_error(
-                "agent_reasoning_model_unavailable",
-                "the active API key has no verified reasoning capability",
-                412,
-            )
-        if context_window < minimum_context_window:
-            raise http_error(
-                "agent_context_window_exceeded",
-                "the active API key cannot carry the complete session context",
-                412,
-                minimum_context_window=minimum_context_window,
-            )
-    else:
-        provider = await wallet_chat_provider_preflight(
-            db,
-            require_vision=references_required,
-            require_reasoning=reasoning_requested,
-            minimum_context_window=minimum_context_window,
-        )
-        model = provider.model
-        provider_names = provider.eligible_provider_names
-        context_window = provider.context_window
-        max_output_tokens = provider.max_output_tokens
-        reasoning_supported = provider.reasoning_supported
-    return _ExecutionPin(
-        model,
-        provider_names,
-        credential,
-        system_prompt,
-        context_window,
-        max_output_tokens,
-        reasoning_supported,
-    )
+    by_image = {reference.image_id: reference for reference in references}
+    turn = tuple(by_image[attachment.image_id] for attachment in body.attachments)
+    return _SubmissionReferences(catalog=tuple(references), turn=turn)
 
 
 async def _stage_submission(
@@ -604,20 +479,20 @@ async def _stage_submission(
     request_fingerprint: str,
     request: Any | None,
     pin: _ExecutionPin,
-    references: list[_SessionReference],
+    catalog_references: tuple[_SessionReference, ...],
+    references: tuple[_SessionReference, ...],
 ) -> _StagedSubmission:
+    continuation = pin.continuation
     now = datetime.now(timezone.utc)
     references_by_image = {
-        reference.image_id: reference for reference in references
+        reference.image_id: reference for reference in catalog_references
     }
     reference_content = [
         {
             "image_id": attachment.image_id,
             "role": attachment.role,
             "label": attachment.label,
-            "reference_label": references_by_image[
-                attachment.image_id
-            ].reference_label,
+            "reference_label": references_by_image[attachment.image_id].reference_label,
         }
         for attachment in body.attachments
     ]
@@ -633,12 +508,19 @@ async def _stage_submission(
     ]
     user_message = Message(
         conversation_id=conversation.id,
-        role=Role.USER.value,
-        content={
-            "text": body.text,
-            "source": "agent",
-            "attachments": reference_content,
-        },
+        role=Role.SYSTEM.value if continuation else Role.USER.value,
+        content=(
+            {
+                "source": "agent-continuation",
+                "continuation_source_run_id": continuation.source_run_id,
+            }
+            if continuation
+            else {
+                "text": body.text,
+                "source": "agent",
+                "attachments": reference_content,
+            }
+        ),
         intent="agent",
         status=None,
     )
@@ -656,7 +538,9 @@ async def _stage_submission(
             "tool_calls": [],
             "generation_ids": [],
         },
-        parent_message_id=user_message.id,
+        parent_message_id=(
+            continuation.source_user_message_id if continuation else user_message.id
+        ),
         intent="agent",
         status=MessageStatus.PENDING.value,
     )
@@ -669,6 +553,9 @@ async def _stage_submission(
         user_id=user_id,
         user_message_id=user_message.id,
         assistant_message_id=assistant_message.id,
+        continuation_source_run_id=(
+            continuation.source_run_id if continuation else None
+        ),
         status=AgentRunStatus.QUEUED.value,
         execution_epoch=0,
         attempt=0,
@@ -677,9 +564,11 @@ async def _stage_submission(
         request_fingerprint=request_fingerprint,
         request_snapshot_jsonb={},
         account_mode_snapshot=account_mode,
-        system_prompt_snapshot=pin.system_prompt,
+        system_prompt_snapshot=(
+            continuation.system_prompt if continuation else pin.system_prompt
+        ),
         model=pin.model,
-        reasoning_effort=body.reasoning_effort or "max",
+        reasoning_effort=body.reasoning_effort,
         user_api_credential_id=credential.credential_id if credential else None,
         upstream_supplier_id=credential.supplier_id if credential else None,
         text_hold_micro=0,
@@ -691,42 +580,19 @@ async def _stage_submission(
     )
     db.add(run)
     await db.flush()
-    max_image_tool_calls = await agent_setting_int(
-        db, "agent.max_image_tool_calls"
-    )
+    max_image_tool_calls = await agent_setting_int(db, "agent.max_image_tool_calls")
     max_images_per_run = await agent_setting_int(db, "agent.max_images_per_run")
-    run.request_snapshot_jsonb = {
-        "image_defaults": body.image_defaults.model_dump(mode="json"),
-        "allow_image": body.allow_image,
-        "allowed_tools": [AGENT_TOOL_CREATE_IMAGE] if body.allow_image else [],
-        "references": [
-            {
-                "reference_label": item["reference_label"],
-                "role": item["role"],
-                "display_label": item["label"],
-            }
-            for item in run_reference_content
-        ],
-        "execution_policy": "pi-native",
-        "tool_policy": {
-            "max_image_tool_calls": (
-                max_image_tool_calls if body.allow_image else 0
-            ),
-            "max_images_per_run": max_images_per_run,
-        },
-        "reference_policy": {
-            "max_reference_images": await agent_setting_int(
-                db, "agent.max_reference_images"
-            ),
-            "max_session_images": await agent_setting_int(
-                db, "agent.max_session_images"
-            ),
-        },
-        "eligible_provider_names": list(pin.provider_names),
-        "credential_capabilities": (
-            dict(credential.capabilities_jsonb or {}) if credential else {}
+    run.request_snapshot_jsonb = await _request_snapshot(
+        db,
+        _SnapshotInput(
+            body=body,
+            pin=pin,
+            catalog_references=catalog_references,
+            run_reference_content=tuple(run_reference_content),
+            max_image_tool_calls=max_image_tool_calls,
+            max_images_per_run=max_images_per_run,
         ),
-    }
+    )
     for index, reference in enumerate(references):
         db.add(
             AgentRunReference(
@@ -773,7 +639,7 @@ async def _stage_submission(
             "agent_session_id": session.id,
             "agent_run_id": run.id,
             "explicit_reference_count": len(body.attachments),
-            "session_reference_count": len(references),
+            "session_reference_count": len(catalog_references),
             "allow_image": body.allow_image,
             "account_mode": account_mode,
         },
@@ -789,6 +655,7 @@ async def submit_agent_message(
     user: User,
     body: AgentMessageCreateIn,
     request: Any | None,
+    continuation: AgentContinuationSubmission | None = None,
 ) -> AgentMessageCreateOut:
     request_user_id = str(user.id)
     request_fingerprint = agent_message_request_fingerprint(body)
@@ -828,7 +695,7 @@ async def submit_agent_message(
     if prior is not None:
         await db.rollback()
         return prior
-    references = await _validate_submission_slot(
+    submission_references = await _validate_submission_slot(
         db,
         session=session,
         user=user,
@@ -841,8 +708,9 @@ async def submit_agent_message(
         account_mode=snapshot.account_mode,
         conversation=conversation,
         body=body,
-        reference_count=len(references),
+        references=submission_references.turn,
     )
+    pin = replace(pin, continuation=continuation)
     staged = await _stage_submission(
         db,
         user_id=request_user_id,
@@ -854,7 +722,8 @@ async def submit_agent_message(
         request_fingerprint=request_fingerprint,
         request=request,
         pin=pin,
-        references=references,
+        catalog_references=submission_references.catalog,
+        references=submission_references.turn,
     )
     try:
         await db.commit()
@@ -889,4 +758,4 @@ async def submit_agent_message(
     )
 
 
-__all__ = ["submit_agent_message"]
+__all__ = ["AgentContinuationSubmission", "submit_agent_message"]

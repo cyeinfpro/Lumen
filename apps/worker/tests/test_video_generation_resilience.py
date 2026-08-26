@@ -536,7 +536,7 @@ def test_video_poll_deadline_continues_polling_submitted_tasks() -> None:
     assert "if cancel_requested:" in source
     assert "if deadline_expired:" in source
     unlock_idx = source.index("await session.commit()")
-    cancel_idx = source.index("await video_ports()._try_provider_cancel")
+    cancel_idx = source.index("await video_ports().operations._try_provider_cancel")
     assert unlock_idx < cancel_idx
 
 
@@ -558,8 +558,8 @@ def test_video_poll_retry_is_bounded_by_poll_window_not_local_deadline() -> None
     assert _MAX_POLL_DURATION_S == 30 * 60
     assert _MAX_POLL_COUNT == _MAX_POLL_DURATION_S // _POLL_INTERVAL_S
     assert "generation.deadline_at <= now and" not in source
-    assert "_poll_window_exhausted(generation, now)" in source
-    assert "_provider_tracking_window_exhausted(generation, now)" in source
+    assert "video_ports().lease_queue._poll_window_exhausted(" in source
+    assert "video_ports().lease_queue._provider_tracking_window_exhausted(" in source
     assert "_EXTENDED_POLL_INTERVAL_S" in source
     assert "generation.poll_count >= _MAX_POLL_COUNT" in window_source
     assert "_MAX_POLL_DURATION_S" in window_source
@@ -571,9 +571,9 @@ def test_video_poll_extends_running_provider_tasks_after_local_window() -> None:
     source = inspect.getsource(video_generation._apply_poll_result)
     helper = inspect.getsource(video_generation._continue_running_poll)
 
-    assert "_poll_window_exhausted(generation, now)" in helper
-    assert "_provider_tracking_window_exhausted(generation, now)" in source
-    assert "await _continue_running_poll(" in source
+    assert "video_ports().lease_queue._poll_window_exhausted(" in helper
+    assert "video_ports().lease_queue._provider_tracking_window_exhausted(" in source
+    assert "await video_ports().operations._continue_running_poll(" in source
     assert "lease_lost=lease_lost" in source
     assert "extended_polling_continues" in helper
     assert "extended_poll_delay_s" in helper

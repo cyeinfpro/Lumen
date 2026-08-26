@@ -25,6 +25,7 @@ from .agents import (
     AgentSession,
     AgentRun,
     AgentRunReference,
+    AgentSessionImage,
     AgentToolCall,
 )
 
@@ -92,6 +93,7 @@ __all__ = [
     "AgentSession",
     "AgentRun",
     "AgentRunReference",
+    "AgentSessionImage",
     "AgentToolCall",
     "Generation",
     "Completion",

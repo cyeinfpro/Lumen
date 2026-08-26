@@ -209,6 +209,7 @@ def resolved_image_provider(provider: ProviderConfig) -> ResolvedProvider:
         agent_context_window=provider.agent_context_window,
         agent_max_output_tokens=provider.agent_max_output_tokens,
         agent_reasoning_supported=provider.agent_reasoning_supported,
+        agent_thinking_level_map=provider.agent_thinking_level_map,
         purposes=provider.purposes,
         image_generations_supported=provider.image_generations_supported,
         image_responses_supported=provider.image_responses_supported,
@@ -236,11 +237,7 @@ async def load_avoided_image_providers(
         raw = await redis.smembers(f"generation:image_queue:avoid:{task_id}")
     except Exception:  # noqa: BLE001
         return set()
-    return {
-        decoded
-        for item in raw or []
-        if (decoded := decoder(item)) is not None
-    }
+    return {decoded for item in raw or [] if (decoded := decoder(item)) is not None}
 
 
 def only_avoided_image_providers(
@@ -498,9 +495,7 @@ class ProviderPoolImageSelectionMixin:
             quota_providers = [
                 provider.name
                 for provider, _sort_key in candidates
-                if account_limiter.parse_rate_limit(
-                    provider.image_rate_limit
-                ).state
+                if account_limiter.parse_rate_limit(provider.image_rate_limit).state
                 == "valid"
                 or provider.image_daily_quota is not None
             ]

@@ -263,9 +263,7 @@ async def delete_agent_session(
         ).scalar_one_or_none()
         if assistant_message is not None:
             assistant_message.status = MessageStatus.CANCELED.value
-        events.append(
-            stage_agent_event(db, run=run, event_name=EV_AGENT_RUN_CANCELLED)
-        )
+        events.append(stage_agent_event(db, run=run, event_name=EV_AGENT_RUN_CANCELLED))
     conversation.deleted_at = now
     await write_audit(
         db,

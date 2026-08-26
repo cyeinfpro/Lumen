@@ -9,6 +9,7 @@ import type {
   AgentMessage,
   AgentRun,
   AgentSession,
+  AgentSessionImageList,
   AgentSessionPatchInput,
 } from "../model/contracts";
 import type { AgentPromptOption } from "./AgentContextBar";
@@ -37,6 +38,9 @@ export interface AgentWorkspaceProps {
   toolGatewayConfigured: boolean;
   prompts: AgentPromptOption[];
   sessionSaving: boolean;
+  sessionImages: AgentSessionImageList | null;
+  sessionImagesLoading: boolean;
+  sessionImageRemovingId: string | null;
   scrollToMessageId: string | null;
   assetItems: GenerationSummary[];
   assetsLoading: boolean;
@@ -51,6 +55,7 @@ export interface AgentWorkspaceProps {
   onArchiveSession: (session: AgentSession) => void;
   onDeleteSession: (sessionId: string) => Promise<void> | void;
   onPatchSession: (patch: AgentSessionPatchInput) => void;
+  onEjectSessionImage: (imageId: string) => void;
   onRetryMessages: () => void;
   onPickSuggestion: (text: string) => void;
   onTextChange: (text: string) => void;

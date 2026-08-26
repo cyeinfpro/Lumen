@@ -28,6 +28,18 @@ const ReasoningEffort = Type.Union([
   Type.Literal("xhigh"),
   Type.Literal("max"),
 ]);
+const ThinkingLevelMap = Type.Object(
+  {
+    off: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 32 }), Type.Null()])),
+    minimal: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 32 }), Type.Null()])),
+    low: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 32 }), Type.Null()])),
+    medium: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 32 }), Type.Null()])),
+    high: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 32 }), Type.Null()])),
+    xhigh: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 32 }), Type.Null()])),
+    max: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 32 }), Type.Null()])),
+  },
+  { additionalProperties: false, maxProperties: 7 },
+);
 
 export const RuntimeReferenceSchema = Type.Object(
   {
@@ -40,6 +52,48 @@ export const RuntimeReferenceSchema = Type.Object(
       Type.Literal("image/webp"),
     ]),
     data_base64: Type.String({ minLength: 4, maxLength: 700_000 }),
+    width: Type.Optional(Type.Integer({ minimum: 1, maximum: 8192 })),
+    height: Type.Optional(Type.Integer({ minimum: 1, maximum: 8192 })),
+    estimated_input_tokens: Type.Optional(
+      Type.Integer({ minimum: 1, maximum: 1_000_000 }),
+    ),
+    token_policy: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
+  },
+  { additionalProperties: false },
+);
+
+const RuntimeHistoryToolCallSchema = Type.Object(
+  {
+    id: Type.String({ minLength: 1, maxLength: 128 }),
+    name: Type.String({ minLength: 1, maxLength: 64 }),
+    arguments: Type.Record(Type.String({ maxLength: 128 }), Type.Unknown(), {
+      maxProperties: 32,
+    }),
+  },
+  { additionalProperties: false },
+);
+
+const RuntimeHistoryToolResultSchema = Type.Object(
+  {
+    tool_call_id: Type.String({ minLength: 1, maxLength: 128 }),
+    name: Type.String({ minLength: 1, maxLength: 64 }),
+    text: Type.String({ minLength: 1, maxLength: 20_000 }),
+    is_error: Type.Boolean(),
+  },
+  { additionalProperties: false },
+);
+
+const RuntimeHistoryImageSchema = Type.Object(
+  {
+    mime_type: Type.Union([
+      Type.Literal("image/png"),
+      Type.Literal("image/jpeg"),
+      Type.Literal("image/webp"),
+    ]),
+    data_base64: Type.String({ minLength: 4, maxLength: 700_000 }),
+    estimated_input_tokens: Type.Optional(
+      Type.Integer({ minimum: 1, maximum: 1_000_000 }),
+    ),
   },
   { additionalProperties: false },
 );
@@ -49,6 +103,28 @@ export const RuntimeHistoryMessageSchema = Type.Object(
     message_id: Type.Optional(Identifier),
     role: Type.Union([Type.Literal("user"), Type.Literal("assistant")]),
     text: Type.String({ minLength: 1, maxLength: 20_000 }),
+    final_text: Type.Optional(Type.String({ minLength: 1, maxLength: 20_000 })),
+    api: Type.Optional(ProviderApi),
+    provider_id: Type.Optional(
+      Type.String({ minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9._:-]+$" }),
+    ),
+    model: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+    stop_reason: Type.Optional(
+      Type.Union([
+        Type.Literal("stop"),
+        Type.Literal("length"),
+        Type.Literal("toolUse"),
+        Type.Literal("error"),
+        Type.Literal("aborted"),
+      ]),
+    ),
+    tool_calls: Type.Optional(
+      Type.Array(RuntimeHistoryToolCallSchema, { maxItems: 8 }),
+    ),
+    tool_results: Type.Optional(
+      Type.Array(RuntimeHistoryToolResultSchema, { maxItems: 8 }),
+    ),
+    images: Type.Optional(Type.Array(RuntimeHistoryImageSchema, { maxItems: 16 })),
   },
   { additionalProperties: false },
 );
@@ -59,6 +135,8 @@ const RuntimeCompactionSchema = Type.Object(
     first_kept_message_id: Identifier,
     next_message_id: Identifier,
     tokens_before: Type.Integer({ minimum: 1, maximum: 2_000_000 }),
+    phase: Type.Optional(Type.Literal("pre_prompt")),
+    session_revision: Type.Optional(Type.Integer({ minimum: 0 })),
   },
   { additionalProperties: false },
 );
@@ -104,6 +182,7 @@ const RuntimeRequestSharedFields = {
         max_output_tokens: Type.Integer({ minimum: 1, maximum: 128_000 }),
         reasoning_supported: Type.Boolean(),
         vision_supported: Type.Boolean(),
+        thinking_level_map: Type.Optional(ThinkingLevelMap),
       },
       { additionalProperties: false },
     ),
@@ -141,6 +220,20 @@ const RuntimeRequestSharedFields = {
     ),
     tool_gateway_url: Type.Union([Type.String({ minLength: 8, maxLength: 2048 }), Type.Null()]),
     tool_capability: Type.Union([Type.String({ minLength: 32, maxLength: 8192 }), Type.Null()]),
+  provider_dispatch_url: Type.Optional(
+    Type.String({ minLength: 8, maxLength: 2048 }),
+  ),
+  provider_dispatch_capability: Type.Optional(
+    Type.String({ minLength: 32, maxLength: 8192 }),
+  ),
+  safety_budget: Type.Optional(
+    Type.Object(
+      {
+        max_provider_dispatches: Type.Integer({ minimum: 1, maximum: 128 }),
+      },
+      { additionalProperties: false },
+    ),
+  ),
   reasoning_effort: Type.Union([ReasoningEffort, Type.Null()]),
 } as const;
 
@@ -192,9 +285,29 @@ const RuntimeRequestV2Schema = Type.Object(
   { additionalProperties: false },
 );
 
+const RuntimeRequestV3Schema = Type.Object(
+  {
+    version: Type.Literal(3),
+    ...RuntimeRequestSharedFields,
+    user_message_id: Identifier,
+    event_features: Type.Array(
+      Type.Union([
+        Type.Literal("heartbeat-v1"),
+        Type.Literal("text-reset-v1"),
+      ]),
+      { minItems: 2, maxItems: 2, uniqueItems: true },
+    ),
+    tool_policy: RuntimeToolPolicySchema,
+    operation: Type.Union([Type.Literal("prompt"), Type.Literal("continue")]),
+    tool_receipt_version: Type.Optional(Type.Literal(2)),
+  },
+  { additionalProperties: false },
+);
+
 export const RuntimeRequestSchema = Type.Union([
   RuntimeRequestV1Schema,
   RuntimeRequestV2Schema,
+  RuntimeRequestV3Schema,
 ]);
 
 export type RuntimeRequest = Static<typeof RuntimeRequestSchema>;
@@ -254,6 +367,9 @@ function strictRequestChecks(request: RuntimeRequest): void {
   }
   const labels = request.references.map((reference) => reference.reference_label);
   if (new Set(labels).size !== labels.length) throw new Error("duplicate reference label");
+  if (request.version === 3 && request.references.length > 16) {
+    throw new Error("current turn reference limit exceeded");
+  }
   if (request.references.length > 0 && !request.provider.vision_supported) {
     throw new Error("provider does not support reference images");
   }
@@ -268,18 +384,43 @@ function strictRequestChecks(request: RuntimeRequest): void {
     throw new Error("tool gateway and capability must match the tool allowlist");
   }
   if (
-    request.version === 2 &&
+    request.version !== 1 &&
     (!request.event_features.includes("heartbeat-v1") ||
       !request.event_features.includes("text-reset-v1"))
   ) {
     throw new Error("Pi-native Runtime features are incomplete");
   }
   if (
-    request.version === 2 &&
+    request.version !== 1 &&
     toolsEnabled &&
     request.tool_policy.max_image_tool_calls === 0
   ) {
     throw new Error("image tool requires a positive call allowance");
+  }
+  if (
+    request.provider.thinking_level_map !== undefined &&
+    !request.provider.reasoning_supported
+  ) {
+    throw new Error("thinking level map requires reasoning support");
+  }
+  const dispatchBindings = Boolean(
+    request.provider_dispatch_url && request.provider_dispatch_capability,
+  );
+  if (dispatchBindings !== Boolean(request.safety_budget)) {
+    throw new Error("provider dispatch bindings require a safety budget");
+  }
+  if (
+    request.provider_dispatch_url !== undefined &&
+    !validUrl(request.provider_dispatch_url, new Set(["http:", "https:"]))
+  ) {
+    throw new Error("invalid provider dispatch URL");
+  }
+  if (
+    request.version === 3 &&
+    request.operation === "continue" &&
+    (request.references.length > 0 || request.allowed_tools.length > 0)
+  ) {
+    throw new Error("continuation cannot replay image or paid tool input");
   }
   if (!validUrl(request.provider.base_url, new Set(["http:", "https:"]))) {
     throw new Error("invalid provider base URL");
@@ -310,18 +451,24 @@ function strictRequestChecks(request: RuntimeRequest): void {
       throw new Error("provider envelope contains a reserved header");
     }
   }
+  let aggregateReferenceBytes = 0;
   for (const reference of request.references) {
     if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(reference.data_base64)) {
       throw new Error("invalid reference preview encoding");
     }
-    if (Buffer.byteLength(reference.data_base64, "base64") > 512 * 1024) {
+    const referenceBytes = Buffer.byteLength(reference.data_base64, "base64");
+    if (referenceBytes > 512 * 1024) {
       throw new Error("reference preview exceeds the byte limit");
     }
+    aggregateReferenceBytes += referenceBytes;
+  }
+  if (aggregateReferenceBytes > 8 * 1024 * 1024) {
+    throw new Error("aggregate reference previews exceed the byte limit");
   }
 }
 
 export function runtimeToolPolicy(request: RuntimeRequest): RuntimeToolPolicy {
-  return request.version === 2
+  return request.version !== 1
     ? request.tool_policy
     : {
         max_image_tool_calls: Math.min(

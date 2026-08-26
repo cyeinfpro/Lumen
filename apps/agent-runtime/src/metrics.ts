@@ -9,6 +9,7 @@ export class RuntimeMetrics {
   readonly toolCalls: Counter;
   readonly toolDuration: Histogram;
   readonly limits: Counter;
+  readonly cleanupFailures: Counter;
 
   constructor() {
     collectDefaultMetrics({ register: this.registry, prefix: "lumen_agent_runtime_" });
@@ -53,6 +54,12 @@ export class RuntimeMetrics {
       name: "lumen_agent_runtime_limits_total",
       help: "Agent Runtime limit stops.",
       labelNames: ["reason"],
+      registers: [this.registry],
+    });
+    this.cleanupFailures = new Counter({
+      name: "lumen_agent_runtime_cleanup_failures_total",
+      help: "Agent Runtime cleanup failures by bounded resource slot.",
+      labelNames: ["resource"],
       registers: [this.registry],
     });
   }

@@ -14,6 +14,7 @@ import type {
   AgentMessageList,
   AgentRun,
   AgentSession,
+  AgentSessionImageList,
   AgentSessionCreateInput,
   AgentSessionList,
   AgentSessionPatchInput,
@@ -21,12 +22,15 @@ import type {
 } from "../model/contracts";
 import {
   cancelAgentRun,
+  continueAgentRun,
   createAgentSession,
   deleteAgentSession,
+  ejectAgentSessionImage,
   getAgentActiveRun,
   getAgentSession,
   getAgentStatus,
   listAgentMessages,
+  listAgentSessionImages,
   listAgentSessions,
   patchAgentSession,
 } from "./agentApi";
@@ -115,6 +119,16 @@ export function useAgentActiveRunQuery(
   });
 }
 
+export function useAgentSessionImagesQuery(sessionId: string | null) {
+  const userScope = useUserQueryScope();
+  return useQuery<AgentSessionImageList>({
+    queryKey: qk.user(userScope.userId).agentSessionImages(sessionId ?? ""),
+    queryFn: ({ signal }) => listAgentSessionImages(sessionId as string, signal),
+    enabled: userScope.enabled && Boolean(sessionId),
+    staleTime: 5_000,
+  });
+}
+
 function useAgentInvalidation() {
   const userScope = useUserQueryScope();
   const queryClient = useQueryClient();
@@ -172,6 +186,39 @@ export function useCancelAgentRunMutation() {
       void queryClient.invalidateQueries({
         queryKey: keys.agentMessages(run.agent_session_id),
       });
+    },
+  });
+}
+
+export function useContinueAgentRunMutation() {
+  const { queryClient, keys } = useAgentInvalidation();
+  return useMutation<AgentRun, Error, { runId: string; idempotencyKey: string }>({
+    mutationFn: ({ runId, idempotencyKey }) =>
+      continueAgentRun(runId, idempotencyKey),
+    onSuccess: (run) => {
+      queryClient.setQueryData(keys.agentRun(run.id), run);
+      queryClient.setQueryData(keys.agentActiveRun(run.agent_session_id), run);
+      void queryClient.invalidateQueries({
+        queryKey: keys.agentMessages(run.agent_session_id),
+      });
+    },
+  });
+}
+
+export function useEjectAgentSessionImageMutation() {
+  const { queryClient, keys } = useAgentInvalidation();
+  return useMutation<
+    AgentSessionImageList,
+    Error,
+    { sessionId: string; imageId: string }
+  >({
+    mutationFn: ({ sessionId, imageId }) =>
+      ejectAgentSessionImage(sessionId, imageId),
+    onSuccess: (catalog, variables) => {
+      queryClient.setQueryData(
+        keys.agentSessionImages(variables.sessionId),
+        catalog,
+      );
     },
   });
 }

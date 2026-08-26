@@ -61,6 +61,9 @@ function providerAgentFields(p: ProviderItemOut) {
     agent_context_window: Math.max(4096, p.agent_context_window ?? 128_000),
     agent_max_output_tokens: Math.max(1, p.agent_max_output_tokens ?? 16_384),
     agent_reasoning_supported: p.agent_reasoning_supported !== false,
+    agent_thinking_level_map: p.agent_thinking_level_map
+      ? { ...p.agent_thinking_level_map }
+      : null,
     image_generations_supported: p.image_generations_supported ?? null,
     image_responses_supported: p.image_responses_supported ?? null,
   };
@@ -114,6 +117,7 @@ export function emptyDraft(): Draft {
     agent_context_window: 128_000,
     agent_max_output_tokens: 16_384,
     agent_reasoning_supported: true,
+    agent_thinking_level_map: null,
     image_generations_supported: null,
     image_responses_supported: null,
     proxy: null,

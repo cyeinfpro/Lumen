@@ -47,6 +47,8 @@ function userQueryKeys(userId: string | null | undefined) {
       [...scope, "agent", "session", sessionId] as const,
     agentMessages: (sessionId: string) =>
       [...scope, "agent", "session", sessionId, "messages"] as const,
+    agentSessionImages: (sessionId: string) =>
+      [...scope, "agent", "session", sessionId, "images"] as const,
     agentActiveRun: (sessionId: string) =>
       [...scope, "agent", "session", sessionId, "active-run"] as const,
     agentRun: (runId: string) =>

@@ -93,31 +93,64 @@ function dispatcherFor(
   throw new Error("unsupported provider proxy protocol");
 }
 
+function assertRedirectPolicy(init: RequestInit | undefined): void {
+  if (
+    init?.redirect !== undefined &&
+    init.redirect !== "manual" &&
+    init.redirect !== "error"
+  ) {
+    throw new Error("provider redirects must not be followed");
+  }
+}
+
+function isAborted(signal: AbortSignal): boolean {
+  return signal.aborted;
+}
+
+function requestInitForUndici(
+  request: Request,
+  dispatcher: Dispatcher,
+): Parameters<typeof undiciFetch>[1] {
+  return {
+    method: request.method,
+    headers: request.headers,
+    body: request.body,
+    signal: request.signal,
+    credentials: request.credentials,
+    cache: request.cache,
+    integrity: request.integrity,
+    keepalive: request.keepalive,
+    mode: request.mode,
+    referrer: request.referrer,
+    referrerPolicy: request.referrerPolicy,
+    dispatcher,
+    redirect: "manual",
+    ...(request.body !== null ? { duplex: "half" as const } : {}),
+  } as unknown as Parameters<typeof undiciFetch>[1];
+}
+
 export function createProviderTransport(
   proxyUrl: string | null,
   baseUrl: string,
   resolvedIps: readonly string[],
-  onDispatch: () => Promise<void>,
+  onDispatch: (signal?: AbortSignal) => Promise<void>,
 ): ProviderTransport {
   const dispatcher = dispatcherFor(proxyUrl, baseUrl, resolvedIps);
   const allowedOrigin = new URL(baseUrl).origin;
   const fetch: typeof globalThis.fetch = async (input, init) => {
-    const requestInput =
-      typeof input === "string" || input instanceof URL ? input : input.url;
-    const requestUrl = new URL(requestInput);
+    assertRedirectPolicy(init);
+    const request = new globalThis.Request(input, init);
+    const requestUrl = new URL(request.url);
     if (requestUrl.origin !== allowedOrigin) {
       throw new Error("provider request origin does not match the configured endpoint");
     }
-    if (init?.redirect !== undefined && init.redirect !== "manual" && init.redirect !== "error") {
-      throw new Error("provider redirects must not be followed");
-    }
-    await onDispatch();
-    const requestInit = {
-      ...(init ?? {}),
-      dispatcher,
-      redirect: "manual",
-    } as unknown as Parameters<typeof undiciFetch>[1];
-    const response = (await undiciFetch(requestUrl, requestInit)) as unknown as Response;
+    if (isAborted(request.signal)) throw new Error("provider request aborted before dispatch");
+    await onDispatch(request.signal);
+    if (isAborted(request.signal)) throw new Error("provider request aborted before send");
+    const response = (await undiciFetch(
+      requestUrl,
+      requestInitForUndici(request, dispatcher),
+    )) as unknown as Response;
     if (response.status >= 300 && response.status < 400) {
       await response.body?.cancel();
       throw new Error("provider redirect rejected");

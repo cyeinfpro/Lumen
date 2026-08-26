@@ -20,13 +20,14 @@ def poll_window_exhausted(generation: Any, current: datetime) -> bool:
     ``submitted_at + timedelta(seconds=_MAX_POLL_DURATION_S)``.
     """
 
-    if generation.poll_count >= video_ports()._MAX_POLL_COUNT:
+    if generation.poll_count >= video_ports().policy._MAX_POLL_COUNT:
         return True
     submitted_at = generation.submitted_at
     if submitted_at is None:
         return False
     return (
-        submitted_at + timedelta(seconds=video_ports()._MAX_POLL_DURATION_S) <= current
+        submitted_at + timedelta(seconds=video_ports().policy._MAX_POLL_DURATION_S)
+        <= current
     )
 
 
@@ -38,7 +39,8 @@ def provider_tracking_window_exhausted(
     if submitted_at is None:
         return False
     return (
-        submitted_at + timedelta(seconds=video_ports()._MAX_PROVIDER_POLL_DURATION_S)
+        submitted_at
+        + timedelta(seconds=video_ports().policy._MAX_PROVIDER_POLL_DURATION_S)
         <= current
     )
 
@@ -55,7 +57,7 @@ async def acquire_lease(redis: Any, task_id: str, token: str) -> bool:
         await redis.set(
             f"video:{task_id}:lease",
             token,
-            ex=video_ports()._LEASE_TTL_S,
+            ex=video_ports().policy._LEASE_TTL_S,
             nx=True,
         )
     )
@@ -74,11 +76,11 @@ async def renew_lease(redis: Any, task_id: str, token: str) -> bool | None:
             1,
             f"video:{task_id}:lease",
             token,
-            str(video_ports()._LEASE_TTL_S),
+            str(video_ports().policy._LEASE_TTL_S),
         )
         return int(renewed or 0) == 1
     except Exception:
-        video_ports().logger.warning(
+        video_ports().operations.logger.warning(
             "video lease renew failed task=%s",
             task_id,
             exc_info=True,
@@ -97,11 +99,13 @@ async def lease_renewer(
     transient_failures = 0
     while not stop.is_set():
         try:
-            await asyncio.wait_for(stop.wait(), timeout=video_ports()._LEASE_RENEW_S)
+            await asyncio.wait_for(
+                stop.wait(), timeout=video_ports().policy._LEASE_RENEW_S
+            )
             return
         except TimeoutError:
             pass
-        renewed = await video_ports()._renew_lease(redis, task_id, token)
+        renewed = await video_ports().lease_queue._renew_lease(redis, task_id, token)
         if renewed is True:
             transient_failures = 0
             continue
@@ -109,7 +113,10 @@ async def lease_renewer(
             lost.set()
             return
         transient_failures += 1
-        if transient_failures >= video_ports()._LEASE_RENEW_MAX_TRANSIENT_FAILURES:
+        if (
+            transient_failures
+            >= video_ports().policy._LEASE_RENEW_MAX_TRANSIENT_FAILURES
+        ):
             lost.set()
             return
 
@@ -118,7 +125,7 @@ async def lease_active(redis: Any, task_id: str) -> bool:
     try:
         return await redis.get(f"video:{task_id}:lease") is not None
     except Exception:
-        video_ports().logger.warning(
+        video_ports().operations.logger.warning(
             "video lease status unavailable task=%s; keeping task fenced",
             task_id,
             exc_info=True,
@@ -131,7 +138,7 @@ def raise_if_video_lease_lost(
     message: str,
 ) -> None:
     if lease_lost is not None and lease_lost.is_set():
-        raise video_ports()._VideoLeaseLost(message)
+        raise video_ports().policy._VideoLeaseLost(message)
 
 
 async def release_lease(redis: Any, task_id: str, token: str) -> None:
@@ -144,7 +151,7 @@ async def release_lease(redis: Any, task_id: str, token: str) -> None:
     try:
         await redis.eval(lua, 1, f"video:{task_id}:lease", token)
     except Exception:
-        video_ports().logger.debug(
+        video_ports().operations.logger.debug(
             "video lease release failed task=%s",
             task_id,
             exc_info=True,
@@ -153,7 +160,7 @@ async def release_lease(redis: Any, task_id: str, token: str) -> None:
 
 def enqueue_job_id(kind: str, task_id: str, defer_s: int) -> str:
     delay = max(0, int(defer_s or 0))
-    due_at = video_ports().time.time() + delay
+    due_at = video_ports().operations.time.time() + delay
     bucket_s = max(1, delay)
     bucket = int(due_at // bucket_s)
     return f"lumen:{kind}:{task_id}:{bucket_s}:{bucket}"
@@ -165,12 +172,12 @@ async def enqueue_poll(
     *,
     defer_s: int | None = None,
 ) -> None:
-    delay = video_ports()._POLL_INTERVAL_S if defer_s is None else defer_s
+    delay = video_ports().policy._POLL_INTERVAL_S if defer_s is None else defer_s
     await redis.enqueue_job(
         "run_video_poll",
         task_id,
         _defer_by=delay,
-        _job_id=video_ports()._enqueue_job_id("video_poll", task_id, delay),
+        _job_id=video_ports().lease_queue._enqueue_job_id("video_poll", task_id, delay),
     )
 
 
@@ -180,12 +187,14 @@ async def enqueue_submit(
     *,
     defer_s: int | None = None,
 ) -> None:
-    delay = video_ports()._POLL_INTERVAL_S if defer_s is None else defer_s
+    delay = video_ports().policy._POLL_INTERVAL_S if defer_s is None else defer_s
     await redis.enqueue_job(
         "run_video_generation",
         task_id,
         _defer_by=delay,
-        _job_id=video_ports()._enqueue_job_id("video_generation", task_id, delay),
+        _job_id=video_ports().lease_queue._enqueue_job_id(
+            "video_generation", task_id, delay
+        ),
     )
 
 
@@ -196,9 +205,9 @@ async def enqueue_cached_submit_recovery(
     defer_s: int,
 ) -> bool:
     try:
-        cached_submit = await video_ports()._load_submit_result(redis, task_id)
+        cached_submit = await video_ports().provider._load_submit_result(redis, task_id)
     except Exception:
-        video_ports().logger.warning(
+        video_ports().operations.logger.warning(
             "video cached submit lookup failed task=%s",
             task_id,
             exc_info=True,
@@ -207,9 +216,9 @@ async def enqueue_cached_submit_recovery(
     if cached_submit is None:
         return False
     try:
-        await video_ports()._enqueue_submit(redis, task_id, defer_s=defer_s)
+        await video_ports().lease_queue._enqueue_submit(redis, task_id, defer_s=defer_s)
     except Exception:
-        video_ports().logger.warning(
+        video_ports().operations.logger.warning(
             "video cached submit recovery enqueue failed task=%s",
             task_id,
             exc_info=True,

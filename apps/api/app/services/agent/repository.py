@@ -131,10 +131,19 @@ async def load_run_parts(
 
 async def load_agent_run_out(db: AsyncSession, run: AgentRun) -> AgentRunOut:
     refs_by_run, tools_by_run = await load_run_parts(db, [run])
+    latest_run_id = (
+        await db.execute(
+            select(AgentRun.id)
+            .where(AgentRun.agent_session_id == run.agent_session_id)
+            .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
     return agent_run_out(
         run,
         references=refs_by_run.get(run.id),
         tool_calls=tools_by_run.get(run.id),
+        is_latest=run.id == latest_run_id,
     )
 
 
@@ -182,7 +191,9 @@ async def list_agent_sessions(
     if query:
         value = query.strip()[:200]
         if value:
-            escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            escaped = (
+                value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            )
             statement = statement.where(
                 Conversation.title.ilike(f"%{escaped}%", escape="\\")
             )
@@ -342,9 +353,7 @@ async def list_agent_messages(
     next_cursor = None
     if len(rows) > limit and page_desc:
         oldest = page_desc[-1]
-        next_cursor = enc_cursor(
-            {"ca": oldest.created_at.isoformat(), "id": oldest.id}
-        )
+        next_cursor = enc_cursor({"ca": oldest.created_at.isoformat(), "id": oldest.id})
     assistant_ids = [
         message.id for message in page if message.role == Role.ASSISTANT.value
     ]
@@ -367,6 +376,14 @@ async def list_agent_messages(
         else []
     )
     refs_by_run, tools_by_run = await load_run_parts(db, runs)
+    latest_run_id = (
+        await db.execute(
+            select(AgentRun.id)
+            .where(AgentRun.agent_session_id == session.id)
+            .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
     generations: list[GenerationOut] = []
     completions: list[CompletionOut] = []
     images: list[ImageOut] = []
@@ -412,9 +429,7 @@ async def list_agent_messages(
             image_visible = await retention_filter(db, user, Image.created_at)
             if image_visible is not None:
                 image_statement = image_statement.where(image_visible)
-            image_rows = list(
-                (await db.execute(image_statement)).scalars().all()
-            )
+            image_rows = list((await db.execute(image_statement)).scalars().all())
             images = [image_to_out(item) for item in image_rows]
     return AgentMessageListOut(
         items=[MessageOut.model_validate(message) for message in page],
@@ -423,6 +438,7 @@ async def list_agent_messages(
                 run,
                 references=refs_by_run.get(run.id),
                 tool_calls=tools_by_run.get(run.id),
+                is_latest=run.id == latest_run_id,
             )
             for run in runs
         ],

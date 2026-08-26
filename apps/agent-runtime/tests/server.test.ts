@@ -3,6 +3,7 @@ import {
   InMemoryModelsStore,
   fauxAssistantMessage,
   fauxProvider,
+  lazyStream,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { once } from "node:events";
@@ -40,7 +41,13 @@ async function dependencies(
   });
   modelRuntime.registerNativeProvider(faux.provider);
   return {
-    async prepareProvider() {
+    async prepareProvider(_request, onDispatch) {
+      const streamSimple = modelRuntime.streamSimple.bind(modelRuntime);
+      modelRuntime.streamSimple = (model, context, options) =>
+        lazyStream(model, async () => {
+          await onDispatch();
+          return streamSimple(model, context, options);
+        });
       return {
         modelRuntime,
         model: faux.getModel(),
@@ -65,8 +72,19 @@ function testConfig(): RuntimeConfig {
     maxRequestBytes: 8 * 1024 * 1024,
     maxLineBytes: 64 * 1024,
     maxConcurrentRuns: 2,
+    maxConcurrentBodyReads: 4,
+    maxInflightRequestBytes: 16 * 1024 * 1024,
     requestBodyTimeoutSeconds: 2,
     heartbeatIntervalSeconds: 1,
+    toolGatewayTimeoutSeconds: 30,
+    toolGatewayMaxResponseBytes: 64 * 1024,
+    maxRunSeconds: 60,
+    maxProviderDispatches: 16,
+    maxTurns: 16,
+    maxTotalTokens: 1_000_000,
+    maxEventBytes: 1024 * 1024,
+    maxRepeatedToolCalls: 4,
+    shutdownGraceSeconds: 2,
   };
 }
 
@@ -210,8 +228,13 @@ describe("Runtime HTTP boundary", () => {
     }
   }, 15_000);
 
-  it("admits slow bodies before reading and releases the slot at the deadline", async () => {
-    const config = { ...testConfig(), maxConcurrentRuns: 1, requestBodyTimeoutSeconds: 1 };
+  it("keeps an authenticated run slot available behind nine slow unauthenticated bodies", async () => {
+    const config = {
+      ...testConfig(),
+      maxConcurrentRuns: 1,
+      maxConcurrentBodyReads: 10,
+      requestBodyTimeoutSeconds: 1,
+    };
     const runtime = createRuntimeServer({
       config,
       dependencies: await dependencies(),
@@ -221,32 +244,60 @@ describe("Runtime HTTP boundary", () => {
     runtime.server.listen(0, "127.0.0.1");
     await once(runtime.server, "listening");
     const address = runtime.server.address() as AddressInfo;
-    const stalledClosed = new Promise<void>((resolve) => {
-      const stalled = httpRequest({
-        host: "127.0.0.1",
-        port: address.port,
-        path: "/v1/runs",
-        method: "POST",
-        headers: { "content-type": "application/json" },
-      });
-      stalled.on("error", () => resolve());
-      stalled.on("close", () => resolve());
-      stalled.write("{");
-    });
+    const stalledClosed = Promise.all(
+      Array.from({ length: 9 }, (_, index) => new Promise<void>((resolve) => {
+        const stalled = httpRequest({
+          host: "127.0.0.1",
+          port: address.port,
+          path: "/v1/runs",
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            [AUTH_TIMESTAMP_HEADER]: String(Math.floor(Date.now() / 1000)),
+            [AUTH_NONCE_HEADER]: `slow-unauthenticated-${String(index)}`,
+            [AUTH_SIGNATURE_HEADER]: "0".repeat(64),
+          },
+        });
+        stalled.on("response", (response) => response.resume());
+        stalled.on("error", () => resolve());
+        stalled.on("close", () => resolve());
+        stalled.write("{");
+      })),
+    );
     await new Promise((resolve) => setTimeout(resolve, 25));
     try {
-      const rejected = await fetch(
+      const run = runtimeRequest({
+        allowed_tools: [],
+        tool_gateway_url: null,
+        tool_capability: null,
+      });
+      const body = Buffer.from(JSON.stringify(run), "utf8");
+      const timestamp = String(Math.floor(Date.now() / 1000));
+      const nonce = "valid-request-after-slow-body";
+      const signature = signRuntimeRequest(
+        TEST_SECRET,
+        "POST",
+        "/v1/runs",
+        timestamp,
+        nonce,
+        body,
+      );
+      const accepted = await fetch(
         `http://127.0.0.1:${String(address.port)}/v1/runs`,
         {
           method: "POST",
-          headers: { "content-type": "application/json" },
-          body: "{}",
+          headers: {
+            "content-type": "application/json",
+            [AUTH_TIMESTAMP_HEADER]: timestamp,
+            [AUTH_NONCE_HEADER]: nonce,
+            [AUTH_SIGNATURE_HEADER]: signature,
+          },
+          body,
         },
       );
-      expect(rejected.status).toBe(503);
-      await expect(rejected.json()).resolves.toMatchObject({
-        error: { code: "agent_runtime_capacity_exhausted" },
-      });
+      expect(accepted.status).toBe(200);
+      const events = await accepted.text();
+      expect(events).toContain('"type":"run.completed"');
       await expect(
         Promise.race([
           stalledClosed.then(() => "closed"),
@@ -258,4 +309,58 @@ describe("Runtime HTTP boundary", () => {
       await once(runtime.server, "close");
     }
   });
+
+  it("marks readiness draining and aborts a run after the shutdown grace period", async () => {
+    const runtime = createRuntimeServer({
+      config: { ...testConfig(), shutdownGraceSeconds: 1 },
+      dependencies: await dependencies(1, "slow ".repeat(100)),
+    });
+    runtime.readiness.state.ready = true;
+    runtime.readiness.state.checkedAt = new Date().toISOString();
+    runtime.server.listen(0, "127.0.0.1");
+    await once(runtime.server, "listening");
+    const address = runtime.server.address() as AddressInfo;
+    const run = runtimeRequest({
+      allowed_tools: [],
+      tool_gateway_url: null,
+      tool_capability: null,
+    });
+    const body = Buffer.from(JSON.stringify(run), "utf8");
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const nonce = "shutdown-active-run-nonce";
+    const response = await fetch(
+      `http://127.0.0.1:${String(address.port)}/v1/runs`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [AUTH_TIMESTAMP_HEADER]: timestamp,
+          [AUTH_NONCE_HEADER]: nonce,
+          [AUTH_SIGNATURE_HEADER]: signRuntimeRequest(
+            TEST_SECRET,
+            "POST",
+            "/v1/runs",
+            timestamp,
+            nonce,
+            body,
+          ),
+        },
+        body,
+      },
+    );
+
+    await runtime.shutdown();
+    const events = (await response.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(runtime.readiness.state).toMatchObject({
+      ready: false,
+      errorCode: "agent_runtime_draining",
+    });
+    expect(events.at(-1)).toMatchObject({
+      type: "run.failed",
+      error_code: "agent_runtime_shutdown",
+    });
+  }, 15_000);
 });

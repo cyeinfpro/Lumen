@@ -3,6 +3,7 @@ import { agentErrorPresentation } from "../model/errors";
 import type {
   AgentDraft,
   AgentImageDefaults,
+  AgentMessageCreateInput,
   AgentMessage,
   AgentRun,
   AgentSession,
@@ -32,6 +33,27 @@ export function uniqueAgentId(prefix: string): string {
   return `${prefix}:${id}`;
 }
 
+export function agentMessageBody(
+  draft: AgentDraft,
+  toolGatewayConfigured: boolean,
+  idempotencyKey: string,
+): AgentMessageCreateInput {
+  return {
+    idempotency_key: idempotencyKey,
+    text: draft.text,
+    attachments: draft.attachments.map((attachment) => ({
+      image_id: attachment.imageId,
+      role: attachment.role,
+      label: attachment.label,
+    })),
+    image_defaults: draft.imageDefaults,
+    allow_image: draft.allowImage && toolGatewayConfigured,
+    ...(draft.reasoningEffort && draft.reasoningEffort !== "auto"
+      ? { reasoning_effort: draft.reasoningEffort }
+      : {}),
+  };
+}
+
 function optimisticRun(
   sessionId: string,
   userMessageId: string,
@@ -50,7 +72,10 @@ function optimisticRun(
     last_event_seq: 0,
     idempotency_key: idempotencyKey,
     model: null,
-    reasoning_effort: reasoningEffort ?? "max",
+    reasoning_effort:
+      reasoningEffort && reasoningEffort !== "auto" ? reasoningEffort : null,
+    memory_state: null,
+    continuable: false,
     turn_count: 0,
     tool_call_count: 0,
     usage: {},
@@ -78,11 +103,10 @@ function optimisticMessages(
       id: userMessageId,
       role: "user",
       text: draft.text,
-      attachments: draft.attachments.map((attachment, index) => ({
+      attachments: draft.attachments.map((attachment) => ({
         image_id: attachment.imageId,
         role: attachment.role,
         label: attachment.label,
-        reference_label: `ref_${index + 1}`,
       })),
       createdAt: now,
       optimistic: true,

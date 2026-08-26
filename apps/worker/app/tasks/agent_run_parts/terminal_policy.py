@@ -11,7 +11,38 @@ from lumen_core.agent_events import (
     EV_AGENT_RUN_SUCCEEDED,
     AgentRunStatus,
 )
+from lumen_core.agent_dispatch import (
+    provider_dispatch_authorized_count,
+    provider_dispatch_checkpointed_count,
+)
 from lumen_core.model_entities import AgentToolCall, Message
+
+from .contracts import AGENT_NO_COST_HTTP_STATUSES
+
+
+def cancelled_dispatch_unknown(dispatch: dict[str, Any]) -> bool:
+    delivery = str(dispatch.get("runtime_delivery") or "")
+    response_statuses = [
+        value
+        for value in dispatch.get("provider_response_statuses", [])
+        if isinstance(value, int) and not isinstance(value, bool)
+    ]
+    checkpointed = provider_dispatch_checkpointed_count(dispatch)
+    authorized = provider_dispatch_authorized_count(dispatch)
+    dispatch_count = max(checkpointed, authorized)
+    completed = max(0, int(dispatch.get("provider_completed_count") or 0))
+    pending = max(0, dispatch_count - completed)
+    pending_statuses = response_statuses[-pending:] if pending else []
+    pending_proven_absent = (
+        pending > 0
+        and len(pending_statuses) == pending
+        and all(value in AGENT_NO_COST_HTTP_STATUSES for value in pending_statuses)
+    )
+    return (
+        authorized > checkpointed
+        or (pending > 0 and not pending_proven_absent)
+        or (dispatch_count == 0 and delivery in {"starting", "unknown"})
+    )
 
 
 def has_partial_result(
@@ -56,4 +87,9 @@ def terminal_event_name(status: str) -> str:
     }.get(status, EV_AGENT_RUN_FAILED)
 
 
-__all__ = ["has_partial_result", "terminal_event_name", "tool_projection"]
+__all__ = [
+    "cancelled_dispatch_unknown",
+    "has_partial_result",
+    "terminal_event_name",
+    "tool_projection",
+]

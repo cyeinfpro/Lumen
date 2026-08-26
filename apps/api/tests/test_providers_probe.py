@@ -8,7 +8,11 @@ import httpx
 import pytest
 from fastapi import Request
 
-from lumen_core.schemas import ProvidersUpdateIn
+from lumen_core.schemas import ProviderItemIn, ProvidersUpdateIn
+from app.routes.provider_parts.presentation import (
+    provider_agent_update_fields,
+    provider_out,
+)
 from app.services.admin_model_cache import AdminModelCache
 
 
@@ -38,6 +42,23 @@ class _StubAsyncClient:
     async def post(self, url: str, **kwargs: Any) -> _StubResponse:
         self.posts.append({"url": url, **kwargs})
         return self.response
+
+
+def test_agent_thinking_level_map_survives_provider_round_trip() -> None:
+    stored = {
+        "name": "provider",
+        "base_url": "https://provider.example/v1",
+        "agent_thinking_level_map": {"xhigh": "high", "max": "high"},
+    }
+    output = provider_out(stored, 0)
+    assert output.agent_thinking_level_map == {"xhigh": "high", "max": "high"}
+
+    partial = ProviderItemIn(name="provider", base_url=stored["base_url"])
+    updated = provider_agent_update_fields(partial, stored)
+    assert updated["agent_thinking_level_map"] == {
+        "xhigh": "high",
+        "max": "high",
+    }
 
 
 class _ScalarResult:

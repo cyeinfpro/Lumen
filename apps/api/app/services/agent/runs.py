@@ -16,7 +16,18 @@ from lumen_core.agent_events import (
     AgentRunStatus,
 )
 from lumen_core.constants import MessageStatus
-from lumen_core.model_entities import AgentRun, AgentSession, Conversation, Message, User
+from lumen_core.model_entities import (
+    AgentRun,
+    AgentSession,
+    Conversation,
+    Message,
+    User,
+)
+from lumen_core.schema_models import (
+    AgentImageDefaultsIn,
+    AgentMessageCreateIn,
+    AgentRunContinueIn,
+)
 
 from ...audit import hash_email, request_ip_hash, write_audit
 from ...deps import durable_session_id_from_db
@@ -34,6 +45,8 @@ from .common import (
     stage_agent_event,
 )
 from .repository import load_agent_run_out
+from .message_submission import submit_agent_message
+from .submission_planning import ContinuationPlan
 
 
 logger = logging.getLogger(__name__)
@@ -197,8 +210,113 @@ async def cancel_agent_run(
     return await load_agent_run_out(db, run)
 
 
+async def continue_agent_run(
+    db: AsyncSession,
+    *,
+    run_id: str,
+    body: AgentRunContinueIn,
+    user: User,
+    request: Any | None,
+):
+    source = await get_owned_agent_run(
+        db,
+        run_id=run_id,
+        user_id=user.id,
+        for_update=True,
+    )
+    existing = (
+        await db.execute(
+            select(AgentRun).where(
+                AgentRun.agent_session_id == source.agent_session_id,
+                AgentRun.idempotency_key == body.idempotency_key,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        existing_id = existing.id
+        existing_source_id = existing.continuation_source_run_id
+        source_id = source.id
+        if existing_source_id != source_id:
+            raise http_error(
+                "idempotency_conflict",
+                "idempotency_key was used for another Agent request",
+                409,
+            )
+        await db.rollback()
+        persisted_existing = await db.get(AgentRun, existing_id)
+        if persisted_existing is None:
+            raise http_error("agent_snapshot_incomplete", "Agent run is missing", 409)
+        return await load_agent_run_out(db, persisted_existing)
+    latest_run_id = (
+        await db.execute(
+            select(AgentRun.id)
+            .where(AgentRun.agent_session_id == source.agent_session_id)
+            .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if (
+        source.status != AgentRunStatus.PARTIAL.value
+        or source.error_code
+        not in {
+            "agent_output_truncated",
+            "agent_safety_budget_reached",
+            "agent_runtime_disconnected",
+            "agent_runtime_event_timeout",
+        }
+        or latest_run_id != source.id
+    ):
+        raise http_error(
+            "agent_run_not_continuable",
+            "Agent run cannot be continued safely",
+            409,
+        )
+    snapshot = (
+        source.request_snapshot_jsonb
+        if isinstance(source.request_snapshot_jsonb, dict)
+        else {}
+    )
+    try:
+        image_defaults = AgentImageDefaultsIn.model_validate(
+            snapshot.get("image_defaults", {})
+        )
+    except (TypeError, ValueError):
+        image_defaults = AgentImageDefaultsIn()
+    source_id = source.id
+    source_user_id = source.user_id
+    source_session_id = source.agent_session_id
+    source_user_message_id = source.user_message_id
+    source_reasoning_effort = source.reasoning_effort
+    source_system_prompt = source.system_prompt_snapshot
+    await db.commit()
+    continuation_user = await db.get(User, source_user_id)
+    if continuation_user is None:
+        raise http_error("agent_snapshot_incomplete", "Agent user is missing", 409)
+    created = await submit_agent_message(
+        db,
+        session_id=source_session_id,
+        user=continuation_user,
+        body=AgentMessageCreateIn(
+            idempotency_key=body.idempotency_key,
+            text="Continue the previous incomplete response.",
+            attachments=[],
+            image_defaults=image_defaults,
+            allow_image=False,
+            reasoning_effort=source_reasoning_effort,
+        ),
+        request=request,
+        continuation=ContinuationPlan(
+            source_run_id=source_id,
+            source_user_message_id=source_user_message_id,
+            system_prompt=source_system_prompt,
+        ),
+    )
+    return created.agent_run
+
+
 __all__ = [
     "cancel_agent_run",
+    "continue_agent_run",
     "get_active_agent_run_snapshot",
     "get_agent_run_snapshot",
     "get_owned_agent_run",

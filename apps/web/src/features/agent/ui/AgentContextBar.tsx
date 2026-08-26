@@ -1,13 +1,17 @@
 "use client";
 
-import { Bot, Radio, Settings2 } from "lucide-react";
+import { Bot, Images, Loader2, Radio, Settings2, Trash2 } from "lucide-react";
 import { useRef, useState } from "react";
 import { DesktopPopover } from "@/components/ui/composer/desktop/DesktopPopover";
 import { Button, IconButton, Select, Switch } from "@/components/ui/primitives";
 import { BottomSheet } from "@/components/ui/primitives/mobile";
 import { cn } from "@/lib/utils";
 import type { AgentRealtimeStatus, } from "@/store/agent/useAgentStore";
-import type { AgentSession, AgentSessionPatchInput } from "../model/contracts";
+import type {
+  AgentSession,
+  AgentSessionImageList,
+  AgentSessionPatchInput,
+} from "../model/contracts";
 
 export interface AgentPromptOption {
   id: string;
@@ -22,6 +26,10 @@ export function AgentContextBar({
   prompts,
   saving,
   onPatch,
+  images,
+  imagesLoading,
+  removingImageId,
+  onEjectImage,
 }: {
   platform: "desktop" | "mobile";
   session: AgentSession | null;
@@ -30,6 +38,10 @@ export function AgentContextBar({
   prompts: AgentPromptOption[];
   saving: boolean;
   onPatch: (patch: AgentSessionPatchInput) => void;
+  images: AgentSessionImageList | null;
+  imagesLoading: boolean;
+  removingImageId: string | null;
+  onEjectImage: (imageId: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const anchorRef = useRef<HTMLDivElement | null>(null);
@@ -41,6 +53,10 @@ export function AgentContextBar({
       prompts={prompts}
       saving={saving}
       onPatch={onPatch}
+      images={images}
+      imagesLoading={imagesLoading}
+      removingImageId={removingImageId}
+      onEjectImage={onEjectImage}
     />
   ) : (
     <p className="p-4 type-body-sm text-[var(--fg-2)]">新建会话后可设置</p>
@@ -123,11 +139,19 @@ function AgentContextSettings({
   prompts,
   saving,
   onPatch,
+  images,
+  imagesLoading,
+  removingImageId,
+  onEjectImage,
 }: {
   session: AgentSession;
   prompts: AgentPromptOption[];
   saving: boolean;
   onPatch: (patch: AgentSessionPatchInput) => void;
+  images: AgentSessionImageList | null;
+  imagesLoading: boolean;
+  removingImageId: string | null;
+  onEjectImage: (imageId: string) => void;
 }) {
   const [systemPrompt, setSystemPrompt] = useState(session.default_system ?? "");
   return (
@@ -172,6 +196,52 @@ function AgentContextSettings({
           placeholder="可选"
         />
       </label>
+      <div className="grid gap-2 border-t border-[var(--border-subtle)] pt-3">
+        <div className="flex min-h-9 items-center gap-2">
+          <Images className="h-4 w-4 text-accent" aria-hidden />
+          <p className="type-label text-[var(--fg-0)]">会话图片</p>
+          <span className="ml-auto type-caption text-[var(--fg-2)]">
+            {images?.used ?? 0}/{images?.maximum ?? 64}
+          </span>
+        </div>
+        {imagesLoading ? (
+          <div className="flex min-h-10 items-center gap-2 type-caption text-[var(--fg-2)]">
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+            正在载入
+          </div>
+        ) : null}
+        {!imagesLoading && images?.items.some((item) => item.active) ? (
+          <div className="max-h-44 overflow-y-auto border-y border-[var(--border-subtle)]">
+            {images.items.filter((item) => item.active).map((item) => (
+              <div
+                key={item.image_id}
+                className="flex min-h-11 items-center gap-2 border-b border-[var(--border-subtle)] px-1 last:border-b-0"
+              >
+                <span className="w-12 shrink-0 type-caption font-medium text-[var(--fg-0)]">
+                  {item.reference_label}
+                </span>
+                <span className="min-w-0 flex-1 truncate type-caption text-[var(--fg-2)]">
+                  {item.display_label || item.role}
+                </span>
+                <IconButton
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => onEjectImage(item.image_id)}
+                  disabled={saving || removingImageId !== null}
+                  loading={removingImageId === item.image_id}
+                  aria-label={`移除 ${item.reference_label}`}
+                  tooltip="移出会话图片"
+                >
+                  <Trash2 className="h-4 w-4" aria-hidden />
+                </IconButton>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {!imagesLoading && !images?.items.some((item) => item.active) ? (
+          <p className="type-caption text-[var(--fg-2)]">暂无会话图片</p>
+        ) : null}
+      </div>
       <Button
         variant="primary"
         loading={saving}

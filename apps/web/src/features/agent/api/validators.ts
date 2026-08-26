@@ -8,6 +8,7 @@ import type {
   AgentRun,
   AgentRunStatus,
   AgentSession,
+  AgentSessionImageList,
   AgentSessionList,
   AgentStatus,
   AgentToolCall,
@@ -215,6 +216,18 @@ export function parseAgentRun(
   ] as const) {
     string(item[field], endpoint, `${path}.${field}`, true);
   }
+  if (
+    item.memory_state !== undefined &&
+    item.memory_state !== null &&
+    !new Set(["disabled", "empty", "ready", "degraded"]).has(
+      String(item.memory_state),
+    )
+  ) {
+    invalid(endpoint, `${path}.memory_state`);
+  }
+  if (item.continuable !== undefined) {
+    boolean(item.continuable, endpoint, `${path}.continuable`);
+  }
   object(item.usage, endpoint, `${path}.usage`);
   array(item.references, endpoint, `${path}.references`).forEach((entry, index) =>
     reference(entry, endpoint, `${path}.references[${index}]`),
@@ -353,9 +366,36 @@ export function validateAgentStatus<T>(value: unknown): T {
   return root as unknown as T;
 }
 
+export function validateAgentSessionImages<T>(value: unknown): T {
+  const endpoint = "/agent/sessions/images";
+  const root = object(value, endpoint, "response");
+  number(root.used, endpoint, "response.used");
+  number(root.maximum, endpoint, "response.maximum");
+  array(root.items, endpoint, "response.items").forEach((value, index) => {
+    const item = object(value, endpoint, `response.items[${index}]`);
+    for (const field of [
+      "image_id",
+      "reference_label",
+      "role",
+      "source",
+    ] as const) {
+      nonempty(item[field], endpoint, `response.items[${index}].${field}`);
+    }
+    string(
+      item.display_label,
+      endpoint,
+      `response.items[${index}].display_label`,
+      true,
+    );
+    boolean(item.active, endpoint, `response.items[${index}].active`);
+  });
+  return root as unknown as T;
+}
+
 export type {
   AgentMessageCreateResult,
   AgentMessageList,
   AgentSessionList,
+  AgentSessionImageList,
   AgentStatus,
 };

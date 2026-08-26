@@ -122,6 +122,21 @@ def normalize_image_concurrency(raw: Any) -> int:
     return max(1, min(IMAGE_CONCURRENCY_MAX, value))
 
 
+def normalize_agent_thinking_level_map(raw: Any) -> dict[str, str | None] | None:
+    if not isinstance(raw, dict):
+        return None
+    allowed = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+    output: dict[str, str | None] = {}
+    for key, value in raw.items():
+        if key not in allowed:
+            continue
+        if value is None:
+            output[key] = None
+        elif isinstance(value, str) and value.strip() and len(value.strip()) <= 32:
+            output[key] = value.strip()
+    return output or None
+
+
 def provider_out(item: dict[str, Any], index: int) -> ProviderItemOut:
     endpoint = normalize_image_jobs_endpoint(item.get("image_jobs_endpoint"))
     return ProviderItemOut(
@@ -177,6 +192,9 @@ def provider_out(item: dict[str, Any], index: int) -> ProviderItemOut:
         agent_reasoning_supported=normalize_bool(
             item.get("agent_reasoning_supported"), default=True
         ),
+        agent_thinking_level_map=normalize_agent_thinking_level_map(
+            item.get("agent_thinking_level_map")
+        ),
         image_generations_supported=normalize_capability(
             item.get("image_generations_supported")
         ),
@@ -210,6 +228,9 @@ def provider_agent_update_fields(
             "agent_reasoning_supported",
             provider_input.agent_reasoning_supported,
         ),
+        "agent_thinking_level_map": preserved(
+            "agent_thinking_level_map", provider_input.agent_thinking_level_map
+        ),
     }
     for key in (
         "responses_supported",
@@ -217,9 +238,7 @@ def provider_agent_update_fields(
         "image_generations_supported",
         "image_responses_supported",
     ):
-        value = normalize_capability(
-            preserved(key, getattr(provider_input, key, None))
-        )
+        value = normalize_capability(preserved(key, getattr(provider_input, key, None)))
         if value is not None:
             output[key] = value
     return output

@@ -23,6 +23,10 @@ from lumen_core.agent_events import (
     agent_channel,
     agent_event_id,
 )
+from lumen_core.agent_dispatch import (
+    PROVIDER_DISPATCH_AUTHORIZED_COUNT_KEY,
+    provider_dispatch_evidence_count,
+)
 from lumen_core.constants import MessageStatus
 from lumen_core.model_entities import (
     AgentRun,
@@ -48,8 +52,9 @@ from .compaction_checkpoint import (
     checkpoint_provider_dispatched,
     checkpoint_provider_response,
 )
-from .contracts import AGENT_NO_COST_HTTP_STATUSES, AGENT_USAGE_KEYS, AgentClaim
+from .contracts import AGENT_USAGE_KEYS, AgentClaim
 from .terminal_policy import (
+    cancelled_dispatch_unknown as _cancelled_dispatch_unknown,
     has_partial_result as _has_partial_result,
     terminal_event_name as _terminal_event_name,
     tool_projection as _tool_projection,
@@ -200,14 +205,18 @@ async def claim_agent_run(run_id: str) -> tuple[AgentClaim, dict[str, Any] | Non
                 return AgentClaim("terminal", run.id, run.execution_epoch), None
             dispatch = _dispatch(run)
             delivery = str(dispatch.get("runtime_delivery") or "")
-            if run.status == AgentRunStatus.RUNNING.value and delivery in {
-                "starting",
-                "provider_dispatched",
-                "provider_response",
-                "compaction_ready",
-                "terminal_received",
-                "unknown",
-            }:
+            if run.status == AgentRunStatus.RUNNING.value and (
+                delivery
+                in {
+                    "starting",
+                    "provider_dispatched",
+                    "provider_response",
+                    "compaction_ready",
+                    "terminal_received",
+                    "unknown",
+                }
+                or provider_dispatch_evidence_count(dispatch) > 0
+            ):
                 return AgentClaim("result_unknown", run.id, run.execution_epoch), None
 
             run.execution_epoch = int(run.execution_epoch or 0) + 1
@@ -224,6 +233,7 @@ async def claim_agent_run(run_id: str) -> tuple[AgentClaim, dict[str, Any] | Non
                 "attempt": run.attempt,
                 "claimed_at": now.isoformat(),
                 "provider_dispatch_count": 0,
+                PROVIDER_DISPATCH_AUTHORIZED_COUNT_KEY: 0,
                 "provider_completed_count": 0,
                 "provider_response_statuses": [],
                 "last_runtime_seq": 0,
@@ -317,6 +327,13 @@ async def _record_runtime_tool_failure(
         if event.result_unknown is True
         else "agent_tool_failed"
     )
+    failure_receipt = {
+        "receipt_version": 1,
+        "status": status,
+        "http_status": 504 if event.result_unknown is True else 409,
+        "error_code": error_code,
+        "runtime_receipt_only": True,
+    }
     if existing is None:
         identity = (
             f"{run.id}\n{run.execution_epoch}\n{event.ordinal}\n{event.tool_call_id}"
@@ -338,7 +355,7 @@ async def _record_runtime_tool_failure(
             request_hash=request_hash,
             semantic_key=hashlib.sha256(identity).hexdigest(),
             arguments_jsonb={},
-            result_jsonb={"accepted": False, "runtime_receipt_only": True},
+            result_jsonb=failure_receipt,
             generation_count=0,
             error_code=error_code,
             error_message=None,
@@ -350,6 +367,7 @@ async def _record_runtime_tool_failure(
         existing.status = status
         existing.error_code = error_code
         existing.error_message = None
+        existing.result_jsonb = failure_receipt
         existing.finished_at = now
     _stage_event(
         db,
@@ -410,6 +428,9 @@ async def _checkpoint_pi_compaction(
     dispatch["pi_compaction_count"] = int(dispatch.get("pi_compaction_count") or 0) + 1
     dispatch["pi_compaction_first_kept_message_id"] = event.first_kept_message_id
     dispatch["pi_compaction"] = checkpoint
+    session.active_pi_compaction_run_id = run.id
+    session.active_pi_compaction_schema_version = event.checkpoint_version
+    session.active_pi_compaction_event_seq = event.seq
 
 
 def _checkpoint_turn(
@@ -644,6 +665,12 @@ def _repair_tools(
                 "agent_tool_result_unknown" if unknown else "agent_tool_interrupted"
             )
             tool.error_message = None
+            tool.result_jsonb = {
+                "receipt_version": 1,
+                "status": tool.status,
+                "http_status": 504 if unknown else 409,
+                "error_code": tool.error_code,
+            }
         tool.finished_at = now
 
 
@@ -904,32 +931,12 @@ async def reconcile_cancelled_agent_hold(run_id: str) -> bool:
                 .scalars()
                 .all()
             )
-            dispatch = _dispatch(run)
-            delivery = str(dispatch.get("runtime_delivery") or "")
             usage = run.usage_jsonb if isinstance(run.usage_jsonb, dict) else {}
             has_usage = any(
                 isinstance(value, int) and not isinstance(value, bool) and value > 0
                 for value in usage.values()
             )
-            response_statuses = [
-                value
-                for value in dispatch.get("provider_response_statuses", [])
-                if isinstance(value, int) and not isinstance(value, bool)
-            ]
-            dispatch_count = int(dispatch.get("provider_dispatch_count") or 0)
-            completed_count = int(dispatch.get("provider_completed_count") or 0)
-            pending = max(0, dispatch_count - completed_count)
-            pending_statuses = response_statuses[-pending:] if pending else []
-            pending_proven_absent = (
-                pending > 0
-                and len(pending_statuses) == pending
-                and all(
-                    value in AGENT_NO_COST_HTTP_STATUSES for value in pending_statuses
-                )
-            )
-            unknown = (pending > 0 and not pending_proven_absent) or (
-                dispatch_count == 0 and delivery in {"starting", "unknown"}
-            )
+            unknown = _cancelled_dispatch_unknown(_dispatch(run))
             _repair_tools(tools, generations, now=now, unknown=unknown)
             message = (
                 await db.execute(

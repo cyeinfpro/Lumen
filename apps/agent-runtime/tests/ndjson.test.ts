@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import type { ServerResponse } from "node:http";
 import { describe, expect, it } from "vitest";
 
-import { NdjsonEventWriter } from "../src/ndjson.js";
+import { CollectingEventWriter, NdjsonEventWriter } from "../src/ndjson.js";
 
 class FakeResponse extends EventEmitter {
   destroyed = false;
@@ -95,5 +95,33 @@ describe("NDJSON event writer", () => {
       output.emit("run.failed", { status: "failed" }, true),
     ).rejects.toThrow(/backpressure timed out/u);
     expect(response.lines).toHaveLength(1);
+  });
+
+  it("keeps every reserved envelope field authoritative", async () => {
+    const payload = {
+      version: 99,
+      type: "run.failed",
+      seq: 999,
+      run_id: "forged-run",
+      execution_epoch: 999,
+      detail: "preserved",
+    };
+    const response = new FakeResponse(true);
+    const streaming = writer(response);
+    const collecting = new CollectingEventWriter("run-1", 1);
+
+    await streaming.emit("run.heartbeat", payload);
+    await collecting.emit("run.heartbeat", payload);
+
+    for (const event of [JSON.parse(response.lines[0] ?? "{}"), collecting.events[0]]) {
+      expect(event).toMatchObject({
+        version: 1,
+        type: "run.heartbeat",
+        seq: 1,
+        run_id: "run-1",
+        execution_epoch: 1,
+        detail: "preserved",
+      });
+    }
   });
 });
