@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import (
 
 from app.services.agent import message_submission as agent_messages
 from app.services.agent import runs as agent_runs
+from app.services.agent import submission_planning as agent_submission_planning
 from app.services.agent import tools as agent_tools
 from app.services.agent.common import AgentProviderPreflight, AgentTextReservation
 from lumen_core.agent_capability import AgentCapabilityClaims
@@ -30,6 +31,7 @@ from lumen_core.model_entities import (
     AgentRun,
     AgentRunReference,
     AgentSession,
+    AgentSessionImage,
     AgentToolCall,
     ApiSupplierTemplate,
     AuditLog,
@@ -69,6 +71,7 @@ _AGENT_TABLES = (
     Conversation,
     UserApiCredential,
     AgentSession,
+    AgentSessionImage,
     Message,
     AgentRun,
     Generation,
@@ -159,11 +162,17 @@ async def _patch_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
             return None
 
     monkeypatch.setattr(agent_messages, "lock_active_user_snapshot", active_snapshot)
-    monkeypatch.setattr(agent_messages, "wallet_chat_provider_preflight", provider)
+    monkeypatch.setattr(
+        agent_submission_planning,
+        "wallet_chat_provider_preflight",
+        provider,
+    )
     monkeypatch.setattr(agent_messages, "reserve_agent_text", reserve)
     monkeypatch.setattr(agent_messages, "agent_setting_int", setting)
     monkeypatch.setattr(
-        agent_messages, "resolve_system_prompt_for_message", no_system_prompt
+        agent_submission_planning,
+        "resolve_system_prompt_for_message",
+        no_system_prompt,
     )
     monkeypatch.setattr(agent_messages, "write_audit", no_audit)
     monkeypatch.setattr(agent_messages, "publish_agent_events_best_effort", no_publish)
