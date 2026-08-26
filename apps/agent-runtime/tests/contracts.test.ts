@@ -11,6 +11,17 @@ describe("Runtime contracts", () => {
     expect("limits" in parsed).toBe(false);
   });
 
+  it("requires the nullable provider proxy slot on the wire", () => {
+    const { proxy_url: _proxyUrl, ...provider } = runtimeRequest().provider;
+    void _proxyUrl;
+    expect(() =>
+      parseRuntimeRequest({
+        ...runtimeRequest(),
+        provider,
+      }),
+    ).toThrow(/invalid request/u);
+  });
+
   it("accepts receiver-first v3 typed history and provider metadata", () => {
     const parsed = parseRuntimeRequest({
       ...runtimeRequest(),

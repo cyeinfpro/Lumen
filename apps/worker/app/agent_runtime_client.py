@@ -493,10 +493,13 @@ def _runtime_request_body(request: AgentRuntimeRequest) -> bytes:
         "reasoning_effort",
     ):
         payload[key] = complete_payload[key]
+    provider = payload.get("provider")
+    complete_provider = complete_payload.get("provider")
+    if isinstance(provider, dict) and isinstance(complete_provider, dict):
+        provider["proxy_url"] = complete_provider["proxy_url"]
     if request.version == 2:
         payload.pop("operation", None)
         payload.pop("tool_receipt_version", None)
-        provider = payload.get("provider")
         if isinstance(provider, dict):
             provider.pop("thinking_level_map", None)
         compaction = payload.get("compaction")

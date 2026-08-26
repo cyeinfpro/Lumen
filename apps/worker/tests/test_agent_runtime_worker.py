@@ -405,7 +405,23 @@ def test_runtime_v3_serializes_typed_optional_fields_receiver_first() -> None:
     assert payload["version"] == 3
     assert payload["operation"] == "prompt"
     assert payload["provider"]["thinking_level_map"] == {"max": "max"}
+    assert payload["provider"]["proxy_url"] is None
     assert payload["history"][0]["tool_calls"][0]["id"] == "tool-1"
+
+
+@pytest.mark.parametrize("version", [2, 3])
+def test_runtime_wire_preserves_required_nullable_provider_proxy(version: int) -> None:
+    request = _request().model_copy(
+        update={
+            "version": version,
+            **({"operation": "prompt"} if version == 3 else {}),
+        }
+    )
+
+    payload = json.loads(_runtime_request_body(request))
+
+    assert "proxy_url" in payload["provider"]
+    assert payload["provider"]["proxy_url"] is None
 
 
 @pytest.mark.asyncio
