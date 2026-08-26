@@ -8,6 +8,7 @@ import type {
   AgentMessageList,
   AgentRun,
   AgentSession,
+  AgentSessionImageList,
   AgentSessionCreateInput,
   AgentSessionList,
   AgentSessionPatchInput,
@@ -18,6 +19,7 @@ import {
   validateAgentMessages,
   validateAgentRun,
   validateAgentSession,
+  validateAgentSessionImages,
   validateAgentSessionList,
   validateAgentStatus,
   validateNullableAgentRun,
@@ -94,6 +96,26 @@ export async function deleteAgentSession(sessionId: string): Promise<void> {
   );
 }
 
+export function listAgentSessionImages(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<AgentSessionImageList> {
+  return apiFetch<AgentSessionImageList>(
+    `/agent/sessions/${encodeURIComponent(sessionId)}/images`,
+    { signal, validate: validateAgentSessionImages },
+  );
+}
+
+export function ejectAgentSessionImage(
+  sessionId: string,
+  imageId: string,
+): Promise<AgentSessionImageList> {
+  return apiFetch<AgentSessionImageList>(
+    `/agent/sessions/${encodeURIComponent(sessionId)}/images/${encodeURIComponent(imageId)}`,
+    { method: "DELETE", validate: validateAgentSessionImages },
+  );
+}
+
 export interface ListAgentMessagesOptions {
   cursor?: string;
   since?: string;
@@ -156,5 +178,18 @@ export function cancelAgentRun(runId: string): Promise<AgentRun> {
   return apiFetch<AgentRun>(
     `/agent/runs/${encodeURIComponent(runId)}/cancel`,
     { method: "POST", body: JSON.stringify({}), validate: validateAgentRun },
+  );
+}
+
+export function continueAgentRun(
+  runId: string,
+  idempotencyKey: string,
+): Promise<AgentRun> {
+  return apiFetch<AgentRun>(
+    `/agent/runs/${encodeURIComponent(runId)}/continue`,
+    {
+      ...idempotentPostRequest({ idempotency_key: idempotencyKey }),
+      validate: validateAgentRun,
+    },
   );
 }

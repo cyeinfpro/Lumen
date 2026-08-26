@@ -30,7 +30,7 @@ def _persisted_submit_delivery_state(
 ) -> str | None:
     if getattr(generation, "provider_task_id", None):
         return "confirmed"
-    diagnostics = video_ports()._generation_diagnostics(generation)
+    diagnostics = video_ports().operations._generation_diagnostics(generation)
     states: list[str] = []
     aggregate = diagnostics.get("submit_delivery_state")
     if aggregate in _SUBMIT_DELIVERY_STATES:
@@ -71,15 +71,15 @@ def _record_submit_delivery(
 ) -> None:
     if state not in _SUBMIT_DELIVERY_STATES:
         raise ValueError(f"invalid submit delivery state: {state}")
-    diagnostics = video_ports()._generation_diagnostics(generation)
+    diagnostics = video_ports().operations._generation_diagnostics(generation)
     current = _persisted_submit_delivery_state(generation) or state
     aggregate = max(
         (current, state),
         key=_SUBMIT_DELIVERY_PRECEDENCE.index,
     )
     item: dict[str, Any] = {
-        "at": video_ports()._now().isoformat(),
-        "attempt": video_ports()._generation_attempt(generation),
+        "at": video_ports().operations._now().isoformat(),
+        "attempt": video_ports().operations._generation_attempt(generation),
         "submission_epoch": int(getattr(generation, "submission_epoch", 0) or 0),
         "state": state,
         "reason": reason,
@@ -93,7 +93,7 @@ def _record_submit_delivery(
         item["provider_supports_idempotency"] = bool(provider_supports_idempotency)
     if error_code:
         item["error_code"] = error_code
-    video_ports()._append_bounded_history(
+    video_ports().operations._append_bounded_history(
         diagnostics,
         "submit_delivery_history",
         item,
@@ -112,11 +112,11 @@ async def persist_video_submit_receipt(
     record_submit_delivery: Callable[..., None],
 ) -> bool:
     try:
-        video_ports()._raise_if_video_lease_lost(
+        video_ports().lease_queue._raise_if_video_lease_lost(
             lease_lost,
             "video submit lease lost before receipt persistence",
         )
-        async with video_ports().SessionLocal() as session:
+        async with video_ports().store.SessionLocal() as session:
             filters = [VideoGeneration.id == task_id]
             if submission_epoch is not None:
                 filters.append(VideoGeneration.submission_epoch == submission_epoch)
@@ -126,16 +126,16 @@ async def persist_video_submit_receipt(
                 )
             ).scalar_one_or_none()
             if generation is None:
-                video_ports().logger.warning(
+                video_ports().operations.logger.warning(
                     "video submit receipt fenced out task=%s epoch=%s",
                     task_id,
                     submission_epoch,
                 )
                 return False
-            if generation.status in video_ports()._TERMINAL_STATUSES:
+            if generation.status in video_ports().policy._TERMINAL_STATUSES:
                 return False
             if generation.cancel_requested_at is not None:
-                video_ports().logger.info(
+                video_ports().operations.logger.info(
                     "video submit receipt persists through cancellation task=%s epoch=%s",
                     task_id,
                     submission_epoch,
@@ -145,11 +145,11 @@ async def persist_video_submit_receipt(
             generation.status = VideoGenerationStatus.SUBMITTED.value
             generation.progress_stage = VideoGenerationStage.RENDERING.value
             generation.progress_pct = max(generation.progress_pct, 10)
-            generation.submitted_at = video_ports()._now()
-            generation.next_poll_at = video_ports()._now() + timedelta(
-                seconds=video_ports()._POLL_INTERVAL_S
+            generation.submitted_at = video_ports().operations._now()
+            generation.next_poll_at = video_ports().operations._now() + timedelta(
+                seconds=video_ports().policy._POLL_INTERVAL_S
             )
-            diagnostics = video_ports()._generation_diagnostics(generation)
+            diagnostics = video_ports().operations._generation_diagnostics(generation)
             diagnostics["submit_receipt"] = {
                 "submission_epoch": submission_epoch,
                 "provider_task_id": result.provider_task_id,
@@ -158,7 +158,7 @@ async def persist_video_submit_receipt(
                     "provider_idempotency_key",
                     None,
                 ),
-                "persisted_at": video_ports()._now().isoformat(),
+                "persisted_at": video_ports().operations._now().isoformat(),
             }
             generation.diagnostics = diagnostics
             record_submit_delivery(
@@ -167,19 +167,19 @@ async def persist_video_submit_receipt(
                 reason="provider_submit_receipt_persisted",
             )
             await session.commit()
-            await video_ports()._publish_after_commit(
+            await video_ports().billing_events._publish_after_commit(
                 redis, generation, EV_VIDEO_SUBMITTED
             )
             return True
-    except video_ports()._VideoLeaseLost:
-        video_ports().logger.warning(
+    except video_ports().policy._VideoLeaseLost:
+        video_ports().operations.logger.warning(
             "video submit receipt skipped after lease loss task=%s epoch=%s",
             task_id,
             submission_epoch,
         )
         return False
     except Exception:
-        video_ports().logger.warning(
+        video_ports().operations.logger.warning(
             "video submit persist failed task=%s",
             task_id,
             exc_info=True,
@@ -196,7 +196,7 @@ def transition_submit_unknown(
     last_error: dict[str, Any] | None = None,
     record_submit_delivery: Callable[..., None],
 ) -> None:
-    diagnostics = video_ports()._generation_diagnostics(generation)
+    diagnostics = video_ports().operations._generation_diagnostics(generation)
     diagnostics["submit_unknown_at"] = now.isoformat()
     diagnostics["submit_unknown_reason"] = reason
     diagnostics["submission_epoch"] = int(
@@ -228,9 +228,9 @@ def transition_submit_unknown(
         "video submission outcome is unknown; automatic reconciliation pending"
     )
     generation.next_poll_at = now + timedelta(
-        seconds=video_ports()._SUBMIT_UNKNOWN_FINALIZE_AFTER_S
+        seconds=video_ports().policy._SUBMIT_UNKNOWN_FINALIZE_AFTER_S
     )
-    video_ports()._queue_video_event(
+    video_ports().billing_events._queue_video_event(
         session,
         generation,
         EV_VIDEO_PROGRESS,
@@ -245,7 +245,7 @@ async def mark_submit_unknown(
     provider_name: str | None,
     submission_epoch: int | None,
 ) -> bool:
-    async with video_ports().SessionLocal() as session:
+    async with video_ports().store.SessionLocal() as session:
         filters = [VideoGeneration.id == task_id]
         if submission_epoch is not None:
             filters.append(VideoGeneration.submission_epoch == submission_epoch)
@@ -254,22 +254,27 @@ async def mark_submit_unknown(
                 select(VideoGeneration).where(*filters).with_for_update()
             )
         ).scalar_one_or_none()
-        if generation is None or generation.status in video_ports()._TERMINAL_STATUSES:
+        if (
+            generation is None
+            or generation.status in video_ports().policy._TERMINAL_STATUSES
+        ):
             return False
-        now = video_ports()._now()
-        error_code = video_ports()._video_exception_code(
+        now = video_ports().operations._now()
+        error_code = video_ports().operations._video_exception_code(
             exc, default="upstream_unknown"
         )
-        error_message = video_ports()._video_exception_message(exc, phase="submit")
+        error_message = video_ports().operations._video_exception_message(
+            exc, phase="submit"
+        )
         generation.provider_name = generation.provider_name or provider_name
-        video_ports()._transition_submit_unknown(
+        video_ports().operations._transition_submit_unknown(
             session,
             generation,
             now=now,
             reason="ambiguous_non_idempotent_submit_error",
             last_error={
                 "at": now.isoformat(),
-                "attempt": video_ports()._generation_attempt(generation),
+                "attempt": video_ports().operations._generation_attempt(generation),
                 "error_code": error_code,
                 "message": error_message[:500],
                 "retryable": False,

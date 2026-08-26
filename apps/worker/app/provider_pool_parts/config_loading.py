@@ -67,12 +67,11 @@ def _runtime_provider(definition: Any) -> ProviderConfig:
         agent_api=getattr(definition, "agent_api", "openai-responses"),
         agent_models=getattr(definition, "agent_models", ()),
         agent_context_window=getattr(definition, "agent_context_window", 128000),
-        agent_max_output_tokens=getattr(
-            definition, "agent_max_output_tokens", 16384
-        ),
+        agent_max_output_tokens=getattr(definition, "agent_max_output_tokens", 16384),
         agent_reasoning_supported=getattr(
             definition, "agent_reasoning_supported", True
         ),
+        agent_thinking_level_map=getattr(definition, "agent_thinking_level_map", None),
         image_generations_supported=getattr(
             definition,
             "image_generations_supported",
@@ -86,7 +85,9 @@ def _runtime_provider(definition: Any) -> ProviderConfig:
     )
 
 
-def _validated_runtime_provider(provider: ProviderConfig, base_url: str) -> ProviderConfig:
+def _validated_runtime_provider(
+    provider: ProviderConfig, base_url: str
+) -> ProviderConfig:
     return ProviderConfig(
         name=provider.name,
         base_url=base_url,
@@ -113,6 +114,7 @@ def _validated_runtime_provider(provider: ProviderConfig, base_url: str) -> Prov
         agent_context_window=provider.agent_context_window,
         agent_max_output_tokens=provider.agent_max_output_tokens,
         agent_reasoning_supported=provider.agent_reasoning_supported,
+        agent_thinking_level_map=provider.agent_thinking_level_map,
         image_generations_supported=provider.image_generations_supported,
         image_responses_supported=provider.image_responses_supported,
     )
@@ -136,8 +138,7 @@ def _quota_errors(providers: list[ProviderConfig]) -> tuple[str, ...]:
             or daily_quota <= 0
         ):
             errors.append(
-                f"provider {provider.name}: invalid image_daily_quota "
-                f"{daily_quota!r}"
+                f"provider {provider.name}: invalid image_daily_quota {daily_quota!r}"
             )
     return tuple(errors)
 

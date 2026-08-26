@@ -266,6 +266,7 @@ export interface Generation {
   elapsed?: number;
   partial_count?: number;
   started_at: number;
+  created_at?: number;
   finished_at?: number;
   is_dual_race_bonus?: boolean;
   billing_free?: boolean;

@@ -4,13 +4,13 @@ Redis 存活：
   lumen:proxy:health:{name}  HASH  last_latency_ms / last_tested_at_iso / last_target
   lumen:proxy:fail:{name}    string INCR with TTL=300  连续失败计数
   lumen:proxy:cooldown:{name} string TTL=N  冷却中（被踢出 pool）
-  lumen:proxy:rr:idx          INCR        round_robin 计数器
+  lumen:proxy:rr:{pool_hash}  INCR        每个候选池的 round_robin 计数器
 
 策略：
   - random       从 healthy 集随机一个
   - latency      取 last_latency_ms 最低的 1/3 候选随机一个；缺测的视为 +inf
   - failover     按入参 candidates 顺序，第一个 healthy 的就用
-  - round_robin  全局 INCR % len(healthy)
+  - round_robin  候选池独立 (INCR - 1) % len(healthy)
 
 Only proxies with a proven available cooldown state are selectable.
 """
@@ -18,6 +18,7 @@ Only proxies with a proven available cooldown state are selectable.
 from __future__ import annotations
 
 import logging
+import hashlib
 import random
 import time
 from dataclasses import dataclass, field
@@ -43,7 +44,7 @@ DEFAULT_TEST_TARGET = "https://api.telegram.org"
 _HEALTH_PREFIX = "lumen:proxy:health:"
 _FAIL_PREFIX = "lumen:proxy:fail:"
 _COOLDOWN_PREFIX = "lumen:proxy:cooldown:"
-_RR_KEY = "lumen:proxy:rr:idx"
+_RR_PREFIX = "lumen:proxy:rr:"
 _FAIL_TTL_SECONDS = 300
 
 # INCR + EXPIRE 必须原子执行：若分两条命令且 INCR 成功后 EXPIRE 失败（断连/超时），
@@ -161,6 +162,12 @@ def cooldown_key(name: str) -> str:
 
 def fail_key(name: str) -> str:
     return f"{_FAIL_PREFIX}{name}"
+
+
+def round_robin_key(candidates: Iterable[ProviderProxyDefinition]) -> str:
+    identity = "\n".join(sorted({candidate.name for candidate in candidates}))
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+    return f"{_RR_PREFIX}{digest}"
 
 
 async def _cooldown_state(redis: Any, name: str) -> CooldownState:
@@ -334,7 +341,7 @@ async def pick_proxy(
         return random.choice(pool)
     if strategy == "round_robin":
         try:
-            idx = int(await redis.incr(_RR_KEY))
+            idx = int(await redis.incr(round_robin_key(enabled))) - 1
         except RedisError as exc:
             raise ProxyStateUnavailable([proxy.name for proxy in pool]) from exc
         return pool[idx % len(pool)]
@@ -393,5 +400,6 @@ __all__ = [
     "pick_proxy",
     "report_failure",
     "report_success",
+    "round_robin_key",
     "set_health",
 ]

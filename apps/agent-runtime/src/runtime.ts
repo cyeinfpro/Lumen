@@ -30,6 +30,11 @@ import {
 import { RUNTIME_VERSION } from "./config.js";
 import type { RuntimeMetrics } from "./metrics.js";
 import type { EventWriter } from "./ndjson.js";
+import { logRuntime } from "./redaction.js";
+import {
+  authorizeProviderDispatch,
+  ProviderDispatchPermitError,
+} from "./providers/dispatch-permit.js";
 import {
   prepareProviderRuntime,
   type PreparedProviderRuntime,
@@ -39,6 +44,7 @@ import { createImageTool, ordinalFor, type ToolRuntimeState } from "./tools/crea
 import {
   createImageGateway,
   type CreateImageGateway,
+  type GatewayTransportPolicy,
 } from "./tools/gateway.js";
 
 const EMPTY_USAGE: Usage = {
@@ -53,10 +59,38 @@ const EMPTY_USAGE: Usage = {
 export interface RuntimeDependencies {
   prepareProvider(
     request: RuntimeRequest,
-    onDispatch: () => Promise<void>,
+    onDispatch: (signal?: AbortSignal) => Promise<void>,
   ): Promise<PreparedProviderRuntime>;
-  createGateway(request: RuntimeRequest): CreateImageGateway;
+  createGateway(
+    request: RuntimeRequest,
+    policy?: GatewayTransportPolicy,
+  ): CreateImageGateway;
+  readonly gatewayPolicy?: GatewayTransportPolicy;
+  readonly safetyPolicy?: RuntimeSafetyPolicy;
+  authorizeProviderDispatch?(
+    request: RuntimeRequest,
+    ordinal: number,
+    signal?: AbortSignal,
+  ): Promise<void>;
 }
+
+export interface RuntimeSafetyPolicy {
+  readonly maxWallClockMs: number;
+  readonly maxProviderDispatches: number;
+  readonly maxTurns: number;
+  readonly maxTotalTokens: number;
+  readonly maxEventBytes: number;
+  readonly maxRepeatedToolCalls: number;
+}
+
+export const DEFAULT_RUNTIME_SAFETY_POLICY: RuntimeSafetyPolicy = {
+  maxWallClockMs: 6 * 60 * 60 * 1000,
+  maxProviderDispatches: 128,
+  maxTurns: 128,
+  maxTotalTokens: 4_000_000,
+  maxEventBytes: 16 * 1024 * 1024,
+  maxRepeatedToolCalls: 8,
+};
 
 export interface ExecuteResult {
   readonly outcome: "succeeded" | "partial" | "failed" | "cancelled";
@@ -81,7 +115,15 @@ export class RuntimeExecutionError extends Error {
 const DEFAULT_DEPENDENCIES: RuntimeDependencies = {
   prepareProvider: prepareProviderRuntime,
   createGateway: createImageGateway,
+  authorizeProviderDispatch,
 };
+
+class RuntimeSafetyError extends Error {
+  constructor(readonly reason: string) {
+    super("Agent Runtime safety budget reached");
+    this.name = "RuntimeSafetyError";
+  }
+}
 
 function zeroUsage(): RuntimeUsage {
   return {
@@ -174,24 +216,66 @@ function addUsage(target: RuntimeUsage, usage: RuntimeUsage): void {
     target.cache_read_tokens + target.cache_write_tokens;
 }
 
-function historyMessage(
+function historyMessages(
   item: RuntimeHistoryMessage,
   request: RuntimeRequest,
   timestamp: number,
-): Message {
+): Message[] {
   if (item.role === "user") {
-    return { role: "user", content: item.text, timestamp };
+    return [{
+      role: "user",
+      content: [
+        { type: "text", text: item.text },
+        ...(item.images ?? []).map((image): ImageContent => ({
+          type: "image",
+          mimeType: image.mime_type,
+          data: image.data_base64,
+        })),
+      ],
+      timestamp,
+    }];
   }
-  return {
+  const toolCalls = (item.tool_calls ?? []).map((toolCall) => ({
+    type: "toolCall" as const,
+    id: toolCall.id,
+    name: toolCall.name,
+    arguments: toolCall.arguments,
+  }));
+  const assistant: AssistantMessage = {
     role: "assistant",
-    content: [{ type: "text", text: item.text }],
-    api: request.provider.api,
-    provider: request.provider.provider_id,
-    model: request.provider.model,
+    content: [{ type: "text", text: item.text }, ...toolCalls],
+    api: item.api ?? request.provider.api,
+    provider: item.provider_id ?? request.provider.provider_id,
+    model: item.model ?? request.provider.model,
     usage: EMPTY_USAGE,
-    stopReason: "stop",
+    stopReason: item.stop_reason ?? (toolCalls.length > 0 ? "toolUse" : "stop"),
     timestamp,
   };
+  return [
+    assistant,
+    ...(item.tool_results ?? []).map((result, index): Message => ({
+      role: "toolResult",
+      toolCallId: result.tool_call_id,
+      toolName: result.name,
+      content: [{ type: "text", text: result.text }],
+      isError: result.is_error,
+      timestamp: timestamp + index + 1,
+    })),
+    ...(item.final_text
+      ? [
+          {
+            role: "assistant" as const,
+            content: [{ type: "text" as const, text: item.final_text }],
+            api: item.api ?? request.provider.api,
+            provider: item.provider_id ?? request.provider.provider_id,
+            model: item.model ?? request.provider.model,
+            usage: EMPTY_USAGE,
+            stopReason: "stop" as const,
+            timestamp: timestamp + (item.tool_results?.length ?? 0) + 1,
+          },
+        ]
+      : []),
+  ];
 }
 
 interface SeededPiSession {
@@ -228,11 +312,13 @@ function seedPiSession(request: RuntimeRequest): SeededPiSession {
     if (compaction?.next_message_id === messageId) {
       compactionAppended = appendCompaction();
     }
-    const entryId = manager.appendMessage(
-      historyMessage(item, request, start + index),
-    );
-    entryMessageIds.set(entryId, messageId);
-    messageEntryIds.set(messageId, entryId);
+    for (const message of historyMessages(item, request, start + index * 10)) {
+      const entryId = manager.appendMessage(message);
+      entryMessageIds.set(entryId, messageId);
+      if (!messageEntryIds.has(messageId)) {
+        messageEntryIds.set(messageId, entryId);
+      }
+    }
   }
   if (
     compaction !== null &&
@@ -264,7 +350,7 @@ function terminalErrorCode(message: AssistantMessage | null): string | null {
     return null;
   }
   if (message.stopReason === "aborted") return "agent_cancelled";
-  if (message.stopReason === "length") return null;
+  if (message.stopReason === "length") return "agent_output_truncated";
   return "agent_provider_error";
 }
 
@@ -280,11 +366,33 @@ function finalOutcome(
   errorCode: string | null,
   state: ToolRuntimeState,
   signal: AbortSignal,
+  hasProgress: boolean,
 ): ExecuteResult["outcome"] {
-  if (signal.aborted) return "cancelled";
+  if (signal.aborted && signal.reason !== "agent_runtime_shutdown") return "cancelled";
   if (errorCode === null && state.unknownResults === 0) return "succeeded";
-  if (state.successfulCalls > 0 || state.unknownResults > 0) return "partial";
+  if (errorCode === "agent_runtime_shutdown") return "failed";
+  if (hasProgress || state.successfulCalls > 0 || state.unknownResults > 0) return "partial";
   return "failed";
+}
+
+function stableToolSignature(name: string, value: unknown): string {
+  const canonical = (item: unknown): string => {
+    if (Array.isArray(item)) return `[${item.map(canonical).join(",")}]`;
+    if (item !== null && typeof item === "object") {
+      const record = item as Record<string, unknown>;
+      return `{${Object.keys(record)
+        .sort()
+        .map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`)
+        .join(",")}}`;
+    }
+    if (item === undefined) return "null";
+    return JSON.stringify(item);
+  };
+  return `${name}:${canonical(value)}`;
+}
+
+function anySignalAborted(...signals: Array<AbortSignal | undefined>): boolean {
+  return signals.some((candidate) => candidate?.aborted === true);
 }
 
 async function emitOrThrow(
@@ -324,11 +432,27 @@ export async function executeAgentRun(
   const usage = zeroUsage();
   const tools = buildToolState();
   const toolPolicy = runtimeToolPolicy(request);
+  const configuredSafety = dependencies.safetyPolicy ?? DEFAULT_RUNTIME_SAFETY_POLICY;
+  const safetyPolicy: RuntimeSafetyPolicy = {
+    ...configuredSafety,
+    maxProviderDispatches: Math.min(
+      configuredSafety.maxProviderDispatches,
+      request.safety_budget?.max_provider_dispatches ??
+        configuredSafety.maxProviderDispatches,
+    ),
+  };
   let turnCount = 0;
   let lastAssistant: AssistantMessage | null = null;
   let providerDispatches = 0;
   let providerResponses = 0;
   let providerCompletions = 0;
+  const dispatchFailure: { code: string | null } = { code: null };
+  let retainedTextChars = 0;
+  const safetyState: { reason: string | null } = { reason: null };
+  let abortForSafety: (() => void) | null = null;
+  let repeatedToolSignature: string | null = null;
+  let repeatedToolCalls = 0;
+  const signatureCountedToolCalls = new Set<string>();
   const toolStartedAt = new Map<string, bigint>();
   let sessionEventTail: Promise<void> = Promise.resolve();
   let sessionEventFailure: unknown = null;
@@ -348,11 +472,72 @@ export async function executeAgentRun(
     }
   };
 
-  const onDispatch = async (): Promise<void> => {
+  const tripSafety = (reason: string): void => {
+    safetyState.reason ??= reason;
+    abortForSafety?.();
+  };
+  const emitRuntimeEvent = async (
+    type: string,
+    payload: Record<string, unknown> = {},
+  ): Promise<void> => {
+    if (writer.bytesWritten >= safetyPolicy.maxEventBytes) {
+      tripSafety("event_bytes");
+      throw new RuntimeSafetyError("event_bytes");
+    }
+    await emitOrThrow(writer, type, payload);
+  };
+  const emitTextReset = async (): Promise<void> => {
+    retainedTextChars = 0;
+    await emitRuntimeEvent(RUNTIME_TEXT_RESET_EVENT);
+  };
+  const countToolSignature = (name: string, args: unknown): boolean => {
+    const signature = stableToolSignature(name, args);
+    if (signature === repeatedToolSignature) repeatedToolCalls += 1;
+    else {
+      repeatedToolSignature = signature;
+      repeatedToolCalls = 1;
+    }
+    if (repeatedToolCalls <= safetyPolicy.maxRepeatedToolCalls) return false;
+    tripSafety("repeated_tool_call");
+    return true;
+  };
+
+  const onDispatch = async (providerSignal?: AbortSignal): Promise<void> => {
     await drainSessionEvents();
+    if (anySignalAborted(signal, providerSignal)) {
+      dispatchFailure.code = "agent_cancelled";
+      throw new ProviderDispatchPermitError("agent_cancelled");
+    }
+    if (providerDispatches >= safetyPolicy.maxProviderDispatches) {
+      tripSafety("provider_dispatches");
+      throw new RuntimeSafetyError("provider_dispatches");
+    }
+    const dispatchSignal = providerSignal
+      ? AbortSignal.any([signal, providerSignal])
+      : signal;
+    try {
+      await (dependencies.authorizeProviderDispatch ?? authorizeProviderDispatch)(
+        request,
+        providerDispatches + 1,
+        dispatchSignal,
+      );
+    } catch (error) {
+      dispatchFailure.code =
+        error instanceof ProviderDispatchPermitError
+          ? error.code
+          : "agent_provider_dispatch_denied";
+      if (dispatchFailure.code === "agent_safety_budget_reached") {
+        tripSafety("provider_dispatches");
+      }
+      throw error;
+    }
+    if (anySignalAborted(signal, providerSignal)) {
+      dispatchFailure.code = "agent_cancelled";
+      throw new ProviderDispatchPermitError("agent_cancelled");
+    }
     providerDispatches += 1;
     metrics?.providerRequests.labels("dispatch", "sent").inc();
-    await emitOrThrow(writer, "provider.dispatched", {
+    await emitRuntimeEvent("provider.dispatched", {
       turn: providerDispatches,
     });
   };
@@ -360,7 +545,9 @@ export async function executeAgentRun(
     request,
     onDispatch,
   );
-  const gateway = dependencies.createGateway(request);
+  let pendingSessionCleanup: (() => Promise<void>) | null = null;
+  try {
+  const gateway = dependencies.createGateway(request, dependencies.gatewayPolicy);
   const nativeCompactionEnabled =
     request.compaction !== undefined &&
     request.history.every((message) => message.message_id !== undefined);
@@ -405,10 +592,9 @@ export async function executeAgentRun(
     cwd: "/tmp/lumen-agent-runtime",
     agentDir: "/tmp/lumen-agent-runtime-empty",
     model: prepared.model,
-    thinkingLevel:
-      request.provider.reasoning_supported && request.reasoning_effort !== null
-        ? request.reasoning_effort
-        : "off",
+    ...(request.provider.reasoning_supported && request.reasoning_effort !== null
+      ? { thinkingLevel: request.reasoning_effort }
+      : {}),
     modelRuntime: prepared.modelRuntime,
     resourceLoader: emptyResourceLoader(request.system_prompt),
     noTools: "builtin",
@@ -417,6 +603,23 @@ export async function executeAgentRun(
     sessionManager,
     settingsManager: settings,
   });
+  pendingSessionCleanup = async () => {
+    const [result] = await Promise.allSettled([
+      Promise.resolve().then(() => session.dispose()),
+    ]);
+    if (result.status === "rejected") {
+      metrics?.cleanupFailures.labels("session").inc();
+      logRuntime("warn", "agent_runtime.cleanup_failed", {
+        run_id: request.run_id,
+        resource: "session",
+        error_type: result.reason instanceof Error ? result.reason.name : "Error",
+      });
+    }
+  };
+  abortForSafety = () => {
+    session.abortCompaction();
+    session.agent.abort();
+  };
 
   const expectedTools = [...request.allowed_tools];
   const activeTools = session.getActiveToolNames();
@@ -426,8 +629,6 @@ export async function executeAgentRun(
     JSON.stringify(activeTools) !== JSON.stringify(expectedTools) ||
     JSON.stringify(allTools) !== JSON.stringify(expectedTools)
   ) {
-    session.dispose();
-    await prepared.close();
     throw new Error("Pi tool or session isolation check failed");
   }
 
@@ -449,12 +650,34 @@ export async function executeAgentRun(
       onResponse: async (response) => {
         providerResponses += 1;
         metrics?.providerRequests.labels("response", String(response.status)).inc();
-        await emitOrThrow(writer, "provider.response", {
+        await emitRuntimeEvent("provider.response", {
           turn: providerResponses,
           status: response.status,
         });
       },
     });
+
+  const previousBeforeToolCall = session.agent.beforeToolCall;
+  session.agent.beforeToolCall = async (context, toolSignal) => {
+    const previous = await previousBeforeToolCall?.(context, toolSignal);
+    if (previous?.block) return previous;
+    signatureCountedToolCalls.add(context.toolCall.id);
+    if (!countToolSignature(context.toolCall.name, context.args)) return previous;
+    return {
+      block: true,
+      reason: "Agent safety budget reached",
+      terminate: true,
+    };
+  };
+  session.agent.shouldStopAfterTurn = () => {
+    if (turnCount >= safetyPolicy.maxTurns) tripSafety("turns");
+    if (usage.total_tokens >= safetyPolicy.maxTotalTokens) tripSafety("tokens");
+    return safetyState.reason !== null;
+  };
+  const safetyTimer = setTimeout(() => {
+    tripSafety("wall_clock");
+  }, safetyPolicy.maxWallClockMs);
+  safetyTimer.unref();
 
   const emitCompactionCheckpoint = async (
     result: CompactionResult,
@@ -463,9 +686,9 @@ export async function executeAgentRun(
   ): Promise<void> => {
     const providerCallCount = providerDispatches - dispatchCountBefore;
     const responseCount = providerResponses - responseCountBefore;
-    const firstKeptMessageId =
-      seededSession.entryMessageIds.get(result.firstKeptEntryId) ??
-      request.user_message_id;
+    const firstKeptMessageId = seededSession.entryMessageIds.get(
+      result.firstKeptEntryId,
+    );
     if (
       firstKeptMessageId === undefined ||
       result.usage === undefined ||
@@ -483,11 +706,17 @@ export async function executeAgentRun(
     );
     addUsage(usage, compactionUsage);
     providerCompletions += providerCallCount;
-    await emitOrThrow(writer, "compaction.completed", {
-      checkpoint_version: 1,
+    await emitRuntimeEvent("compaction.completed", {
+      checkpoint_version: request.version === 3 ? 2 : 1,
       pi_runtime_version: RUNTIME_VERSION,
       summary: result.summary,
       first_kept_message_id: firstKeptMessageId,
+      ...(request.version === 3
+        ? {
+            next_message_id: request.user_message_id,
+            phase: "pre_prompt",
+          }
+        : {}),
       tokens_before: result.tokensBefore,
       provider_call_count: providerCallCount,
       usage: compactionUsage,
@@ -498,7 +727,7 @@ export async function executeAgentRun(
   const emitRunStarted = async (): Promise<void> => {
     if (runStarted) return;
     runStarted = true;
-    await emitOrThrow(writer, "run.started", {
+    await emitRuntimeEvent("run.started", {
       tools: expectedTools,
       runtime_version: RUNTIME_VERSION,
       reasoning_effort: session.thinkingLevel,
@@ -541,16 +770,20 @@ export async function executeAgentRun(
     ) {
       const delta = event.assistantMessageEvent.delta;
       for (let offset = 0; offset < delta.length; offset += 8192) {
-        await emitOrThrow(writer, "text.delta", {
+        retainedTextChars += delta.slice(offset, offset + 8192).length;
+        await emitRuntimeEvent("text.delta", {
           delta: delta.slice(offset, offset + 8192),
         });
       }
       return;
     }
     if (event.type === "tool_execution_start") {
+      if (!signatureCountedToolCalls.delete(event.toolCallId)) {
+        countToolSignature(event.toolName, event.args);
+      }
       toolStartedAt.set(event.toolCallId, process.hrtime.bigint());
       const ordinal = ordinalFor(tools, event.toolCallId);
-      await emitOrThrow(writer, "tool.started", {
+      await emitRuntimeEvent("tool.started", {
         tool_call_id: event.toolCallId,
         ordinal,
         name: event.toolName,
@@ -567,6 +800,29 @@ export async function executeAgentRun(
           ? null
           : Number(process.hrtime.bigint() - started) / 1_000_000_000;
       if (event.isError) {
+        if (
+          event.toolName === AGENT_TOOL_CREATE_IMAGE &&
+          !tools.errors.has(event.toolCallId)
+        ) {
+          const fallbackCode =
+            tools.imageCalls >= toolPolicy.max_image_tool_calls
+              ? "agent_tool_limit_reached"
+              : tools.acceptedImages >= toolPolicy.max_images_per_run
+                ? "agent_image_limit_reached"
+                : "agent_tool_failed";
+          if (fallbackCode === "agent_tool_limit_reached") {
+            tools.limitReason = "tool_calls";
+          } else if (fallbackCode === "agent_image_limit_reached") {
+            tools.limitReason = "images";
+          }
+          tools.calls += 1;
+          tools.failedCalls += 1;
+          tools.lastErrorCode = fallbackCode;
+          tools.errors.set(event.toolCallId, {
+            code: fallbackCode,
+            resultUnknown: false,
+          });
+        }
         const recorded = tools.errors.get(event.toolCallId);
         const code =
           event.toolName === AGENT_TOOL_CREATE_IMAGE
@@ -576,7 +832,7 @@ export async function executeAgentRun(
         if (toolDuration !== null) {
           metrics?.toolDuration.labels(event.toolName, mode, "failed").observe(toolDuration);
         }
-        await emitOrThrow(writer, "tool.failed", {
+        await emitRuntimeEvent("tool.failed", {
           tool_call_id: event.toolCallId,
           ordinal,
           name: event.toolName,
@@ -591,7 +847,7 @@ export async function executeAgentRun(
         if (toolDuration !== null) {
           metrics?.toolDuration.labels(event.toolName, resultMode, "succeeded").observe(toolDuration);
         }
-        await emitOrThrow(writer, "tool.succeeded", {
+        await emitRuntimeEvent("tool.succeeded", {
           tool_call_id: event.toolCallId,
           ordinal,
           name: event.toolName,
@@ -620,7 +876,7 @@ export async function executeAgentRun(
       ) {
         providerCompletions += 1;
       }
-      await emitOrThrow(writer, "turn.completed", {
+      await emitRuntimeEvent("turn.completed", {
         turn: turnCount,
         usage: turnUsage,
         stop_reason: message?.stopReason ?? "error",
@@ -637,7 +893,7 @@ export async function executeAgentRun(
       request.event_features?.includes("text-reset-v1")
     ) {
       enqueueSessionEvent(async () => {
-        await emitOrThrow(writer, RUNTIME_TEXT_RESET_EVENT);
+        await emitTextReset();
       });
       return;
     }
@@ -664,7 +920,7 @@ export async function executeAgentRun(
         event.willRetry &&
         request.event_features?.includes("text-reset-v1")
       ) {
-        await emitOrThrow(writer, RUNTIME_TEXT_RESET_EVENT);
+        await emitTextReset();
       }
     });
   });
@@ -673,22 +929,56 @@ export async function executeAgentRun(
     session.abortCompaction();
     session.agent.abort();
   };
+  pendingSessionCleanup = async () => {
+    clearTimeout(safetyTimer);
+    signal.removeEventListener("abort", abortListener);
+    const cleanup = await Promise.allSettled([
+      Promise.resolve().then(() => unsubscribe()),
+      Promise.resolve().then(() => unsubscribeSession()),
+      Promise.resolve().then(() => session.dispose()),
+    ]);
+    cleanup.forEach((result, index) => {
+      if (result.status !== "rejected") return;
+      const resource = ["agent_listener", "session_listener", "session"][index];
+      metrics?.cleanupFailures.labels(resource ?? "unknown").inc();
+      logRuntime("warn", "agent_runtime.cleanup_failed", {
+        run_id: request.run_id,
+        resource,
+        error_type:
+          result.reason instanceof Error ? result.reason.name : "Error",
+      });
+    });
+  };
   signal.addEventListener("abort", abortListener, { once: true });
   try {
     await emitRunStarted();
     const images = currentImages(request);
-    const estimateCompleteContext = (): number => [
-      ...session.messages,
-      {
+    const estimateCompleteContext = (): number => {
+      const historyTokens = session.messages.reduce(
+        (total, message) => total + estimateTokens(message),
+        0,
+      );
+      const promptTokens = estimateTokens({
         role: "user" as const,
         content: [
           { type: "text" as const, text: request.system_prompt },
           { type: "text" as const, text: request.current_prompt },
-          ...images,
         ],
         timestamp: Date.now(),
-      },
-    ].reduce((total, message) => total + estimateTokens(message), 0);
+      });
+      const imageTokens = request.references.reduce(
+        (total, reference, index) =>
+          total +
+          (reference.estimated_input_tokens ??
+            estimateTokens({
+              role: "user",
+              content: [images[index] as ImageContent],
+              timestamp: Date.now(),
+            })),
+        0,
+      );
+      return historyTokens + promptTokens + imageTokens;
+    };
     const compactionSettings = settings.getCompactionSettings();
     if (
       nativeCompactionEnabled &&
@@ -728,24 +1018,49 @@ export async function executeAgentRun(
         throw new Error("Pi native compaction could not fit the Agent context");
       }
     }
-    session.setAutoCompactionEnabled(request.version === 2);
-    await session.prompt(request.current_prompt, {
-      images,
-      expandPromptTemplates: false,
-    });
+    // Only explicit pre-prompt compaction is persisted. Automatic threshold and
+    // overflow checkpoints can retain current-turn Pi entries that do not yet
+    // have a durable Lumen message boundary.
+    session.setAutoCompactionEnabled(false);
+    if (request.version === 3 && request.operation === "continue") {
+      await session.prompt(request.current_prompt, {
+        images: [],
+        expandPromptTemplates: false,
+      });
+    } else {
+      await session.prompt(request.current_prompt, {
+        images,
+        expandPromptTemplates: false,
+      });
+    }
     await drainSessionEvents();
     if (tools.limitReason !== null) {
       metrics?.limits.labels(tools.limitReason).inc();
-      await emitOrThrow(writer, "limit.reached", { reason: tools.limitReason });
+      await emitRuntimeEvent("limit.reached", { reason: tools.limitReason });
+    }
+    if (safetyState.reason !== null) {
+      metrics?.limits.labels(safetyState.reason).inc();
+      await emitRuntimeEvent("limit.reached", {
+        reason: "agent_safety_budget_reached",
+      });
     }
     const errorCode =
-      tools.unknownResults > 0
+      signal.aborted
+        ? signal.reason === "agent_runtime_shutdown"
+          ? "agent_runtime_shutdown"
+          : "agent_cancelled"
+        : safetyState.reason !== null
+          ? "agent_safety_budget_reached"
+          : dispatchFailure.code !== null
+            ? dispatchFailure.code
+            : tools.unknownResults > 0
         ? "agent_tool_result_unknown"
         : tools.failedCalls > 0
           ? tools.lastErrorCode ?? "agent_tool_failed"
           : terminalErrorCode(lastAssistant);
+    const hasProgress = retainedTextChars > 0 || tools.successfulCalls > 0;
     return {
-      outcome: finalOutcome(errorCode, tools, signal),
+      outcome: finalOutcome(errorCode, tools, signal, hasProgress),
       errorCode,
       usage,
       turnCount,
@@ -755,15 +1070,22 @@ export async function executeAgentRun(
     };
   } catch (error) {
     const errorCode = signal.aborted
-      ? "agent_cancelled"
-      : tools.unknownResults > 0
-        ? "agent_tool_result_unknown"
-        : tools.failedCalls > 0
-          ? tools.lastErrorCode ?? "agent_tool_failed"
-          : terminalErrorCode(lastAssistant) ?? "agent_runtime_error";
+      ? signal.reason === "agent_runtime_shutdown"
+        ? "agent_runtime_shutdown"
+        : "agent_cancelled"
+      : safetyState.reason !== null || error instanceof RuntimeSafetyError
+        ? "agent_safety_budget_reached"
+        : dispatchFailure.code !== null
+          ? dispatchFailure.code
+          : tools.unknownResults > 0
+          ? "agent_tool_result_unknown"
+          : tools.failedCalls > 0
+            ? tools.lastErrorCode ?? "agent_tool_failed"
+            : terminalErrorCode(lastAssistant) ?? "agent_runtime_error";
+    const hasProgress = retainedTextChars > 0 || tools.successfulCalls > 0;
     throw new RuntimeExecutionError(
       {
-        outcome: finalOutcome(errorCode, tools, signal),
+        outcome: finalOutcome(errorCode, tools, signal, hasProgress),
         errorCode,
         usage,
         turnCount,
@@ -774,11 +1096,27 @@ export async function executeAgentRun(
       error,
     );
   } finally {
-    signal.removeEventListener("abort", abortListener);
-    unsubscribe();
-    unsubscribeSession();
-    session.dispose();
-    await prepared.close();
+    await pendingSessionCleanup();
+    pendingSessionCleanup = null;
+  }
+  } finally {
+    if (pendingSessionCleanup !== null) {
+      await pendingSessionCleanup();
+    }
+    const [providerCleanup] = await Promise.allSettled([
+      Promise.resolve().then(() => prepared.close()),
+    ]);
+    if (providerCleanup.status === "rejected") {
+      metrics?.cleanupFailures.labels("provider").inc();
+      logRuntime("warn", "agent_runtime.cleanup_failed", {
+        run_id: request.run_id,
+        resource: "provider",
+        error_type:
+          providerCleanup.reason instanceof Error
+            ? providerCleanup.reason.name
+            : "Error",
+      });
+    }
   }
 }
 

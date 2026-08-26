@@ -108,6 +108,10 @@ export function MobileAgent(props: AgentWorkspaceProps) {
                 prompts={props.prompts}
                 saving={props.sessionSaving}
                 onPatch={props.onPatchSession}
+                images={props.sessionImages}
+                imagesLoading={props.sessionImagesLoading}
+                removingImageId={props.sessionImageRemovingId}
+                onEjectImage={props.onEjectSessionImage}
               />
             </div>
           }

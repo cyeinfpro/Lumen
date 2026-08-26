@@ -37,7 +37,7 @@ def build_pi_compaction_checkpoint(
     event: AgentRuntimeEvent,
 ) -> dict[str, Any]:
     if (
-        event.checkpoint_version != 1
+        event.checkpoint_version not in {1, 2}
         or event.pi_runtime_version is None
         or event.summary is None
         or event.first_kept_message_id is None
@@ -46,17 +46,33 @@ def build_pi_compaction_checkpoint(
         or event.usage is None
     ):
         raise ValueError("Pi compaction checkpoint is incomplete")
+    next_message_id = event.next_message_id or run.user_message_id
+    phase = event.phase or "pre_prompt"
+    if phase != "pre_prompt":
+        raise ValueError("Pi compaction placement is unsupported")
+    snapshot = (
+        run.request_snapshot_jsonb
+        if isinstance(run.request_snapshot_jsonb, dict)
+        else {}
+    )
     return {
         "schema_version": event.checkpoint_version,
         "pi_runtime_version": event.pi_runtime_version,
         "summary": event.summary,
         "first_kept_message_id": event.first_kept_message_id,
-        "next_message_id": run.user_message_id,
+        "next_message_id": next_message_id,
         "tokens_before": event.tokens_before,
         "source_run_id": run.id,
         "source_execution_epoch": run.execution_epoch,
         "source_event_seq": event.seq,
-        "reason": "pre_prompt",
+        "reason": phase,
+        "session_revision": event.session_revision,
+        "placement_contract": (
+            "runtime-pre-prompt-only-v1"
+            if event.checkpoint_version == 1
+            and snapshot.get("runtime_request_version") == 2
+            else None
+        ),
         "status": "ready",
         "compacted_at": datetime.now(timezone.utc).isoformat(),
     }

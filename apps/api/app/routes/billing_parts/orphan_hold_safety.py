@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
+from lumen_core.agent_dispatch import provider_dispatch_evidence_count
 from lumen_core.model_entities.billing_operations import WalletTransaction
 from lumen_core.model_entities.agents import AgentRun
 from lumen_core.model_entities.tasks import Completion, Generation, VideoGeneration
@@ -151,6 +152,8 @@ def _hold_release_proof(task: Any, *, ref_type: str) -> str | None:
             if isinstance(getattr(task, "dispatch_jsonb", None), Mapping)
             else {}
         )
+        if provider_dispatch_evidence_count(dict(dispatch)) > 0:
+            return None
         if dispatch.get("runtime_delivery") in {
             "claimed",
             "context_ready",

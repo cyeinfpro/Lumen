@@ -18,6 +18,12 @@ export class RuntimeReadiness {
 
   constructor(private readonly config: RuntimeConfig) {}
 
+  markDraining(): void {
+    this.state.ready = false;
+    this.state.checkedAt = new Date().toISOString();
+    this.state.errorCode = "agent_runtime_draining";
+  }
+
   async check(): Promise<ReadinessState> {
     try {
       if (

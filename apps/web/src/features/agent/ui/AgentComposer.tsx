@@ -119,8 +119,8 @@ export function AgentComposer({
     !isUploading &&
     (draft.text.trim().length > 0 || draft.attachments.length > 0);
   const summary = draft.allowImage
-    ? `${draft.imageDefaults.count} 张 · ${draft.imageDefaults.aspect_ratio} · ${draft.imageDefaults.quality.toUpperCase()}`
-    : "仅文本";
+    ? `输出 ${draft.imageDefaults.count} 张 · ${draft.imageDefaults.aspect_ratio} · ${draft.imageDefaults.quality.toUpperCase()}`
+    : "仅文本输出";
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (
@@ -267,7 +267,9 @@ export function AgentComposer({
           </div>
 
           <div className="flex min-h-8 items-center justify-between gap-2 border-t border-[var(--border-subtle)] px-3 py-1.5">
-            <span className="type-caption text-[var(--fg-2)]">{summary}</span>
+            <span className="type-caption text-[var(--fg-2)]">
+              本轮输入 {draft.attachments.length} 张 · {summary}
+            </span>
             <span className="type-caption tabular-nums text-[var(--fg-3)]">
               {draft.text.length} / 10000
             </span>

@@ -56,6 +56,13 @@ class AgentRuntimeProviderEnvelope(_StrictModel):
     max_output_tokens: int = Field(ge=1, le=128000)
     reasoning_supported: bool
     vision_supported: bool
+    thinking_level_map: (
+        dict[
+            Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+            str | None,
+        ]
+        | None
+    ) = None
 
     @field_validator("resolved_ips")
     @classmethod
@@ -66,10 +73,43 @@ class AgentRuntimeProviderEnvelope(_StrictModel):
             raise ValueError("resolved_ips contains an invalid address") from exc
 
 
+class AgentRuntimeHistoryToolCall(_StrictModel):
+    id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=64)
+    arguments: dict[str, Any] = Field(default_factory=dict, max_length=32)
+
+
+class AgentRuntimeHistoryToolResult(_StrictModel):
+    tool_call_id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=64)
+    text: str = Field(min_length=1, max_length=20000)
+    is_error: bool
+
+
+class AgentRuntimeHistoryImage(_StrictModel):
+    mime_type: Literal["image/png", "image/jpeg", "image/webp"]
+    data_base64: str = Field(min_length=4, max_length=700000, repr=False)
+    estimated_input_tokens: int | None = Field(default=None, ge=1, le=1_000_000)
+
+
 class AgentRuntimeHistoryMessage(_StrictModel):
     message_id: str = Field(min_length=1, max_length=96)
     role: Literal["user", "assistant"]
     text: str = Field(min_length=1, max_length=20000)
+    final_text: str | None = Field(default=None, min_length=1, max_length=20000)
+    api: (
+        Literal["openai-responses", "openai-completions", "anthropic-messages"] | None
+    ) = None
+    provider_id: str | None = Field(default=None, min_length=1, max_length=64)
+    model: str | None = Field(default=None, min_length=1, max_length=256)
+    stop_reason: Literal["stop", "length", "toolUse", "error", "aborted"] | None = None
+    tool_calls: list[AgentRuntimeHistoryToolCall] = Field(
+        default_factory=list, max_length=8
+    )
+    tool_results: list[AgentRuntimeHistoryToolResult] = Field(
+        default_factory=list, max_length=8
+    )
+    images: list[AgentRuntimeHistoryImage] = Field(default_factory=list, max_length=16)
 
 
 class AgentRuntimeCompaction(_StrictModel):
@@ -77,6 +117,8 @@ class AgentRuntimeCompaction(_StrictModel):
     first_kept_message_id: str = Field(min_length=1, max_length=96)
     next_message_id: str = Field(min_length=1, max_length=96)
     tokens_before: int = Field(ge=1, le=2_000_000)
+    phase: Literal["pre_prompt"] | None = None
+    session_revision: int | None = Field(default=None, ge=0)
 
 
 class AgentRuntimeReference(_StrictModel):
@@ -85,6 +127,10 @@ class AgentRuntimeReference(_StrictModel):
     display_label: str | None = Field(default=None, max_length=80)
     mime_type: Literal["image/png", "image/jpeg", "image/webp"]
     data_base64: str = Field(min_length=4, max_length=700000, repr=False)
+    width: int | None = Field(default=None, ge=1, le=8192)
+    height: int | None = Field(default=None, ge=1, le=8192)
+    estimated_input_tokens: int | None = Field(default=None, ge=1, le=1_000_000)
+    token_policy: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class AgentRuntimeImageDefaults(_StrictModel):
@@ -101,8 +147,12 @@ class AgentRuntimeToolPolicy(_StrictModel):
     max_images_per_run: int = Field(ge=1, le=16)
 
 
+class AgentRuntimeSafetyBudget(_StrictModel):
+    max_provider_dispatches: int = Field(ge=1, le=128)
+
+
 class AgentRuntimeRequest(_StrictModel):
-    version: Literal[2] = 2
+    version: Literal[2, 3] = 2
     run_id: str = Field(min_length=1, max_length=96)
     agent_session_id: str = Field(min_length=1, max_length=96)
     user_id: str = Field(min_length=1, max_length=96)
@@ -120,7 +170,7 @@ class AgentRuntimeRequest(_StrictModel):
     history: list[AgentRuntimeHistoryMessage] = Field(max_length=2048)
     compaction: AgentRuntimeCompaction | None = None
     current_prompt: str = Field(min_length=1, max_length=40000)
-    references: list[AgentRuntimeReference] = Field(max_length=64)
+    references: list[AgentRuntimeReference] = Field(max_length=16)
     allowed_tools: list[Literal["lumen_create_image"]] = Field(max_length=1)
     image_defaults: AgentRuntimeImageDefaults
     tool_gateway_url: str | None = Field(default=None, max_length=2048)
@@ -129,6 +179,13 @@ class AgentRuntimeRequest(_StrictModel):
         Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"] | None
     ) = None
     tool_policy: AgentRuntimeToolPolicy
+    provider_dispatch_url: str | None = Field(default=None, max_length=2048)
+    provider_dispatch_capability: str | None = Field(
+        default=None, max_length=8192, repr=False
+    )
+    safety_budget: AgentRuntimeSafetyBudget | None = None
+    operation: Literal["prompt", "continue"] | None = None
+    tool_receipt_version: Literal[2] | None = None
 
     @model_validator(mode="after")
     def validate_bindings(self) -> "AgentRuntimeRequest":
@@ -155,6 +212,15 @@ class AgentRuntimeRequest(_StrictModel):
             raise ValueError("Pi-native Runtime features are incomplete")
         if self.allowed_tools and self.tool_policy.max_image_tool_calls < 1:
             raise ValueError("image tool requires a positive call allowance")
+        if self.provider.thinking_level_map and not self.provider.reasoning_supported:
+            raise ValueError("thinking level map requires reasoning support")
+        if self.operation == "continue" and (self.references or self.allowed_tools):
+            raise ValueError("continuation cannot replay image or paid tool input")
+        dispatch_enabled = bool(
+            self.provider_dispatch_url and self.provider_dispatch_capability
+        )
+        if dispatch_enabled != bool(self.safety_budget):
+            raise ValueError("provider dispatch bindings require a safety budget")
         return self
 
 
@@ -216,10 +282,13 @@ class AgentRuntimeEvent(_StrictModel):
     stop_reason: str | None = Field(default=None, max_length=32)
     tools: list[str] | None = Field(default=None, max_length=1)
     runtime_version: str | None = Field(default=None, max_length=64)
-    checkpoint_version: Literal[1] | None = None
+    checkpoint_version: Literal[1, 2] | None = None
     pi_runtime_version: str | None = Field(default=None, max_length=64)
     summary: str | None = Field(default=None, max_length=48000)
     first_kept_message_id: str | None = Field(default=None, max_length=96)
+    next_message_id: str | None = Field(default=None, max_length=96)
+    phase: Literal["pre_prompt"] | None = None
+    session_revision: int | None = Field(default=None, ge=0)
     tokens_before: int | None = Field(default=None, ge=1, le=2_000_000)
     provider_call_count: int | None = Field(default=None, ge=1, le=2)
     reasoning_effort: (
@@ -250,6 +319,9 @@ class AgentRuntimeEvent(_StrictModel):
             value is None for value in fields
         ):
             raise ValueError("compaction event is incomplete")
+        if self.type == "compaction.completed" and self.checkpoint_version == 2:
+            if self.next_message_id is None or self.phase != "pre_prompt":
+                raise ValueError("compaction v2 placement is incomplete")
         return self
 
 
@@ -412,7 +484,50 @@ def _encoded_runtime_request(payload: dict[str, Any]) -> bytes:
 
 
 def _runtime_request_body(request: AgentRuntimeRequest) -> bytes:
-    return _encoded_runtime_request(request.model_dump(mode="json"))
+    complete_payload = request.model_dump(mode="json")
+    payload = request.model_dump(mode="json", exclude_none=True)
+    for key in (
+        "compaction",
+        "tool_gateway_url",
+        "tool_capability",
+        "reasoning_effort",
+    ):
+        payload[key] = complete_payload[key]
+    if request.version == 2:
+        payload.pop("operation", None)
+        payload.pop("tool_receipt_version", None)
+        provider = payload.get("provider")
+        if isinstance(provider, dict):
+            provider.pop("thinking_level_map", None)
+        compaction = payload.get("compaction")
+        if isinstance(compaction, dict):
+            compaction.pop("phase", None)
+            compaction.pop("session_revision", None)
+        for reference in payload.get("references", []):
+            if not isinstance(reference, dict):
+                continue
+            for key in (
+                "width",
+                "height",
+                "estimated_input_tokens",
+                "token_policy",
+            ):
+                reference.pop(key, None)
+        for history in payload.get("history", []):
+            if not isinstance(history, dict):
+                continue
+            for key in (
+                "api",
+                "provider_id",
+                "model",
+                "stop_reason",
+                "tool_calls",
+                "tool_results",
+                "final_text",
+                "images",
+            ):
+                history.pop(key, None)
+    return _encoded_runtime_request(payload)
 
 
 def sign_runtime_request(
@@ -436,7 +551,7 @@ class AgentRuntimeClient:
     shared_secret: str = field(repr=False)
     connect_timeout_seconds: float = 5.0
     event_idle_timeout_seconds: float = 45.0
-    max_request_bytes: int = 64 * 1024 * 1024
+    max_request_bytes: int = 16 * 1024 * 1024
     max_line_bytes: int = 64 * 1024
     _client: httpx.AsyncClient | None = field(default=None, init=False, repr=False)
 
@@ -484,6 +599,11 @@ class AgentRuntimeClient:
             )
         if on_request_starting is not None:
             await on_request_starting()
+        if cancel_requested is not None and cancel_requested.is_set():
+            raise AgentRuntimeClientError(
+                "agent_cancelled",
+                delivery="proven_absent",
+            )
         try:
             timestamp = str(int(time.time()))
             nonce = secrets.token_urlsafe(24)
@@ -565,11 +685,15 @@ __all__ = [
     "AgentRuntimeCompaction",
     "AgentRuntimeEvent",
     "AgentRuntimeHistoryMessage",
+    "AgentRuntimeHistoryImage",
+    "AgentRuntimeHistoryToolCall",
+    "AgentRuntimeHistoryToolResult",
     "AgentRuntimeImageDefaults",
     "AgentRuntimeToolPolicy",
     "AgentRuntimeProviderEnvelope",
     "AgentRuntimeReference",
     "AgentRuntimeRequest",
+    "AgentRuntimeSafetyBudget",
     "AgentRuntimeUsage",
     "canonical_runtime_request",
     "sign_runtime_request",

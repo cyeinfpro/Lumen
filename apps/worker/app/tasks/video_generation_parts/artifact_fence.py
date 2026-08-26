@@ -144,17 +144,17 @@ async def claim_video_artifact_fence(
     lease_lost: asyncio.Event | None,
     artifact_attempt_id: str,
 ) -> _VideoArtifactFence | None:
-    video_ports()._raise_if_video_lease_lost(
+    video_ports().lease_queue._raise_if_video_lease_lost(
         lease_lost,
         "video poll lease lost before artifact ownership claim",
     )
     await session.refresh(generation, with_for_update=True)
     if (
-        generation.status in video_ports()._TERMINAL_STATUSES
+        generation.status in video_ports().policy._TERMINAL_STATUSES
         or generation.cancel_requested_at is not None
     ):
         return None
-    owner_token = video_ports().new_uuid7()
+    owner_token = video_ports().store.new_uuid7()
     owned_artifact_attempt_id = hashlib.sha256(
         f"{artifact_attempt_id}\0{owner_token}".encode("utf-8")
     ).hexdigest()[:32]
@@ -171,12 +171,12 @@ async def claim_video_artifact_fence(
         state=_VIDEO_ARTIFACT_PENDING
     )
     generation.diagnostics = diagnostics
-    video_ports()._raise_if_video_lease_lost(
+    video_ports().lease_queue._raise_if_video_lease_lost(
         lease_lost,
         "video poll lease lost before artifact ownership commit",
     )
     await session.commit()
-    video_ports()._raise_if_video_lease_lost(
+    video_ports().lease_queue._raise_if_video_lease_lost(
         lease_lost,
         "video poll lease lost after artifact ownership commit",
     )
@@ -189,7 +189,7 @@ async def probe_video_success_adoption(
     video: Video,
     fence: _VideoArtifactFence,
 ) -> ArtifactAdoption:
-    async with video_ports().SessionLocal() as session:
+    async with video_ports().store.SessionLocal() as session:
         generation = await session.get(
             VideoGeneration,
             generation_id,
@@ -208,8 +208,7 @@ async def probe_video_success_adoption(
                 and persisted_video.storage_key == video.storage_key
                 and persisted_video.poster_storage_key == video.poster_storage_key
                 and persisted_video.sha256 == video.sha256
-                and video_fence
-                == fence.payload(state=_VIDEO_ARTIFACT_ADOPTED)
+                and video_fence == fence.payload(state=_VIDEO_ARTIFACT_ADOPTED)
             )
             exact_generation = (
                 generation is not None
@@ -245,7 +244,7 @@ async def finalize_video_success_adoption(
     probe_success_adoption: Callable[..., Awaitable[ArtifactAdoption]],
 ) -> VideoSuccessAdoptionOutcome:
     artifact_attempt_id = fence.artifact_attempt_id
-    video_ports()._raise_if_video_lease_lost(
+    video_ports().lease_queue._raise_if_video_lease_lost(
         lease_lost,
         "video poll lease lost before success row lock",
     )
@@ -255,7 +254,7 @@ async def finalize_video_success_adoption(
         fence,
         states={_VIDEO_ARTIFACT_PENDING},
     ):
-        video_ports().logger.warning(
+        video_ports().operations.logger.warning(
             "video finalization ownership superseded task=%s "
             "epoch=%s attempt=%s owner=%s; artifacts retained",
             generation.id,
@@ -268,8 +267,8 @@ async def finalize_video_success_adoption(
             cleanup_created_artifacts=True,
             release_provider_slot=False,
         )
-    if generation.status in video_ports()._TERMINAL_STATUSES:
-        video_ports().logger.warning(
+    if generation.status in video_ports().policy._TERMINAL_STATUSES:
+        video_ports().operations.logger.warning(
             "video finalization lost terminal race; deterministic artifacts "
             "retained for aged reconciliation task=%s attempt=%s",
             generation.id,
@@ -281,11 +280,11 @@ async def finalize_video_success_adoption(
             release_provider_slot=False,
         )
     if generation.cancel_requested_at is not None:
-        await video_ports()._finish_terminal_failure(
+        await video_ports().billing_events._finish_terminal_failure(
             session,
             redis,
             generation,
-            video_ports()._cancelled_poll_during_finalization(poll),
+            video_ports().operations._cancelled_poll_during_finalization(poll),
             fallback_error_message="video task cancelled by user",
             lease_lost=lease_lost,
         )
@@ -295,7 +294,7 @@ async def finalize_video_success_adoption(
             release_provider_slot=False,
         )
 
-    existing = await video_ports()._video_for_generation(session, generation.id)
+    existing = await video_ports().store._video_for_generation(session, generation.id)
     if existing is None:
         session.add(stored.video)
         await session.flush()
@@ -314,17 +313,17 @@ async def finalize_video_success_adoption(
     )
     video_metadata[_VIDEO_ARTIFACT_FENCE_KEY] = adopted_fence
     video.metadata_jsonb = video_metadata
-    video_ports()._raise_if_video_lease_lost(
+    video_ports().lease_queue._raise_if_video_lease_lost(
         lease_lost,
         "video poll lease lost before billing settlement",
     )
-    resolution = await video_ports().resolve_video_billing(
+    resolution = await video_ports().billing_events.resolve_video_billing(
         session,
         generation,
         poll_result=poll,
         reason="succeeded",
     )
-    video_ports()._raise_if_video_lease_lost(
+    video_ports().lease_queue._raise_if_video_lease_lost(
         lease_lost,
         "video poll lease lost before success mutation",
     )
@@ -336,14 +335,14 @@ async def finalize_video_success_adoption(
     generation.diagnostics = diagnostics
     generation.billed_tokens = resolution.actual_tokens
     generation.billed_cost_micro = resolution.actual_micro
-    generation.finished_at = video_ports()._now()
-    video_ports()._queue_video_event(
+    generation.finished_at = video_ports().operations._now()
+    video_ports().billing_events._queue_video_event(
         session,
         generation,
         EV_VIDEO_SUCCEEDED,
         video_id=video.id,
     )
-    video_ports()._raise_if_video_lease_lost(
+    video_ports().lease_queue._raise_if_video_lease_lost(
         lease_lost,
         "video poll lease lost before success commit",
     )
@@ -354,11 +353,11 @@ async def finalize_video_success_adoption(
             video=video,
             fence=fence,
         ),
-        logger=video_ports().logger,
+        logger=video_ports().operations.logger,
         label=f"video artifact task={generation.id} attempt={artifact_attempt_id}",
     )
     if commit_result.adopted:
-        await video_ports().worker_flush_balance_cache(session)
+        await video_ports().billing_events.worker_flush_balance_cache(session)
         return VideoSuccessAdoptionOutcome(
             terminal_committed=True,
             cleanup_created_artifacts=not adopt_stored_artifacts,
@@ -369,7 +368,7 @@ async def finalize_video_success_adoption(
             commit_result,
             label=f"video artifact task={generation.id}",
         )
-    video_ports().logger.error(
+    video_ports().operations.logger.error(
         "video artifact commit outcome unknown task=%s attempt=%s; "
         "artifacts retained for reconciliation",
         generation.id,
@@ -394,7 +393,7 @@ async def cleanup_video_artifacts_if_owned(
     if not unique_keys:
         return True
     if lease_lost is not None and lease_lost.is_set():
-        video_ports().logger.warning(
+        video_ports().operations.logger.warning(
             "video artifact cleanup deferred after lease loss; deterministic "
             "keys retained for aged sweep task=%s keys=%s",
             generation_id,
@@ -404,7 +403,7 @@ async def cleanup_video_artifacts_if_owned(
     try:
         cleanup_state: str | None = None
         deletable_keys: list[str] = []
-        async with video_ports().SessionLocal() as session:
+        async with video_ports().store.SessionLocal() as session:
             generation = await session.get(
                 VideoGeneration,
                 generation_id,
@@ -418,7 +417,7 @@ async def cleanup_video_artifacts_if_owned(
                     _VIDEO_ARTIFACT_ADOPTED,
                 },
             ):
-                video_ports().logger.warning(
+                video_ports().operations.logger.warning(
                     "video artifact cleanup fenced by durable owner task=%s "
                     "epoch=%s attempt=%s owner=%s keys=%s",
                     generation_id,
@@ -439,7 +438,7 @@ async def cleanup_video_artifacts_if_owned(
                     generation.status == VideoGenerationStatus.SUCCEEDED.value
                     or adopted_video is not None
                 ):
-                    video_ports().logger.error(
+                    video_ports().operations.logger.error(
                         "video artifact cleanup retained inconsistent pending "
                         "adoption task=%s keys=%s",
                         generation_id,
@@ -453,7 +452,7 @@ async def cleanup_video_artifacts_if_owned(
                     or generation.status != VideoGenerationStatus.SUCCEEDED.value
                     or adopted_video is None
                 ):
-                    video_ports().logger.error(
+                    video_ports().operations.logger.error(
                         "video artifact cleanup retained unconfirmed adoption "
                         "task=%s keys=%s",
                         generation_id,
@@ -474,9 +473,9 @@ async def cleanup_video_artifacts_if_owned(
             await session.commit()
 
         if deletable_keys:
-            await video_ports()._delete_video_storage_keys(deletable_keys)
+            await video_ports().store._delete_video_storage_keys(deletable_keys)
         if cleanup_state == _VIDEO_ARTIFACT_PENDING:
-            async with video_ports().SessionLocal() as session:
+            async with video_ports().store.SessionLocal() as session:
                 generation = await session.get(
                     VideoGeneration,
                     generation_id,
@@ -500,7 +499,7 @@ async def cleanup_video_artifacts_if_owned(
                 await session.commit()
         return True
     except Exception as exc:  # noqa: BLE001
-        video_ports().logger.error(
+        video_ports().operations.logger.error(
             "video artifact cleanup ownership check failed closed task=%s "
             "epoch=%s attempt=%s owner=%s keys=%s err=%s",
             generation_id,

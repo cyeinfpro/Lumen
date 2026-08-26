@@ -51,8 +51,7 @@ class NonceCache {
 
   claim(nonce: string, nowMs: number): "claimed" | "replayed" | "full" {
     for (const [key, expiresAt] of this.entries) {
-      if (expiresAt > nowMs) break;
-      this.entries.delete(key);
+      if (expiresAt <= nowMs) this.entries.delete(key);
     }
     if (this.entries.has(nonce)) return "replayed";
     if (this.entries.size >= this.maximum) return "full";

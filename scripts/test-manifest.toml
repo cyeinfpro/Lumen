@@ -2,6 +2,8 @@
 max_reverse_depth = 2
 exclusive_resources = ["postgres", "redis", "filesystem", "web-build"]
 full_mandatory_paths = [
+  "AGENTS.md",
+  "MEMORY.md",
   ".dockerignore",
   ".env.example",
   ".github/workflows/**",
@@ -48,6 +50,7 @@ full_mandatory_paths = [
   "tests/test_governance_evidence.py",
   "tests/test_lint_alembic_breaking.py",
   "tests/test_release_proof.py",
+  "tests/test_repository_agent_instructions.py",
   "scripts/test_impact.py",
   "uv.lock",
   "**/conftest.py",
@@ -189,6 +192,7 @@ paths = [
   "apps/api/app/services/agent_health.py",
   "apps/api/tests/test_admin_dlq_retry.py",
   "apps/api/tests/test_agent_api_foundation.py",
+  "apps/api/tests/test_agent_audit_hardening_migration.py",
   "apps/api/tests/test_agent_postgres_integration.py",
   "apps/api/tests/test_agent_health.py",
   "apps/api/tests/test_health.py",
@@ -199,7 +203,7 @@ paths = [
   "packages/core/tests/test_byok_retention.py",
 ]
 commands = [
-  "uv run pytest -q apps/api/tests/test_agent_health.py apps/api/tests/test_health.py apps/api/tests/test_admin_dlq_retry.py apps/api/tests/test_agent_api_foundation.py apps/api/tests/test_agent_postgres_integration.py apps/api/tests/test_me_security.py apps/api/tests/test_me_export_integrity.py packages/core/tests/test_byok_retention.py",
+  "uv run pytest -q apps/api/tests/test_agent_health.py apps/api/tests/test_health.py apps/api/tests/test_admin_dlq_retry.py apps/api/tests/test_agent_api_foundation.py apps/api/tests/test_agent_audit_hardening_migration.py apps/api/tests/test_agent_postgres_integration.py apps/api/tests/test_me_security.py apps/api/tests/test_me_export_integrity.py packages/core/tests/test_byok_retention.py",
 ]
 gates = ["python-ruff", "backend-architecture", "backend-complexity", "backend-runtime-state"]
 risk = ["readiness", "privacy", "retention", "dlq", "account-deletion"]

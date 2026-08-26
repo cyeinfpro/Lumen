@@ -13,6 +13,7 @@ from .common import BaseOut
 
 
 ProviderPurpose = Literal["chat", "image", "embedding"]
+AgentThinkingLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 
 def _default_provider_purposes() -> list[ProviderPurpose]:
@@ -30,6 +31,23 @@ def _normalize_agent_models(values: list[str]) -> list[str]:
             raise ValueError("agent model id exceeds 256 characters")
         seen.add(value)
         normalized.append(value)
+    return normalized
+
+
+def _normalize_thinking_level_map(
+    value: dict[AgentThinkingLevel, str | None] | None,
+) -> dict[AgentThinkingLevel, str | None] | None:
+    if not value:
+        return None
+    normalized: dict[AgentThinkingLevel, str | None] = {}
+    for level, raw in value.items():
+        if raw is None:
+            normalized[level] = None
+            continue
+        mapped = raw.strip()
+        if not mapped or len(mapped) > 32:
+            raise ValueError("thinking level map values must be short strings or null")
+        normalized[level] = mapped
     return normalized
 
 
@@ -59,6 +77,9 @@ class ProviderItemOut(BaseModel):
     agent_context_window: int = Field(default=128000, ge=4096, le=2_000_000)
     agent_max_output_tokens: int = Field(default=16384, ge=1, le=128000)
     agent_reasoning_supported: bool = True
+    agent_thinking_level_map: dict[AgentThinkingLevel, str | None] | None = Field(
+        default=None, max_length=7
+    )
     image_generations_supported: bool | None = None
     image_responses_supported: bool | None = None
 
@@ -98,9 +119,7 @@ class AdminModelsOut(BaseModel):
 
 
 class AdminProviderModelProfileOut(BaseModel):
-    agent_api: Literal[
-        "openai-responses", "openai-completions", "anthropic-messages"
-    ]
+    agent_api: Literal["openai-responses", "openai-completions", "anthropic-messages"]
     responses_supported: bool | None = None
     vision_supported: bool | None = None
     context_window: int = Field(ge=4096, le=2_000_000)
@@ -160,6 +179,9 @@ class ProviderItemIn(BaseModel):
     agent_context_window: int = Field(default=128000, ge=4096, le=2_000_000)
     agent_max_output_tokens: int = Field(default=16384, ge=1, le=128000)
     agent_reasoning_supported: bool = True
+    agent_thinking_level_map: dict[AgentThinkingLevel, str | None] | None = Field(
+        default=None, max_length=7
+    )
     image_generations_supported: bool | None = None
     image_responses_supported: bool | None = None
 
@@ -167,6 +189,14 @@ class ProviderItemIn(BaseModel):
     @classmethod
     def validate_agent_models(cls, values: list[str]) -> list[str]:
         return _normalize_agent_models(values)
+
+    @field_validator("agent_thinking_level_map")
+    @classmethod
+    def validate_thinking_level_map(
+        cls,
+        value: dict[AgentThinkingLevel, str | None] | None,
+    ) -> dict[AgentThinkingLevel, str | None] | None:
+        return _normalize_thinking_level_map(value)
 
 
 class ProviderProxyIn(BaseModel):

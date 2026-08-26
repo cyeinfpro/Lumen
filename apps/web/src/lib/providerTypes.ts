@@ -10,6 +10,17 @@ export type ProviderAgentApi =
   | "openai-responses"
   | "openai-completions"
   | "anthropic-messages";
+export type ProviderThinkingLevel =
+  | "off"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
+export type ProviderThinkingLevelMap = Partial<
+  Record<ProviderThinkingLevel, string | null>
+>;
 
 export interface ProviderItemOut {
   name: string;
@@ -34,6 +45,7 @@ export interface ProviderItemOut {
   agent_context_window: number;
   agent_max_output_tokens: number;
   agent_reasoning_supported: boolean;
+  agent_thinking_level_map?: ProviderThinkingLevelMap | null;
   image_generations_supported: boolean | null;
   image_responses_supported: boolean | null;
 }
@@ -80,6 +92,7 @@ export interface ProviderItemIn {
   agent_context_window?: number;
   agent_max_output_tokens?: number;
   agent_reasoning_supported?: boolean;
+  agent_thinking_level_map?: ProviderThinkingLevelMap | null;
   image_generations_supported?: boolean | null;
   image_responses_supported?: boolean | null;
 }

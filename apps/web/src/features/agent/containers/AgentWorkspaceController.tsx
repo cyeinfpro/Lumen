@@ -28,35 +28,41 @@ import {
   useAgentActiveRunQuery,
   useAgentMessagesQuery,
   useCancelAgentRunMutation,
+  useContinueAgentRunMutation,
   useCreateAgentSessionMutation,
   useDeleteAgentSessionMutation,
+  useEjectAgentSessionImageMutation,
   usePatchAgentSessionMutation,
+  useAgentSessionImagesQuery,
 } from "../api/queries";
 import { parseAgentEventEnvelope } from "../model/events";
 import { agentErrorPresentation } from "../model/errors";
 import { DesktopAgent } from "../ui/DesktopAgent";
 import { MobileAgent } from "../ui/MobileAgent";
-import { flattenFeed, useStreamFeedQuery, type GenerationSummary } from "@/features/assets";
+import { flattenFeed, useStreamFeedQuery } from "@/features/assets";
 import { useSSE, type SSEHandlers } from "@/features/realtime";
 import { useSystemPromptsQuery } from "@/lib/queries";
 import { qk } from "@/lib/queries/queryKeys";
 import { useUserQueryScope } from "@/lib/queries/userScope";
-import { imageBinaryUrl, imageVariantUrl, uploadImage } from "@/lib/apiClient";
-import { MAX_UPLOAD_SOURCE_BYTES, maxUploadSourceMessage } from "@/lib/uploadLimits";
 import { getPrivateIdentitySnapshot } from "@/lib/auth/privateIdentityEpoch";
-import { lightboxItemForConversationImage } from "@/components/ui/chat/ConversationVisualAtoms";
-import { useUiStore } from "@/store/useUiStore";
 import {
   selectAgentDraft,
   useAgentStore,
 } from "@/store/agent/useAgentStore";
-import type { AttachmentRole, Generation } from "@/lib/types";
+import type { AttachmentRole } from "@/lib/types";
 import {
   useAgentScrollTargetPagination,
   useAgentSessionDirectory,
 } from "./useAgentSessionDirectory";
 import {
+  AgentRefreshCoordinator,
+  selectAgentGenerationChannelIds,
+} from "./agentRealtime";
+import { useAgentSnapshotPolling } from "./useAgentSnapshotPolling";
+import { useAgentMediaActions } from "./useAgentMediaActions";
+import {
   createSessionForSubmission,
+  agentMessageBody,
   acquireAgentSubmissionFence,
   postAgentMessageWithTransportRetry,
   releaseAgentSubmissionFence,
@@ -64,6 +70,7 @@ import {
   stageOptimisticSubmission,
   uniqueAgentId,
 } from "./agentSubmission";
+import type { AgentWorkspaceProps } from "../ui/AgentWorkspace.types";
 
 const GENERATION_EVENT_NAMES = [
   "generation.queued",
@@ -75,6 +82,50 @@ const GENERATION_EVENT_NAMES = [
   "generation.canceled",
   "generation.retrying",
 ] as const;
+
+function snapshotPollInterval(active: boolean): number {
+  return active ? 2_000 : 8_000;
+}
+
+function agentChannels(sessionId: string | null, generationIds: string[]): string[] {
+  if (!sessionId) return [];
+  return [
+    `agent:${sessionId}`,
+    ...generationIds.map((id) => `task:${id}`),
+  ];
+}
+
+function busySessionId(input: {
+  patching: boolean;
+  patchSessionId?: string;
+  deleting: boolean;
+  deleteSessionId?: string;
+}): string | null {
+  if (input.patching) return input.patchSessionId ?? null;
+  if (input.deleting) return input.deleteSessionId ?? null;
+  return null;
+}
+
+function removingImageId(
+  pending: boolean,
+  imageId: string | undefined,
+): string | null {
+  return pending ? imageId ?? null : null;
+}
+
+function AgentWorkspaceView({
+  platform,
+  props,
+}: {
+  platform: "desktop" | "mobile";
+  props: AgentWorkspaceProps;
+}) {
+  return platform === "mobile" ? (
+    <MobileAgent {...props} />
+  ) : (
+    <DesktopAgent {...props} />
+  );
+}
 
 export function AgentWorkspaceController({
   platform,
@@ -89,6 +140,7 @@ export function AgentWorkspaceController({
   const [submitting, setSubmitting] = useState(false);
   const [composerAction, setComposerAction] = useState<{ href: string; label: string } | null>(null);
   const submissionRef = useRef(false);
+  const refreshCoordinator = useMemo(() => new AgentRefreshCoordinator(), []);
 
   const currentSessionId = useAgentStore((state) => state.currentSessionId);
   const messagesBySession = useAgentStore((state) => state.messagesBySession);
@@ -152,6 +204,7 @@ export function AgentWorkspaceController({
 
   const messagesQuery = useAgentMessagesQuery(currentSessionId);
   const activeRunQuery = useAgentActiveRunQuery(currentSessionId);
+  const sessionImagesQuery = useAgentSessionImagesQuery(currentSessionId);
   useEffect(() => {
     if (currentSessionId && messagesQuery.data) {
       for (const page of messagesQuery.data.pages) {
@@ -179,89 +232,56 @@ export function AgentWorkspaceController({
       .sort((left, right) => right.created_at.localeCompare(left.created_at));
     return candidates[0] ?? null;
   }, [currentSessionId, runsById]);
-  const snapshotPollIntervalMs = activeRun ? 2_000 : 8_000;
+  const snapshotPollIntervalMs = snapshotPollInterval(Boolean(activeRun));
   const refreshSnapshot = useCallback(
     async (signal?: AbortSignal) => {
       const sessionId = useAgentStore.getState().currentSessionId;
       if (!sessionId) return;
+      const identity = getPrivateIdentitySnapshot();
       const [snapshot, run] = await Promise.all([
         listAgentMessages(sessionId, { limit: 100, includeTasks: true, signal }),
         getAgentActiveRun(sessionId, signal),
       ]);
-      if (useAgentStore.getState().currentSessionId !== sessionId) return;
+      const currentIdentity = getPrivateIdentitySnapshot();
+      if (
+        useAgentStore.getState().currentSessionId !== sessionId ||
+        currentIdentity.userId !== identity.userId ||
+        currentIdentity.epoch !== identity.epoch
+      ) return;
       applySnapshot(sessionId, snapshot);
       if (run) applyRunSnapshot(run);
     },
     [applyRunSnapshot, applySnapshot],
   );
+  const coordinatedRefresh = useCallback((signal?: AbortSignal) =>
+    refreshCoordinator.request(() => refreshSnapshot(signal)),
+  [refreshCoordinator, refreshSnapshot]);
   const requestRefresh = useCallback(() => {
-    void refreshSnapshot().catch(() => undefined);
-  }, [refreshSnapshot]);
+    void coordinatedRefresh().catch(() => undefined);
+  }, [coordinatedRefresh]);
 
-  useEffect(() => {
-    if (!currentSessionId) return;
-    let timer: number | null = null;
-    let controller: AbortController | null = null;
-    let running = false;
-    const clearTimer = () => {
-      if (timer !== null) window.clearTimeout(timer);
-      timer = null;
-    };
-    const schedule = () => {
-      clearTimer();
-      if (document.visibilityState !== "visible") return;
-      timer = window.setTimeout(run, snapshotPollIntervalMs);
-    };
-    async function run() {
-      if (running || document.visibilityState !== "visible") return;
-      running = true;
-      controller = new AbortController();
-      try {
-        await refreshSnapshot(controller.signal);
-      } catch (error) {
-        if (!(error instanceof Error && error.name === "AbortError")) {
-          setRealtimeStatus("error");
-        }
-      } finally {
-        running = false;
-        controller = null;
-        schedule();
-      }
-    }
-    const onFocus = () => void run();
-    const onVisibility = () => {
-      if (document.visibilityState === "visible") void run();
-      else {
-        clearTimer();
-        controller?.abort();
-      }
-    };
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onVisibility);
-    void run();
-    return () => {
-      clearTimer();
-      controller?.abort();
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onVisibility);
-    };
-  }, [currentSessionId, refreshSnapshot, setRealtimeStatus, snapshotPollIntervalMs]);
+  const pollingInput = useMemo(
+    () => ({
+      sessionId: currentSessionId,
+      intervalMs: snapshotPollIntervalMs,
+      refresh: (signal: AbortSignal) => coordinatedRefresh(signal),
+      setStatus: setRealtimeStatus,
+    }),
+    [currentSessionId, coordinatedRefresh, setRealtimeStatus, snapshotPollIntervalMs],
+  );
+  useAgentSnapshotPolling(pollingInput);
 
   const currentGenerationIds = useMemo(
     () =>
-      Object.keys(generationsById).filter(
-        (id) => generationSessionIds[id] === currentSessionId,
+      selectAgentGenerationChannelIds(
+        generationsById,
+        generationSessionIds,
+        currentSessionId,
       ),
     [currentSessionId, generationSessionIds, generationsById],
   );
   const channels = useMemo(
-    () =>
-      currentSessionId
-        ? [
-            `agent:${currentSessionId}`,
-            ...currentGenerationIds.slice(0, 48).map((id) => `task:${id}`),
-          ]
-        : [],
+    () => agentChannels(currentSessionId, currentGenerationIds),
     [currentGenerationIds, currentSessionId],
   );
   const identityEpoch = getPrivateIdentitySnapshot().epoch;
@@ -302,7 +322,7 @@ export function AgentWorkspaceController({
     },
     recoverSnapshot: async (_scopes, _reason, signal, context) => {
       if (!context.isCurrent()) throw new DOMException("stale Agent scope", "AbortError");
-      await refreshSnapshot(signal);
+      await coordinatedRefresh(signal);
       if (!context.isCurrent()) throw new DOMException("stale Agent scope", "AbortError");
       return { syncedAt: Date.now() };
     },
@@ -313,6 +333,8 @@ export function AgentWorkspaceController({
   const patchMutation = usePatchAgentSessionMutation();
   const deleteMutation = useDeleteAgentSessionMutation();
   const cancelMutation = useCancelAgentRunMutation();
+  const continueMutation = useContinueAgentRunMutation();
+  const ejectImageMutation = useEjectAgentSessionImageMutation();
   const promptsQuery = useSystemPromptsQuery({ enabled: userScope.enabled });
   const assetQuery = useStreamFeedQuery({}, 24);
   const assetItems = useMemo(() => flattenFeed(assetQuery.data), [assetQuery.data]);
@@ -376,18 +398,11 @@ export function AgentWorkspaceController({
         append: appendOptimistic,
         idempotencyKey,
       });
-      const body = {
-        idempotency_key: idempotencyKey,
-        text: sendDraft.text,
-        attachments: sendDraft.attachments.map((attachment) => ({
-          image_id: attachment.imageId,
-          role: attachment.role,
-          label: attachment.label,
-        })),
-        image_defaults: sendDraft.imageDefaults,
-        allow_image: sendDraft.allowImage && toolGatewayConfigured,
-        reasoning_effort: sendDraft.reasoningEffort ?? "max",
-      };
+      const body = agentMessageBody(
+        sendDraft,
+        toolGatewayConfigured,
+        idempotencyKey,
+      );
       const result = await postAgentMessageWithTransportRetry(sessionId, body);
       reconcileSubmission({
         sessionId,
@@ -449,73 +464,34 @@ export function AgentWorkspaceController({
     });
   }, [setDraft]);
 
-  const upload = useCallback(async (file: File, signal: AbortSignal): Promise<AgentDraftAttachment> => {
-    if (!file.type.startsWith("image/")) throw new Error("格式不正确");
-    if (file.size > MAX_UPLOAD_SOURCE_BYTES) throw new Error(maxUploadSourceMessage());
-    const image = await uploadImage(file, { signal });
-    return {
-      imageId: image.id,
-      role: "reference",
-      label: file.name.replace(/\.[^.]+$/, "").slice(0, 40) || null,
-      name: file.name || "上传参考图",
-      previewUrl: image.thumb_url ?? image.preview_url ?? image.url ?? imageVariantUrl(image.id, "thumb256"),
-      width: image.width,
-      height: image.height,
-      mime: image.mime,
-    };
-  }, []);
-
-  const openLightboxFromItems = useUiStore((state) => state.openLightboxFromItems);
-  const previewAttachment = useCallback((attachment: AgentDraftAttachment) => {
-    openLightboxFromItems([{
-      id: attachment.imageId,
-      url: imageBinaryUrl(attachment.imageId),
-      previewUrl: attachment.previewUrl,
-      thumbUrl: attachment.previewUrl,
-      prompt: attachment.name,
-      width: attachment.width,
-      height: attachment.height,
-    }], attachment.imageId);
-  }, [openLightboxFromItems]);
-  const previewGeneration = useCallback((generation: Generation) => {
-    if (!generation.image) return;
-    const item = lightboxItemForConversationImage(generation, generation.image);
-    openLightboxFromItems([item], item.id);
-  }, [openLightboxFromItems]);
-  const addGenerationReference = useCallback((generation: Generation) => {
-    if (!generation.image) return;
-    const added = addDraftAttachment(useAgentStore.getState().currentSessionId, {
-      imageId: generation.image.id,
-      role: "reference",
-      label: "Agent 结果",
-      name: "Agent 结果图",
-      previewUrl: generation.image.thumb_url ?? generation.image.preview_url ?? generation.image.data_url,
-      width: generation.image.width,
-      height: generation.image.height,
-      mime: generation.image.mime,
-    });
-    if (!added) setComposerError("最多添加 16 张参考图，且不能重复添加");
-  }, [addDraftAttachment, setComposerError]);
-  const pickAsset = useCallback((item: GenerationSummary) => {
-    const added = addDraftAttachment(useAgentStore.getState().currentSessionId, {
-      imageId: item.image.id,
-      role: "reference",
-      label: "素材图",
-      name: item.prompt.slice(0, 40) || "素材图",
-      previewUrl: item.image.thumb_url ?? item.image.preview_url ?? item.image.url,
-      width: item.image.width,
-      height: item.image.height,
-      mime: item.image.mime,
-    });
-    if (!added) setComposerError("最多添加 16 张参考图，且不能重复添加");
-  }, [addDraftAttachment, setComposerError]);
+  const {
+    upload,
+    previewAttachment,
+    previewGeneration,
+    addGenerationReference,
+    pickAsset,
+  } = useAgentMediaActions(addDraftAttachment, setComposerError);
 
   const continueFrom = useCallback((assistant: AgentAssistantMessage) => {
-    const parent = messages.find(
-      (message) => message.id === assistant.parentUserMessageId && message.role === "user",
+    if (!assistant.agentRunId) return;
+    const source = useAgentStore.getState().runsById[assistant.agentRunId];
+    if (!source?.continuable || continueMutation.isPending) return;
+    continueMutation.mutate(
+      {
+        runId: source.id,
+        idempotencyKey: uniqueAgentId("agent-continue").slice(0, 96),
+      },
+      {
+        onSuccess: (run) => {
+          applyRunSnapshot(run);
+          requestRefresh();
+        },
+        onError: (error) => {
+          setComposerError(agentErrorPresentation(error).detail);
+        },
+      },
     );
-    if (parent?.role === "user") setDraftText(currentSessionId, parent.text);
-  }, [currentSessionId, messages, setDraftText]);
+  }, [applyRunSnapshot, continueMutation, requestRefresh, setComposerError]);
 
   const workspaceProps = {
     sessions: sidebarSessions,
@@ -535,16 +511,23 @@ export function AgentWorkspaceController({
     creating: createMutation.isPending,
     submitting,
     stopping: cancelMutation.isPending,
-    busySessionId: patchMutation.isPending
-      ? patchMutation.variables?.sessionId ?? null
-      : deleteMutation.isPending
-        ? deleteMutation.variables ?? null
-        : null,
+    busySessionId: busySessionId({
+      patching: patchMutation.isPending,
+      patchSessionId: patchMutation.variables?.sessionId,
+      deleting: deleteMutation.isPending,
+      deleteSessionId: deleteMutation.variables,
+    }),
     activeRun,
     realtimeStatus,
     toolGatewayConfigured,
     prompts: (promptsQuery.data?.items ?? []).map((prompt) => ({ id: prompt.id, name: prompt.name })),
     sessionSaving: patchMutation.isPending,
+    sessionImages: sessionImagesQuery.data ?? null,
+    sessionImagesLoading: sessionImagesQuery.isLoading,
+    sessionImageRemovingId: removingImageId(
+      ejectImageMutation.isPending,
+      ejectImageMutation.variables?.imageId,
+    ),
     scrollToMessageId,
     assetItems,
     assetsLoading: assetQuery.isLoading || assetQuery.isFetchingNextPage,
@@ -564,6 +547,18 @@ export function AgentWorkspaceController({
       ),
     onDeleteSession: deleteSession,
     onPatchSession: patchSession,
+    onEjectSessionImage: (imageId: string) => {
+      const sessionId = useAgentStore.getState().currentSessionId;
+      if (!sessionId) return;
+      ejectImageMutation.mutate(
+        { sessionId, imageId },
+        {
+          onError: (error) => {
+            setComposerError(agentErrorPresentation(error).detail);
+          },
+        },
+      );
+    },
     onRetryMessages: () => {
       void messagesQuery.refetch();
       reconnect();
@@ -592,9 +587,5 @@ export function AgentWorkspaceController({
     },
   };
 
-  return platform === "mobile" ? (
-    <MobileAgent {...workspaceProps} />
-  ) : (
-    <DesktopAgent {...workspaceProps} />
-  );
+  return <AgentWorkspaceView platform={platform} props={workspaceProps} />;
 }

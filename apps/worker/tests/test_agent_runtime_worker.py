@@ -11,8 +11,11 @@ import httpx
 import pytest
 from arq.worker import Worker
 from PIL import Image as PILImage
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app import agent_context as agent_context_module
+from app import agent_reference_previews as agent_reference_previews_module
+from app import agent_memory_context as agent_memory_context_module
 from app import main
 from app import observability as worker_observability
 from app.agent_billing import agent_usage_tokens
@@ -20,7 +23,10 @@ from app.billing_parts.helpers import generation_agent_billing_meta
 from app.agent_context import (
     AgentContextError,
     _capability,
+    _current_turn_reference_rows,
+    _current_prompt,
     _encode_reference_preview,
+    _memory_context,
     _pack_history,
     _reference_visible_after,
     _runtime_tool_policy,
@@ -37,8 +43,10 @@ from app.agent_runtime_client import (
     AgentRuntimeImageDefaults,
     AgentRuntimeToolPolicy,
     AgentRuntimeProviderEnvelope,
+    AgentRuntimeReference,
     AgentRuntimeRequest,
     _next_stream_chunk,
+    _runtime_request_body,
     canonical_runtime_request,
     sign_runtime_request,
 )
@@ -46,7 +54,17 @@ from app.tasks.agent_run_parts.contracts import AgentRuntimeAccumulator
 from app.tasks.agent_run_parts import orchestrator as agent_orchestrator
 from app.tasks.agent_run_parts.orchestrator import _terminal_request
 from app.tasks.agent_run_parts.persistence import _repair_tools
-from lumen_core.model_entities import AgentToolCall, Generation, Message
+from lumen_core.model_base import Base
+from lumen_core.model_entities import (
+    AgentRunReference,
+    AgentToolCall,
+    Conversation,
+    Generation,
+    Image,
+    ImageVariant,
+    Message,
+    User,
+)
 from lumen_core.agent_capability import verify_agent_capability
 
 
@@ -241,6 +259,44 @@ async def test_runtime_client_validates_signed_monotonic_terminal_stream() -> No
 
 
 @pytest.mark.asyncio
+async def test_runtime_client_rechecks_cancellation_after_starting_fence() -> None:
+    requests = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(500)
+
+    client = AgentRuntimeClient(
+        base_url="http://agent-runtime:8090",
+        shared_secret=TEST_SECRET,
+    )
+    client._client = httpx.AsyncClient(  # noqa: SLF001
+        base_url=client.base_url,
+        transport=httpx.MockTransport(handler),
+    )
+    cancelled = asyncio.Event()
+
+    async def cancel_at_fence() -> None:
+        cancelled.set()
+
+    with pytest.raises(AgentRuntimeClientError) as captured:
+        _ = [
+            event
+            async for event in client.stream(
+                _request(),
+                cancel_requested=cancelled,
+                on_request_starting=cancel_at_fence,
+            )
+        ]
+    await client.close()
+
+    assert captured.value.code == "agent_cancelled"
+    assert captured.value.delivery == "proven_absent"
+    assert requests == 0
+
+
+@pytest.mark.asyncio
 async def test_runtime_client_refuses_to_downgrade_pi_native_lifecycle() -> None:
     payloads: list[dict[str, Any]] = []
     checkpoint_summary = "😀" * 15_000
@@ -302,6 +358,54 @@ async def test_runtime_client_refuses_to_downgrade_pi_native_lifecycle() -> None
         "max_image_tool_calls": 2,
         "max_images_per_run": 4,
     }
+    assert "operation" not in payloads[0]
+    assert "thinking_level_map" not in payloads[0]["provider"]
+    assert "tool_calls" not in payloads[0]["history"][0]
+
+
+def test_runtime_v3_serializes_typed_optional_fields_receiver_first() -> None:
+    request = _request().model_copy(
+        update={
+            "version": 3,
+            "operation": "prompt",
+            "provider": _request().provider.model_copy(
+                update={"thinking_level_map": {"max": "max"}}
+            ),
+            "history": [
+                AgentRuntimeHistoryMessage(
+                    message_id="assistant-1",
+                    role="assistant",
+                    text="tool turn",
+                    api="openai-responses",
+                    provider_id="provider-history",
+                    model="model-history",
+                    stop_reason="toolUse",
+                    tool_calls=[
+                        {
+                            "id": "tool-1",
+                            "name": "lumen_create_image",
+                            "arguments": {"prompt": "x"},
+                        }
+                    ],
+                    tool_results=[
+                        {
+                            "tool_call_id": "tool-1",
+                            "name": "lumen_create_image",
+                            "text": '{"status":"succeeded"}',
+                            "is_error": False,
+                        }
+                    ],
+                )
+            ],
+        }
+    )
+
+    payload = json.loads(_runtime_request_body(request))
+
+    assert payload["version"] == 3
+    assert payload["operation"] == "prompt"
+    assert payload["provider"]["thinking_level_map"] == {"max": "max"}
+    assert payload["history"][0]["tool_calls"][0]["id"] == "tool-1"
 
 
 @pytest.mark.asyncio
@@ -548,8 +652,121 @@ def test_agent_history_projection_omits_image_ids_and_raw_tool_payloads() -> Non
     assert "private stack" not in projected.text
 
 
+def test_agent_history_projection_preserves_typed_tool_call_and_result() -> None:
+    message = Message(
+        id="assistant-history",
+        conversation_id="conversation-1",
+        role="assistant",
+        content={"text": "Image accepted."},
+    )
+    run = SimpleNamespace(
+        provider_name="provider-a",
+        model="model-a",
+        dispatch_jsonb={"provider_api": "openai-responses"},
+    )
+    tool = SimpleNamespace(
+        pi_tool_call_id="pi-tool-1",
+        name="lumen_create_image",
+        arguments_jsonb={"prompt": "campaign image"},
+        result_jsonb={"generation_ids": ["generation-1"]},
+        status="succeeded",
+        mode="text_to_image",
+        error_code=None,
+    )
+
+    projected = project_history_message(message, run=run, tool_rows=[tool])
+
+    assert projected is not None
+    assert projected.api == "openai-responses"
+    assert projected.model == "model-a"
+    assert projected.stop_reason == "toolUse"
+    assert projected.tool_calls[0].arguments == {"prompt": "campaign image"}
+    assert projected.tool_results[0].is_error is False
+    assert "generation-1" in projected.tool_results[0].text
+
+
+def test_context_packing_counts_typed_tool_arguments_and_results() -> None:
+    message = Message(
+        id="assistant-tool-budget",
+        conversation_id="conversation-1",
+        role="assistant",
+        content={"text": "Image accepted."},
+    )
+    run = SimpleNamespace(
+        id="run-tool-budget",
+        provider_name="provider-a",
+        model="model-a",
+        dispatch_jsonb={"provider_api": "openai-responses"},
+    )
+    tool = SimpleNamespace(
+        pi_tool_call_id="pi-tool-budget",
+        name="lumen_create_image",
+        arguments_jsonb={"prompt": "x" * 20_000},
+        result_jsonb={"generation_ids": ["generation-1"]},
+        status="succeeded",
+        mode="text_to_image",
+        error_code=None,
+    )
+    provider = _request().provider.model_copy(
+        update={"context_window": 4096, "max_output_tokens": 128}
+    )
+
+    with pytest.raises(AgentContextError) as captured:
+        _pack_history(
+            [message],
+            provider=provider,
+            system_prompt="system",
+            current_prompt="current",
+            max_output_tokens=128,
+            runs_by_assistant={message.id: run},
+            tools_by_run={run.id: [tool]},
+        )
+
+    assert captured.value.code == "agent_context_window_exceeded"
+
+
+def test_history_projection_preserves_image_blocks_without_binary_placeholder() -> None:
+    message = Message(
+        id="user-history-image",
+        conversation_id="conversation-1",
+        role="user",
+        content={
+            "text": "Use this image",
+            "attachments": [{"image_id": "private-image", "role": "reference"}],
+        },
+    )
+    preview = AgentRuntimeReference(
+        reference_label="ref_1",
+        role="reference",
+        display_label=None,
+        mime_type="image/webp",
+        data_base64="dGVzdA==",
+        estimated_input_tokens=512,
+    )
+
+    projected = project_history_message(message, image_previews=[preview])
+
+    assert projected is not None
+    assert projected.images[0].data_base64 == "dGVzdA=="
+    assert "binary omitted" not in projected.text
+
+
+def test_current_prompt_preserves_complete_user_tail_before_optional_context() -> None:
+    user = Message(
+        id="prompt-user",
+        conversation_id="conversation-1",
+        role="user",
+        content={"text": "request-start " + "x" * 9_950 + " request-tail"},
+    )
+
+    prompt = _current_prompt(user, [], "memory " * 10_000)
+
+    assert len(prompt) <= 40_000
+    assert prompt.endswith("request-tail")
+
+
 @pytest.mark.asyncio
-async def test_gpt_56_agent_envelope_preserves_context_and_defaults_to_max() -> None:
+async def test_gpt_56_agent_envelope_preserves_context_and_defaults_to_auto() -> None:
     provider = SimpleNamespace(
         name="provider",
         proxy=None,
@@ -569,7 +786,7 @@ async def test_gpt_56_agent_envelope_preserves_context_and_defaults_to_max() -> 
     )
 
     assert envelope.context_window == 128_000
-    assert effort == "max"
+    assert effort is None
     provider.agent_context_window = 272_000
     assert (
         await provider_envelope(provider, model="gpt-5.6-sol")
@@ -597,6 +814,189 @@ def test_reference_preview_is_valid_bounded_webp_and_rejects_invalid_bytes() -> 
     with pytest.raises(AgentContextError) as captured:
         _encode_reference_preview(b"not-an-image", 64 * 1024)
     assert captured.value.code == "agent_reference_preview_invalid"
+
+
+def test_current_turn_reference_selection_excludes_catalog_from_text_turns() -> None:
+    rows = [
+        SimpleNamespace(image_id="image-1", reference_label="ref_1"),
+        SimpleNamespace(image_id="image-2", reference_label="ref_2"),
+    ]
+    text_only = Message(
+        id="message-text-only",
+        conversation_id="conversation-1",
+        role="user",
+        content={"text": "continue", "attachments": []},
+    )
+    selected = Message(
+        id="message-selected",
+        conversation_id="conversation-1",
+        role="user",
+        content={
+            "text": "use one",
+            "attachments": [{"image_id": "image-2"}],
+        },
+    )
+
+    assert _current_turn_reference_rows(text_only, rows) == []
+    assert _current_turn_reference_rows(selected, rows) == [rows[1]]
+
+
+@pytest.mark.asyncio
+async def test_agent_memory_failure_is_retried_and_reported_degraded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    async def fail_memory(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("memory unavailable")
+
+    monkeypatch.setattr(
+        agent_memory_context_module.memory_extraction,
+        "assemble_user_memory_prompt",
+        fail_memory,
+    )
+    result = await _memory_context(
+        SimpleNamespace(),
+        run=SimpleNamespace(id="run-1", user_id="user-1"),
+        conversation=SimpleNamespace(id="conversation-1", memory_disabled=False),
+        current_user=SimpleNamespace(id="message-1", content={"text": "hello"}),
+        redis=object(),
+    )
+
+    assert attempts == 2
+    assert result == ([], [], "", "", "degraded")
+
+
+@pytest.mark.asyncio
+async def test_memory_integrity_failure_does_not_poison_context_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'memory.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            lambda sync: Base.metadata.create_all(
+                sync, tables=[User.__table__, Conversation.__table__]
+            )
+        )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as seed:
+        user = User(
+            id="memory-user",
+            email="memory@example.test",
+            display_name="Memory",
+            account_mode="wallet",
+        )
+        conversation = Conversation(
+            id="memory-conversation",
+            user_id=user.id,
+            title="Memory",
+            default_params={},
+        )
+        seed.add_all([user, conversation])
+        await seed.commit()
+
+    attempts = 0
+
+    async def fail_with_integrity(session, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        session.add(
+            User(
+                id="memory-user",
+                email=f"duplicate-{attempts}@example.test",
+                display_name="Duplicate",
+                account_mode="wallet",
+            )
+        )
+        await session.flush()
+
+    monkeypatch.setattr(agent_memory_context_module, "SessionLocal", factory)
+    monkeypatch.setattr(
+        agent_memory_context_module.memory_extraction,
+        "assemble_user_memory_prompt",
+        fail_with_integrity,
+    )
+    async with factory() as context_db:
+        conversation = await context_db.get(Conversation, "memory-conversation")
+        assert conversation is not None
+        result = await _memory_context(
+            context_db,
+            run=SimpleNamespace(id="run-memory", user_id="memory-user"),
+            conversation=conversation,
+            current_user=SimpleNamespace(id="message-1", content={"text": "hello"}),
+            redis=object(),
+        )
+        assert result[-1] == "degraded"
+        assert (
+            await context_db.scalar(select(User.id).where(User.id == "memory-user"))
+            == "memory-user"
+        )
+    assert attempts == 2
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stale_starting_fence_prevents_runtime_http_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dispatched = False
+    finished_error: AgentRuntimeClientError | None = None
+
+    class RuntimeClient:
+        async def stream(self, _request: Any, **kwargs: Any):
+            nonlocal dispatched
+            await kwargs["on_request_starting"]()
+            dispatched = True
+            if False:
+                yield None
+
+    class Background:
+        cancel_requested = asyncio.Event()
+
+        async def close(self) -> None:
+            return None
+
+    async def stale_fence(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    async def finish_failure(_state: Any, error: AgentRuntimeClientError) -> None:
+        nonlocal finished_error
+        finished_error = error
+
+    monkeypatch.setattr(agent_orchestrator, "update_dispatch_state", stale_fence)
+    monkeypatch.setattr(
+        agent_orchestrator._BackgroundTasks,
+        "start",
+        lambda _state: Background(),
+    )
+    monkeypatch.setattr(agent_orchestrator, "_finish_runtime_failure", finish_failure)
+    state = agent_orchestrator._PreparedExecution(
+        ctx={},
+        redis=object(),
+        runtime_client=RuntimeClient(),
+        claim=SimpleNamespace(run_id="run-1", execution_epoch=2),
+        accumulator=AgentRuntimeAccumulator(),
+        build=SimpleNamespace(
+            request=SimpleNamespace(
+                agent_session_id="session-1",
+                trace_id="0" * 32,
+                user_id="user-1",
+                provider=SimpleNamespace(model="model-1"),
+            ),
+            provider=SimpleNamespace(name="provider-1"),
+        ),
+        pool=None,
+    )
+
+    await agent_orchestrator._run_prepared_execution(state)
+
+    assert dispatched is False
+    assert finished_error is not None
+    assert finished_error.code == "agent_stale_execution_epoch"
+    assert finished_error.delivery == "proven_absent"
 
 
 def _running_tool(tool_id: str) -> AgentToolCall:
@@ -687,6 +1087,7 @@ def test_agent_usage_and_runtime_accumulator_are_cache_aware() -> None:
     assert accumulator.response_proves_no_cost is True
     accumulator.provider_response_statuses.append(500)
     assert accumulator.response_proves_no_cost is False
+
 
 def test_agent_usage_is_monotonic_and_later_unknown_dispatch_stays_unknown() -> None:
     accumulator = AgentRuntimeAccumulator()
@@ -814,7 +1215,7 @@ def test_agent_history_is_passed_complete_for_pi_native_compaction() -> None:
             id=f"message-{index:03d}",
             conversation_id="conversation-context",
             role="assistant" if index % 2 else "user",
-            content={"text": "context " * 1000},
+            content={"text": "context " * 500},
         )
         for index in range(130)
     ]
@@ -834,6 +1235,32 @@ def test_agent_history_is_passed_complete_for_pi_native_compaction() -> None:
     assert len(packed) == len(rows)
 
 
+def test_agent_history_over_direct_limit_is_admitted_for_pi_pre_prompt_compaction() -> None:
+    rows = [
+        Message(
+            id=f"compaction-message-{index:03d}",
+            conversation_id="conversation-compaction-plan",
+            role="assistant" if index % 2 else "user",
+            content={"text": "x" * 4_000},
+        )
+        for index in range(85)
+    ]
+    provider = _request().provider.model_copy(
+        update={"context_window": 128_000, "max_output_tokens": 16_384}
+    )
+
+    packed = _pack_history(
+        rows,
+        provider=provider,
+        system_prompt="s" * 22_000,
+        current_prompt="c" * 22_000,
+        max_output_tokens=16_384,
+        reference_count=0,
+    )
+
+    assert len(packed) == len(rows)
+
+
 @pytest.mark.asyncio
 async def test_agent_reference_retention_is_rechecked_at_execution(
     monkeypatch: pytest.MonkeyPatch,
@@ -847,7 +1274,7 @@ async def test_agent_reference_retention_is_rechecked_at_execution(
         }.get(key, default)
 
     monkeypatch.setattr(
-        agent_context_module.runtime_settings,
+        agent_reference_previews_module.runtime_settings,
         "resolve_int",
         resolve_int,
     )
@@ -859,6 +1286,116 @@ async def test_agent_reference_retention_is_rechecked_at_execution(
     assert before.timestamp() - visible_after.timestamp() <= 3 * 86400
     assert after.timestamp() - visible_after.timestamp() >= 3 * 86400
     assert after.timestamp() - visible_after.timestamp() < 3 * 86400 + 1
+
+
+@pytest.mark.asyncio
+async def test_agent_reference_preview_cache_hit_skips_storage_and_pil(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = Image(
+        id="preview-cache-image",
+        user_id="preview-cache-user",
+        storage_key="images/original.webp",
+        source="upload",
+        width=32,
+        height=16,
+        mime="image/webp",
+        size_bytes=128,
+        sha256="a" * 64,
+        artifact_status="ready",
+    )
+    variant = ImageVariant(
+        id="preview-cache-variant",
+        image_id=image.id,
+        kind="preview1024",
+        storage_key="images/preview.webp",
+        width=32,
+        height=16,
+    )
+    reference = AgentRunReference(
+        agent_run_id="preview-cache-run",
+        user_id=image.user_id,
+        image_id=image.id,
+        ordinal=0,
+        reference_label="ref_1",
+        role="reference",
+        display_label=None,
+    )
+
+    class Result:
+        def __init__(self, rows: list[object]) -> None:
+            self.rows = rows
+
+        def scalars(self) -> "Result":
+            return self
+
+        def all(self) -> list[object]:
+            return self.rows
+
+    class Db:
+        calls = 0
+
+        async def execute(self, _statement: object) -> Result:
+            self.calls += 1
+            return Result([image] if self.calls % 2 else [variant])
+
+    class Redis:
+        values: dict[str, str] = {}
+
+        async def get(self, key: str) -> str | None:
+            return self.values.get(key)
+
+        async def set(self, key: str, value: str, **_kwargs: object) -> None:
+            self.values[key] = value
+
+    source = io.BytesIO()
+    PILImage.new("RGB", (32, 16), (10, 20, 30)).save(source, format="WEBP")
+    storage_reads = 0
+
+    async def read_storage(_key: str) -> bytes:
+        nonlocal storage_reads
+        storage_reads += 1
+        return source.getvalue()
+
+    monkeypatch.setattr(
+        agent_reference_previews_module.storage,
+        "aget_bytes",
+        read_storage,
+    )
+    db = Db()
+    redis = Redis()
+    first = await agent_reference_previews_module.reference_previews(
+        db,  # type: ignore[arg-type]
+        [reference],
+        run_user_id=image.user_id,
+        visible_after=None,
+        provider_api="openai-responses",
+        redis=redis,
+    )
+
+    async def unexpected_storage(_key: str) -> bytes:
+        raise AssertionError("storage must not be read on preview cache hit")
+
+    def unexpected_pil(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("PIL must not run on preview cache hit")
+
+    monkeypatch.setattr(
+        agent_reference_previews_module.storage,
+        "aget_bytes",
+        unexpected_storage,
+    )
+    monkeypatch.setattr(agent_reference_previews_module.PILImage, "open", unexpected_pil)
+    second = await agent_reference_previews_module.reference_previews(
+        db,  # type: ignore[arg-type]
+        [reference],
+        run_user_id=image.user_id,
+        visible_after=None,
+        provider_api="openai-responses",
+        redis=redis,
+    )
+
+    assert storage_reads == 1
+    assert second == first
 
 
 def test_context_packing_rejects_fixed_content_above_model_window() -> None:
@@ -908,12 +1445,15 @@ async def test_capability_ttl_covers_the_complete_run_and_tool_window(
             },
         },
     )
-    _url, token = await _capability(
+    callback_base = "http://api-green:8000/internal/agent"
+    run.request_snapshot_jsonb["internal_agent_callback_base_url"] = callback_base
+    url, token = await _capability(
         Db(),  # type: ignore[arg-type]
         run,  # type: ignore[arg-type]
         references=[],
         tools=["lumen_create_image"],
     )
+    assert url == f"{callback_base}/runs/{run.id}/tools/create-image"
     assert token is not None
     claims = verify_agent_capability(secret, token)
     assert claims.expires_at - claims.issued_at == 86_400
@@ -1035,8 +1575,7 @@ def test_run_agent_is_registered_with_worker_and_outbox_contract() -> None:
     agent_functions = [
         function
         for function in main.WorkerSettings.functions
-        if getattr(function, "__name__", getattr(function, "name", ""))
-        == "run_agent"
+        if getattr(function, "__name__", getattr(function, "name", "")) == "run_agent"
     ]
     assert len(agent_functions) == 1
     assert (

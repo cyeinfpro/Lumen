@@ -24,6 +24,21 @@ const ERROR_PRESENTATIONS: Record<string, AgentErrorPresentation> = {
     detail: "已保留当前结果，可以继续生成。",
     recoverable: true,
   },
+  agent_output_truncated: {
+    title: "输出达到长度限制",
+    detail: "已保留当前结果，可从同一 Agent 会话继续。",
+    recoverable: true,
+  },
+  agent_safety_budget_reached: {
+    title: "运行达到安全上限",
+    detail: "已保留当前文本和已接受的任务。",
+    recoverable: true,
+  },
+  agent_runtime_shutdown: {
+    title: "Agent 服务维护中",
+    detail: "已保留当前结果，服务恢复后可继续。",
+    recoverable: true,
+  },
   agent_runtime_event_timeout: {
     title: "运行连接超时",
     detail: "已保留当前结果，可以继续生成。",
@@ -69,6 +84,16 @@ const ERROR_PRESENTATIONS: Record<string, AgentErrorPresentation> = {
     detail: "已保留当前文本和图片任务。",
     recoverable: false,
   },
+  agent_tool_limit_reached: {
+    title: "生图调用达到上限",
+    detail: "已保留当前文本和已接受的图片任务。",
+    recoverable: false,
+  },
+  agent_image_limit_reached: {
+    title: "生图数量达到上限",
+    detail: "已保留当前文本和已接受的图片任务。",
+    recoverable: false,
+  },
   agent_reference_limit_reached: {
     title: "参考图超过上限",
     detail: "Agent 每条消息最多使用 16 张参考图。",
@@ -76,7 +101,12 @@ const ERROR_PRESENTATIONS: Record<string, AgentErrorPresentation> = {
   },
   agent_session_reference_limit_reached: {
     title: "会话图片达到上限",
-    detail: "当前 Agent 会话已保留 64 张图片，请新建会话继续。",
+    detail: "当前 Agent 会话已保留 64 张图片，请先移除不再使用的图片。",
+    recoverable: false,
+  },
+  agent_run_not_continuable: {
+    title: "无法安全继续",
+    detail: "该运行包含图片或工具状态，请编辑后重新提交。",
     recoverable: false,
   },
   INSUFFICIENT_BALANCE: {

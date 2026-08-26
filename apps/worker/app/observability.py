@@ -132,8 +132,7 @@ def _scrub_stacktrace_variables(event: dict[str, Any]) -> None:
             if not isinstance(frame, dict) or not isinstance(frame.get("vars"), dict):
                 continue
             frame["vars"] = {
-                key: _scrub_value(key, value)
-                for key, value in frame["vars"].items()
+                key: _scrub_value(key, value) for key, value in frame["vars"].items()
             }
 
 
@@ -289,6 +288,13 @@ task_reconcile_lease_unknown_total = _metric(
     Counter,
     "lumen_task_reconcile_lease_unknown_total",
     "Task reconciler lease reads that could not determine ownership.",
+    labelnames=("kind",),
+)
+
+generation_lease_secondary_refresh_failures_total = _metric(
+    Counter,
+    "lumen_generation_lease_secondary_refresh_failures_total",
+    "Best-effort generation lease metadata refresh failures.",
     labelnames=("kind",),
 )
 
@@ -735,6 +741,7 @@ __all__ = [
     "billing_idempotency_replay_total",
     "completion_cancel_check_errors_total",
     "task_reconcile_lease_unknown_total",
+    "generation_lease_secondary_refresh_failures_total",
     "agent_runs_total",
     "agent_run_duration_seconds",
     "agent_turns_histogram",

@@ -9,6 +9,7 @@ import {
 
 const STORAGE_KEY = "lumen.agent.drafts.v1";
 const REASONING_EFFORTS = new Set([
+  "auto",
   "none",
   "minimal",
   "low",
@@ -37,9 +38,19 @@ interface PersistedDraft {
 }
 
 interface PersistedEnvelope {
-  version: 1;
+  version: 1 | 2;
   ownerUserId: string;
   drafts: Record<string, PersistedDraft>;
+}
+
+function restoredReasoningEffort(
+  version: PersistedEnvelope["version"],
+  effort: AgentDraft["reasoningEffort"],
+): AgentDraft["reasoningEffort"] {
+  if (typeof effort !== "string" || !REASONING_EFFORTS.has(effort)) {
+    return "auto";
+  }
+  return version === 1 && effort === "max" ? "auto" : effort;
 }
 
 function attachmentPreviewUrl(imageId: string): string {
@@ -68,7 +79,7 @@ export function serializeAgentDrafts(
     Object.entries(drafts).map(([key, draft]) => [key, persistedDraft(draft)]),
   );
   return JSON.stringify({
-    version: 1,
+    version: 2,
     ownerUserId,
     drafts: safeDrafts,
   } satisfies PersistedEnvelope);
@@ -82,7 +93,7 @@ export function deserializeAgentDrafts(
   try {
     const parsed = JSON.parse(raw) as Partial<PersistedEnvelope>;
     if (
-      parsed.version !== 1 ||
+      (parsed.version !== 1 && parsed.version !== 2) ||
       parsed.ownerUserId !== ownerUserId ||
       !parsed.drafts ||
       typeof parsed.drafts !== "object"
@@ -116,11 +127,10 @@ export function deserializeAgentDrafts(
         attachments,
         allowImage: draft.allowImage !== false,
         imageDefaults: draft.imageDefaults,
-        reasoningEffort:
-          typeof draft.reasoningEffort === "string" &&
-          REASONING_EFFORTS.has(draft.reasoningEffort)
-            ? draft.reasoningEffort
-            : "max",
+        reasoningEffort: restoredReasoningEffort(
+          parsed.version,
+          draft.reasoningEffort,
+        ),
       });
     }
     return drafts;

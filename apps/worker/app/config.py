@@ -172,7 +172,7 @@ class Settings(BaseSettings):
     agent_runtime_heartbeat_interval_seconds: float = Field(default=15.0, ge=1, le=60)
     agent_runtime_event_idle_timeout_seconds: float = Field(default=90.0, gt=0, le=300)
     agent_runtime_max_request_bytes: int = Field(
-        default=64 * 1024 * 1024,
+        default=16 * 1024 * 1024,
         ge=64 * 1024,
         le=64 * 1024 * 1024,
     )

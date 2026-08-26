@@ -5,6 +5,238 @@ import {
   openAgent,
 } from "./agent-fixture";
 
+test("mounted Agent workspace closes its replaced EventSource", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const lifecycle = { created: [] as string[], closed: [] as string[] };
+    Object.defineProperty(window, "__agentEventSourceLifecycle", {
+      configurable: true,
+      value: lifecycle,
+    });
+    class ControlledEventSource extends EventTarget {
+      static readonly CONNECTING = 0;
+      static readonly OPEN = 1;
+      static readonly CLOSED = 2;
+      readonly CONNECTING = 0;
+      readonly OPEN = 1;
+      readonly CLOSED = 2;
+      readonly url: string;
+      readonly withCredentials = true;
+      readyState = ControlledEventSource.OPEN;
+      onerror: ((event: Event) => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onopen: ((event: Event) => void) | null = null;
+
+      constructor(url: string | URL) {
+        super();
+        this.url = String(url);
+        lifecycle.created.push(this.url);
+        queueMicrotask(() => {
+          if (this.readyState !== ControlledEventSource.OPEN) return;
+          const event = new Event("open");
+          this.onopen?.(event);
+          this.dispatchEvent(event);
+        });
+      }
+
+      close() {
+        if (this.readyState === ControlledEventSource.CLOSED) return;
+        this.readyState = ControlledEventSource.CLOSED;
+        lifecycle.closed.push(this.url);
+      }
+    }
+    Object.defineProperty(window, "EventSource", {
+      configurable: true,
+      value: ControlledEventSource,
+    });
+  });
+  await installAgentFixture(page);
+  await openAgent(page);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const lifecycle = (
+          window as unknown as Window & {
+            __agentEventSourceLifecycle: {
+              created: string[];
+              closed: string[];
+            };
+          }
+        ).__agentEventSourceLifecycle;
+        return lifecycle.created.some((url) =>
+          decodeURIComponent(url).includes("agent:session-1"),
+        );
+      }),
+    )
+    .toBe(true);
+
+  await page
+    .getByRole("link", { name: "创作", exact: true })
+    .or(page.getByRole("button", { name: "创作", exact: true }))
+    .first()
+    .click();
+  await expect.poll(() => page.evaluate(() => window.location.pathname)).toBe("/");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as unknown as Window & {
+              __agentEventSourceLifecycle: { closed: string[] };
+            }
+          ).__agentEventSourceLifecycle.closed.length,
+      ),
+    )
+    .toBeGreaterThan(0);
+});
+
+test("mounted Agent coordinates 60 task streams across rapid session and visibility changes", async ({
+  page,
+}) => {
+  test.skip(
+    (page.viewportSize()?.width ?? 0) < 1_200,
+    "persistent desktop session list required",
+  );
+  await page.addInitScript(() => {
+    let visibility: DocumentVisibilityState = "visible";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    const lifecycle = { created: [] as string[], closed: [] as string[] };
+    Object.defineProperties(window, {
+      __agentEventSourceLifecycle: {
+        configurable: true,
+        value: lifecycle,
+      },
+      __setAgentVisibility: {
+        configurable: true,
+        value: (next: DocumentVisibilityState) => {
+          visibility = next;
+          document.dispatchEvent(new Event("visibilitychange"));
+        },
+      },
+    });
+    class ControlledEventSource extends EventTarget {
+      static readonly CONNECTING = 0;
+      static readonly OPEN = 1;
+      static readonly CLOSED = 2;
+      readonly CONNECTING = 0;
+      readonly OPEN = 1;
+      readonly CLOSED = 2;
+      readonly url: string;
+      readonly withCredentials = true;
+      readyState = ControlledEventSource.OPEN;
+      onerror: ((event: Event) => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onopen: ((event: Event) => void) | null = null;
+
+      constructor(url: string | URL) {
+        super();
+        this.url = String(url);
+        lifecycle.created.push(this.url);
+        queueMicrotask(() => {
+          if (this.readyState !== ControlledEventSource.OPEN) return;
+          const event = new Event("open");
+          this.onopen?.(event);
+          this.dispatchEvent(event);
+        });
+      }
+
+      close() {
+        if (this.readyState === ControlledEventSource.CLOSED) return;
+        this.readyState = ControlledEventSource.CLOSED;
+        lifecycle.closed.push(this.url);
+      }
+    }
+    Object.defineProperty(window, "EventSource", {
+      configurable: true,
+      value: ControlledEventSource,
+    });
+  });
+  const fixture = await installAgentFixture(page, {
+    mode: "active-image",
+    sessionCount: 3,
+    generationCount: 60,
+  });
+  await openAgent(page);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const created = (
+          window as unknown as Window & {
+            __agentEventSourceLifecycle: { created: string[] };
+          }
+        ).__agentEventSourceLifecycle.created;
+        return created.some((raw) => {
+          const url = decodeURIComponent(raw);
+          return (
+            url.includes("agent:session-1") &&
+            (url.match(/task:generation-/gu) ?? []).length === 60
+          );
+        });
+      }),
+    )
+    .toBe(true);
+
+  const selectSession = (sessionId: string) =>
+    page.locator(`[data-agent-session-id="${sessionId}"] > div > button`).first();
+  await selectSession("session-2").click();
+  await selectSession("session-3").click();
+  await selectSession("session-1").click();
+  await expect(page).toHaveURL(/session=session-1/u);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const lifecycle = (
+          window as unknown as Window & {
+            __agentEventSourceLifecycle: {
+              created: string[];
+              closed: string[];
+            };
+          }
+        ).__agentEventSourceLifecycle;
+        const replaced = lifecycle.created.filter((raw) =>
+          /agent%3A(?:session-2|session-3)|agent:(?:session-2|session-3)/u.test(raw),
+        );
+        const agentSources = lifecycle.created.filter((raw) =>
+          decodeURIComponent(raw).includes("channels=agent:"),
+        );
+        const latest = decodeURIComponent(agentSources.at(-1) ?? "");
+        return (
+          agentSources.some((raw) => lifecycle.closed.includes(raw)) &&
+          latest.includes("agent:session-1") &&
+          replaced.every((raw) => lifecycle.closed.includes(raw))
+        );
+      }),
+    )
+    .toBe(true);
+
+  await page.evaluate(() => {
+    (
+      window as unknown as Window & {
+        __setAgentVisibility: (value: DocumentVisibilityState) => void;
+      }
+    ).__setAgentVisibility("hidden");
+    window.dispatchEvent(new Event("focus"));
+  });
+  const hiddenCalls = fixture.snapshotCalls;
+  await page.waitForTimeout(500);
+  expect(fixture.snapshotCalls - hiddenCalls).toBeLessThanOrEqual(2);
+  await page.evaluate(() => {
+    (
+      window as unknown as Window & {
+        __setAgentVisibility: (value: DocumentVisibilityState) => void;
+      }
+    ).__setAgentVisibility("visible");
+    window.dispatchEvent(new Event("focus"));
+  });
+  await expect.poll(() => fixture.snapshotCalls).toBeGreaterThan(hiddenCalls);
+  await page.waitForTimeout(500);
+  expect(fixture.snapshotCalls - hiddenCalls).toBeLessThanOrEqual(8);
+});
+
 test("Agent shell keeps six mobile targets stable and content unobscured", async ({
   page,
 }, testInfo) => {
@@ -99,7 +331,7 @@ test("text reply submits and restores from authoritative snapshots", async ({
     : 0;
   expect(assistantBottom <= (composerBox as DOMRect).top + 1).toBe(true);
   expect(fixture.lastMessageBody?.text).toBe("给我一个产品视觉方向");
-  expect(fixture.lastMessageBody?.reasoning_effort).toBe("max");
+  expect(fixture.lastMessageBody).not.toHaveProperty("reasoning_effort");
   await page.reload();
   await expect(page.getByText("已完成产品视觉方向。")).toBeVisible();
 });
@@ -113,6 +345,7 @@ test("ordered references and roles serialize directly from Agent state", async (
   await page.getByRole("button", { name: /添加参考图：素材参考 1/ }).click();
   await page.getByRole("button", { name: /添加参考图：素材参考 2/ }).click();
   await page.getByRole("button", { name: "确认", exact: true }).click();
+  await expect(page.getByText(/本轮输入 2 张/)).toBeVisible();
   await page
     .getByRole("combobox", { name: "参考图 1 角色" })
     .selectOption("product");
@@ -239,6 +472,20 @@ test("active Agent snapshot polling stays bounded", async ({ page }) => {
   const settledCalls = fixture.snapshotCalls;
   await page.waitForTimeout(1_000);
   expect(fixture.snapshotCalls - settledCalls).toBeLessThanOrEqual(4);
+});
+
+test("partial Agent run continues without replaying browser inputs", async ({
+  page,
+}) => {
+  const fixture = await installAgentFixture(page, { mode: "partial-image" });
+  await openAgent(page);
+
+  await page.getByRole("button", { name: "继续", exact: true }).click();
+
+  await expect.poll(() => fixture.continuationCalls).toBe(1);
+  expect(fixture.lastContinuationBody).toEqual({
+    idempotency_key: expect.stringMatching(/^agent-continue/u),
+  });
 });
 
 test("task tray locates the owning Agent assistant message", async ({

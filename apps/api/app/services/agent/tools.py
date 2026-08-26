@@ -11,6 +11,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.agent_capability import AgentCapabilityClaims
+from lumen_core.agent_dispatch import mark_provider_dispatch_authorized
 from lumen_core.agent_events import (
     AGENT_TOOL_CREATE_IMAGE,
     EV_AGENT_TOOL_FAILED,
@@ -32,6 +33,8 @@ from lumen_core.model_entities import (
 )
 from lumen_core.schema_models import (
     AgentImageDefaultsIn,
+    AgentProviderDispatchIn,
+    AgentProviderDispatchOut,
     AgentCreateImageNormalized,
     AgentToolCreateImageIn,
     AgentToolCreateImageOut,
@@ -114,6 +117,12 @@ def _tool_replay_out(tool_call: AgentToolCall) -> AgentToolCreateImageOut:
         if isinstance(generation_ids, list)
         else []
     )
+    if tool_call.status != AgentToolCallStatus.SUCCEEDED.value or not safe_ids:
+        raise http_error(
+            "agent_tool_receipt_incomplete",
+            "Agent tool success receipt is incomplete",
+            409,
+        )
     mode = (
         tool_call.mode
         if tool_call.mode in {"text_to_image", "image_to_image"}
@@ -128,10 +137,37 @@ def _tool_replay_out(tool_call: AgentToolCall) -> AgentToolCreateImageOut:
         mode=mode,
         accepted=accepted,
         replayed=True,
+        pi_tool_call_id=tool_call.pi_tool_call_id,
+        ordinal=tool_call.ordinal,
+        request_hash=tool_call.request_hash,
     )
 
 
-async def _locked_capability_run(
+def _tool_replay_failure(tool_call: AgentToolCall) -> HTTPException:
+    if tool_call.status in {
+        AgentToolCallStatus.QUEUED.value,
+        AgentToolCallStatus.RUNNING.value,
+    }:
+        return http_error(
+            "agent_tool_in_progress",
+            "Agent tool call is still in progress",
+            409,
+            agent_tool_call_id=tool_call.id,
+        )
+    receipt = tool_call.result_jsonb if isinstance(tool_call.result_jsonb, dict) else {}
+    code = receipt.get("error_code") or tool_call.error_code
+    status = receipt.get("http_status")
+    if not isinstance(status, int) or isinstance(status, bool):
+        status = 504 if tool_call.status == AgentToolCallStatus.TIMED_OUT.value else 409
+    if not isinstance(code, str) or not code:
+        code = {
+            AgentToolCallStatus.CANCELLED.value: "agent_tool_cancelled",
+            AgentToolCallStatus.TIMED_OUT.value: "agent_tool_timed_out",
+        }.get(tool_call.status, "agent_tool_failed")
+    return http_error(code[:64], "Agent tool call previously failed", status)
+
+
+async def lock_agent_capability_run(
     db: AsyncSession,
     *,
     run_id: str,
@@ -278,7 +314,7 @@ async def _prepare_create_image_tool(
         raise http_error(
             "agent_stale_execution_epoch", "stale Agent execution epoch", 409
         )
-    run, grant = await _locked_capability_run(db, run_id=run_id, claims=claims)
+    run, grant = await lock_agent_capability_run(db, run_id=run_id, claims=claims)
     if AGENT_TOOL_CREATE_IMAGE not in _snapshot_list(run, "allowed_tools"):
         raise http_error("agent_tool_not_allowed", "image generation is disabled", 403)
     defaults = AgentImageDefaultsIn.model_validate(
@@ -308,14 +344,19 @@ async def _prepare_create_image_tool(
         exact_replay = (
             len(existing_rows) == 1
             and existing.ordinal == body.ordinal
+            and existing.pi_tool_call_id == body.pi_tool_call_id
             and existing.name == AGENT_TOOL_CREATE_IMAGE
             and existing.request_hash == request_hash
             and existing.semantic_key == semantic_key
         )
         if exact_replay:
-            replay = _tool_replay_out(existing)
+            if existing.status == AgentToolCallStatus.SUCCEEDED.value:
+                replay = _tool_replay_out(existing)
+                await db.rollback()
+                return replay
+            replay_failure = _tool_replay_failure(existing)
             await db.rollback()
-            return replay
+            raise replay_failure
         raise http_error(
             "agent_tool_ordinal_conflict",
             "tool ordinal was used with different arguments",
@@ -373,8 +414,8 @@ async def _enforce_tool_limits(
     requested_count: int,
 ) -> None:
     limits = _snapshot_dict(run, "tool_policy") or _snapshot_dict(run, "limits")
-    reference_policy = (
-        _snapshot_dict(run, "reference_policy") or _snapshot_dict(run, "limits")
+    reference_policy = _snapshot_dict(run, "reference_policy") or _snapshot_dict(
+        run, "limits"
     )
     max_image_tool_calls = _snapshot_limit(
         limits,
@@ -537,6 +578,12 @@ async def _commit_tool_failure(
     run, tool_call = prepared.run, prepared.tool_call
     tool_call.status = AgentToolCallStatus.FAILED.value
     tool_call.error_code = _error_code(failure)
+    tool_call.result_jsonb = {
+        "receipt_version": 1,
+        "status": AgentToolCallStatus.FAILED.value,
+        "http_status": failure.status_code,
+        "error_code": tool_call.error_code,
+    }
     tool_call.error_message = None
     tool_call.finished_at = datetime.now(timezone.utc)
     prepared.events.append(
@@ -582,6 +629,9 @@ async def _commit_tool_success(
         "mode": prepared.mode,
         "accepted": True,
         "accepted_parameters": prepared.normalized.model_dump(mode="json"),
+        "pi_tool_call_id": tool_call.pi_tool_call_id,
+        "ordinal": tool_call.ordinal,
+        "request_hash": tool_call.request_hash,
     }
     tool_call.generation_count = len(generation_ids)
     tool_call.finished_at = datetime.now(timezone.utc)
@@ -670,6 +720,9 @@ async def _commit_tool_success(
         mode=prepared.mode,
         accepted=prepared.normalized,
         replayed=False,
+        pi_tool_call_id=tool_call.pi_tool_call_id,
+        ordinal=tool_call.ordinal,
+        request_hash=tool_call.request_hash,
     )
 
 
@@ -695,4 +748,53 @@ async def submit_create_image_tool(
     return await _commit_tool_success(db, prepared=prepared, result=result)
 
 
-__all__ = ["submit_create_image_tool"]
+async def authorize_provider_dispatch(
+    db: AsyncSession,
+    *,
+    run_id: str,
+    claims: AgentCapabilityClaims,
+    body: AgentProviderDispatchIn,
+) -> AgentProviderDispatchOut:
+    if claims.allowed_tools or claims.allowed_reference_labels:
+        raise http_error(
+            "agent_capability_scope_mismatch", "capability scope mismatch", 403
+        )
+    if body.execution_epoch != claims.execution_epoch:
+        raise http_error(
+            "agent_stale_execution_epoch", "stale Agent execution epoch", 409
+        )
+    run, grant = await lock_agent_capability_run(
+        db,
+        run_id=run_id,
+        claims=claims,
+    )
+    expected_ordinal = grant.redeemed_count + 1
+    if body.dispatch_ordinal != expected_ordinal:
+        raise http_error(
+            "agent_provider_dispatch_conflict",
+            "provider dispatch ordinal is unavailable",
+            409,
+        )
+    if grant.redeemed_count >= grant.max_redemptions:
+        raise http_error(
+            "agent_safety_budget_reached",
+            "provider dispatch budget reached",
+            409,
+        )
+    grant.redeemed_count += 1
+    dispatch = dict(run.dispatch_jsonb) if isinstance(run.dispatch_jsonb, dict) else {}
+    mark_provider_dispatch_authorized(dispatch, body.dispatch_ordinal)
+    run.dispatch_jsonb = dispatch
+    permit_id = f"{grant.capability_id}:{body.dispatch_ordinal}"
+    await db.commit()
+    return AgentProviderDispatchOut(
+        permit_id=permit_id,
+        dispatch_ordinal=body.dispatch_ordinal,
+    )
+
+
+__all__ = [
+    "authorize_provider_dispatch",
+    "lock_agent_capability_run",
+    "submit_create_image_tool",
+]

@@ -28,7 +28,7 @@ async def handle_existing_pre_submit_state(
         return False
     should_handle = (
         generation.status == VideoGenerationStatus.SUBMITTING.value
-        or generation.deadline_at <= video_ports()._now()
+        or generation.deadline_at <= video_ports().operations._now()
         or (
             generation.cancel_requested_at is not None
             and generation.status == VideoGenerationStatus.QUEUED.value
@@ -46,15 +46,15 @@ async def handle_existing_pre_submit_state(
     ).scalar_one_or_none()
     if generation is None:
         await session.commit()
-        await video_ports()._release_lease(redis, task_id, token)
+        await video_ports().lease_queue._release_lease(redis, task_id, token)
         return True
-    if generation.status in video_ports()._NON_RESUBMIT_STATUSES:
+    if generation.status in video_ports().policy._NON_RESUBMIT_STATUSES:
         await session.commit()
-        await video_ports()._release_lease(redis, task_id, token)
+        await video_ports().lease_queue._release_lease(redis, task_id, token)
         return True
     if generation.provider_task_id:
         await session.commit()
-        return await video_ports()._resume_existing_provider_task(
+        return await video_ports().operations._resume_existing_provider_task(
             redis,
             generation,
             task_id=task_id,
@@ -63,20 +63,20 @@ async def handle_existing_pre_submit_state(
     release_provider_name: str | None = None
     flush_balance_cache = False
     if generation.status == VideoGenerationStatus.SUBMITTING.value:
-        now = video_ports()._now()
+        now = video_ports().operations._now()
         submit_started_at = getattr(
             generation,
             "submit_started_at",
             None,
         ) or getattr(generation, "updated_at", None)
         if submit_started_at is not None and submit_started_at > now - timedelta(
-            seconds=video_ports()._SUBMIT_UNKNOWN_AFTER_S
+            seconds=video_ports().policy._SUBMIT_UNKNOWN_AFTER_S
         ):
             generation.next_poll_at = submit_started_at + timedelta(
-                seconds=video_ports()._SUBMIT_UNKNOWN_AFTER_S
+                seconds=video_ports().policy._SUBMIT_UNKNOWN_AFTER_S
             )
         else:
-            video_ports()._transition_submit_unknown(
+            video_ports().operations._transition_submit_unknown(
                 session,
                 generation,
                 now=now,
@@ -84,9 +84,9 @@ async def handle_existing_pre_submit_state(
             )
             if generation.provider_name:
                 release_provider_name = generation.provider_name
-    elif generation.deadline_at <= video_ports()._now():
+    elif generation.deadline_at <= video_ports().operations._now():
         # Compatibility audit marker: await _mark_pre_submit_expired
-        await video_ports()._mark_pre_submit_expired(
+        await video_ports().operations._mark_pre_submit_expired(
             session,
             generation,
             reason="deadline_expired_before_submit",
@@ -98,7 +98,7 @@ async def handle_existing_pre_submit_state(
         and not generation.provider_task_id
     ):
         # Compatibility audit marker: await _mark_pre_submit_canceled
-        await video_ports()._mark_pre_submit_canceled(session, generation)
+        await video_ports().operations._mark_pre_submit_canceled(session, generation)
         flush_balance_cache = True
     else:
         await session.commit()
@@ -106,14 +106,14 @@ async def handle_existing_pre_submit_state(
     await session.commit()
     if flush_balance_cache:
         # Compatibility audit marker: await worker_flush_balance_cache(session)
-        await video_ports().worker_flush_balance_cache(session)
+        await video_ports().billing_events.worker_flush_balance_cache(session)
     if release_provider_name:
-        await video_ports()._release_provider_slot(
+        await video_ports().lease_queue._release_provider_slot(
             redis,
             release_provider_name,
             generation.id,
         )
-    await video_ports()._release_lease(redis, task_id, token)
+    await video_ports().lease_queue._release_lease(redis, task_id, token)
     return True
 
 
@@ -127,14 +127,14 @@ async def resume_existing_provider_task(
     if not generation.provider_task_id:
         return False
     try:
-        await video_ports()._enqueue_poll(redis, generation.id, defer_s=0)
+        await video_ports().lease_queue._enqueue_poll(redis, generation.id, defer_s=0)
     except Exception:
-        video_ports().logger.warning(
+        video_ports().operations.logger.warning(
             "video poll enqueue failed task=%s",
             generation.id,
             exc_info=True,
         )
-    await video_ports()._release_lease(redis, task_id, token)
+    await video_ports().lease_queue._release_lease(redis, task_id, token)
     return True
 
 
@@ -153,18 +153,23 @@ async def prepare_submit_row(
         )
     ).scalar_one_or_none()
     await session.commit()
-    if generation is None or generation.status in video_ports()._NON_RESUBMIT_STATUSES:
-        await video_ports()._release_lease(redis, task_id, token)
+    if (
+        generation is None
+        or generation.status in video_ports().policy._NON_RESUBMIT_STATUSES
+    ):
+        await video_ports().lease_queue._release_lease(redis, task_id, token)
         return None
-    if await video_ports()._resume_existing_provider_task(
+    if await video_ports().operations._resume_existing_provider_task(
         redis,
         generation,
         task_id=task_id,
         token=token,
     ):
         return None
-    cached_submit = await video_ports()._load_submit_result(redis, generation.id)
-    if await video_ports()._handle_existing_pre_submit_state(
+    cached_submit = await video_ports().provider._load_submit_result(
+        redis, generation.id
+    )
+    if await video_ports().operations._handle_existing_pre_submit_state(
         session,
         redis,
         generation,
@@ -191,7 +196,10 @@ async def relock_cached_submit_row(
             .with_for_update()
         )
     ).scalar_one_or_none()
-    if generation is None or generation.status in video_ports()._TERMINAL_STATUSES:
+    if (
+        generation is None
+        or generation.status in video_ports().policy._TERMINAL_STATUSES
+    ):
         await session.commit()
         return None
     return generation
@@ -220,19 +228,19 @@ async def relock_pre_submit_transition(
     ):
         await session.commit()
         return None
-    if generation.deadline_at <= video_ports()._now():
-        await video_ports()._mark_pre_submit_expired(
+    if generation.deadline_at <= video_ports().operations._now():
+        await video_ports().operations._mark_pre_submit_expired(
             session,
             generation,
             reason="deadline_expired_before_submit_transition",
         )
         await session.commit()
-        await video_ports().worker_flush_balance_cache(session)
+        await video_ports().billing_events.worker_flush_balance_cache(session)
         return None
     if generation.cancel_requested_at is not None:
-        await video_ports()._mark_pre_submit_canceled(session, generation)
+        await video_ports().operations._mark_pre_submit_canceled(session, generation)
         await session.commit()
-        await video_ports().worker_flush_balance_cache(session)
+        await video_ports().billing_events.worker_flush_balance_cache(session)
         return None
     return generation
 

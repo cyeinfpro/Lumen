@@ -10,6 +10,11 @@ from lumen_core.agent_capability import (
     issue_agent_capability,
     verify_agent_capability,
 )
+from lumen_core.agent_dispatch import (
+    mark_provider_dispatch_authorized,
+    provider_dispatch_authorized_count,
+    provider_dispatch_evidence_count,
+)
 from lumen_core.agent_events import (
     AGENT_TOOL_CREATE_IMAGE,
     AgentRunStatus,
@@ -17,6 +22,8 @@ from lumen_core.agent_events import (
     agent_event_id,
     require_agent_run_transition,
 )
+from lumen_core.agent_image_tokens import estimate_agent_image_tokens
+from lumen_core.agent_history import plan_agent_runtime_context
 from lumen_core.message_content import public_message_content
 from lumen_core.model_entities import (
     AgentRun,
@@ -66,7 +73,7 @@ def test_agent_input_contracts_are_strict_and_bounded() -> None:
         ],
     )
     assert body.attachments[0].label == "Product"
-    assert body.reasoning_effort == "max"
+    assert body.reasoning_effort is None
 
     with pytest.raises(ValidationError):
         AgentMessageCreateIn.model_validate(
@@ -114,6 +121,57 @@ def test_agent_input_contracts_are_strict_and_bounded() -> None:
                 "arguments": {"prompt": "image", "callback_url": "https://bad"},
             }
         )
+
+
+def test_agent_image_token_estimate_is_dimension_and_provider_aware() -> None:
+    openai = estimate_agent_image_tokens("openai-responses", 1024, 512)
+    anthropic = estimate_agent_image_tokens("anthropic-messages", 1024, 512)
+    unknown = estimate_agent_image_tokens("custom", 1024, 512)
+
+    assert openai.policy_version == anthropic.policy_version
+    assert openai.upper != anthropic.upper
+    assert unknown.upper >= max(openai.upper, anthropic.upper)
+
+
+def test_agent_context_planner_distinguishes_direct_compaction_and_impossible() -> None:
+    direct = plan_agent_runtime_context(
+        context_window=128_000,
+        max_output_tokens=16_384,
+        fixed_input_tokens=10_000,
+        history_tokens=50_000,
+    )
+    compact = plan_agent_runtime_context(
+        context_window=128_000,
+        max_output_tokens=16_384,
+        fixed_input_tokens=15_000,
+        history_tokens=100_000,
+        largest_history_entry_tokens=40_000,
+    )
+    impossible = plan_agent_runtime_context(
+        context_window=128_000,
+        max_output_tokens=16_384,
+        fixed_input_tokens=1_000,
+        history_tokens=112_000,
+    )
+
+    assert direct.mode == "direct"
+    assert compact.mode == "compact_before_prompt"
+    assert compact.estimated_post_compaction_tokens <= compact.direct_input_limit
+    assert impossible.mode == "impossible"
+    assert impossible.estimated_input_tokens < compact.estimated_input_tokens
+
+
+def test_provider_dispatch_evidence_is_monotonic_and_conservative() -> None:
+    dispatch = {"provider_dispatch_count": 1}
+
+    mark_provider_dispatch_authorized(dispatch, 2)
+
+    assert provider_dispatch_evidence_count(dispatch) == 2
+    assert provider_dispatch_authorized_count(dispatch) == 2
+    mark_provider_dispatch_authorized(dispatch, 1)
+    assert provider_dispatch_evidence_count(dispatch) == 2
+    with pytest.raises(ValueError):
+        mark_provider_dispatch_authorized(dispatch, 0)
 
 
 def test_agent_reference_labels_and_tool_hashes_are_stable() -> None:

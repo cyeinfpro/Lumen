@@ -16,6 +16,8 @@ from .session_crud import (
     delete_agent_session,
     patch_agent_session,
 )
+
+
 @dataclass(frozen=True, slots=True)
 class AgentSessionServices:
     create_agent_session: Callable[..., Any]

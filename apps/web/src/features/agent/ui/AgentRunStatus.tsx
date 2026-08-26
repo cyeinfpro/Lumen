@@ -38,6 +38,9 @@ export function AgentRunStatus({
     >
       <RunStatusIcon status={run.status} />
       <span className="font-medium">{STATUS_TEXT[run.status]}</span>
+      {run.memory_state === "degraded" ? (
+        <span className="text-[var(--fg-1)]">本轮记忆服务降级</span>
+      ) : null}
       {error ? <span className="text-[var(--fg-1)]">{error.detail}</span> : null}
       <RunRecoveryActions error={error} failed={failed} onContinue={onContinue} />
     </div>

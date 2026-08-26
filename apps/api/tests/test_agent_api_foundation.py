@@ -24,8 +24,14 @@ from app.services.agent import sessions as agent_sessions_service
 from app.services.agent import tools as agent_tools_service
 from app.services.agent import common as agent_common
 from app.services.agent import message_submission as agent_message_service
+from app.services.agent import submission_planning as agent_submission_planning
+from app.services.agent import reference_validation as agent_reference_validation
 from app.services.agent import session_crud as agent_session_crud_service
-from app.services.agent.session_images import session_image_slot_count
+from app.services.agent.session_images import (
+    eject_agent_session_image,
+    list_agent_session_images,
+    session_image_slot_count,
+)
 from app.services.agent.common import AgentProviderPreflight, AgentTextReservation
 from lumen_core.agent_capability import AgentCapabilityClaims
 from lumen_core.agent_events import AGENT_TOOL_CREATE_IMAGE, AgentRunStatus
@@ -35,6 +41,7 @@ from lumen_core.model_entities import (
     AgentCapabilityGrant,
     AgentRunReference,
     AgentSession,
+    AgentSessionImage,
     AgentToolCall,
     ApiSupplierTemplate,
     Conversation,
@@ -50,6 +57,8 @@ from lumen_core.model_entities import (
 )
 from lumen_core.schema_models import (
     AgentMessageCreateIn,
+    AgentProviderDispatchIn,
+    AgentRunContinueIn,
     AgentSessionCreateIn,
     AgentSessionPatchIn,
     AgentToolCreateImageIn,
@@ -66,6 +75,7 @@ _TABLE_MODELS = (
     ApiSupplierTemplate,
     UserApiCredential,
     AgentSession,
+    AgentSessionImage,
     AgentRun,
     AgentCapabilityGrant,
     AgentRunReference,
@@ -84,12 +94,20 @@ def test_agent_orphan_hold_requires_persisted_no_dispatch_evidence() -> None:
         dispatch_jsonb={"runtime_delivery": "provider_dispatched"},
         billing_jsonb={"knowledge": "unknown"},
     )
+    authorized = SimpleNamespace(
+        dispatch_jsonb={
+            "runtime_delivery": "claimed",
+            "provider_dispatch_authorized_count": 1,
+        },
+        billing_jsonb={"knowledge": "unknown"},
+    )
 
     assert recovery_action("agent_run") == "release"
     assert _hold_release_proof(safe, ref_type="agent_run") == (
         "runtime_delivery:proven_absent"
     )
     assert _hold_release_proof(unknown, ref_type="agent_run") is None
+    assert _hold_release_proof(authorized, ref_type="agent_run") is None
 
 
 def _create_generation_table(connection: Any) -> None:
@@ -212,6 +230,70 @@ async def _seed_session(
     return user, session, conversation
 
 
+@pytest.mark.asyncio
+async def test_submission_planning_counts_durable_typed_tool_payloads(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_factory() as db:
+        user, session, conversation = await _seed_session(db)
+        prior_user = Message(
+            id="tool-budget-user",
+            conversation_id=conversation.id,
+            role="user",
+            content={"text": "Create an image"},
+            intent="agent",
+        )
+        prior_assistant = Message(
+            id="tool-budget-assistant",
+            conversation_id=conversation.id,
+            role="assistant",
+            content={"text": "Image accepted."},
+            parent_message_id=prior_user.id,
+            intent="agent",
+            status="succeeded",
+        )
+        run = AgentRun(
+            id="tool-budget-run",
+            agent_session_id=session.id,
+            user_id=user.id,
+            user_message_id=prior_user.id,
+            assistant_message_id=prior_assistant.id,
+            status="succeeded",
+            idempotency_key="tool-budget-run",
+            request_fingerprint="a" * 64,
+            request_snapshot_jsonb={},
+            account_mode_snapshot="wallet",
+        )
+        tool = AgentToolCall(
+            id="tool-budget-call",
+            agent_run_id=run.id,
+            capability_id="tool-budget-capability",
+            pi_tool_call_id="pi-tool-budget",
+            ordinal=0,
+            execution_epoch=1,
+            name=AGENT_TOOL_CREATE_IMAGE,
+            mode="text_to_image",
+            status="succeeded",
+            request_hash="b" * 64,
+            semantic_key="c" * 64,
+            arguments_jsonb={"prompt": "x" * 20_000},
+            result_jsonb={"generation_ids": ["generation-1"]},
+            generation_count=1,
+        )
+        db.add_all([prior_user, prior_assistant])
+        await db.flush()
+        db.add(run)
+        await db.flush()
+        db.add(tool)
+        await db.commit()
+
+        tokens = await agent_submission_planning._history_tool_tokens(
+            db, [prior_assistant]
+        )
+
+        assert tokens > 4_000
+
+
 def _patch_agent_message_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
     async def provider_preflight(*_args: Any, **_kwargs: Any) -> AgentProviderPreflight:
         return AgentProviderPreflight("gpt-agent-test", ("provider-test",))
@@ -238,7 +320,7 @@ def _patch_agent_message_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
             return None
 
     monkeypatch.setattr(
-        agent_message_service,
+        agent_submission_planning,
         "wallet_chat_provider_preflight",
         provider_preflight,
     )
@@ -384,6 +466,59 @@ async def test_agent_text_reservation_uses_pi_native_model_and_tool_shape(
 
 
 @pytest.mark.asyncio
+async def test_wallet_agent_preflight_admits_history_that_pi_can_compact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    providers = [
+        SimpleNamespace(
+            name="compact-capable",
+            enabled=True,
+            purposes=["chat"],
+            responses_supported=True,
+            agent_models=["gpt-agent-test"],
+            agent_context_window=128_000,
+            agent_max_output_tokens=16_384,
+            agent_reasoning_supported=True,
+            vision_supported=True,
+        ),
+        SimpleNamespace(
+            name="too-small",
+            enabled=True,
+            purposes=["chat"],
+            responses_supported=True,
+            agent_models=["gpt-agent-test"],
+            agent_context_window=64_000,
+            agent_max_output_tokens=16_384,
+            agent_reasoning_supported=True,
+            vision_supported=True,
+        ),
+    ]
+
+    async def setting(_db: object, spec: str) -> object:
+        return "gpt-agent-test" if spec == "upstream.default_model" else {}
+
+    monkeypatch.setattr(agent_common, "get_spec", lambda key: key)
+    monkeypatch.setattr(agent_common, "get_setting", setting)
+    monkeypatch.setattr(
+        agent_common,
+        "parse_provider_json",
+        lambda _raw: (providers, []),
+    )
+
+    result = await agent_common.wallet_chat_provider_preflight(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        require_vision=False,
+        require_reasoning=False,
+        fixed_input_tokens=15_000,
+        history_context_tokens=100_000,
+    )
+
+    assert result.eligible_provider_names == ("compact-capable",)
+    assert result.context_plan == "compact_before_prompt"
+    assert result.estimated_input_tokens == 115_000
+
+
+@pytest.mark.asyncio
 async def test_agent_session_crud_keeps_conversation_soft_delete_semantics(
     db_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -489,8 +624,21 @@ async def test_agent_message_is_idempotent_owned_and_hidden_from_studio(
         ]
         persisted = await db.get(AgentRun, first.agent_run.id)
         assert persisted is not None
-        assert persisted.reasoning_effort == "max"
+        assert persisted.reasoning_effort is None
         assert persisted.request_snapshot_jsonb["execution_policy"] == "pi-native"
+        assert persisted.request_snapshot_jsonb["runtime_request_version"] == 3
+        assert persisted.request_snapshot_jsonb["tool_receipt"] == {"version": 2}
+        assert persisted.request_snapshot_jsonb["context_plan"] == {
+            "version": 1,
+            "mode": "direct",
+            "estimated_input_tokens": 2_049,
+            "context_window": 128_000,
+            "max_output_tokens": 16_384,
+        }
+        assert (
+            persisted.request_snapshot_jsonb["internal_agent_callback_base_url"]
+            == "http://api:8000/internal/agent"
+        )
         assert persisted.request_snapshot_jsonb["tool_policy"] == {
             "max_image_tool_calls": 3,
             "max_images_per_run": 4,
@@ -572,6 +720,74 @@ async def test_agent_message_is_idempotent_owned_and_hidden_from_studio(
         )
         assert second.agent_run.id != first.agent_run.id
         assert await db.scalar(select(func.count(AgentRun.id))) == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_continuation_is_server_side_and_idempotent(
+    db_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_agent_message_dependencies(monkeypatch)
+    async with db_factory() as db:
+        user, session, _conversation = await _seed_session(db)
+        submitted = await agent_sessions_service.submit_agent_message(
+            db,
+            session_id=session.id,
+            user=user,
+            body=AgentMessageCreateIn(
+                idempotency_key="continuation-source",
+                text="Write a long response",
+                reasoning_effort="high",
+            ),
+            request=None,
+        )
+        source = await db.get(AgentRun, submitted.agent_run.id)
+        source_assistant = await db.get(Message, submitted.assistant_message.id)
+        assert source is not None and source_assistant is not None
+        source.status = AgentRunStatus.PARTIAL.value
+        source.error_code = "agent_output_truncated"
+        source.finished_at = datetime.now(timezone.utc)
+        source_assistant.content = {
+            **dict(source_assistant.content),
+            "text": "partial answer",
+        }
+        source_id = source.id
+        source_user_message_id = source.user_message_id
+        await db.commit()
+
+        continuation_body = AgentRunContinueIn(idempotency_key="continuation-command")
+        continued = await agent_runs_service.continue_agent_run(
+            db,
+            run_id=source_id,
+            body=continuation_body,
+            user=user,
+            request=None,
+        )
+        replay = await agent_runs_service.continue_agent_run(
+            db,
+            run_id=source_id,
+            body=continuation_body,
+            user=user,
+            request=None,
+        )
+
+        assert replay.id == continued.id
+        continuation = await db.get(AgentRun, continued.id)
+        assert continuation is not None
+        assert continuation.continuation_source_run_id == source_id
+        assert continuation.reasoning_effort == "high"
+        assert continuation.request_snapshot_jsonb["operation"] == "continue"
+        internal = await db.get(Message, continuation.user_message_id)
+        assistant = await db.get(Message, continuation.assistant_message_id)
+        assert internal is not None and internal.role == "system"
+        assert assistant is not None
+        assert assistant.parent_message_id == source_user_message_id
+        assert (
+            await db.scalar(
+                select(func.count(Message.id)).where(Message.role == "user")
+            )
+            == 1
+        )
 
 
 @pytest.mark.asyncio
@@ -719,7 +935,7 @@ async def test_agent_session_slots_exclude_retention_hidden_images(
 
 
 @pytest.mark.asyncio
-async def test_agent_session_inherits_all_prior_uploads_and_generated_images(
+async def test_agent_session_catalog_is_distinct_from_current_turn_images(
     db_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -814,7 +1030,7 @@ async def test_agent_session_inherits_all_prior_uploads_and_generated_images(
 
         async def low_session_limit(db_arg: Any, key: str) -> int:
             if key == "agent.max_session_images":
-                return 2
+                return 1
             return await setting_reader(db_arg, key)
 
         monkeypatch.setattr(
@@ -864,23 +1080,18 @@ async def test_agent_session_inherits_all_prior_uploads_and_generated_images(
         )
 
         assert second.user_message.content["attachments"] == []
-        assert second.agent_run.reasoning_effort == "max"
-        assert [reference.image_id for reference in second.agent_run.references] == [
-            "image-original",
-            "image-agent-result",
-        ]
-        assert [
-            reference.reference_label for reference in second.agent_run.references
-        ] == [
-            "ref_1",
-            "ref_2",
-        ]
+        assert second.agent_run.reasoning_effort is None
+        assert second.agent_run.references == []
         persisted = await db.get(AgentRun, second.agent_run.id)
         assert persisted is not None
         assert persisted.request_snapshot_jsonb["reference_policy"] == {
             "max_reference_images": 16,
             "max_session_images": 64,
         }
+        assert [
+            item["image_id"]
+            for item in persisted.request_snapshot_jsonb["session_catalog"]
+        ] == ["image-original"]
 
         persisted.status = AgentRunStatus.SUCCEEDED.value
         db.add(
@@ -915,14 +1126,283 @@ async def test_agent_session_inherits_all_prior_uploads_and_generated_images(
             request=None,
         )
         assert [reference.image_id for reference in third.agent_run.references] == [
-            "image-original",
-            "image-agent-result",
             "image-new",
+            "image-original",
         ]
         assert [
             reference.reference_label for reference in third.agent_run.references
-        ] == ["ref_1", "ref_2", "ref_3"]
-        assert third.agent_run.references[0].role == "style"
+        ] == ["ref_3", "ref_1"]
+        assert third.agent_run.references[1].role == "style"
+
+
+@pytest.mark.asyncio
+async def test_agent_session_image_can_be_ejected_and_explicitly_reactivated(
+    db_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_agent_message_dependencies(monkeypatch)
+    async with db_factory() as db:
+        user, session, _conversation = await _seed_session(
+            db, image_ids=("image-catalog",)
+        )
+        first = await agent_sessions_service.submit_agent_message(
+            db,
+            session_id=session.id,
+            user=user,
+            body=AgentMessageCreateIn(
+                idempotency_key="catalog-first",
+                text="use image",
+                attachments=[{"image_id": "image-catalog"}],
+            ),
+            request=None,
+        )
+        first_run = await db.get(AgentRun, first.agent_run.id)
+        assert first_run is not None
+        first_run.status = AgentRunStatus.SUCCEEDED.value
+        await db.commit()
+
+        catalog = await list_agent_session_images(db, session_id=session.id, user=user)
+        assert catalog.used == 1
+        assert catalog.items[0].reference_label == "ref_1"
+        ejected = await eject_agent_session_image(
+            db,
+            session_id=session.id,
+            image_id="image-catalog",
+            user=user,
+        )
+        assert ejected.used == 0
+
+        second = await agent_sessions_service.submit_agent_message(
+            db,
+            session_id=session.id,
+            user=user,
+            body=AgentMessageCreateIn(
+                idempotency_key="catalog-text-only",
+                text="text only",
+            ),
+            request=None,
+        )
+        assert second.agent_run.references == []
+        second_run = await db.get(AgentRun, second.agent_run.id)
+        assert second_run is not None
+        second_run.status = AgentRunStatus.SUCCEEDED.value
+        await db.commit()
+        third = await agent_sessions_service.submit_agent_message(
+            db,
+            session_id=session.id,
+            user=user,
+            body=AgentMessageCreateIn(
+                idempotency_key="catalog-reactivate",
+                text="use it again",
+                attachments=[{"image_id": "image-catalog"}],
+            ),
+            request=None,
+        )
+        assert [item.reference_label for item in third.agent_run.references] == [
+            "ref_1"
+        ]
+
+
+@pytest.mark.asyncio
+async def test_agent_catalog_reuses_inactive_slot_at_capacity(
+    db_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_agent_message_dependencies(monkeypatch)
+    image_ids = tuple(f"catalog-image-{index}" for index in range(65))
+    async with db_factory() as db:
+        user, session, _conversation = await _seed_session(db, image_ids=image_ids)
+        for index, image_id in enumerate(image_ids[:64]):
+            db.add(
+                AgentSessionImage(
+                    id=f"catalog-row-{index}",
+                    agent_session_id=session.id,
+                    user_id=user.id,
+                    image_id=image_id,
+                    reference_label=f"ref_{index + 1}",
+                    role="reference",
+                    source="history",
+                    active=index != 0,
+                )
+            )
+        await db.commit()
+
+        submitted = await agent_sessions_service.submit_agent_message(
+            db,
+            session_id=session.id,
+            user=user,
+            body=AgentMessageCreateIn(
+                idempotency_key="catalog-reuse-slot",
+                text="use replacement",
+                attachments=[{"image_id": image_ids[64]}],
+            ),
+            request=None,
+        )
+
+        assert [item.reference_label for item in submitted.agent_run.references] == [
+            "ref_1"
+        ]
+        rows = list(
+            (
+                await db.execute(
+                    select(AgentSessionImage).where(
+                        AgentSessionImage.agent_session_id == session.id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 64
+        assert sum(1 for row in rows if row.active) == 64
+        assert image_ids[0] not in {row.image_id for row in rows}
+
+
+@pytest.mark.asyncio
+async def test_ejected_generated_catalog_image_no_longer_consumes_slot(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_factory() as db:
+        user, session, _conversation = await _seed_session(
+            db, image_ids=("generated-catalog-image",)
+        )
+        row = AgentSessionImage(
+            id="generated-catalog-row",
+            agent_session_id=session.id,
+            user_id=user.id,
+            image_id="generated-catalog-image",
+            reference_label="ref_1",
+            role="reference",
+            source="generated",
+            active=False,
+        )
+        db.add(row)
+        await db.commit()
+
+        slots = await session_image_slot_count(
+            db,
+            session_id=session.id,
+            user_id=user.id,
+            snapshotted_image_ids=set(),
+        )
+
+        assert slots == 0
+
+
+def test_agent_tool_replay_error_preserves_in_progress_and_failed_state() -> None:
+    tool = AgentToolCall(
+        id="tool-replay",
+        agent_run_id="run-replay",
+        capability_id="capability-replay",
+        pi_tool_call_id="pi-tool-replay",
+        ordinal=0,
+        execution_epoch=1,
+        name=AGENT_TOOL_CREATE_IMAGE,
+        mode="text_to_image",
+        status="running",
+        request_hash="a" * 64,
+        semantic_key="b" * 64,
+        arguments_jsonb={"prompt": "x"},
+        result_jsonb={},
+        generation_count=0,
+    )
+
+    running = agent_tools_service._tool_replay_failure(tool)
+    assert running.status_code == 409
+    assert running.detail["error"]["code"] == "agent_tool_in_progress"
+    tool.status = "failed"
+    tool.error_code = "agent_image_provider_unavailable"
+    tool.result_jsonb = {
+        "http_status": 503,
+        "error_code": "agent_image_provider_unavailable",
+    }
+    failed = agent_tools_service._tool_replay_failure(tool)
+    assert failed.status_code == 503
+    assert failed.detail["error"]["code"] == "agent_image_provider_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_provider_dispatch_permit_serializes_budget_and_cancellation(
+    db_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_agent_message_dependencies(monkeypatch)
+    async with db_factory() as db:
+        user, session, _conversation = await _seed_session(db)
+        submitted = await agent_sessions_service.submit_agent_message(
+            db,
+            session_id=session.id,
+            user=user,
+            body=AgentMessageCreateIn(
+                idempotency_key="dispatch-permit-run",
+                text="hello",
+            ),
+            request=None,
+        )
+        run = await db.get(AgentRun, submitted.agent_run.id)
+        assert run is not None
+        run.status = AgentRunStatus.RUNNING.value
+        run.execution_epoch = 1
+        claims = _capability(run=run, reference_labels=[]).model_copy(
+            update={"allowed_tools": [], "allowed_reference_labels": []}
+        )
+        grant = AgentCapabilityGrant(
+            capability_id=claims.capability_id,
+            nonce=claims.nonce,
+            agent_run_id=run.id,
+            user_id=run.user_id,
+            agent_session_id=run.agent_session_id,
+            execution_epoch=run.execution_epoch,
+            expires_at=datetime.fromtimestamp(claims.expires_at, tz=timezone.utc),
+            max_redemptions=2,
+            redeemed_count=0,
+        )
+        db.add(grant)
+        await db.commit()
+        run_id = run.id
+        user_id = user.id
+
+        permit = await agent_tools_service.authorize_provider_dispatch(
+            db,
+            run_id=run_id,
+            claims=claims,
+            body=AgentProviderDispatchIn(dispatch_ordinal=1, execution_epoch=1),
+        )
+        assert permit.dispatch_ordinal == 1
+        await db.refresh(run)
+        assert run.dispatch_jsonb["provider_dispatch_authorized_count"] == 1
+        with pytest.raises(HTTPException) as replay:
+            await agent_tools_service.authorize_provider_dispatch(
+                db,
+                run_id=run_id,
+                claims=claims,
+                body=AgentProviderDispatchIn(dispatch_ordinal=1, execution_epoch=1),
+            )
+        assert replay.value.detail["error"]["code"] == (
+            "agent_provider_dispatch_conflict"
+        )
+        await db.rollback()
+        user = await db.get(User, user_id)
+        assert user is not None
+        await agent_runs_service.cancel_agent_run(
+            db,
+            run_id=run_id,
+            user=user,
+            request=None,
+        )
+        with pytest.raises(HTTPException) as cancelled:
+            await agent_tools_service.authorize_provider_dispatch(
+                db,
+                run_id=run_id,
+                claims=claims,
+                body=AgentProviderDispatchIn(dispatch_ordinal=2, execution_epoch=1),
+            )
+        assert cancelled.value.detail["error"]["code"] in {
+            "agent_stale_execution_epoch",
+            "agent_run_not_active",
+        }
+        await db.refresh(grant)
+        assert grant.redeemed_count == 1
 
 
 @pytest.mark.asyncio
@@ -1082,6 +1562,17 @@ async def test_agent_tool_gateway_creates_one_generation_batch_and_replays_recei
         assert await db.scalar(select(func.count(AgentToolCall.id))) == 1
         assert batch_submissions == 1
 
+        with pytest.raises(HTTPException) as call_id_conflict:
+            await agent_tools_service.submit_create_image_tool(
+                db,
+                run_id=run_id,
+                claims=claims,
+                body=request.model_copy(update={"pi_tool_call_id": "pi-tool-new"}),
+            )
+        assert call_id_conflict.value.detail["error"]["code"] == (
+            "agent_tool_ordinal_conflict"
+        )
+
         replay = await agent_tools_service.submit_create_image_tool(
             db,
             run_id=run_id,
@@ -1163,14 +1654,17 @@ async def test_agent_tool_gateway_creates_one_generation_batch_and_replays_recei
             "wallet_image_provider_preflight",
             image_preflight,
         )
-        failed_replay = await agent_tools_service.submit_create_image_tool(
-            db,
-            run_id=run_id,
-            claims=claims,
-            body=failed_request,
+        with pytest.raises(HTTPException) as failed_replay:
+            await agent_tools_service.submit_create_image_tool(
+                db,
+                run_id=run_id,
+                claims=claims,
+                body=failed_request,
+            )
+        assert failed_replay.value.status_code == 503
+        assert failed_replay.value.detail["error"]["code"] == (
+            "agent_image_provider_unavailable"
         )
-        assert failed_replay.replayed is True
-        assert failed_replay.tool_call.status == "failed"
         assert await db.scalar(select(func.count(Generation.id))) == 2
         assert batch_submissions == 1
         await db.refresh(grant)
@@ -1239,8 +1733,10 @@ async def test_reference_preflight_decodes_and_matches_declared_format(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    original_root = agent_message_service.settings.storage_root
-    monkeypatch.setattr(agent_message_service.settings, "storage_root", str(tmp_path))
+    original_root = agent_reference_validation.settings.storage_root
+    monkeypatch.setattr(
+        agent_reference_validation.settings, "storage_root", str(tmp_path)
+    )
     path = tmp_path / "references" / "image.png"
     path.parent.mkdir(parents=True)
     PILImage.new("RGB", (8, 8), (10, 20, 30)).save(path, format="PNG")
@@ -1257,13 +1753,13 @@ async def test_reference_preflight_decodes_and_matches_declared_format(
         artifact_status="ready",
     )
     try:
-        await agent_message_service._validate_reference_artifact(image)
+        await agent_reference_validation.validate_reference_artifact(image)
         image.mime = "image/jpeg"
         with pytest.raises(HTTPException) as captured:
-            await agent_message_service._validate_reference_artifact(image)
+            await agent_reference_validation.validate_reference_artifact(image)
         assert captured.value.detail["error"]["code"] == "invalid_attachment"
     finally:
-        agent_message_service.settings.storage_root = original_root
+        agent_reference_validation.settings.storage_root = original_root
 
 
 @pytest.mark.asyncio

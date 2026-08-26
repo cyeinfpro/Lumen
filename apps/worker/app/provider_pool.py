@@ -493,6 +493,7 @@ class ProviderPool(
                         agent_context_window=p.agent_context_window,
                         agent_max_output_tokens=p.agent_max_output_tokens,
                         agent_reasoning_supported=p.agent_reasoning_supported,
+                        agent_thinking_level_map=p.agent_thinking_level_map,
                         image_generations_supported=p.image_generations_supported,
                         image_responses_supported=p.image_responses_supported,
                         text_circuit_state=circuit_state,
@@ -735,6 +736,7 @@ class ProviderPool(
             h.total_requests += total
             h.successful_requests += success
             h.failed_requests += fail
+
 
 # ---------------------------------------------------------------------------
 # 单例

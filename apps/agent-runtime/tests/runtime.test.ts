@@ -5,6 +5,7 @@ import {
   fauxProvider,
   fauxText,
   fauxToolCall,
+  lazyStream,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
@@ -12,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import { CollectingEventWriter } from "../src/ndjson.js";
 import {
   boundedTurnUsage,
+  DEFAULT_RUNTIME_SAFETY_POLICY,
   executeAgentRun,
   RuntimeExecutionError,
   type RuntimeDependencies,
@@ -21,7 +23,7 @@ import {
   type CreateImageGateway,
 } from "../src/tools/gateway.js";
 import { runtimeModel } from "../src/providers/runtime-provider.js";
-import { runtimeRequest } from "./fixtures.js";
+import { runtimeRequest, runtimeRequestV3 } from "./fixtures.js";
 
 async function fakeDependencies(
   responses: Parameters<ReturnType<typeof fauxProvider>["setResponses"]>[0],
@@ -46,11 +48,12 @@ async function fakeDependencies(
   return {
     async prepareProvider(_request, onDispatch) {
       const streamSimple = modelRuntime.streamSimple.bind(modelRuntime);
-      modelRuntime.streamSimple = (model, context, options) => {
-        observeOptions?.(options);
-        void onDispatch();
-        return streamSimple(model, context, options);
-      };
+      modelRuntime.streamSimple = (model, context, options) =>
+        lazyStream(model, async () => {
+          observeOptions?.(options);
+          await onDispatch();
+          return streamSimple(model, context, options);
+        });
       return {
         modelRuntime,
         model: faux.getModel(),
@@ -62,14 +65,24 @@ async function fakeDependencies(
   };
 }
 
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolveValue: (() => void) | undefined;
+  const promise = new Promise<void>((resolve) => {
+    resolveValue = resolve;
+  });
+  if (!resolveValue) throw new Error("deferred initialization failed");
+  return { promise, resolve: resolveValue };
+}
+
 describe("Pi Runtime execution", () => {
   it("advertises GPT-5.6 max reasoning to Pi", () => {
-    const request = runtimeRequest({
+    const request = runtimeRequestV3({
       provider: {
         ...runtimeRequest().provider,
         model: "openai/gpt-5.6-sol",
         context_window: 272_000,
         max_output_tokens: 16_384,
+        thinking_level_map: { xhigh: "xhigh", max: "max" },
       },
       reasoning_effort: "max",
     });
@@ -84,7 +97,7 @@ describe("Pi Runtime execution", () => {
     });
   });
 
-  it("treats Pi's provider-native length stop as a settled turn", async () => {
+  it("preserves Pi's provider-native length stop as a partial result", async () => {
     const dependencies = await fakeDependencies(
       [fauxAssistantMessage("Provider-native terminal text.", { stopReason: "length" })],
       async () => {
@@ -106,8 +119,8 @@ describe("Pi Runtime execution", () => {
       dependencies,
     );
 
-    expect(result.outcome).toBe("succeeded");
-    expect(result.errorCode).toBeNull();
+    expect(result.outcome).toBe("partial");
+    expect(result.errorCode).toBe("agent_output_truncated");
     expect(writer.events).toContainEqual(
       expect.objectContaining({ type: "turn.completed", stop_reason: "length" }),
     );
@@ -140,6 +153,39 @@ describe("Pi Runtime execution", () => {
     );
 
     expect(timeoutMs).toBe(2_147_483_647);
+  });
+
+  it("continues server-side from a transcript ending in the source user turn", async () => {
+    const dependencies = await fakeDependencies(
+      [fauxAssistantMessage("Continuation from the same Pi transcript.")],
+      async () => {
+        throw new Error("tool must remain disabled");
+      },
+    );
+    const request = runtimeRequestV3({
+      history: [
+        {
+          message_id: "source-user-message",
+          role: "user",
+          text: "Write a long response",
+        },
+      ],
+      operation: "continue",
+      allowed_tools: [],
+      tool_gateway_url: null,
+      tool_capability: null,
+      references: [],
+    });
+
+    await expect(
+      executeAgentRun(
+        request,
+        new CollectingEventWriter(request.run_id, request.execution_epoch),
+        new AbortController().signal,
+        undefined,
+        dependencies,
+      ),
+    ).resolves.toMatchObject({ outcome: "succeeded", providerDispatchCount: 1 });
   });
 
   it("uses Pi native compaction and emits a durable checkpoint", async () => {
@@ -190,6 +236,8 @@ describe("Pi Runtime execution", () => {
     expect(checkpoint?.provider_call_count).toBe(1);
     expect(typeof checkpoint?.usage).toBe("object");
     expect(String(checkpoint?.first_kept_message_id)).toMatch(/^history-/u);
+    expect(checkpoint).not.toHaveProperty("next_message_id");
+    expect(checkpoint).not.toHaveProperty("phase");
     expect(result.usage.total_tokens).toBeGreaterThan(0);
   });
 
@@ -243,7 +291,7 @@ describe("Pi Runtime execution", () => {
     ).toMatchObject({ provider_call_count: 2 });
   });
 
-  it("resets streamed text before Pi retries a recoverable length stop", async () => {
+  it("does not persist unsafe current-turn overflow compaction", async () => {
     const dependencies = await fakeDependencies(
       [
         fauxAssistantMessage("Discard this truncated draft.", { stopReason: "length" }),
@@ -276,15 +324,13 @@ describe("Pi Runtime execution", () => {
       dependencies,
     );
 
-    expect(result.outcome).toBe("succeeded");
+    expect(result.outcome).toBe("partial");
+    expect(result.errorCode).toBe("agent_output_truncated");
     const resetIndex = writer.events.findIndex((event) => event.type === "text.reset");
-    expect(resetIndex).toBeGreaterThan(0);
+    expect(resetIndex).toBe(-1);
     expect(
-      writer.events.slice(0, resetIndex).some((event) => event.type === "text.delta"),
-    ).toBe(true);
-    expect(
-      writer.events.slice(resetIndex + 1).some((event) => event.type === "text.delta"),
-    ).toBe(true);
+      writer.events.some((event) => event.type === "compaction.completed"),
+    ).toBe(false);
   });
 
   it("keeps Pi transient-error retry semantics and resets the failed draft", async () => {
@@ -374,6 +420,48 @@ describe("Pi Runtime execution", () => {
     expect(
       writer.events.some((event) => event.type === "compaction.completed"),
     ).toBe(false);
+  });
+
+  it("does not preserve discarded text progress after reset and safety trip", async () => {
+    const base = await fakeDependencies(
+      [
+        fauxAssistantMessage("Discard this transient draft.", {
+          stopReason: "error",
+          errorMessage: "rate limit exceeded",
+        }),
+        fauxAssistantMessage("must not complete"),
+      ],
+      async () => {
+        throw new Error("tool must remain disabled");
+      },
+    );
+    const dependencies: RuntimeDependencies = {
+      ...base,
+      safetyPolicy: {
+        ...DEFAULT_RUNTIME_SAFETY_POLICY,
+        maxProviderDispatches: 1,
+      },
+    };
+    const request = runtimeRequest({
+      allowed_tools: [],
+      tool_gateway_url: null,
+      tool_capability: null,
+    });
+    const writer = new CollectingEventWriter(request.run_id, request.execution_epoch);
+
+    const result = await executeAgentRun(
+      request,
+      writer,
+      new AbortController().signal,
+      undefined,
+      dependencies,
+    );
+
+    expect(writer.events.some((event) => event.type === "text.reset")).toBe(true);
+    expect(result).toMatchObject({
+      outcome: "failed",
+      errorCode: "agent_safety_budget_reached",
+    });
   });
 
   it("proves text -> lumen tool -> text ordering with exactly one tool", async () => {
@@ -504,7 +592,7 @@ describe("Pi Runtime execution", () => {
       dependencies,
     );
 
-    expect(result.outcome).toBe("failed");
+    expect(result.outcome).toBe("partial");
     expect(result.errorCode).toBe("agent_reference_not_found");
     expect(result.toolCallCount).toBe(1);
     expect(writer.events.find((event) => event.type === "tool.failed")).toMatchObject({
@@ -727,7 +815,7 @@ describe("Pi Runtime execution", () => {
     });
     const writer = new CollectingEventWriter(request.run_id, request.execution_epoch);
 
-    await executeAgentRun(
+    const result = await executeAgentRun(
       request,
       writer,
       new AbortController().signal,
@@ -736,6 +824,18 @@ describe("Pi Runtime execution", () => {
     );
 
     expect(gatewayCalls).toBe(0);
+    expect(result).toMatchObject({
+      outcome: "partial",
+      errorCode: "agent_image_limit_reached",
+      toolCallCount: 1,
+    });
+    expect(writer.events).toContainEqual(
+      expect.objectContaining({
+        type: "tool.failed",
+        error_code: "agent_image_limit_reached",
+        result_unknown: false,
+      }),
+    );
     expect(writer.events).toContainEqual(
       expect.objectContaining({ type: "limit.reached", reason: "images" }),
     );
@@ -779,7 +879,7 @@ describe("Pi Runtime execution", () => {
     });
     const writer = new CollectingEventWriter(request.run_id, request.execution_epoch);
 
-    await executeAgentRun(
+    const result = await executeAgentRun(
       request,
       writer,
       new AbortController().signal,
@@ -788,6 +888,11 @@ describe("Pi Runtime execution", () => {
     );
 
     expect(gatewayCalls).toBe(1);
+    expect(result).toMatchObject({
+      outcome: "partial",
+      errorCode: "agent_tool_limit_reached",
+      toolCallCount: 2,
+    });
     expect(writer.events).toContainEqual(
       expect.objectContaining({ type: "limit.reached", reason: "tool_calls" }),
     );
@@ -868,5 +973,170 @@ describe("Pi Runtime execution", () => {
     );
     expect(result.outcome).toBe("cancelled");
     expect(result.errorCode).toBe("agent_cancelled");
+  });
+
+  it("stops an unbounded unknown-tool loop before the next Provider dispatch", async () => {
+    const base = await fakeDependencies(
+      Array.from({ length: 20 }, (_, index) =>
+        fauxAssistantMessage(
+          fauxToolCall("bash", { command: "id" }, { id: `unknown-${String(index)}` }),
+          { stopReason: "toolUse" },
+        )),
+      async () => {
+        throw new Error("tool must remain disabled");
+      },
+    );
+    const dependencies: RuntimeDependencies = {
+      ...base,
+      safetyPolicy: {
+        maxWallClockMs: 10_000,
+        maxProviderDispatches: 20,
+        maxTurns: 20,
+        maxTotalTokens: 1_000_000,
+        maxEventBytes: 1024 * 1024,
+        maxRepeatedToolCalls: 4,
+      },
+    };
+    const request = runtimeRequest({
+      allowed_tools: [],
+      tool_gateway_url: null,
+      tool_capability: null,
+    });
+
+    await expect(
+      executeAgentRun(
+        request,
+        new CollectingEventWriter(request.run_id, request.execution_epoch),
+        new AbortController().signal,
+        undefined,
+        dependencies,
+      ),
+    ).resolves.toMatchObject({
+      outcome: "failed",
+      errorCode: "agent_safety_budget_reached",
+      providerDispatchCount: 5,
+    });
+  });
+
+  it("enforces the signed run dispatch budget below the server ceiling", async () => {
+    const permits: number[] = [];
+    const base = await fakeDependencies(
+      Array.from({ length: 8 }, (_, index) =>
+        fauxAssistantMessage(
+          fauxToolCall("bash", { command: "id" }, { id: `budget-${String(index)}` }),
+          { stopReason: "toolUse" },
+        )),
+      async () => {
+        throw new Error("tool must remain disabled");
+      },
+    );
+    const dependencies: RuntimeDependencies = {
+      ...base,
+      async authorizeProviderDispatch(_request, ordinal) {
+        permits.push(ordinal);
+      },
+    };
+    const request = runtimeRequest({
+      allowed_tools: [],
+      tool_gateway_url: null,
+      tool_capability: null,
+      provider_dispatch_url: "http://api:8000/internal/agent/runs/run-1/provider-dispatch",
+      provider_dispatch_capability: "dispatch-capability-token-more-than-32-characters",
+      safety_budget: { max_provider_dispatches: 2 },
+    });
+
+    const result = await executeAgentRun(
+      request,
+      new CollectingEventWriter(request.run_id, request.execution_epoch),
+      new AbortController().signal,
+      undefined,
+      dependencies,
+    );
+
+    expect(result).toMatchObject({
+      outcome: "failed",
+      errorCode: "agent_safety_budget_reached",
+      providerDispatchCount: 2,
+    });
+    expect(permits).toEqual([1, 2]);
+  });
+
+  it("does not dispatch when cancellation wins while the permit is pending", async () => {
+    const permitStarted = deferred();
+    const permitRelease = deferred();
+    const base = await fakeDependencies(
+      [fauxAssistantMessage("must not start")],
+      async () => {
+        throw new Error("tool must remain disabled");
+      },
+    );
+    const dependencies: RuntimeDependencies = {
+      ...base,
+      async authorizeProviderDispatch() {
+        permitStarted.resolve();
+        await permitRelease.promise;
+      },
+    };
+    const request = runtimeRequest({
+      allowed_tools: [],
+      tool_gateway_url: null,
+      tool_capability: null,
+      provider_dispatch_url: "http://api:8000/internal/agent/runs/run-1/provider-dispatch",
+      provider_dispatch_capability: "dispatch-capability-token-more-than-32-characters",
+      safety_budget: { max_provider_dispatches: 2 },
+    });
+    const controller = new AbortController();
+    const execution = executeAgentRun(
+      request,
+      new CollectingEventWriter(request.run_id, request.execution_epoch),
+      controller.signal,
+      undefined,
+      dependencies,
+    );
+    await permitStarted.promise;
+    controller.abort("agent_cancelled");
+    permitRelease.resolve();
+
+    await expect(execution).resolves.toMatchObject({
+      outcome: "cancelled",
+      errorCode: "agent_cancelled",
+      providerDispatchCount: 0,
+    });
+  });
+
+  it("does not let provider cleanup failure replace a known successful result", async () => {
+    const base = await fakeDependencies(
+      [fauxAssistantMessage("Known result")],
+      async () => {
+        throw new Error("tool must remain disabled");
+      },
+    );
+    const dependencies: RuntimeDependencies = {
+      ...base,
+      async prepareProvider(request, onDispatch) {
+        const prepared = await base.prepareProvider(request, onDispatch);
+        return {
+          ...prepared,
+          async close() {
+            throw new Error("injected cleanup failure");
+          },
+        };
+      },
+    };
+    const request = runtimeRequest({
+      allowed_tools: [],
+      tool_gateway_url: null,
+      tool_capability: null,
+    });
+
+    await expect(
+      executeAgentRun(
+        request,
+        new CollectingEventWriter(request.run_id, request.execution_epoch),
+        new AbortController().signal,
+        undefined,
+        dependencies,
+      ),
+    ).resolves.toMatchObject({ outcome: "succeeded", errorCode: null });
   });
 });

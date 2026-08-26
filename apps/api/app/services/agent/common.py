@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
 from lumen_core.agent_events import agent_channel, agent_event_id
+from lumen_core.agent_history import plan_agent_runtime_context
 from lumen_core.context_window import estimate_message_tokens
 from lumen_core.model_entities import AgentRun, OutboxEvent
 from lumen_core.providers_parts.config import parse_provider_json
@@ -49,12 +50,24 @@ class AgentProviderPreflight:
     context_window: int = 128_000
     max_output_tokens: int = 16_384
     reasoning_supported: bool = True
+    context_plan: str = "direct"
+    estimated_input_tokens: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class AgentTextReservation:
     hold_micro: int
     billing_snapshot: dict[str, Any]
+
+
+def agent_provider_call_budget(max_image_tool_calls: int) -> int:
+    native_tool_turns = max(0, min(8, max_image_tool_calls))
+    return (
+        1
+        + native_tool_turns
+        + _AGENT_PI_COMPACTION_RESERVE_CALLS
+        + _AGENT_PI_RETRY_RESERVE_CALLS
+    )
 
 
 def http_error(
@@ -100,6 +113,10 @@ async def wallet_chat_provider_preflight(
     require_vision: bool,
     require_reasoning: bool = True,
     minimum_context_window: int = 4096,
+    input_context_tokens: int | None = None,
+    fixed_input_tokens: int | None = None,
+    history_context_tokens: int | None = None,
+    largest_history_entry_tokens: int = 0,
 ) -> AgentProviderPreflight:
     providers_spec = get_spec("providers")
     raw = await get_setting(db, providers_spec) if providers_spec is not None else None
@@ -128,17 +145,62 @@ async def wallet_chat_provider_preflight(
             503,
             configuration_errors=len(errors),
         )
-    eligible = [
-        provider
-        for provider in eligible
-        if provider.agent_context_window >= minimum_context_window
-    ]
+    context_candidates = list(eligible)
+    context_plans: dict[str, str] = {}
+    estimated_input = 0
+    if fixed_input_tokens is not None and history_context_tokens is not None:
+        fixed_tokens = max(0, int(fixed_input_tokens))
+        history_tokens = max(0, int(history_context_tokens))
+        estimated_input = fixed_tokens + history_tokens
+        admitted = []
+        for provider in eligible:
+            plan = plan_agent_runtime_context(
+                context_window=provider.agent_context_window,
+                max_output_tokens=provider.agent_max_output_tokens,
+                fixed_input_tokens=fixed_tokens,
+                history_tokens=history_tokens,
+                largest_history_entry_tokens=largest_history_entry_tokens,
+            )
+            if plan.mode == "impossible":
+                continue
+            admitted.append(provider)
+            context_plans[provider.name] = plan.mode
+        eligible = admitted
+        required_context_window = min(
+            (
+                estimated_input + provider.agent_max_output_tokens
+                for provider in context_candidates
+            ),
+            default=estimated_input + 1,
+        )
+    elif input_context_tokens is None:
+        eligible = [
+            provider
+            for provider in eligible
+            if provider.agent_context_window >= minimum_context_window
+        ]
+        required_context_window = minimum_context_window
+    else:
+        input_tokens = max(0, int(input_context_tokens))
+        eligible = [
+            provider
+            for provider in eligible
+            if provider.agent_context_window
+            >= input_tokens + provider.agent_max_output_tokens
+        ]
+        required_context_window = min(
+            (
+                input_tokens + provider.agent_max_output_tokens
+                for provider in context_candidates
+            ),
+            default=input_tokens + 1,
+        )
     if not eligible:
         raise http_error(
             "agent_context_window_exceeded",
             "no Agent chat provider can carry the complete session context",
             412,
-            minimum_context_window=minimum_context_window,
+            minimum_context_window=required_context_window,
         )
     if require_vision:
         eligible = [
@@ -170,6 +232,15 @@ async def wallet_chat_provider_preflight(
         reasoning_supported=any(
             provider.agent_reasoning_supported for provider in eligible
         ),
+        context_plan=(
+            "compact_before_prompt"
+            if any(
+                context_plans.get(provider.name) == "compact_before_prompt"
+                for provider in eligible
+            )
+            else "direct"
+        ),
+        estimated_input_tokens=estimated_input,
     )
 
 
@@ -221,12 +292,7 @@ async def reserve_agent_text(
     bounded_context_window = max(4096, min(2_000_000, context_window))
     input_per_turn = max(1, bounded_context_window - max_output_tokens)
     native_tool_turns = max(0, min(8, max_image_tool_calls))
-    reserved_provider_calls = (
-        1
-        + native_tool_turns
-        + _AGENT_PI_COMPACTION_RESERVE_CALLS
-        + _AGENT_PI_RETRY_RESERVE_CALLS
-    )
+    reserved_provider_calls = agent_provider_call_budget(max_image_tool_calls)
     input_upper = input_per_turn * reserved_provider_calls
     output_upper = max_output_tokens * reserved_provider_calls
     try:
@@ -438,6 +504,7 @@ __all__ = [
     "AGENT_SETTING_DEFAULTS",
     "AgentProviderPreflight",
     "AgentTextReservation",
+    "agent_provider_call_budget",
     "agent_setting_int",
     "byok_vision_supported",
     "http_error",

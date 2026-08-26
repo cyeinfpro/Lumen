@@ -149,6 +149,7 @@ def test_parse_provider_item_defaults_and_normalizes_fields():
             "image_streaming_enabled": "true",
             "image_edit_input_transport": " file ",
             "agent_models": [" gpt-5.6-sol ", "gpt-5.6-sol", "gpt-5.6-mini"],
+            "agent_thinking_level_map": {"xhigh": "xhigh", "max": "max"},
         },
         index=0,
     )
@@ -166,6 +167,7 @@ def test_parse_provider_item_defaults_and_normalizes_fields():
     assert provider.image_edit_input_transport == "file"
     assert provider.agent_models == ("gpt-5.6-sol", "gpt-5.6-mini")
     assert provider.agent_context_window == 272_000
+    assert provider.agent_thinking_level_map == {"xhigh": "xhigh", "max": "max"}
     assert provider.purposes == DEFAULT_PROVIDER_PURPOSES
 
 
@@ -188,6 +190,15 @@ def test_parse_provider_item_rejects_invalid_agent_models() -> None:
                 "base_url": "https://upstream.example",
                 "api_key": "sk-test",
                 "agent_models": "gpt-5.6-sol",
+            },
+            index=0,
+        )
+    with pytest.raises(ValueError, match="unsupported level"):
+        parse_provider_item(
+            {
+                "base_url": "https://upstream.example",
+                "api_key": "sk-test",
+                "agent_thinking_level_map": {"extreme": "extreme"},
             },
             index=0,
         )

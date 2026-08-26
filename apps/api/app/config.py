@@ -273,6 +273,7 @@ class Settings(BaseSettings):
     # unless this is at least 32 bytes.
     agent_tool_capability_secret: str = Field(default="", repr=False)
     agent_runtime_url: str = "http://agent-runtime:8090"
+    agent_internal_callback_base_url: str = "http://api:8000/internal/agent"
     agent_runtime_shared_secret: str = Field(default="", repr=False)
     agent_runtime_health_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
 
@@ -292,6 +293,10 @@ class Settings(BaseSettings):
         self.agent_runtime_url = _internal_service_url(
             self.agent_runtime_url,
             field="AGENT_RUNTIME_URL",
+        )
+        self.agent_internal_callback_base_url = _internal_service_url(
+            self.agent_internal_callback_base_url,
+            field="AGENT_INTERNAL_CALLBACK_BASE_URL",
         )
         for field_name in (
             "agent_tool_capability_secret",

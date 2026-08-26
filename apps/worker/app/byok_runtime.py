@@ -86,6 +86,24 @@ def _agent_api(capabilities: dict[str, Any]) -> str:
     return value
 
 
+def _agent_thinking_level_map(
+    capabilities: dict[str, Any],
+) -> dict[str, str | None] | None:
+    raw = capabilities.get("agent_thinking_level_map")
+    if not isinstance(raw, dict):
+        return None
+    allowed = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+    result: dict[str, str | None] = {}
+    for key, value in raw.items():
+        if key not in allowed:
+            continue
+        if value is None:
+            result[key] = None
+        elif isinstance(value, str) and value.strip() and len(value.strip()) <= 32:
+            result[key] = value.strip()
+    return result or None
+
+
 async def _resolve_supplier_base_target(raw_base_url: str) -> PublicHttpTarget:
     dev_env = _is_dev_env()
     return await resolve_public_http_target(
@@ -247,6 +265,7 @@ async def resolve_user_credential_runtime(
             maximum=128000,
         ),
         agent_reasoning_supported=caps.get("agent_reasoning_supported") is not False,
+        agent_thinking_level_map=_agent_thinking_level_map(caps),
         image_generations_supported=None,
         image_responses_supported=True,
     )

@@ -33,6 +33,7 @@ export type AgentQuality = "1k" | "2k" | "4k";
 export type AgentRenderQuality = "auto" | "low" | "medium" | "high";
 export type AgentBackground = "auto" | "opaque" | "transparent";
 export type AgentReasoningEffort =
+  | "auto"
   | "none"
   | "minimal"
   | "low"
@@ -93,7 +94,7 @@ export function createAgentDraft(
     attachments: [],
     allowImage: true,
     ...rest,
-    reasoningEffort: rest.reasoningEffort ?? "max",
+    reasoningEffort: rest.reasoningEffort ?? "auto",
     imageDefaults: {
       ...DEFAULT_AGENT_IMAGE_DEFAULTS,
       ...imageDefaults,
@@ -137,6 +138,8 @@ export interface AgentRun {
   idempotency_key: string;
   model: string | null;
   reasoning_effort: string | null;
+  memory_state?: "disabled" | "empty" | "ready" | "degraded" | null;
+  continuable?: boolean;
   turn_count: number;
   tool_call_count: number;
   usage: Record<string, unknown>;
@@ -258,7 +261,22 @@ export interface AgentMessageCreateInput {
   attachments: AgentReferenceInput[];
   image_defaults: AgentImageDefaults;
   allow_image: boolean;
-  reasoning_effort?: AgentReasoningEffort;
+  reasoning_effort?: Exclude<AgentReasoningEffort, "auto"> | null;
+}
+
+export interface AgentSessionImage {
+  image_id: string;
+  reference_label: string;
+  role: string;
+  display_label: string | null;
+  source: string;
+  active: boolean;
+}
+
+export interface AgentSessionImageList {
+  items: AgentSessionImage[];
+  used: number;
+  maximum: number;
 }
 
 export interface AgentMessageCreateResult {

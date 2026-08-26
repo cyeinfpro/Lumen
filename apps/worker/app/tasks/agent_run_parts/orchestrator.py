@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from sqlalchemy import select
 
+from lumen_core.agent_dispatch import provider_dispatch_evidence_count
 from lumen_core.agent_events import AgentRunStatus
 from lumen_core.model_entities import AgentRun, Message
 
@@ -64,6 +65,18 @@ logger = logging.getLogger(__name__)
 tracer = get_tracer("lumen.worker.agent")
 _AGENT_LOCK_TTL_SECONDS = 60
 _CANCEL_POLL_SECONDS = 0.25
+_PROVIDER_HEALTH_NEUTRAL_CODES = frozenset(
+    {
+        "agent_output_truncated",
+        "agent_safety_budget_reached",
+        "agent_tool_failed",
+        "agent_tool_limit_reached",
+        "agent_image_limit_reached",
+        "agent_reference_not_found",
+        "agent_tool_result_unknown",
+        "agent_runtime_shutdown",
+    }
+)
 
 
 async def _watch_cancel(
@@ -208,6 +221,8 @@ async def _prepare_context(
             "reference_count": len(build.request.references),
             "history_count": len(build.request.history),
             "pi_compaction_restored": build.pi_compaction_restored,
+            "pi_compaction_degraded": build.pi_compaction_degraded,
+            "memory_state": build.memory_state,
         },
     )
     if not current:
@@ -399,6 +414,10 @@ async def _finalize(
             partial_reason = (
                 "tool_result_unknown"
                 if error_code == "agent_tool_result_unknown"
+                else "output_truncated"
+                if error_code == "agent_output_truncated"
+                else "safety_budget"
+                if error_code == "agent_safety_budget_reached"
                 else "run_timeout"
                 if error_code == "agent_run_timeout"
                 else "text_before_failure"
@@ -437,9 +456,7 @@ async def _recover_result_unknown(
             accumulator.usage[key] = max(0, value)
     accumulator.turn_count = max(0, int(run.turn_count or 0))
     accumulator.runtime_tool_call_count = max(0, int(run.tool_call_count or 0))
-    accumulator.provider_dispatch_count = max(
-        0, int(dispatch.get("provider_dispatch_count") or 0)
-    )
+    accumulator.provider_dispatch_count = provider_dispatch_evidence_count(dispatch)
     accumulator.provider_completed_count = max(
         0, int(dispatch.get("provider_completed_count") or 0)
     )
@@ -654,7 +671,11 @@ async def _finish_runtime_success(state: _PreparedExecution, attempt: Any) -> No
     agent_runtime_requests_total.labels(outcome=requested).inc()
     if attempt is not None and requested == "succeeded":
         attempt.report_success()
-    elif attempt is not None and state.accumulator.provider_dispatch_count > 0:
+    elif (
+        attempt is not None
+        and state.accumulator.provider_dispatch_count > 0
+        and code not in _PROVIDER_HEALTH_NEUTRAL_CODES
+    ):
         attempt.report_failure()
     if requested in {"failed", "partial"} and state.build.provider.name.startswith(
         "user:"
@@ -756,15 +777,26 @@ async def _run_prepared_execution(state: _PreparedExecution) -> None:
         )
         try:
             with attempt_context as attempt:
-                await update_dispatch_state(
-                    state.claim.run_id,
-                    state.claim.execution_epoch,
-                    state="starting",
-                )
+
+                async def fence_runtime_request() -> None:
+                    started = await update_dispatch_state(
+                        state.claim.run_id,
+                        state.claim.execution_epoch,
+                        state="starting",
+                    )
+                    if started:
+                        return
+                    background.cancel_requested.set()
+                    raise AgentRuntimeClientError(
+                        "agent_stale_execution_epoch",
+                        delivery="proven_absent",
+                    )
+
                 try:
                     async for event in state.runtime_client.stream(
                         state.build.request,
                         cancel_requested=background.cancel_requested,
+                        on_request_starting=fence_runtime_request,
                     ):
                         await _handle_runtime_event(
                             state,

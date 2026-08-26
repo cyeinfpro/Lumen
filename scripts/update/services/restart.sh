@@ -62,7 +62,9 @@ if ! lumen_verify_backup_service_layout_binding; then
     exit 70
 fi
 # --force-recreate：同 start_infra 理由，避免容器名冲突 fail。
-# 服务启动顺序：agent-runtime → api → worker → web。fast 模式使用 --no-deps，因此必须
+# 服务启动顺序：agent-runtime → worker → api → web。新 Worker 能兼容旧 API
+# 创建的 v2 Run；旧 Worker 不能安全消费新 API 创建的 v3 continuation/dispatch Run。
+# fast 模式使用 --no-deps，因此必须
 # 由 updater 显式建立依赖顺序。Web 若在 API 缺失或仍指向旧容器地址时启动，
 # 长驻的 Next.js 进程可能继续访问失效的 Docker DNS 结果，令更新完成后仍长期
 # 返回 502。API 重启会短暂断开更新进度 SSE，但前端可重连；不能用全站可用性
@@ -181,9 +183,9 @@ if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] && [ -f "${CURRENT_LINK}/docker-com
         fi
     fi
 else
-    _target_services=(api worker web)
+    _target_services=(worker api web)
     if lumen_update_agent_runtime_expected "${CURRENT_LINK}"; then
-        _target_services=(agent-runtime api worker web)
+        _target_services=(agent-runtime worker api web)
     fi
     for _svc in "${_target_services[@]}"; do
         if ! lumen_update_start_bound_service "${CURRENT_LINK}" "${_svc}"; then

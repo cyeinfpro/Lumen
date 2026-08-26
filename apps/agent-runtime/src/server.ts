@@ -13,12 +13,14 @@ import {
 import { healthPayload, readinessPayload, RuntimeReadiness } from "./health.js";
 import { RuntimeMetrics } from "./metrics.js";
 import { NdjsonEventWriter, type EventWriter } from "./ndjson.js";
+import { prepareProviderRuntime } from "./providers/runtime-provider.js";
 import { logRuntime, safeErrorCode } from "./redaction.js";
 import {
   executeAgentRun,
   RuntimeExecutionError,
   type RuntimeDependencies,
 } from "./runtime.js";
+import { createImageGateway } from "./tools/gateway.js";
 
 const RUN_PATH = "/v1/runs";
 
@@ -36,9 +38,11 @@ async function readBody(
   request: IncomingMessage,
   maximum: number,
   timeoutMs: number,
+  expectedLength: number | null,
 ): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
+    const allocated = expectedLength === null ? null : Buffer.allocUnsafe(expectedLength);
     let total = 0;
     let settled = false;
     const cleanup = (): void => {
@@ -53,7 +57,7 @@ async function readBody(
       settled = true;
       cleanup();
       if (error) reject(error);
-      else resolve(Buffer.concat(chunks, total));
+      else resolve(allocated ?? Buffer.concat(chunks, total));
     };
     const onData = (raw: Buffer | Uint8Array): void => {
       const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
@@ -63,9 +67,16 @@ async function readBody(
         request.destroy();
         return;
       }
-      chunks.push(chunk);
+      if (allocated !== null) chunk.copy(allocated, total - chunk.length);
+      else chunks.push(chunk);
     };
-    const onEnd = (): void => finish();
+    const onEnd = (): void => {
+      if (expectedLength !== null && total !== expectedLength) {
+        finish(new RequestError(400, "agent_runtime_content_length_mismatch"));
+        return;
+      }
+      finish();
+    };
     const onError = (): void => finish(new RequestError(400, "agent_runtime_body_error"));
     const onAborted = (): void => finish(new RequestError(400, "agent_runtime_body_aborted"));
     const timer = setTimeout(() => {
@@ -188,17 +199,57 @@ function authStatus(error: RuntimeAuthError): number {
     : 401;
 }
 
+function declaredContentLength(
+  request: IncomingMessage,
+  maximum: number,
+): number | null {
+  const raw = request.headers["content-length"];
+  if (raw === undefined) return null;
+  if (typeof raw !== "string" || !/^\d+$/u.test(raw)) {
+    throw new RequestError(400, "agent_runtime_invalid_content_length");
+  }
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new RequestError(400, "agent_runtime_invalid_content_length");
+  }
+  if (parsed > maximum) {
+    throw new RequestError(413, "agent_runtime_request_too_large");
+  }
+  return parsed;
+}
+
+function hasAuthenticationHeaders(request: IncomingMessage): boolean {
+  return [
+    "x-lumen-agent-timestamp",
+    "x-lumen-agent-nonce",
+    "x-lumen-agent-signature",
+  ].every((name) => {
+    const value = request.headers[name];
+    return typeof value === "string" && value.trim() !== "";
+  });
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, milliseconds);
+    timer.unref();
+  });
+}
+
 interface ServerOptions {
   readonly config?: RuntimeConfig;
   readonly metrics?: RuntimeMetrics;
   readonly dependencies?: RuntimeDependencies;
 }
 
-export function createRuntimeServer(options: ServerOptions = {}): {
-  server: Server;
-  readiness: RuntimeReadiness;
-  metrics: RuntimeMetrics;
-} {
+export interface RuntimeServer {
+  readonly server: Server;
+  readonly readiness: RuntimeReadiness;
+  readonly metrics: RuntimeMetrics;
+  shutdown(): Promise<void>;
+}
+
+export function createRuntimeServer(options: ServerOptions = {}): RuntimeServer {
   const config = validateRuntimeConfig(options.config ?? loadConfig());
   const metrics = options.metrics ?? new RuntimeMetrics();
   const readiness = new RuntimeReadiness(config);
@@ -208,7 +259,38 @@ export function createRuntimeServer(options: ServerOptions = {}): {
     config.nonceCacheSize,
     config.authClockSkewSeconds,
   );
-  let admittedRequests = 0;
+  let pendingBodyReads = 0;
+  let activeRuns = 0;
+  let activeRunBytes = 0;
+  let draining = false;
+  let shutdownPromise: Promise<void> | null = null;
+  const activeExecutions = new Map<
+    symbol,
+    { readonly controller: AbortController; readonly done: Promise<void> }
+  >();
+  const runtimeDependencies: RuntimeDependencies = {
+    ...(options.dependencies ?? {}),
+    prepareProvider: async (request, onDispatch) =>
+      options.dependencies === undefined
+        ? prepareProviderRuntime(request, onDispatch)
+        : options.dependencies.prepareProvider(request, onDispatch),
+    createGateway: (request, policy) =>
+      options.dependencies === undefined
+        ? createImageGateway(request, policy)
+        : options.dependencies.createGateway(request, policy),
+    gatewayPolicy: {
+      timeoutMs: config.toolGatewayTimeoutSeconds * 1000,
+      maxResponseBytes: config.toolGatewayMaxResponseBytes,
+    },
+    safetyPolicy: {
+      maxWallClockMs: config.maxRunSeconds * 1000,
+      maxProviderDispatches: config.maxProviderDispatches,
+      maxTurns: config.maxTurns,
+      maxTotalTokens: config.maxTotalTokens,
+      maxEventBytes: config.maxEventBytes,
+      maxRepeatedToolCalls: config.maxRepeatedToolCalls,
+    },
+  };
 
   const server = createServer(async (request, response) => {
     const path = request.url ?? "/";
@@ -237,13 +319,12 @@ export function createRuntimeServer(options: ServerOptions = {}): {
       writeError(response, 404, "agent_runtime_not_found");
       return;
     }
-    if (!readiness.state.ready) {
-      writeError(response, 503, "agent_runtime_not_ready");
-      return;
-    }
-    if (admittedRequests >= config.maxConcurrentRuns) {
-      metrics.requests.labels("capacity_rejected").inc();
-      writeError(response, 503, "agent_runtime_capacity_exhausted");
+    if (draining || !readiness.state.ready) {
+      writeError(
+        response,
+        503,
+        draining ? "agent_runtime_draining" : "agent_runtime_not_ready",
+      );
       return;
     }
     const contentType = request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
@@ -251,16 +332,43 @@ export function createRuntimeServer(options: ServerOptions = {}): {
       writeError(response, 415, "agent_runtime_content_type_required");
       return;
     }
-    admittedRequests += 1;
-
-    let rawBody: Buffer;
+    if (!hasAuthenticationHeaders(request)) {
+      writeError(response, 401, "agent_runtime_auth_required");
+      return;
+    }
+    let contentLength: number | null;
     try {
-      rawBody = await readBody(
+      contentLength = declaredContentLength(request, config.maxRequestBytes);
+    } catch (error) {
+      const requestError = error instanceof RequestError
+        ? error
+        : new RequestError(400, "agent_runtime_invalid_request");
+      writeError(response, requestError.statusCode, requestError.code);
+      return;
+    }
+    if (pendingBodyReads >= config.maxConcurrentBodyReads) {
+      metrics.requests.labels("preauth_capacity_rejected").inc();
+      writeError(response, 503, "agent_runtime_preauth_capacity_exhausted");
+      return;
+    }
+    pendingBodyReads += 1;
+
+    let runRequest: ReturnType<typeof parseRuntimeRequest>;
+    let requestBytes: number;
+    try {
+      const rawBody = await readBody(
         request,
         config.maxRequestBytes,
         config.requestBodyTimeoutSeconds * 1000,
+        contentLength,
       );
+      requestBytes = rawBody.byteLength;
       authenticator.verify("POST", RUN_PATH, request.headers, rawBody);
+      try {
+        runRequest = parseRuntimeRequest(parseJsonBody(rawBody));
+      } catch {
+        throw new RequestError(422, "agent_runtime_invalid_request");
+      }
     } catch (error) {
       if (error instanceof RuntimeAuthError) {
         writeError(response, authStatus(error), error.code);
@@ -269,25 +377,36 @@ export function createRuntimeServer(options: ServerOptions = {}): {
       } else {
         writeError(response, 400, "agent_runtime_invalid_request");
       }
-      admittedRequests -= 1;
+      return;
+    } finally {
+      pendingBodyReads -= 1;
+    }
+    if (
+      activeRuns >= config.maxConcurrentRuns ||
+      activeRunBytes + requestBytes > config.maxInflightRequestBytes
+    ) {
+      metrics.requests.labels("run_capacity_rejected").inc();
+      writeError(response, 503, "agent_runtime_capacity_exhausted");
       return;
     }
-
-    let runRequest;
-    try {
-      runRequest = parseRuntimeRequest(parseJsonBody(rawBody));
-    } catch {
-      writeError(response, 422, "agent_runtime_invalid_request");
-      admittedRequests -= 1;
-      return;
-    }
+    activeRuns += 1;
+    activeRunBytes += requestBytes;
 
     metrics.activeRuns.inc();
     const startedAt = process.hrtime.bigint();
     const abortController = new AbortController();
+    const executionKey = Symbol(runRequest.run_id);
+    let resolveExecution: (() => void) | undefined;
+    const executionDone = new Promise<void>((resolve) => {
+      resolveExecution = resolve;
+    });
+    activeExecutions.set(executionKey, {
+      controller: abortController,
+      done: executionDone,
+    });
     let completed = false;
     const abortOnDisconnect = (): void => {
-      if (!completed) abortController.abort();
+      if (!completed) abortController.abort("agent_cancelled");
     };
     request.once("aborted", abortOnDisconnect);
     response.once("close", abortOnDisconnect);
@@ -323,7 +442,7 @@ export function createRuntimeServer(options: ServerOptions = {}): {
         writer,
         abortController.signal,
         metrics,
-        options.dependencies,
+        runtimeDependencies,
       );
       await heartbeat.stop();
       const effectiveOutcome = runtimeState.streamFailed
@@ -394,7 +513,10 @@ export function createRuntimeServer(options: ServerOptions = {}): {
       request.off("aborted", abortOnDisconnect);
       response.off("close", abortOnDisconnect);
       if (!response.destroyed) response.end();
-      admittedRequests -= 1;
+      activeRuns -= 1;
+      activeRunBytes -= requestBytes;
+      activeExecutions.delete(executionKey);
+      resolveExecution?.();
       metrics.activeRuns.dec();
       metrics.requests.labels(outcome).inc();
       const duration = Number(process.hrtime.bigint() - startedAt) / 1_000_000_000;
@@ -406,12 +528,54 @@ export function createRuntimeServer(options: ServerOptions = {}): {
   server.headersTimeout = 15_000;
   server.keepAliveTimeout = 5_000;
   server.maxRequestsPerSocket = 100;
-  return { server, readiness, metrics };
+  const shutdown = (): Promise<void> => {
+    shutdownPromise ??= (async () => {
+      draining = true;
+      readiness.markDraining();
+      const listenerClosed = new Promise<void>((resolve) => {
+        if (!server.listening) {
+          resolve();
+          return;
+        }
+        server.close((error) => {
+          if (error) {
+            logRuntime("error", "agent_runtime.shutdown_failed", {
+              error_type: error.name,
+            });
+            process.exitCode = 1;
+          }
+          resolve();
+        });
+        server.closeIdleConnections();
+      });
+      const graceMs = config.shutdownGraceSeconds * 1000;
+      await Promise.race([
+        Promise.allSettled(
+          [...activeExecutions.values()].map((execution) => execution.done),
+        ),
+        delay(graceMs),
+      ]);
+      for (const execution of activeExecutions.values()) {
+        execution.controller.abort("agent_runtime_shutdown");
+      }
+      await Promise.race([
+        Promise.allSettled(
+          [...activeExecutions.values()].map((execution) => execution.done),
+        ),
+        delay(5_000),
+      ]);
+      server.closeAllConnections();
+      await Promise.race([listenerClosed, delay(1_000)]);
+    })();
+    return shutdownPromise;
+  };
+  return { server, readiness, metrics, shutdown };
 }
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const { server, readiness } = createRuntimeServer({ config });
+  const runtime = createRuntimeServer({ config });
+  const { server, readiness } = runtime;
   await readiness.check();
   server.listen(config.port, config.host, () => {
     logRuntime("info", "agent_runtime.started", {
@@ -421,14 +585,7 @@ async function main(): Promise<void> {
     });
   });
   const shutdown = (): void => {
-    server.close((error) => {
-      if (error) {
-        logRuntime("error", "agent_runtime.shutdown_failed", {
-          error_type: error.name,
-        });
-        process.exitCode = 1;
-      }
-    });
+    void runtime.shutdown();
   };
   process.once("SIGTERM", shutdown);
   process.once("SIGINT", shutdown);

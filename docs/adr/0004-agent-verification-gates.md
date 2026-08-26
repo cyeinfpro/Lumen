@@ -19,9 +19,8 @@ and mocked browser geometry. Runtime tests include nonce replay after nominal
 TTL, pre-auth slow-body admission, direct unpinned redirects, parsed Gateway
 5xx unknown results, detailed usage, impossible usage, post-turn exceptions,
 unknown-result submission freezing, and image limits.
-They also prove Runtime v2 has no Lumen lifecycle budget, Pi recoverable-length
-compaction emits `text.reset` before regeneration, and NDJSON has no aggregate
-event/byte cutoff.
+They also prove the server-owned safety budget, pre-prompt-only checkpoint
+persistence, retained-text reset accounting, and bounded NDJSON event output.
 
 These tests make no paid call and do not require Docker, PostgreSQL, or Redis.
 
@@ -40,9 +39,9 @@ The command and scenario-specific prerequisites are documented in ADR 0001.
 Output is machine-readable JSON and includes outcome, error code, turn/tool
 counts, detailed usage, Provider statuses, and text event count. A missing
 reasoning breakdown fails the reasoning scenario; it is not silently accepted.
-The `truncated` scenario follows Pi semantics: a provider-native `length` stop is
-a settled assistant turn, while a recoverable context-clamped length may compact,
-reset the discarded draft, and retry once.
+The `truncated` scenario requires a `partial` result with
+`agent_output_truncated` and a `turn.completed` length stop. Continuation is an
+explicit server command; truncation is never presented as ordinary success.
 
 ## Full-Stack Matrix
 

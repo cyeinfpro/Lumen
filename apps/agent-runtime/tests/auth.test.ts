@@ -133,4 +133,35 @@ describe("Worker request authentication", () => {
       auth.verify("POST", "/v1/runs", headers, body, nowMs + 31_000),
     ).toThrow(expect.objectContaining({ code: "agent_runtime_auth_replayed" }));
   });
+
+  it("sweeps expired nonces after a wall-clock rollback", () => {
+    const body = Buffer.from("{}", "utf8");
+    const auth = new RuntimeAuthenticator(TEST_SECRET, 30, 2, 600);
+    const verifyAt = (nonce: string, nowMs: number) => {
+      const timestamp = String(Math.floor(nowMs / 1000));
+      auth.verify(
+        "POST",
+        "/v1/runs",
+        {
+          [AUTH_TIMESTAMP_HEADER]: timestamp,
+          [AUTH_NONCE_HEADER]: nonce,
+          [AUTH_SIGNATURE_HEADER]: signRuntimeRequest(
+            TEST_SECRET,
+            "POST",
+            "/v1/runs",
+            timestamp,
+            nonce,
+            body,
+          ),
+        },
+        body,
+        nowMs,
+      );
+    };
+    const base = 1_700_000_000_000;
+    verifyAt("nonce-future-expiry-01", base);
+    verifyAt("nonce-earlier-expiry-1", base - 600_000);
+
+    expect(() => verifyAt("nonce-after-rollback-1", base + 700_000)).not.toThrow();
+  });
 });

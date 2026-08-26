@@ -829,6 +829,37 @@ async def test_lease_renewer_uses_redis_time_for_queue_expiry(
 
 
 @pytest.mark.asyncio
+async def test_secondary_lease_refresh_failure_does_not_lose_primary_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Redis:
+        async def eval(self, *_args) -> int:
+            return 1
+
+        async def expire(self, *_args) -> int:
+            raise RuntimeError("secondary metadata unavailable")
+
+    async def _stop_after_primary_renewal(_delay: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(generation_lease, "LEASE_TTL_S", 60)
+    monkeypatch.setattr(generation_lease, "LEASE_RENEW_S", 10)
+    lease_lost = asyncio.Event()
+
+    with pytest.raises(asyncio.CancelledError):
+        await generation_lease.lease_renewer(
+            _Redis(),
+            "gen-secondary-failure",
+            "worker-1",
+            lease_lost,
+            extra_lease_keys=["secondary-key"],
+            sleep=_stop_after_primary_renewal,
+        )
+
+    assert not lease_lost.is_set()
+
+
+@pytest.mark.asyncio
 async def test_cancel_renewer_task_awaits_cancel_cleanup() -> None:
     cleaned = asyncio.Event()
 
@@ -1530,8 +1561,7 @@ async def test_image_queue_capacity_keeps_last_success_during_long_db_outage(
     assert await generation_queue.resolve_image_queue_capacity(services=services) == 16
     for _ in range(3):
         assert (
-            await generation_queue.resolve_image_queue_capacity(services=services)
-            == 16
+            await generation_queue.resolve_image_queue_capacity(services=services) == 16
         )
 
 
@@ -2293,7 +2323,9 @@ async def test_model_library_hook_defers_tagger_until_after_success_commit(
 
 
 @pytest.mark.asyncio
-async def test_post_commit_workflow_tagger_cancellation_cannot_fail_generation() -> None:
+async def test_post_commit_workflow_tagger_cancellation_cannot_fail_generation() -> (
+    None
+):
     async def cancel_tagger(**_kwargs: Any) -> None:
         raise asyncio.CancelledError
 
