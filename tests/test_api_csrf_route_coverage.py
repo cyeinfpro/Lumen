@@ -81,6 +81,9 @@ CSRF_EXEMPT_WRITE_ROUTES = {
     ("POST", "/internal/agent/runs/{run_id}/tools/create-image"): (
         "internal service: HMAC-signed run-scoped capability, no browser cookie"
     ),
+    ("POST", "/internal/agent/runs/{run_id}/provider-dispatch"): (
+        "internal service: HMAC-signed run-scoped capability, no browser cookie"
+    ),
 }
 
 _ROUTE_DUMP_SCRIPT = r"""
