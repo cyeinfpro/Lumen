@@ -20,7 +20,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
 from lumen_core.byok import (
     build_provider_probe_request,  # noqa: F401 - late-bound probe facade
     extract_response_output_text,  # noqa: F401 - late-bound probe facade
@@ -50,6 +49,7 @@ from .provider_runtime.probe_runtime import (
 )
 from .provider_runtime.probes import ProviderProbeMixin
 from .provider_runtime.upstream_services import ImageUpstreamRuntime
+from .provider_pool_parts import attempts as _attempts
 from .provider_pool_parts import image_selection as _image_selection
 from .provider_pool_parts.config_loading import (
     ProviderConfigLoadingMixin,
@@ -100,43 +100,12 @@ _IMAGE_PROBE_QUALITY = "low"
 _IMAGE_PROBE_MIN_B64_LEN = 1000
 
 
-# ---------------------------------------------------------------------------
-# 数据结构
-# ---------------------------------------------------------------------------
-@dataclass
-class TextProviderAttempt:
-    _pool: ProviderPool = field(repr=False)
-    provider: ResolvedProvider
-    _reported: bool = field(default=False, init=False, repr=False)
-
-    def report_success(self) -> None:
-        if self._reported:
-            return
-        self._pool.report_success(self.provider.name)
-        self._reported = True
-
-    def report_failure(self) -> None:
-        if self._reported:
-            return
-        self._pool.report_failure(
-            self.provider.name,
-            selected_circuit_state=self.provider.text_circuit_state,
-            half_open_probe_token=self.provider.half_open_probe_token,
-        )
-        self._reported = True
-
-    def report_exception(self, exc: BaseException) -> bool:
-        if not _is_text_provider_failure(exc):
-            return False
-        self.report_failure()
-        return True
-
-    def release(self) -> None:
-        if self._reported:
-            return
-        self._pool.release_text_attempt(self.provider)
-        self._reported = True
-
+TextProviderAttempt = _attempts.TextProviderAttempt
+AgentProviderAttempt = _attempts.AgentProviderAttempt
+_UntrackedTextProviderAttempt = _attempts.UntrackedProviderAttempt
+_is_text_provider_failure = _attempts.is_text_provider_failure
+text_provider_attempt = _attempts.text_provider_attempt
+agent_provider_attempt = _attempts.agent_provider_attempt
 
 _ImageCandidate = _image_selection.ImageCandidate
 _ImageHealthSnapshot = _image_selection.ImageHealthSnapshot
@@ -157,38 +126,6 @@ class _ImageCandidateBuckets(_image_selection.ImageCandidateBuckets):
             task_id=task_id,
             logger=logger,
         )
-
-
-class _UntrackedTextProviderAttempt:
-    """Compatibility attempt for lightweight pools used by late-bound tests."""
-
-    def report_success(self) -> None:
-        return None
-
-    def report_failure(self) -> None:
-        return None
-
-    def report_exception(self, exc: BaseException) -> bool:
-        return _is_text_provider_failure(exc)
-
-    def release(self) -> None:
-        return None
-
-
-def _is_text_provider_failure(exc: BaseException) -> bool:
-    if isinstance(exc, httpx.HTTPError):
-        return True
-    if getattr(exc, "status_code", None) is not None:
-        return True
-    error_code = getattr(exc, "error_code", None)
-    if isinstance(error_code, str) and error_code.strip():
-        return True
-    if isinstance(exc, RuntimeError):
-        message = str(exc).lower()
-        return (
-            message.startswith("ssh proxy ") or "unsupported proxy protocol" in message
-        )
-    return False
 
 
 def _image_endpoint_skip_reason(
@@ -253,24 +190,6 @@ def _all_image_accounts_failed(
     return _image_selection.all_image_accounts_failed(skipped)
 
 
-@contextmanager
-def text_provider_attempt(
-    pool: Any,
-    provider: Any,
-) -> Iterator[TextProviderAttempt | _UntrackedTextProviderAttempt]:
-    """Track a real ProviderPool attempt while preserving simple test doubles."""
-    attempt_factory = getattr(pool, "text_attempt", None)
-    if not callable(attempt_factory):
-        attempt = _UntrackedTextProviderAttempt()
-        try:
-            yield attempt
-        finally:
-            attempt.release()
-        return
-    with attempt_factory(provider) as attempt:
-        yield attempt
-
-
 # ---------------------------------------------------------------------------
 # Provider Base URL 格式校验（独立模块，避免 provider_pool 运行时导入 upstream）
 # ---------------------------------------------------------------------------
@@ -297,6 +216,7 @@ class ProviderPool(
         self._providers: list[ProviderConfig] = []
         self._proxies: dict[str, ProviderProxyDefinition] = {}
         self._health: dict[str, ProviderHealth] = {}
+        self._agent_health: dict[tuple[str, str, str], ProviderHealth] = {}
         self._config_loaded_at: float = 0.0
         self._config_last_good_at: float | None = None
         self._config_error: str | None = None
@@ -374,12 +294,49 @@ class ProviderPool(
             by_priority.setdefault(provider.priority, []).append(provider)
         return by_priority
 
+    @staticmethod
+    def _filter_agent_model(
+        by_priority: dict[int, list[ProviderConfig]],
+        *,
+        route: str,
+        agent_model: str | None,
+    ) -> dict[int, list[ProviderConfig]]:
+        if route != "agent" or not agent_model:
+            return by_priority
+        filtered = {
+            priority: [
+                provider
+                for provider in providers
+                if not provider.agent_models or agent_model in provider.agent_models
+            ]
+            for priority, providers in by_priority.items()
+        }
+        return {
+            priority: providers for priority, providers in filtered.items() if providers
+        }
+
+    def _selection_health(
+        self,
+        provider: ProviderConfig,
+        *,
+        route: str,
+        agent_model: str | None,
+        create_agent_lane: bool,
+    ) -> ProviderHealth | None:
+        if route == "agent" and agent_model:
+            key = (provider.name, provider.agent_api, agent_model)
+            if create_agent_lane:
+                return self._agent_health.setdefault(key, ProviderHealth())
+            return self._agent_health.get(key)
+        return self._health.get(provider.name)
+
     def _select_ordered(
         self,
         *,
         endpoint_kind: str | None = None,
         route: str = "text",
         purpose: str | None = None,
+        agent_model: str | None = None,
         claim_half_open: bool = True,
         advance_round_robin: bool = True,
     ) -> list[ResolvedProvider]:
@@ -397,6 +354,11 @@ class ProviderPool(
             endpoint_kind=endpoint_kind,
             route=route,
             purpose=effective_purpose,
+        )
+        by_priority = self._filter_agent_model(
+            by_priority,
+            route=route,
+            agent_model=agent_model,
         )
         if not by_priority:
             raise UpstreamError(
@@ -421,7 +383,12 @@ class ProviderPool(
             circuit_open: list[ProviderConfig] = []
 
             for p in ordered:
-                h = self._health.get(p.name)
+                h = self._selection_health(
+                    p,
+                    route=route,
+                    agent_model=agent_model,
+                    create_agent_lane=True,
+                )
                 with self._stats_lock:
                     circuit_state = (
                         "closed" if h is None else self._circuit_state(h, now)
@@ -437,9 +404,16 @@ class ProviderPool(
                     circuit_open.append(p)
 
             # 按冷却开始时间排 circuit_open（最早的最可能已恢复）
-            circuit_open.sort(
-                key=lambda p: self._health[p.name].cooldown_until or float("inf")
-            )
+            def cooldown_key(provider: ProviderConfig) -> float:
+                health = self._selection_health(
+                    provider,
+                    route=route,
+                    agent_model=agent_model,
+                    create_agent_lane=False,
+                )
+                return health.cooldown_until or float("inf") if health else float("inf")
+
+            circuit_open.sort(key=cooldown_key)
 
             half_open_probe: list[tuple[ProviderConfig, str]] = []
             # A half-open candidate must be the first provider this selection
@@ -448,7 +422,12 @@ class ProviderPool(
             # succeeds. At most one selector owns the probe for a provider.
             if claim_half_open and not result:
                 for candidate in half_open_candidates:
-                    h = self._health.get(candidate.name)
+                    h = self._selection_health(
+                        candidate,
+                        route=route,
+                        agent_model=agent_model,
+                        create_agent_lane=False,
+                    )
                     if h is None:
                         continue
                     with self._stats_lock:
@@ -489,6 +468,7 @@ class ProviderPool(
                         responses_supported=p.responses_supported,
                         vision_supported=p.vision_supported,
                         agent_api=p.agent_api,
+                        agent_base_url=p.agent_base_url,
                         agent_models=p.agent_models,
                         agent_context_window=p.agent_context_window,
                         agent_max_output_tokens=p.agent_max_output_tokens,
@@ -657,12 +637,28 @@ class ProviderPool(
             )
         if route == "text":
             endpoint_kind = endpoint_kind or "responses"
+        if route == "agent":
+            endpoint_kind = None
         if effective_purpose == "embedding":
             endpoint_kind = endpoint_kind or "responses"
         return self._select_ordered(
             endpoint_kind=endpoint_kind,
             route=route,
             purpose=effective_purpose,
+        )
+
+    async def select_agent(
+        self,
+        *,
+        model: str,
+        purpose: str = "chat",
+    ) -> list[ResolvedProvider]:
+        await self._maybe_reload()
+        return self._select_ordered(
+            endpoint_kind=None,
+            route="agent",
+            purpose=purpose,
+            agent_model=model,
         )
 
     async def select_one(
@@ -677,16 +673,20 @@ class ProviderPool(
         route: str = "text",
         purpose: str | None = None,
         endpoint_kind: str | None = None,
+        agent_model: str | None = None,
     ) -> list[ResolvedProvider]:
         """Inspect text-capable providers without claiming half-open or RR state."""
         await self._maybe_reload()
         effective_purpose = purpose or route_to_purpose(route)
         if route == "text" or effective_purpose == "embedding":
             endpoint_kind = endpoint_kind or "responses"
+        if route == "agent":
+            endpoint_kind = None
         return self._select_ordered(
             endpoint_kind=endpoint_kind,
             route=route,
             purpose=effective_purpose,
+            agent_model=agent_model,
             claim_half_open=False,
             advance_round_robin=False,
         )
@@ -719,6 +719,73 @@ class ProviderPool(
             return
         with self._stats_lock:
             h = self._health.get(provider.name)
+            if h is None or h.half_open_probe_token != token:
+                return
+            h.half_open_probe_inflight = False
+            h.half_open_probe_token = None
+
+    @contextmanager
+    def agent_attempt(
+        self,
+        provider: ResolvedProvider,
+        model: str,
+    ) -> Iterator[AgentProviderAttempt]:
+        attempt = AgentProviderAttempt(self, provider, model)
+        try:
+            yield attempt
+        finally:
+            attempt.release()
+
+    @staticmethod
+    def _agent_lane_key(
+        provider: ResolvedProvider,
+        model: str,
+    ) -> tuple[str, str, str]:
+        return (provider.name, provider.agent_api, model)
+
+    def report_agent_success(self, provider: ResolvedProvider, model: str) -> None:
+        h = self._agent_health.setdefault(
+            self._agent_lane_key(provider, model),
+            ProviderHealth(),
+        )
+        with self._stats_lock:
+            h.consecutive_failures = 0
+            h.last_success_at = time.monotonic()
+            h.cooldown_until = None
+            h.half_open_probe_inflight = False
+            h.half_open_probe_token = None
+            h.total_requests += 1
+            h.successful_requests += 1
+
+    def report_agent_failure(self, provider: ResolvedProvider, model: str) -> None:
+        h = self._agent_health.setdefault(
+            self._agent_lane_key(provider, model),
+            ProviderHealth(),
+        )
+        now = time.monotonic()
+        with self._stats_lock:
+            h.last_failure_at = now
+            h.total_requests += 1
+            h.failed_requests += 1
+            h.consecutive_failures += 1
+            h.half_open_probe_inflight = False
+            h.half_open_probe_token = None
+            if h.consecutive_failures >= _CB_FAILURE_THRESHOLD:
+                multiplier = min(
+                    h.consecutive_failures - _CB_FAILURE_THRESHOLD + 1,
+                    10,
+                )
+                h.cooldown_until = now + min(
+                    _CB_COOLDOWN_BASE_S * multiplier,
+                    _CB_COOLDOWN_MAX_S,
+                )
+
+    def release_agent_attempt(self, provider: ResolvedProvider, model: str) -> None:
+        token = provider.half_open_probe_token
+        if token is None:
+            return
+        h = self._agent_health.get(self._agent_lane_key(provider, model))
+        with self._stats_lock:
             if h is None or h.half_open_probe_token != token:
                 return
             h.half_open_probe_inflight = False

@@ -1,24 +1,29 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
-from lumen_core.byok import (
-    build_provider_probe_request,
-    extract_response_output_text,
-    extract_sse_output_text,
+from lumen_core.agent_provider_contract import (
+    AGENT_PROBE_EXPECTED_TEXT,
+    AGENT_PROBE_MAX_RESPONSE_BYTES,
+    agent_endpoint_contract,
+    agent_probe_headers,
+    build_agent_probe_request,
+    parse_agent_probe_sse,
 )
+from lumen_core.providers import parse_proxy_item
 from lumen_core.providers_parts.definitions import ProviderProxyDefinition
-from lumen_core.providers_parts.selection import endpoint_kind_allowed
+from lumen_core.schema_models.providers import ProviderProbeResult
+
+from .presentation import normalize_bool
 
 from ...proxy_pool import resolve_provider_proxy_url
-from .presentation import (
-    normalize_image_jobs_endpoint,
-    normalize_image_jobs_endpoint_lock,
-)
 
 
 PROBE_TIMEOUT_S = 15.0
@@ -39,10 +44,8 @@ class ProbeOutcome:
 
 
 def responses_url(base_url: str) -> str:
-    base = base_url.strip().rstrip("/")
-    if base.endswith("/v1"):
-        return f"{base}/responses"
-    return f"{base}/v1/responses"
+    """Legacy compatibility facade for non-Agent callers and tests."""
+    return agent_endpoint_contract(base_url, "openai-responses").request_url
 
 
 def classify_probe_status(status: int) -> tuple[str, str | None]:
@@ -59,7 +62,7 @@ def truncate_probe_error(value: str, *, limit: int = 240) -> str:
     text = " ".join(value.strip().split())
     if len(text) <= limit:
         return text
-    return text[: limit - 8].rstrip() + "…\n（已截断）"
+    return text[: limit - 8].rstrip() + "... (truncated)"
 
 
 def probe_error_detail_from_payload(payload: object) -> str | None:
@@ -77,17 +80,12 @@ def probe_error_detail_from_payload(payload: object) -> str | None:
     return None
 
 
-def probe_http_error_message(
-    response: httpx.Response,
-    fallback: str | None,
-) -> str:
+def probe_http_error_message(response: httpx.Response, fallback: str | None) -> str:
     detail: str | None = None
     try:
         detail = probe_error_detail_from_payload(response.json())
     except Exception:  # noqa: BLE001
         detail = None
-    if not detail and response.text:
-        detail = truncate_probe_error(response.text)
     prefix = fallback or f"HTTP {response.status_code}"
     return f"{prefix}: {detail}" if detail else prefix
 
@@ -97,15 +95,17 @@ async def probe_one(
     api_key: str,
     *,
     proxy: ProviderProxyDefinition | None = None,
+    agent_api: str = "openai-responses",
+    agent_base_url: str | None = None,
+    model: str = "gpt-5.4-mini",
 ) -> ProbeOutcome:
-    url = responses_url(base_url)
-    headers = {
-        "authorization": f"Bearer {api_key}",
-        "content-type": "application/json",
-    }
-    body = build_provider_probe_request()
     started_at = time.monotonic()
     try:
+        endpoint = agent_endpoint_contract(
+            base_url,
+            agent_api,
+            agent_base_url=agent_base_url,
+        )
         proxy_url = await resolve_provider_proxy_url(proxy)
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(PROBE_TIMEOUT_S),
@@ -113,7 +113,11 @@ async def probe_one(
             follow_redirects=False,
             trust_env=False,
         ) as client:
-            response = await client.post(url, json=body, headers=headers)
+            response = await client.post(
+                endpoint.request_url,
+                json=build_agent_probe_request(agent_api, model),
+                headers=agent_probe_headers(agent_api, api_key),
+            )
         latency = int((time.monotonic() - started_at) * 1000)
         if response.status_code >= 400:
             signal, error = classify_probe_status(response.status_code)
@@ -124,64 +128,119 @@ async def probe_one(
                 http_status=response.status_code,
                 capability_signal=signal or None,
             )
+        raw = response.text.encode("utf-8")
+        if len(raw) > AGENT_PROBE_MAX_RESPONSE_BYTES:
+            return ProbeOutcome(False, latency, "response_too_large", 200, None)
         try:
-            payload = response.json()
-            text = extract_response_output_text(payload)
-        except Exception:  # noqa: BLE001
-            text = extract_sse_output_text(response.text)
-            if not text:
-                return ProbeOutcome(
-                    ok=False,
-                    latency_ms=latency,
-                    error="bad_json",
-                    http_status=response.status_code,
-                    capability_signal=None,
-                )
-        if "9801" in text:
-            return ProbeOutcome(
-                ok=True,
-                latency_ms=latency,
-                error=None,
-                http_status=response.status_code,
-                capability_signal="supported",
-            )
-        return ProbeOutcome(
-            ok=False,
-            latency_ms=latency,
-            error="wrong_answer",
-            http_status=response.status_code,
-            capability_signal=None,
-        )
+            parsed = parse_agent_probe_sse(agent_api, raw.decode("utf-8", "strict"))
+        except (UnicodeDecodeError, ValueError):
+            return ProbeOutcome(False, latency, "invalid_stream", 200, None)
+        if not parsed.terminal:
+            return ProbeOutcome(False, latency, "terminal_missing", 200, None)
+        if not parsed.usage_present:
+            return ProbeOutcome(False, latency, "usage_missing", 200, None)
+        if parsed.text.strip() != AGENT_PROBE_EXPECTED_TEXT:
+            digest = hashlib.sha256(parsed.text.encode("utf-8")).hexdigest()[:16]
+            return ProbeOutcome(False, latency, f"wrong_answer:{digest}", 200, None)
+        return ProbeOutcome(True, latency, None, 200, "supported")
     except httpx.TimeoutException:
         latency = int((time.monotonic() - started_at) * 1000)
-        return ProbeOutcome(
-            ok=False,
-            latency_ms=latency,
-            error="timeout",
-            http_status=None,
-            capability_signal="transient",
-        )
-    except Exception as exc:
+        return ProbeOutcome(False, latency, "timeout", None, "transient")
+    except ValueError:
         latency = int((time.monotonic() - started_at) * 1000)
-        message = truncate_probe_error(str(exc))
-        error = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
         return ProbeOutcome(
-            ok=False,
-            latency_ms=latency,
-            error=error,
-            http_status=None,
-            capability_signal=None,
+            False, latency, "invalid_agent_endpoint", None, "unsupported"
+        )
+    except Exception as exc:  # noqa: BLE001
+        latency = int((time.monotonic() - started_at) * 1000)
+        return ProbeOutcome(False, latency, type(exc).__name__, None, None)
+
+
+def probe_blocked_by_endpoint_lock(_item: dict[str, Any]) -> bool:
+    """Agent probes are independent from image endpoint locks."""
+    return False
+
+
+async def probe_configured_providers(
+    items: list[dict[str, Any]],
+    proxy_items: list[dict[str, Any]],
+    *,
+    names_filter: set[str] | None,
+    default_model: str,
+    runner: Callable[..., Awaitable[ProbeOutcome]] = probe_one,
+) -> list[ProviderProbeResult]:
+    proxy_by_name: dict[str, ProviderProxyDefinition] = {}
+    for index, proxy_item in enumerate(proxy_items):
+        try:
+            parsed = parse_proxy_item(proxy_item, index=index)
+        except Exception:  # noqa: BLE001
+            continue
+        proxy_by_name[parsed.name] = parsed
+
+    async def probe_item(item: dict[str, Any], index: int) -> ProviderProbeResult:
+        name = item.get("name") or f"provider-{index}"
+        base_url = item.get("base_url", "")
+        api_key = item.get("api_key", "")
+        agent_api = str(item.get("agent_api") or "openai-responses")
+        agent_base_url = str(item.get("agent_base_url") or "").strip() or None
+        agent_models = {
+            value.strip()
+            for value in item.get("agent_models", [])
+            if isinstance(value, str) and value.strip()
+        }
+
+        if names_filter and name not in names_filter:
+            return ProviderProbeResult(name=name, ok=False, status="skipped")
+        if not normalize_bool(item.get("enabled"), default=True):
+            return ProviderProbeResult(name=name, ok=False, status="disabled")
+        if probe_blocked_by_endpoint_lock(item):
+            return ProviderProbeResult(
+                name=name,
+                ok=False,
+                status="skipped",
+                error="endpoint_locked_to_generations",
+            )
+        if not base_url or not api_key or not default_model:
+            return ProviderProbeResult(
+                name=name,
+                ok=False,
+                error="missing config",
+                status="unhealthy",
+            )
+        if agent_models and default_model not in agent_models:
+            return ProviderProbeResult(
+                name=name,
+                ok=False,
+                error="configured_model_not_admitted",
+                status="skipped",
+            )
+
+        proxy_name = item.get("proxy")
+        proxy = (
+            proxy_by_name.get(proxy_name)
+            if isinstance(proxy_name, str) and proxy_name
+            else None
+        )
+        outcome = await runner(
+            base_url,
+            api_key,
+            proxy=proxy,
+            agent_api=agent_api,
+            agent_base_url=agent_base_url,
+            model=default_model,
+        )
+        return ProviderProbeResult(
+            name=name,
+            ok=outcome.ok,
+            latency_ms=outcome.latency_ms,
+            error=outcome.error,
+            status="healthy" if outcome.ok else "unhealthy",
+            capability_signal=outcome.capability_signal,
+            http_status=outcome.http_status,
         )
 
-
-def probe_blocked_by_endpoint_lock(item: dict[str, Any]) -> bool:
-    endpoint = normalize_image_jobs_endpoint(item.get("image_jobs_endpoint"))
-    if endpoint == "auto":
-        return False
-    probe_view = {
-        "image_jobs_endpoint": endpoint,
-        "image_jobs_endpoint_lock": normalize_image_jobs_endpoint_lock(
-            item.get("image_jobs_endpoint_lock"), endpoint
-        ),
-    }
-    return not endpoint_kind_allowed(probe_view, "responses")
+    return list(
+        await asyncio.gather(
+            *(probe_item(item, index) for index, item in enumerate(items))
+        )
+    )

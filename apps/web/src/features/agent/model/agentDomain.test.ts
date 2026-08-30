@@ -4,6 +4,7 @@ import "../../../store/chat/moduleResolution.test-helper.mjs";
 
 const {
   applyAgentEvent,
+  parseAgentEventEnvelope,
 } = await import(new URL("./events.ts", import.meta.url).href);
 const {
   mergeAgentMessage,
@@ -24,6 +25,8 @@ function run(overrides: Record<string, unknown> = {}) {
     status: "running" as const,
     execution_epoch: 2,
     last_event_seq: 4,
+    output_revision: 0,
+    output_runtime_seq: 0,
     idempotency_key: "message-key-1",
     model: "model",
     reasoning_effort: null,
@@ -53,6 +56,9 @@ function assistant(overrides: Record<string, unknown> = {}) {
     parentUserMessageId: "user-1",
     generationIds: [],
     toolCalls: [],
+    blocks: [],
+    outputRevision: 0,
+    outputRuntimeSeq: 0,
     createdAt: "2026-01-01T00:00:00Z",
     partial: false,
     ...overrides,
@@ -147,7 +153,7 @@ test("Pi recovery resets a truncated draft before regenerated deltas", () => {
   }
 });
 
-test("snapshot reconciliation preserves longer partial text", () => {
+test("equal-revision divergent snapshots keep the current authoritative branch", () => {
   const merged = mergeAgentMessage(
     assistant({ text: "已保留的部分文本和更多内容", status: "partial", partial: true }),
     assistant({ text: "已保留的部分文本", status: "running" }),
@@ -160,6 +166,56 @@ test("snapshot reconciliation preserves longer partial text", () => {
   }
 });
 
+test("a stale lower-revision snapshot cannot revive a longer discarded draft", () => {
+  const reconciled = reconcileAgentSnapshot(
+    [
+      assistant({
+        text: "replacement",
+        outputRevision: 2,
+        outputRuntimeSeq: 10,
+        blocks: [{ kind: "text", turn: 1, text: "replacement" }],
+      }),
+    ],
+    {
+      "run-1": run({
+        last_event_seq: 10,
+        output_revision: 2,
+        output_runtime_seq: 10,
+      }),
+    },
+    {
+      items: [
+        {
+          id: "assistant-1",
+          role: "assistant",
+          content: {
+            text: "discarded stale draft with more characters",
+            agent_run_id: "run-1",
+            output_revision: 1,
+            output_runtime_seq: 9,
+          },
+          parent_message_id: "user-1",
+          status: "running",
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      runs: [
+        run({
+          last_event_seq: 9,
+          output_revision: 1,
+          output_runtime_seq: 9,
+        }),
+      ],
+      generations: [],
+      images: [],
+    },
+    "session-1",
+  );
+  const message = reconciled.messages[0];
+  assert.equal(message?.role, "assistant");
+  if (message?.role === "assistant") assert.equal(message.text, "replacement");
+});
+
 test("a current snapshot keeps Pi text reset authoritative", () => {
   const currentRun = run({ last_event_seq: 5 });
   const reconciled = reconcileAgentSnapshot(
@@ -170,13 +226,24 @@ test("a current snapshot keeps Pi text reset authoritative", () => {
         {
           id: "assistant-1",
           role: "assistant",
-          content: { text: "", agent_run_id: "run-1" },
+          content: {
+            text: "",
+            agent_run_id: "run-1",
+            output_revision: 1,
+            output_runtime_seq: 6,
+          },
           parent_message_id: "user-1",
           status: "running",
           created_at: "2026-01-01T00:00:00Z",
         },
       ],
-      runs: [run({ last_event_seq: 6 })],
+      runs: [
+        run({
+          last_event_seq: 6,
+          output_revision: 1,
+          output_runtime_seq: 6,
+        }),
+      ],
       generations: [],
       images: [],
     },
@@ -186,6 +253,175 @@ test("a current snapshot keeps Pi text reset authoritative", () => {
   const message = reconciled.messages[0];
   assert.equal(message?.role, "assistant");
   if (message?.role === "assistant") assert.equal(message.text, "");
+});
+
+test("reset replacement plus compatibility delta applies exactly once", () => {
+  const currentRun = run({ output_revision: 0, output_runtime_seq: 4 });
+  const reset = applyAgentEvent(currentRun, assistant({ text: "discarded draft" }), {
+    agent_session_id: "session-1",
+    agent_run_id: "run-1",
+    assistant_message_id: "assistant-1",
+    execution_epoch: 2,
+    event_seq: 5,
+    event_name: "agent.output.reset",
+    replacement_text: "regenerated",
+    output_revision: 1,
+    output_runtime_seq: 5,
+    blocks: [{ kind: "text", turn: 1, text: "regenerated" }],
+  });
+  assert.equal(reset.accepted, true);
+  if (!reset.accepted) return;
+  const compatibilityDelta = applyAgentEvent(reset.nextRun, reset.nextMessage, {
+    agent_session_id: "session-1",
+    agent_run_id: "run-1",
+    assistant_message_id: "assistant-1",
+    execution_epoch: 2,
+    event_seq: 6,
+    event_name: "agent.output.delta",
+    text_delta: "regenerated",
+    output_revision: 1,
+    output_runtime_seq: 5,
+  });
+  assert.equal(compatibilityDelta.accepted, true);
+  if (compatibilityDelta.accepted) {
+    assert.equal(compatibilityDelta.nextMessage.text, "regenerated");
+  }
+});
+
+test("replacement delta converges even when reset delivery is missed", () => {
+  const replaced = applyAgentEvent(run(), assistant({ text: "discarded draft" }), {
+    agent_session_id: "session-1",
+    agent_run_id: "run-1",
+    assistant_message_id: "assistant-1",
+    execution_epoch: 2,
+    event_seq: 5,
+    event_name: "agent.output.delta",
+    text_delta: "regenerated",
+    text_operation: "replace",
+    output_revision: 1,
+    output_runtime_seq: 5,
+    blocks: [{ kind: "text", turn: 1, text: "regenerated" }],
+  });
+  assert.equal(replaced.accepted, true);
+  if (!replaced.accepted) return;
+  assert.equal(replaced.nextMessage.text, "regenerated");
+  assert.deepEqual(replaced.nextMessage.blocks, [
+    { kind: "text", turn: 1, text: "regenerated" },
+  ]);
+
+  const olderReset = applyAgentEvent(replaced.nextRun, replaced.nextMessage, {
+    agent_session_id: "session-1",
+    agent_run_id: "run-1",
+    assistant_message_id: "assistant-1",
+    execution_epoch: 2,
+    event_seq: 4,
+    event_name: "agent.output.reset",
+    replacement_text: "regenerated",
+    text_operation: "replace",
+    output_revision: 1,
+    output_runtime_seq: 5,
+  });
+  assert.deepEqual(olderReset, { accepted: false, reason: "stale_sequence" });
+});
+
+test("same-tuple authoritative snapshot repairs divergent local text", () => {
+  const reconciled = reconcileAgentSnapshot(
+    [
+      assistant({
+        text: "discarded draftregenerated",
+        outputRevision: 1,
+        outputRuntimeSeq: 5,
+      }),
+    ],
+    {
+      "run-1": run({
+        last_event_seq: 6,
+        output_revision: 1,
+        output_runtime_seq: 5,
+      }),
+    },
+    {
+      items: [
+        {
+          id: "assistant-1",
+          role: "assistant",
+          content: {
+            text: "regenerated",
+            agent_run_id: "run-1",
+            output_revision: 1,
+            output_runtime_seq: 5,
+            blocks: [{ kind: "text", turn: 1, text: "regenerated" }],
+          },
+          parent_message_id: "user-1",
+          status: "running",
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      runs: [
+        run({
+          last_event_seq: 6,
+          output_revision: 1,
+          output_runtime_seq: 5,
+        }),
+      ],
+      generations: [],
+      images: [],
+    },
+    "session-1",
+  );
+  const message = reconciled.messages[0];
+  assert.equal(message?.role, "assistant");
+  if (message?.role === "assistant") assert.equal(message.text, "regenerated");
+});
+
+test("snapshot-required reset preserves local output until refresh", () => {
+  const decision = applyAgentEvent(run(), assistant(), {
+    agent_session_id: "session-1",
+    agent_run_id: "run-1",
+    assistant_message_id: "assistant-1",
+    execution_epoch: 2,
+    event_seq: 5,
+    event_name: "agent.output.reset",
+    snapshot_required: true,
+    output_revision: 1,
+    output_runtime_seq: 5,
+  });
+  assert.equal(decision.accepted, true);
+  if (decision.accepted) {
+    assert.equal(decision.nextMessage.text, "已保留的部分文本");
+    assert.equal(decision.nextRun.output_revision, 0);
+  }
+});
+
+test("a newer execution epoch does not clear output without an explicit reset", () => {
+  const cancelled = applyAgentEvent(run(), assistant(), {
+    agent_session_id: "session-1",
+    agent_run_id: "run-1",
+    assistant_message_id: "assistant-1",
+    execution_epoch: 3,
+    event_seq: 5,
+    event_name: "agent.run.cancelled",
+  });
+  assert.equal(cancelled.accepted, true);
+  if (cancelled.accepted) {
+    assert.equal(cancelled.nextMessage.text, "已保留的部分文本");
+  }
+});
+
+test("strict realtime parser rejects malformed required output events", () => {
+  assert.throws(
+    () =>
+      parseAgentEventEnvelope("agent.output.delta", {
+        agent_session_id: "session-1",
+        agent_run_id: "run-1",
+        assistant_message_id: "assistant-1",
+        execution_epoch: 2.5,
+        event_seq: 5,
+        event_name: "agent.output.delta",
+        text_delta: { forged: true },
+      }),
+    /Invalid Agent realtime event/,
+  );
 });
 
 test("Agent generation projection links images and filters foreign sources", () => {

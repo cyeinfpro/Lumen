@@ -28,6 +28,27 @@ class _StubResponse:
         return self._payload
 
 
+def _responses_sse(
+    text: str = "9801",
+    *,
+    terminal: bool = True,
+    include_usage: bool = True,
+) -> _StubResponse:
+    raw = (
+        "event: response.output_text.delta\n"
+        f'data: {{"type":"response.output_text.delta","delta":"{text}"}}\n\n'
+    )
+    if terminal:
+        response = {"status": "completed"}
+        if include_usage:
+            response["usage"] = {}
+        raw += (
+            "event: response.completed\n"
+            f'data: {{"type":"response.completed","response":{json.dumps(response)}}}\n\n'
+        )
+    return _StubResponse(200, ValueError("streaming response"), raw)
+
+
 class _StubAsyncClient:
     def __init__(self, response: _StubResponse) -> None:
         self.response = response
@@ -76,6 +97,10 @@ class _FakeProvidersDb:
         self.committed = False
 
     async def execute(self, _stmt: object) -> _ScalarResult:
+        compile_statement = getattr(_stmt, "compile", None)
+        params = compile_statement().params if callable(compile_statement) else {}
+        if "upstream.default_model" in params.values():
+            return _ScalarResult("gpt-5.4-mini")
         self.execute_count += 1
         if self.execute_count == 1:
             return _ScalarResult(self.setting.value)
@@ -167,7 +192,7 @@ async def test_manual_provider_probe_calls_responses_model(
     from app.routes import providers
 
     captured: dict[str, Any] = {}
-    client = _StubAsyncClient(_StubResponse(200, {"output_text": "9801"}))
+    client = _StubAsyncClient(_responses_sse())
 
     def fake_client(**kwargs: Any) -> _StubAsyncClient:
         captured.update(kwargs)
@@ -184,10 +209,29 @@ async def test_manual_provider_probe_calls_responses_model(
     assert client.posts[0]["url"] == "https://upstream.example/v1/responses"
     assert client.posts[0]["json"]["model"] == "gpt-5.4-mini"
     assert client.posts[0]["json"]["instructions"]
-    assert "99 times 99" in client.posts[0]["json"]["input"][0]["content"][0]["text"]
-    assert client.posts[0]["json"]["stream"] is False
+    assert "99 * 99" in client.posts[0]["json"]["input"]
+    assert client.posts[0]["json"]["stream"] is True
     assert captured["follow_redirects"] is False
     assert captured["trust_env"] is False
+
+
+@pytest.mark.asyncio
+async def test_manual_provider_probe_rejects_terminal_without_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import providers
+
+    client = _StubAsyncClient(_responses_sse(include_usage=False))
+    monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
+
+    outcome = await providers._probe_one(
+        "https://upstream.example",
+        "sk-test",
+        model="configured-model",
+    )
+
+    assert outcome.ok is False
+    assert outcome.error == "usage_missing"
 
 
 @pytest.mark.asyncio
@@ -198,7 +242,7 @@ async def test_manual_provider_probe_uses_configured_proxy(
     from lumen_core.providers import ProviderProxyDefinition
 
     captured: dict[str, Any] = {}
-    client = _StubAsyncClient(_StubResponse(200, {"output_text": "9801"}))
+    client = _StubAsyncClient(_responses_sse())
 
     def fake_client(**kwargs: Any) -> _StubAsyncClient:
         captured.update(kwargs)
@@ -223,12 +267,12 @@ async def test_manual_provider_probe_uses_configured_proxy(
 
 
 @pytest.mark.asyncio
-async def test_manual_provider_probe_skips_generation_locked_provider(
+async def test_manual_agent_probe_ignores_image_generation_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.routes import providers
 
-    client = _StubAsyncClient(_StubResponse(200, {"output_text": "9801"}))
+    client = _StubAsyncClient(_responses_sse())
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
 
     out = await providers.probe_providers(
@@ -251,10 +295,10 @@ async def test_manual_provider_probe_skips_generation_locked_provider(
     )
 
     assert out.items[0].name == "image2-only"
-    assert out.items[0].ok is False
-    assert out.items[0].status == "skipped"
-    assert out.items[0].error == "endpoint_locked_to_generations"
-    assert client.posts == []
+    assert out.items[0].ok is True
+    assert out.items[0].status == "healthy"
+    assert out.items[0].error is None
+    assert client.posts[0]["url"] == "https://upstream.example/v1/responses"
 
 
 @pytest.mark.asyncio
@@ -263,7 +307,7 @@ async def test_manual_provider_probe_treats_string_false_enabled_as_disabled(
 ) -> None:
     from app.routes import providers
 
-    client = _StubAsyncClient(_StubResponse(200, {"output_text": "9801"}))
+    client = _StubAsyncClient(_responses_sse())
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
 
     out = await providers.probe_providers(
@@ -643,7 +687,7 @@ async def test_manual_provider_probe_rejects_200_wrong_answer(
 ) -> None:
     from app.routes import providers
 
-    client = _StubAsyncClient(_StubResponse(200, {"output_text": "9802"}))
+    client = _StubAsyncClient(_responses_sse("9802"))
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
 
     ok, _latency, err = await providers._probe_one(
@@ -651,7 +695,7 @@ async def test_manual_provider_probe_rejects_200_wrong_answer(
     )
 
     assert ok is False
-    assert err == "wrong_answer"
+    assert err is not None and err.startswith("wrong_answer:")
     assert client.posts[0]["url"] == "https://upstream.example/v1/responses"
 
 
@@ -699,7 +743,7 @@ async def test_manual_provider_probe_extracts_sse_text(
         "event: response.output_text.delta\n"
         'data: {"type":"response.output_text.delta","delta":"9801"}\n\n'
         "event: response.completed\n"
-        'data: {"type":"response.completed"}\n\n'
+        'data: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n'
     )
     client = _StubAsyncClient(_StubResponse(200, ValueError("not json"), raw))
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
@@ -824,7 +868,7 @@ async def test_probe_outcome_200_correct_signals_supported(
 ) -> None:
     from app.routes import providers
 
-    client = _StubAsyncClient(_StubResponse(200, {"output_text": "9801"}))
+    client = _StubAsyncClient(_responses_sse())
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
 
     outcome = await providers._probe_one("https://upstream.example", "sk-test")

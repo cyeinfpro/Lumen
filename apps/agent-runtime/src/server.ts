@@ -295,7 +295,7 @@ export function createRuntimeServer(options: ServerOptions = {}): RuntimeServer 
   const server = createServer(async (request, response) => {
     const path = request.url ?? "/";
     if (request.method === "GET" && path === "/healthz") {
-      writeJson(response, 200, healthPayload());
+      writeJson(response, 200, healthPayload(config));
       return;
     }
     if (request.method === "GET" && path === "/readyz") {
@@ -303,7 +303,7 @@ export function createRuntimeServer(options: ServerOptions = {}): RuntimeServer 
       writeJson(
         response,
         readiness.state.ready ? 200 : 503,
-        readinessPayload(readiness.state, config.sharedSecret),
+        readinessPayload(readiness.state, config),
       );
       return;
     }
@@ -466,6 +466,7 @@ export function createRuntimeServer(options: ServerOptions = {}): RuntimeServer 
         tool_call_count: result.toolCallCount,
         provider_dispatch_count: result.providerDispatchCount,
         provider_completed_count: result.providerCompletedCount,
+        usage_evidence: result.usageEvidence,
       });
       if (!terminalWritten) outcome = "failed";
     } catch (error) {
@@ -499,6 +500,7 @@ export function createRuntimeServer(options: ServerOptions = {}): RuntimeServer 
         tool_call_count: result?.toolCallCount ?? 0,
         provider_dispatch_count: result?.providerDispatchCount ?? 0,
         provider_completed_count: result?.providerCompletedCount ?? 0,
+        usage_evidence: result?.usageEvidence ?? "unknown",
       });
       if (!terminalWritten) outcome = "failed";
       logRuntime("warn", "agent_runtime.run_failed", {

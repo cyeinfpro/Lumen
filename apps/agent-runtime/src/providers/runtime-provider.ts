@@ -32,8 +32,14 @@ function providerApi(api: RuntimeRequest["provider"]["api"]): ProviderStreams {
 }
 
 export function runtimeModel(request: RuntimeRequest): Model<string> {
-  const thinkingLevelMap = request.provider.reasoning_supported
+  // Keep capability metadata truthful for role and history conversion. Pi must
+  // still be able to hold an internal Off state even when the provider's native
+  // off mapping is omission/null; payload omission is enforced below.
+  const configuredMap = request.provider.reasoning_supported
     ? request.provider.thinking_level_map
+    : undefined;
+  const thinkingLevelMap = request.provider.reasoning_supported
+    ? { ...configuredMap, off: configuredMap?.off ?? "none" }
     : undefined;
   return {
     id: request.provider.model,
@@ -48,6 +54,54 @@ export function runtimeModel(request: RuntimeRequest): Model<string> {
     contextWindow: request.provider.context_window,
     maxTokens: request.provider.max_output_tokens,
   };
+}
+
+const AUTO_REASONING_KEYS = new Set([
+  "reasoning",
+  "reasoning_effort",
+  "thinking",
+  "enable_thinking",
+  "thinking_token_budget",
+  "output_config",
+]);
+
+export function omitAutomaticReasoningControls(
+  request: RuntimeRequest,
+  payload: unknown,
+): unknown {
+  const explicitOffUsesOmission =
+    request.reasoning_effort === "off" &&
+    request.provider.thinking_level_map?.off === null;
+  if (
+    request.reasoning_effort !== null &&
+    !explicitOffUsesOmission
+  ) {
+    return payload;
+  }
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    return payload;
+  }
+  let output = Object.fromEntries(
+    Object.entries(payload as Record<string, unknown>).filter(
+      ([key]) => !AUTO_REASONING_KEYS.has(key),
+    ),
+  );
+  for (const key of ["chat_template_kwargs", "chat_template_args"] as const) {
+    const raw = output[key];
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const values = Object.fromEntries(
+      Object.entries(raw as Record<string, unknown>).filter(
+        ([name]) => name !== "enable_thinking",
+      ),
+    );
+    if (Object.keys(values).length > 0) output[key] = values;
+    else {
+      output = Object.fromEntries(
+        Object.entries(output).filter(([name]) => name !== key),
+      );
+    }
+  }
+  return output;
 }
 
 export async function prepareProviderRuntime(

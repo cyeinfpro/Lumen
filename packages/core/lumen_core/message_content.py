@@ -10,6 +10,9 @@ _AGENT_PUBLIC_KEYS = frozenset(
         "text",
         "source",
         "agent_run_id",
+        "blocks",
+        "output_revision",
+        "output_runtime_seq",
         "attachments",
         "input_images",
         "images",
@@ -34,6 +37,18 @@ _AGENT_TOOL_CALL_KEYS = frozenset(
         "generation_ids",
         "generation_count",
         "error_code",
+    }
+)
+_AGENT_BLOCK_KEYS = frozenset(
+    {
+        "kind",
+        "turn",
+        "text",
+        "tool_call_id",
+        "ordinal",
+        "name",
+        "status",
+        "generation_ids",
     }
 )
 _AGENT_IMAGE_KEYS = frozenset(
@@ -66,6 +81,8 @@ def _public_agent_content(content: dict[str, Any]) -> dict[str, Any]:
                 projected[key],
                 _AGENT_ATTACHMENT_KEYS,
             )
+    if "blocks" in projected:
+        projected["blocks"] = _public_dict_list(projected["blocks"], _AGENT_BLOCK_KEYS)
     if "tool_calls" in projected:
         projected["tool_calls"] = _public_dict_list(
             projected["tool_calls"],
@@ -79,11 +96,9 @@ def _public_agent_content(content: dict[str, Any]) -> dict[str, Any]:
     if "generation_ids" in projected:
         raw_generation_ids = projected["generation_ids"]
         projected["generation_ids"] = (
-            [
-                value
-                for value in raw_generation_ids
-                if isinstance(value, str) and value
-            ][:16]
+            [value for value in raw_generation_ids if isinstance(value, str) and value][
+                :16
+            ]
             if isinstance(raw_generation_ids, list)
             else []
         )
@@ -95,9 +110,7 @@ def public_message_content(content: Any) -> dict[str, Any]:
 
     if not isinstance(content, dict):
         return {}
-    if content.get("source") == "agent" or isinstance(
-        content.get("agent_run_id"), str
-    ):
+    if content.get("source") == "agent" or isinstance(content.get("agent_run_id"), str):
         return _public_agent_content(content)
     return {
         key: value

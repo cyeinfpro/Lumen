@@ -16,6 +16,7 @@ from sqlalchemy.pool import StaticPool
 
 from app import billing as worker_billing
 from app.agent_billing import (
+    _uncertain_dispatch_ordinals,
     release_agent_text_hold,
     settle_agent_text_actual,
     settle_agent_text_unknown,
@@ -245,11 +246,15 @@ async def test_agent_proven_absent_release_restores_full_hold(
 
 
 @pytest.mark.asyncio
-async def test_agent_unknown_settlement_consumes_exactly_the_reserved_hold(
+async def test_agent_unknown_settlement_charges_only_evidenced_usage(
     billing_db: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run = _run("agent-unknown", 6_000)
+    run.dispatch_jsonb = {
+        "provider_dispatch_count": 1,
+        "provider_completed_count": 0,
+    }
     await _hold(billing_db, run_id=run.id, amount=run.text_hold_micro)
 
     async def disallow_negative() -> bool:
@@ -264,14 +269,128 @@ async def test_agent_unknown_settlement_consumes_exactly_the_reserved_hold(
                 reason="provider_result_unknown",
             )
         assert result.action == "settled"
-        assert result.actual_micro == 6_000
+        assert result.actual_micro == 0
 
     wallet, transactions = await _wallet_and_transactions(billing_db)
     assert (wallet.balance_micro, wallet.hold_micro, wallet.lifetime_spend_micro) == (
-        94_000,
+        100_000,
         0,
-        6_000,
+        0,
     )
     assert wallet.balance_micro + wallet.lifetime_spend_micro == INITIAL_BALANCE
     assert [transaction.kind for transaction in transactions] == ["hold", "settle"]
     assert transactions[-1].meta["upstream_cost_knowledge"] == "unknown"
+    assert (
+        transactions[-1].meta["unresolved_liability"][
+            "maximum_uncertain_exposure_micro"
+        ]
+        == 6_000
+    )
+
+
+def test_agent_uncertainty_uses_ordinal_ledger_instead_of_status_suffixes() -> None:
+    rows = [
+        SimpleNamespace(dispatch_ordinal=1, result_state="unknown"),
+        SimpleNamespace(dispatch_ordinal=2, result_state="exact"),
+        SimpleNamespace(dispatch_ordinal=3, result_state="missing"),
+    ]
+    assert _uncertain_dispatch_ordinals(
+        rows,
+        {
+            "provider_dispatch_count": 3,
+            "provider_completed_count": 2,
+            "provider_response_statuses": [429, 200, 404],
+        },
+    ) == [1]
+
+
+@pytest.mark.asyncio
+async def test_agent_unknown_settlement_preserves_completed_call_usage(
+    billing_db: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _run("agent-partial-evidence", 10_000)
+    run.usage_jsonb = {
+        "input_tokens": 1_000,
+        "output_tokens": 500,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "cache_write_1h_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 1_500,
+    }
+    run.dispatch_jsonb = {
+        "provider_dispatch_count": 2,
+        "provider_completed_count": 1,
+    }
+    await _hold(billing_db, run_id=run.id, amount=run.text_hold_micro)
+
+    async def disallow_negative() -> bool:
+        return False
+
+    monkeypatch.setattr(worker_billing, "allow_negative_balance", disallow_negative)
+    async with billing_db() as db:
+        async with db.begin():
+            result = await settle_agent_text_unknown(
+                db,
+                run=run,
+                reason="one_exact_one_unknown",
+            )
+    assert result.actual_micro == 2_000
+    wallet, transactions = await _wallet_and_transactions(billing_db)
+    assert (wallet.balance_micro, wallet.hold_micro, wallet.lifetime_spend_micro) == (
+        98_000,
+        0,
+        2_000,
+    )
+    liability = transactions[-1].meta["unresolved_liability"]
+    assert liability["uncertain_dispatch_ordinals"] == [2]
+    assert liability["maximum_uncertain_exposure_micro"] == 10_000
+
+
+@pytest.mark.asyncio
+async def test_unknown_settlement_keeps_exact_overrun_and_separate_liability(
+    billing_db: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _run("agent-evidenced-overrun-unknown-tail", 1_000)
+    run.usage_jsonb = {
+        "input_tokens": 0,
+        "output_tokens": 20_000,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "cache_write_1h_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 20_000,
+    }
+    run.dispatch_jsonb = {
+        "provider_dispatch_count": 2,
+        "provider_completed_count": 1,
+    }
+    await _hold(billing_db, run_id=run.id, amount=run.text_hold_micro)
+
+    async def disallow_negative() -> bool:
+        return False
+
+    monkeypatch.setattr(worker_billing, "allow_negative_balance", disallow_negative)
+    async with billing_db() as db:
+        async with db.begin():
+            result = await settle_agent_text_unknown(
+                db,
+                run=run,
+                reason="exact_overrun_then_unknown",
+            )
+
+    assert result.actual_micro == 40_000
+    wallet, transactions = await _wallet_and_transactions(billing_db)
+    assert (wallet.balance_micro, wallet.hold_micro, wallet.lifetime_spend_micro) == (
+        60_000,
+        0,
+        40_000,
+    )
+    settlement = transactions[-1]
+    assert settlement.meta["unauthorized_micro"] == 39_000
+    liability = settlement.meta["unresolved_liability"]
+    assert liability["evidenced_actual_micro"] == 40_000
+    assert liability["uncertain_dispatch_ordinals"] == [2]
+    assert liability["maximum_uncertain_exposure_micro"] == 1_000

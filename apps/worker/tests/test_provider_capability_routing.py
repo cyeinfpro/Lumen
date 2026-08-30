@@ -67,6 +67,7 @@ def _cfg(
     image_responses_supported: bool | None = None,
     image_jobs_endpoint: str = "auto",
     image_jobs_endpoint_lock: bool = False,
+    agent_api: str = "openai-responses",
 ) -> ProviderConfig:
     return ProviderConfig(
         name=name,
@@ -78,6 +79,7 @@ def _cfg(
         image_jobs_endpoint=image_jobs_endpoint,
         image_jobs_endpoint_lock=image_jobs_endpoint_lock,
         responses_supported=responses_supported,
+        agent_api=agent_api,
         image_generations_supported=image_generations_supported,
         image_responses_supported=image_responses_supported,
     )
@@ -111,6 +113,31 @@ def test_provider_supports_route_responses_false_blocks_text_and_models() -> Non
     assert provider_supports_route(p, route="models", endpoint_kind="models") is False
     # image+responses 也被屏蔽
     assert provider_supports_route(p, route="image", endpoint_kind="responses") is False
+
+
+def test_agent_route_uses_only_agent_api_relevant_capabilities() -> None:
+    completions = _cfg(
+        "completions",
+        responses_supported=False,
+        image_jobs_endpoint="generations",
+        image_jobs_endpoint_lock=True,
+        agent_api="openai-completions",
+    )
+    anthropic = _cfg(
+        "anthropic",
+        responses_supported=False,
+        image_jobs_endpoint="generations",
+        image_jobs_endpoint_lock=True,
+        agent_api="anthropic-messages",
+    )
+    responses = _cfg(
+        "responses",
+        responses_supported=False,
+        agent_api="openai-responses",
+    )
+    assert provider_supports_route(completions, route="agent", endpoint_kind=None)
+    assert provider_supports_route(anthropic, route="agent", endpoint_kind=None)
+    assert not provider_supports_route(responses, route="agent", endpoint_kind=None)
 
 
 def test_provider_supports_route_image_generations_false_only_blocks_generations() -> (

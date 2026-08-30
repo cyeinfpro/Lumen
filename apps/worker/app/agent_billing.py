@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 from typing import Any, Literal
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
-from lumen_core.model_entities import AgentRun, AuditLog
+from lumen_core.model_entities import AgentProviderCall, AgentRun, AuditLog
 from lumen_core.pricing import UsageTokens
 
 from . import billing as worker_billing
@@ -74,6 +77,50 @@ def _record_state(
     run.billing_jsonb = snapshot
 
 
+def evidenced_agent_cost(
+    run: AgentRun,
+    usage: dict[str, Any],
+) -> tuple[int, dict[str, Any] | None, UsageTokens]:
+    snapshot = _billing_snapshot(run)
+    pricing = snapshot.get("pricing_snapshot")
+    multiplier = snapshot.get("rate_multiplier_x10000")
+    tokens = agent_usage_tokens(usage)
+    if not isinstance(pricing, dict) or not isinstance(multiplier, int):
+        return 0, None, tokens
+    try:
+        breakdown = billing_core.completion_breakdown_from_snapshot(
+            pricing,
+            model=run.model or "",
+            tokens=tokens,
+            rate_multiplier_x10000=multiplier,
+        )
+    except billing_core.BillingError:
+        return 0, None, tokens
+    return (
+        max(0, int(breakdown.actual_cost_micro or 0)),
+        breakdown.model_dump(),
+        tokens,
+    )
+
+
+def _uncertain_dispatch_ordinals(
+    call_rows: list[Any],
+    dispatch: dict[str, Any],
+) -> list[int]:
+    if call_rows:
+        return [
+            int(row.dispatch_ordinal)
+            for row in call_rows
+            if row.result_state not in {"exact", "missing"}
+        ][:128]
+    authorized = max(
+        int(dispatch.get("provider_dispatch_authorized_count") or 0),
+        int(dispatch.get("provider_dispatch_count") or 0),
+    )
+    completed = max(0, int(dispatch.get("provider_completed_count") or 0))
+    return list(range(completed + 1, authorized + 1))[:128]
+
+
 def _record_transaction(
     db: AsyncSession,
     *,
@@ -130,29 +177,14 @@ async def settle_agent_text_actual(
         )
         return AgentBillingResult("not_applicable", 0)
     snapshot = _billing_snapshot(run)
-    pricing = snapshot.get("pricing_snapshot")
     multiplier = snapshot.get("rate_multiplier_x10000")
-    if not isinstance(pricing, dict) or not isinstance(multiplier, int):
+    actual, breakdown, tokens = evidenced_agent_cost(run, usage)
+    if breakdown is None or not isinstance(multiplier, int):
         return await settle_agent_text_unknown(
             db,
             run=run,
-            reason="pricing_snapshot_missing",
+            reason="pricing_evidence_unavailable",
         )
-    tokens = agent_usage_tokens(usage)
-    try:
-        breakdown = billing_core.completion_breakdown_from_snapshot(
-            pricing,
-            model=run.model or "",
-            tokens=tokens,
-            rate_multiplier_x10000=multiplier,
-        )
-    except billing_core.BillingError:
-        return await settle_agent_text_unknown(
-            db,
-            run=run,
-            reason="pricing_snapshot_invalid",
-        )
-    actual = max(0, int(breakdown.actual_cost_micro or 0))
     tx = await billing_core.settle(
         db,
         run.user_id,
@@ -175,7 +207,7 @@ async def settle_agent_text_actual(
             "cache_creation_5m_tokens": tokens.cache_creation_5m_tokens,
             "cache_creation_1h_tokens": tokens.cache_creation_1h_tokens,
             "reasoning_tokens": tokens.reasoning_tokens,
-            "cost_breakdown": breakdown.model_dump(),
+            "cost_breakdown": breakdown,
             "rate_multiplier_x10000": multiplier,
             "upstream_cost_knowledge": "actual",
         },
@@ -185,7 +217,7 @@ async def settle_agent_text_actual(
         state="settled",
         knowledge="actual",
         actual_micro=actual,
-        breakdown=breakdown.model_dump(),
+        breakdown=breakdown,
     )
     return _record_transaction(
         db,
@@ -255,26 +287,55 @@ async def settle_agent_text_unknown(
         "agent_run",
         run.id,
     )
-    actual = held if held > 0 else max(0, int(run.text_hold_micro or 0))
-    if actual <= 0:
-        db.add(
-            AuditLog(
-                user_id=run.user_id,
-                event_type="billing.unresolved_after_upstream",
-                details={
-                    "scope": "agent_result_unknown",
-                    "agent_run_id": run.id,
-                    "reason": reason,
-                },
+    usage = getattr(run, "usage_jsonb", {})
+    actual, breakdown, tokens = evidenced_agent_cost(
+        run,
+        usage if isinstance(usage, dict) else {},
+    )
+    raw_dispatch = getattr(run, "dispatch_jsonb", {})
+    dispatch = raw_dispatch if isinstance(raw_dispatch, dict) else {}
+    execution_epoch = getattr(run, "execution_epoch", None)
+    call_rows = (
+        list(
+            (
+                await db.execute(
+                    select(AgentProviderCall)
+                    .where(
+                        AgentProviderCall.agent_run_id == run.id,
+                        AgentProviderCall.execution_epoch == execution_epoch,
+                    )
+                    .order_by(AgentProviderCall.dispatch_ordinal.asc())
+                )
             )
+            .scalars()
+            .all()
         )
-        _record_state(
-            run,
-            state="unresolved",
-            knowledge="unknown",
-            actual_micro=0,
-        )
-        return AgentBillingResult("not_applicable", 0)
+        if isinstance(execution_epoch, int)
+        else []
+    )
+    uncertain_ordinals = _uncertain_dispatch_ordinals(call_rows, dispatch)
+    evidence = {
+        "version": 1,
+        "reason": reason,
+        "uncertain_dispatch_ordinals": uncertain_ordinals,
+        "maximum_uncertain_exposure_micro": (held if uncertain_ordinals else 0),
+        "evidenced_actual_micro": actual,
+        "usage": {
+            "input_tokens": tokens.input_tokens,
+            "output_tokens": tokens.output_tokens,
+            "cache_read_tokens": tokens.cache_read_tokens,
+            "cache_creation_tokens": tokens.cache_creation_tokens,
+            "reasoning_tokens": tokens.reasoning_tokens,
+        },
+    }
+    evidence_hash = hashlib.sha256(
+        json.dumps(
+            evidence,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    evidence["hash"] = evidence_hash
     tx = await billing_core.settle(
         db,
         run.user_id,
@@ -283,28 +344,49 @@ async def settle_agent_text_unknown(
         actual_micro=actual,
         idempotency_key=f"settle:{run.id}",
         allow_negative=await worker_billing.allow_negative_balance(),
+        record_zero=actual == 0,
         meta={
             "agent_run_id": run.id,
             "model": run.model,
             "provider": run.provider_name,
             "turn_count": run.turn_count,
             "tool_call_count": run.tool_call_count,
-            "tier_source": "upstream_result_unknown",
+            "tier_source": "evidenced_usage_only",
             "upstream_cost_knowledge": "unknown",
-            "reason": reason,
+            "unresolved_liability": evidence,
         },
     )
     _record_state(
         run,
-        state="settled_unknown",
+        state="settled_evidenced_unknown",
         knowledge="unknown",
         actual_micro=actual,
+        breakdown=breakdown,
+    )
+    snapshot = _billing_snapshot(run)
+    snapshot["unresolved_liability"] = evidence
+    run.billing_jsonb = snapshot
+    db.add(
+        AuditLog(
+            user_id=run.user_id,
+            event_type="billing.agent_upstream_liability_unknown",
+            details={
+                "agent_run_id": run.id,
+                "evidenced_actual_micro": actual,
+                "maximum_uncertain_exposure_micro": evidence[
+                    "maximum_uncertain_exposure_micro"
+                ],
+                "uncertain_dispatch_ordinals": uncertain_ordinals,
+                "evidence_hash": evidence_hash,
+                "reason": reason,
+            },
+        )
     )
     return _record_transaction(
         db,
         run=run,
         tx=tx,
-        event_type="wallet.settle.agent_result_unknown",
+        event_type="wallet.settle.agent_evidenced_unknown",
         knowledge="unknown",
         actual_micro=actual,
     )
@@ -312,7 +394,9 @@ async def settle_agent_text_unknown(
 
 __all__ = [
     "AgentBillingResult",
+    "_uncertain_dispatch_ordinals",
     "agent_usage_tokens",
+    "evidenced_agent_cost",
     "release_agent_text_hold",
     "settle_agent_text_actual",
     "settle_agent_text_unknown",

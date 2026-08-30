@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from types import MappingProxyType
 from typing import Any
 
+from lumen_core.agent_dispatch import provider_dispatch_evidence_count
+from lumen_core.agent_errors import (
+    agent_error_allows_continuation,
+    public_agent_error_code,
+    public_agent_error_message,
+)
 from lumen_core.model_entities import (
     AgentRun,
     AgentRunReference,
@@ -19,39 +24,6 @@ from lumen_core.schema_models import (
     AgentSessionOut,
     AgentToolCallOut,
 )
-
-
-_PUBLIC_ERROR_MESSAGES = MappingProxyType(
-    {
-        "agent_cancelled": "Agent run was cancelled",
-        "agent_limit_reached": "Agent run reached a configured limit",
-        "agent_provider_unavailable": "Agent provider is unavailable",
-        "agent_runtime_unavailable": "Agent runtime is unavailable",
-        "agent_run_timeout": "Agent run reached its time limit",
-        "agent_runtime_event_timeout": "Agent runtime stream timed out",
-        "agent_runtime_disconnected": "Agent runtime stream disconnected",
-        "agent_vision_model_unavailable": "Image input is unavailable for this model",
-        "agent_reasoning_model_unavailable": "Reasoning is unavailable for this model",
-        "agent_context_window_exceeded": "The model context window is insufficient",
-        "agent_tool_result_unknown": "Image submission result is unknown",
-        "agent_tool_failed": "Image submission failed",
-        "agent_tool_limit_reached": "Agent image tool limit reached",
-        "agent_image_limit_reached": "Agent image count limit reached",
-        "agent_output_truncated": "Model output reached its length limit",
-        "agent_safety_budget_reached": "Agent safety budget reached",
-        "agent_runtime_shutdown": "Agent runtime stopped for maintenance",
-        "agent_reference_not_found": "A referenced image is unavailable",
-        "agent_session_reference_limit_reached": "Agent session image limit reached",
-        "INSUFFICIENT_BALANCE": "Insufficient wallet balance",
-        "NO_ACTIVE_API_KEY": "No active API key is available",
-    }
-)
-
-
-def public_agent_error_message(error_code: str | None) -> str | None:
-    if not error_code:
-        return None
-    return _PUBLIC_ERROR_MESSAGES.get(error_code, "Agent run could not be completed")
 
 
 def generation_ids_from_tool(tool_call: AgentToolCall) -> list[str]:
@@ -104,17 +76,29 @@ def agent_run_out(
     memory_state = dispatch.get("memory_state")
     if memory_state not in {"disabled", "empty", "ready", "degraded"}:
         memory_state = None
+    unresolved_tool = any(
+        tool.status in {"queued", "running", "timed_out"}
+        or tool.error_code == "agent_tool_result_unknown"
+        for tool in tool_calls or []
+    )
+    billing = run.billing_jsonb if isinstance(run.billing_jsonb, dict) else {}
+    provider_evidence_safe = provider_dispatch_evidence_count(
+        dispatch
+    ) == 0 or billing.get("knowledge") in {"actual", "proven_absent"}
+    transcript = run.transcript_jsonb if isinstance(run.transcript_jsonb, dict) else {}
+    transcript_coherent = transcript.get("projection") != "ordered_blocks" or (
+        transcript.get("output_revision") == int(run.output_revision or 0)
+        and transcript.get("output_runtime_seq") == int(run.output_runtime_seq or 0)
+    )
     continuable = (
         is_latest
         and run.status == "partial"
-        and run.error_code
-        in {
-            "agent_output_truncated",
-            "agent_safety_budget_reached",
-            "agent_runtime_disconnected",
-            "agent_runtime_event_timeout",
-        }
+        and agent_error_allows_continuation(run.error_code)
+        and not unresolved_tool
+        and provider_evidence_safe
+        and transcript_coherent
     )
+    public_error = public_agent_error_code(run.error_code)
     return AgentRunOut(
         id=run.id,
         agent_session_id=run.agent_session_id,
@@ -123,6 +107,8 @@ def agent_run_out(
         status=run.status,
         execution_epoch=run.execution_epoch,
         last_event_seq=run.last_event_seq,
+        output_revision=int(run.output_revision or 0),
+        output_runtime_seq=int(run.output_runtime_seq or 0),
         idempotency_key=run.idempotency_key,
         model=run.model,
         reasoning_effort=run.reasoning_effort,
@@ -131,7 +117,7 @@ def agent_run_out(
         turn_count=run.turn_count,
         tool_call_count=run.tool_call_count,
         usage=usage,
-        error_code=run.error_code,
+        error_code=public_error,
         error_message=public_agent_error_message(run.error_code),
         started_at=run.started_at,
         finished_at=run.finished_at,

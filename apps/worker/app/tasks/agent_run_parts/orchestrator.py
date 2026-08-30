@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import logging
 from contextlib import nullcontext
@@ -11,9 +12,11 @@ from typing import Any, Literal
 
 from sqlalchemy import select
 
+from lumen_core.agent_content_safety import agent_content_safety_decision
+from lumen_core.agent_protocol_safety import agent_text_boundary_error
 from lumen_core.agent_dispatch import provider_dispatch_evidence_count
 from lumen_core.agent_events import AgentRunStatus
-from lumen_core.model_entities import AgentRun, Message
+from lumen_core.model_entities import AgentProviderCall, AgentRun, Message
 
 from ...agent_context import (
     AgentContextBuild,
@@ -45,12 +48,13 @@ from ...observability import (
     agent_turns_histogram,
     get_tracer,
 )
-from ...provider_pool import text_provider_attempt
+from ...provider_pool import agent_provider_attempt
 from ...provider_runtime.errors import UpstreamError
 from ...services.billing_cache import get_billing_cache
 from .. import auto_title
 from .contracts import AGENT_USAGE_KEYS, AgentClaim, AgentRuntimeAccumulator
 from .persistence import (
+    AgentRunFinalization,
     claim_agent_run,
     finalize_agent_run,
     flush_agent_text,
@@ -59,6 +63,7 @@ from .persistence import (
     record_runtime_checkpoint,
     update_dispatch_state,
 )
+from .terminal_policy import terminal_request as _terminal_request
 
 
 logger = logging.getLogger(__name__)
@@ -127,17 +132,29 @@ async def _flush_if_needed(
     force: bool = False,
 ) -> bool:
     async with accumulator.flush_lock:
-        if not accumulator.pending_delta and not accumulator.text_reset_pending:
+        if (
+            not accumulator.pending_delta
+            and not accumulator.text_reset_pending
+            and not accumulator.blocks_dirty
+        ):
             return True
         now = asyncio.get_running_loop().time()
-        if not force and (
-            len(accumulator.pending_delta) < settings.agent_text_flush_chars
-            and now - accumulator.last_flush_at < settings.agent_text_flush_seconds
+        if (
+            not force
+            and not accumulator.text_reset_pending
+            and not accumulator.force_next_delta
+            and (
+                len(accumulator.pending_delta) < settings.agent_text_flush_chars
+                and now - accumulator.last_flush_at < settings.agent_text_flush_seconds
+            )
         ):
             return True
         delta = accumulator.pending_delta
         text_snapshot = accumulator.text
         replace = accumulator.text_reset_pending
+        output_revision = accumulator.output_revision
+        output_runtime_seq = accumulator.output_runtime_seq
+        blocks = copy.deepcopy(accumulator.blocks)
         current = await flush_agent_text(
             redis,
             run_id=run_id,
@@ -145,12 +162,20 @@ async def _flush_if_needed(
             text=text_snapshot,
             delta=delta,
             replace=replace,
+            blocks=blocks,
+            output_revision=output_revision,
+            output_runtime_seq=output_runtime_seq,
+            snapshot_only=(accumulator.blocks_dirty and not delta and not replace),
         )
         if current:
-            if replace:
+            if replace and accumulator.output_revision == output_revision:
                 accumulator.text_reset_pending = False
+            if accumulator.force_next_delta and delta:
+                accumulator.force_next_delta = False
             if accumulator.pending_delta.startswith(delta):
                 accumulator.pending_delta = accumulator.pending_delta[len(delta) :]
+            if accumulator.output_runtime_seq == output_runtime_seq:
+                accumulator.blocks_dirty = False
             accumulator.last_flush_at = now
         return current
 
@@ -223,6 +248,8 @@ async def _prepare_context(
             "pi_compaction_restored": build.pi_compaction_restored,
             "pi_compaction_degraded": build.pi_compaction_degraded,
             "memory_state": build.memory_state,
+            "history_plan": build.history_plan,
+            "runtime_wire_plan": build.wire_plan,
         },
     )
     if not current:
@@ -242,77 +269,6 @@ async def _prepare_context(
                 raise AgentContextError("agent_stale_execution_epoch")
             run.provider_name = build.provider.name
     return build, pool
-
-
-def _terminal_request(
-    accumulator: AgentRuntimeAccumulator,
-) -> tuple[
-    Literal["succeeded", "partial", "failed", "cancelled"],
-    str | None,
-    Literal["actual", "proven_absent", "unknown"],
-    str,
-]:
-    unresolved = accumulator.has_unresolved_dispatch
-    if accumulator.terminal_status == "cancelled":
-        knowledge: Literal["actual", "proven_absent", "unknown"] = (
-            "unknown"
-            if unresolved
-            else "actual"
-            if accumulator.has_exact_usage
-            else "proven_absent"
-            if accumulator.provider_dispatch_count == 0
-            else "unknown"
-        )
-        return "cancelled", "agent_cancelled", knowledge, "runtime_cancelled"
-    if accumulator.terminal_status == "partial":
-        knowledge = (
-            "unknown" if unresolved or not accumulator.has_exact_usage else "actual"
-        )
-        return (
-            "partial",
-            accumulator.terminal_error_code or "agent_result_unknown",
-            knowledge,
-            "runtime_partial",
-        )
-    if accumulator.terminal_status == "succeeded":
-        if unresolved:
-            return (
-                "succeeded",
-                None,
-                "unknown",
-                "runtime_success_with_unknown_billing",
-            )
-        return "succeeded", None, "actual", "runtime_success"
-    if accumulator.has_exact_usage and not unresolved:
-        return (
-            "failed",
-            accumulator.terminal_error_code or "agent_provider_error",
-            "actual",
-            "runtime_failed_with_usage",
-        )
-    if accumulator.response_proves_no_cost and not unresolved:
-        return (
-            "failed",
-            accumulator.terminal_error_code or "agent_provider_error",
-            "proven_absent",
-            "provider_rejected_before_usage",
-        )
-    if (
-        accumulator.terminal_status == "failed"
-        and accumulator.provider_dispatch_count == 0
-    ):
-        return (
-            "failed",
-            accumulator.terminal_error_code or "agent_runtime_error",
-            "proven_absent",
-            "runtime_failed_before_provider_dispatch",
-        )
-    return (
-        "failed",
-        accumulator.terminal_error_code or "agent_result_unknown",
-        "unknown",
-        "provider_result_unknown",
-    )
 
 
 def _preserve_partial_text(
@@ -346,12 +302,14 @@ async def _finalize(
     knowledge: Literal["actual", "proven_absent", "unknown"],
     reason: str,
 ) -> str:
-    status, billing_result, conversation_id = await finalize_agent_run(
-        redis,
+    finalization = AgentRunFinalization(
         run_id=claim.run_id,
         execution_epoch=claim.execution_epoch,
         requested_status=requested_status,
         text=accumulator.text,
+        blocks=accumulator.blocks,
+        output_revision=accumulator.output_revision,
+        output_runtime_seq=accumulator.output_runtime_seq,
         usage=accumulator.usage,
         turn_count=accumulator.turn_count,
         runtime_tool_count=accumulator.runtime_tool_call_count,
@@ -359,6 +317,10 @@ async def _finalize(
         knowledge=knowledge,
         reason=reason,
         used_memory_summary=build.used_memory_summary if build else (),
+    )
+    status, billing_result, conversation_id = await finalize_agent_run(
+        redis,
+        request=finalization,
     )
     if billing_result is not None and billing_result.balance_after is not None:
         cache = get_billing_cache()
@@ -465,12 +427,69 @@ async def _recover_result_unknown(
         for value in dispatch.get("provider_response_statuses", [])
         if isinstance(value, int) and not isinstance(value, bool)
     ]
+    accumulator.output_revision = max(0, int(run.output_revision or 0))
+    accumulator.output_runtime_seq = max(0, int(run.output_runtime_seq or 0))
     async with SessionLocal() as db:
         message = await db.get(Message, run.assistant_message_id)
-        if message is not None and isinstance(message.content, dict):
-            durable_text = message.content.get("text")
+        message_content = (
+            message.content
+            if message is not None and isinstance(message.content, dict)
+            else {}
+        )
+        message_revision = message_content.get("output_revision")
+        message_runtime_seq = message_content.get("output_runtime_seq")
+        message_tuple_matches = (
+            message_revision == accumulator.output_revision
+            and message_runtime_seq == accumulator.output_runtime_seq
+        ) or (
+            message_revision is None
+            and message_runtime_seq is None
+            and accumulator.output_revision == 0
+            and accumulator.output_runtime_seq == 0
+        )
+        if message_tuple_matches:
+            durable_text = message_content.get("text")
             if isinstance(durable_text, str):
                 accumulator.text = durable_text
+        transcript = (
+            run.transcript_jsonb if isinstance(run.transcript_jsonb, dict) else {}
+        )
+        transcript_matches = (
+            transcript.get("projection") == "ordered_blocks"
+            and transcript.get("output_revision") == accumulator.output_revision
+            and transcript.get("output_runtime_seq") == accumulator.output_runtime_seq
+            and isinstance(transcript.get("blocks"), list)
+        )
+        if transcript_matches:
+            accumulator.blocks = copy.deepcopy(transcript["blocks"])
+            if not message_tuple_matches:
+                accumulator.text = "\n\n".join(
+                    str(block.get("text") or "")
+                    for block in accumulator.blocks
+                    if isinstance(block, dict)
+                    and block.get("kind") == "text"
+                    and str(block.get("text") or "")
+                )
+        provider_calls = list(
+            (
+                await db.execute(
+                    select(AgentProviderCall).where(
+                        AgentProviderCall.agent_run_id == run.id,
+                        AgentProviderCall.execution_epoch == run.execution_epoch,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for provider_call in provider_calls:
+            ordinal = int(provider_call.dispatch_ordinal)
+            accumulator.provider_dispatch_ordinals.add(ordinal)
+            if provider_call.result_state == "exact":
+                accumulator.provider_completed_ordinals.add(ordinal)
+                accumulator.exact_usage_ordinals.add(ordinal)
+            elif provider_call.result_state == "missing":
+                accumulator.no_charge_ordinals.add(ordinal)
     if isinstance(terminal, dict):
         usage = terminal.get("usage")
         if isinstance(usage, dict):
@@ -610,6 +629,25 @@ async def _handle_runtime_event(
     event: AgentRuntimeEvent,
     cancel_requested: asyncio.Event,
 ) -> None:
+    compaction_error = (
+        agent_text_boundary_error(event.summary or "")
+        if event.type == "compaction.completed"
+        else None
+    )
+    if event.type == "text.delta" and event.delta:
+        candidate = f"{state.accumulator.text}{event.delta}"
+        if agent_content_safety_decision(candidate).blocked:
+            retained = state.accumulator.text
+            state.accumulator.text = retained
+            state.accumulator.pending_delta = ""
+            state.accumulator.blocks = (
+                [{"kind": "text", "turn": 1, "text": retained}] if retained else []
+            )
+            state.accumulator.output_revision += 1
+            state.accumulator.output_runtime_seq = event.seq
+            state.accumulator.text_reset_pending = True
+            cancel_requested.set()
+            raise AgentRuntimeClientError("content_policy_violation")
     state.accumulator.apply(event)
     if event.type == "limit.reached":
         agent_limits_total.labels(reason=event.reason or "unknown").inc()
@@ -652,10 +690,14 @@ async def _handle_runtime_event(
         run_id=state.claim.run_id,
         execution_epoch=state.claim.execution_epoch,
         accumulator=state.accumulator,
+        force=event.type.startswith("tool."),
     )
     if not flushed:
         cancel_requested.set()
         raise AgentRuntimeClientError("agent_stale_execution_epoch")
+    if compaction_error is not None:
+        cancel_requested.set()
+        raise AgentRuntimeClientError(compaction_error)
 
 
 async def _finish_runtime_success(state: _PreparedExecution, attempt: Any) -> None:
@@ -669,12 +711,12 @@ async def _finish_runtime_success(state: _PreparedExecution, attempt: Any) -> No
     requested, code, knowledge, reason = _terminal_request(state.accumulator)
     requested = _preserve_partial_text(requested, state.accumulator)
     agent_runtime_requests_total.labels(outcome=requested).inc()
-    if attempt is not None and requested == "succeeded":
+    if attempt is not None and requested == "succeeded" and knowledge != "unknown":
         attempt.report_success()
     elif (
         attempt is not None
         and state.accumulator.provider_dispatch_count > 0
-        and code not in _PROVIDER_HEALTH_NEUTRAL_CODES
+        and (knowledge == "unknown" or code not in _PROVIDER_HEALTH_NEUTRAL_CODES)
     ):
         attempt.report_failure()
     if requested in {"failed", "partial"} and state.build.provider.name.startswith(
@@ -771,7 +813,11 @@ async def _run_prepared_execution(state: _PreparedExecution) -> None:
         )
         background = _BackgroundTasks.start(state)
         attempt_context = (
-            text_provider_attempt(state.pool, state.build.provider)
+            agent_provider_attempt(
+                state.pool,
+                state.build.provider,
+                state.build.request.provider.model,
+            )
             if state.pool is not None
             else nullcontext(None)
         )

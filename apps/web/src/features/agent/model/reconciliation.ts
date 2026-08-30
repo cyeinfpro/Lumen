@@ -14,6 +14,7 @@ import type {
   AgentBackendMessage,
   AgentGenerationProjection,
   AgentMessage,
+  AgentMessageContent,
   AgentMessageList,
   AgentRun,
   AgentRunStatus,
@@ -54,6 +55,37 @@ function userMessage(message: AgentBackendMessage): AgentUserMessage {
   };
 }
 
+function nonnegativeContentInteger(value: unknown): number {
+  return Number.isSafeInteger(value) ? Math.max(0, Number(value)) : 0;
+}
+
+function assistantOutput(
+  content: AgentMessageContent,
+  run: AgentRun | undefined,
+): Pick<
+  AgentAssistantMessage,
+  "text" | "toolCalls" | "blocks" | "outputRevision" | "outputRuntimeSeq"
+> {
+  const outputRevision = nonnegativeContentInteger(content.output_revision);
+  const outputRuntimeSeq = nonnegativeContentInteger(content.output_runtime_seq);
+  const torn = outputRevision < (run?.output_revision ?? 0);
+  return {
+    text: !torn && typeof content.text === "string" ? content.text : "",
+    toolCalls: !torn && Array.isArray(content.tool_calls) ? content.tool_calls : [],
+    blocks: !torn && Array.isArray(content.blocks) ? content.blocks : [],
+    outputRevision,
+    outputRuntimeSeq,
+  };
+}
+
+function assistantRunId(
+  content: AgentMessageContent,
+  run: AgentRun | undefined,
+): string | null {
+  if (run) return run.id;
+  return typeof content.agent_run_id === "string" ? content.agent_run_id : null;
+}
+
 function assistantMessage(
   message: AgentBackendMessage,
   run: AgentRun | undefined,
@@ -62,18 +94,11 @@ function assistantMessage(
   return {
     id: message.id,
     role: "assistant",
-    text: typeof message.content.text === "string" ? message.content.text : "",
+    ...assistantOutput(message.content, run),
     status: contentStatus,
-    agentRunId:
-      run?.id ??
-      (typeof message.content.agent_run_id === "string"
-        ? message.content.agent_run_id
-        : null),
+    agentRunId: assistantRunId(message.content, run),
     parentUserMessageId: message.parent_message_id,
     generationIds: stringList(message.content.generation_ids),
-    toolCalls: Array.isArray(message.content.tool_calls)
-      ? message.content.tool_calls
-      : [],
     createdAt: message.created_at,
     partial: contentStatus === "partial",
   };
@@ -101,12 +126,6 @@ export function adaptAgentMessages(
     });
 }
 
-function longerPrefixText(existing: string, incoming: string): string {
-  if (incoming.startsWith(existing)) return incoming;
-  if (existing.startsWith(incoming)) return existing;
-  return incoming.length >= existing.length ? incoming : existing;
-}
-
 export function mergeAgentMessage(
   existing: AgentMessage | undefined,
   incoming: AgentMessage,
@@ -116,26 +135,20 @@ export function mergeAgentMessage(
     return { ...existing, ...incoming, optimistic: false };
   }
   if (existing.role === "assistant" && incoming.role === "assistant") {
-    const existingTerminal = existing.status !== "pending" &&
-      isAgentRunTerminal(existing.status);
-    const incomingTerminal = incoming.status !== "pending" &&
-      isAgentRunTerminal(incoming.status);
-    return {
-      ...existing,
-      ...incoming,
-      text: longerPrefixText(existing.text, incoming.text),
-      status:
-        existingTerminal && !incomingTerminal ? existing.status : incoming.status,
-      generationIds: Array.from(
-        new Set([...existing.generationIds, ...incoming.generationIds]),
-      ),
-      toolCalls:
-        incoming.toolCalls.length >= existing.toolCalls.length
-          ? incoming.toolCalls
-          : existing.toolCalls,
-      partial: existing.partial || incoming.partial,
-      optimistic: false,
-    };
+    const existingRevision = [existing.outputRevision, existing.outputRuntimeSeq];
+    const incomingRevision = [incoming.outputRevision, incoming.outputRuntimeSeq];
+    const incomingOlder =
+      incomingRevision[0] < existingRevision[0] ||
+      (incomingRevision[0] === existingRevision[0] &&
+        incomingRevision[1] < existingRevision[1]);
+    if (incomingOlder) return { ...existing, optimistic: false };
+    const equalRevision =
+      incomingRevision[0] === existingRevision[0] &&
+      incomingRevision[1] === existingRevision[1];
+    if (equalRevision && existing.text !== incoming.text && !existing.optimistic) {
+      return { ...existing, optimistic: false };
+    }
+    return { ...incoming, optimistic: false };
   }
   return incoming;
 }
@@ -281,6 +294,7 @@ function generationFromBackend(generation: BackendGeneration): Generation {
     trace_id: generation.trace_id,
     attachment_roles: generation.attachment_roles,
     attempt: generation.attempt,
+    execution_epoch: generation.execution_epoch ?? 0,
     created_at: generation.created_at
       ? Date.parse(generation.created_at)
       : undefined,
@@ -342,19 +356,23 @@ export function reconcileAgentSnapshot(
   sessionId: string,
 ): ReconciledAgentSnapshot {
   const incomingMessages = adaptAgentMessages(snapshot.items, snapshot.runs);
-  const incomingMessageIds = new Set(incomingMessages.map((message) => message.id));
+  const incomingById = new Map(incomingMessages.map((message) => [message.id, message]));
   const authoritativeAssistantIds = new Set<string>();
   const runs = { ...existingRuns };
   let retainedMessages = existingMessages;
   for (const run of snapshot.runs) {
     const existingRun = runs[run.id];
-    if (
-      incomingMessageIds.has(run.assistant_message_id) &&
-      (!existingRun ||
-        run.execution_epoch > existingRun.execution_epoch ||
-        (run.execution_epoch === existingRun.execution_epoch &&
-          run.last_event_seq >= existingRun.last_event_seq))
-    ) {
+    const incomingAssistant = incomingById.get(run.assistant_message_id);
+    const runIsCurrent =
+      !existingRun ||
+      run.execution_epoch > existingRun.execution_epoch ||
+      (run.execution_epoch === existingRun.execution_epoch &&
+        run.last_event_seq >= existingRun.last_event_seq);
+    const outputMatches =
+      incomingAssistant?.role === "assistant" &&
+      incomingAssistant.outputRevision === (run.output_revision ?? 0) &&
+      incomingAssistant.outputRuntimeSeq === (run.output_runtime_seq ?? 0);
+    if (runIsCurrent && outputMatches) {
       authoritativeAssistantIds.add(run.assistant_message_id);
     }
     const optimistic = Object.values(runs).find(

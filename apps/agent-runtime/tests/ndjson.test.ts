@@ -2,7 +2,12 @@ import { EventEmitter } from "node:events";
 import type { ServerResponse } from "node:http";
 import { describe, expect, it } from "vitest";
 
-import { CollectingEventWriter, NdjsonEventWriter } from "../src/ndjson.js";
+import {
+  CollectingEventWriter,
+  NdjsonEventWriter,
+  runtimeEventLineBytes,
+} from "../src/ndjson.js";
+import type { NdjsonLineTooLargeError } from "../src/ndjson.js";
 
 class FakeResponse extends EventEmitter {
   destroyed = false;
@@ -95,6 +100,23 @@ describe("NDJSON event writer", () => {
       output.emit("run.failed", { status: "failed" }, true),
     ).rejects.toThrow(/backpressure timed out/u);
     expect(response.lines).toHaveLength(1);
+  });
+
+  it("measures the fully escaped UTF-8 line and fails oversized events deterministically", async () => {
+    const payload = { summary: '"\\\\\u0000😀中文'.repeat(64) };
+    const exact = runtimeEventLineBytes("compaction.completed", 1, "run-1", 1, payload);
+    const accepted = writer(new FakeResponse(true), { maxLineBytes: exact });
+    await expect(accepted.emit("compaction.completed", payload)).resolves.toBe(true);
+
+    const rejected = writer(new FakeResponse(true), { maxLineBytes: exact - 1 });
+    await expect(rejected.emit("compaction.completed", payload)).rejects.toEqual(
+      expect.objectContaining({
+        name: "NdjsonLineTooLargeError",
+        lineBytes: exact,
+        maximumBytes: exact - 1,
+      } satisfies Partial<NdjsonLineTooLargeError>),
+    );
+    expect(rejected.sequence).toBe(0);
   });
 
   it("keeps every reserved envelope field authoritative", async () => {

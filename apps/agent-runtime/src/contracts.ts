@@ -83,6 +83,40 @@ const RuntimeHistoryToolResultSchema = Type.Object(
   { additionalProperties: false },
 );
 
+const RuntimeHistoryBlockSchema = Type.Union([
+  Type.Object(
+    {
+      type: Type.Literal("assistant_text"),
+      turn: Type.Integer({ minimum: 1, maximum: 128 }),
+      text: Type.String({ minLength: 1, maxLength: 20_000 }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      type: Type.Literal("tool_call"),
+      turn: Type.Integer({ minimum: 1, maximum: 128 }),
+      id: Type.String({ minLength: 1, maxLength: 128 }),
+      name: Type.String({ minLength: 1, maxLength: 64 }),
+      arguments: Type.Record(Type.String({ maxLength: 128 }), Type.Unknown(), {
+        maxProperties: 32,
+      }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      type: Type.Literal("tool_result"),
+      turn: Type.Integer({ minimum: 1, maximum: 128 }),
+      tool_call_id: Type.String({ minLength: 1, maxLength: 128 }),
+      name: Type.String({ minLength: 1, maxLength: 64 }),
+      text: Type.String({ minLength: 1, maxLength: 20_000 }),
+      is_error: Type.Boolean(),
+    },
+    { additionalProperties: false },
+  ),
+]);
+
 const RuntimeHistoryImageSchema = Type.Object(
   {
     mime_type: Type.Union([
@@ -125,6 +159,7 @@ export const RuntimeHistoryMessageSchema = Type.Object(
       Type.Array(RuntimeHistoryToolResultSchema, { maxItems: 8 }),
     ),
     images: Type.Optional(Type.Array(RuntimeHistoryImageSchema, { maxItems: 16 })),
+    blocks: Type.Optional(Type.Array(RuntimeHistoryBlockSchema, { maxItems: 32 })),
   },
   { additionalProperties: false },
 );
@@ -304,10 +339,30 @@ const RuntimeRequestV3Schema = Type.Object(
   { additionalProperties: false },
 );
 
+const RuntimeRequestV4Schema = Type.Object(
+  {
+    version: Type.Literal(4),
+    ...RuntimeRequestSharedFields,
+    user_message_id: Identifier,
+    event_features: Type.Array(
+      Type.Union([
+        Type.Literal("heartbeat-v1"),
+        Type.Literal("text-reset-v1"),
+      ]),
+      { minItems: 2, maxItems: 2, uniqueItems: true },
+    ),
+    tool_policy: RuntimeToolPolicySchema,
+    operation: Type.Union([Type.Literal("prompt"), Type.Literal("continue")]),
+    tool_receipt_version: Type.Optional(Type.Literal(2)),
+  },
+  { additionalProperties: false },
+);
+
 export const RuntimeRequestSchema = Type.Union([
   RuntimeRequestV1Schema,
   RuntimeRequestV2Schema,
   RuntimeRequestV3Schema,
+  RuntimeRequestV4Schema,
 ]);
 
 export type RuntimeRequest = Static<typeof RuntimeRequestSchema>;
@@ -367,7 +422,7 @@ function strictRequestChecks(request: RuntimeRequest): void {
   }
   const labels = request.references.map((reference) => reference.reference_label);
   if (new Set(labels).size !== labels.length) throw new Error("duplicate reference label");
-  if (request.version === 3 && request.references.length > 16) {
+  if (request.version >= 3 && request.references.length > 16) {
     throw new Error("current turn reference limit exceeded");
   }
   if (request.references.length > 0 && !request.provider.vision_supported) {
@@ -416,7 +471,7 @@ function strictRequestChecks(request: RuntimeRequest): void {
     throw new Error("invalid provider dispatch URL");
   }
   if (
-    request.version === 3 &&
+    (request.version === 3 || request.version === 4) &&
     request.operation === "continue" &&
     (request.references.length > 0 || request.allowed_tools.length > 0)
   ) {

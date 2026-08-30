@@ -276,6 +276,11 @@ class Settings(BaseSettings):
     agent_internal_callback_base_url: str = "http://api:8000/internal/agent"
     agent_runtime_shared_secret: str = Field(default="", repr=False)
     agent_runtime_health_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
+    agent_runtime_max_request_bytes: int = Field(
+        default=16 * 1024 * 1024,
+        ge=64 * 1024,
+        le=64 * 1024 * 1024,
+    )
 
     # Bot 的 TG username（不带 @），仅用于 /me/telegram/link-code 拼 deep_link。
     # 留空则返回 deep_link=None，前端自拼。

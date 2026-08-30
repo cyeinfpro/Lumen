@@ -44,8 +44,14 @@ export class RuntimeReadiness {
   }
 }
 
-export function healthPayload(): Record<string, unknown> {
-  return { ok: true, service: "lumen-agent-runtime", runtime_version: RUNTIME_VERSION };
+export function healthPayload(config: RuntimeConfig): Record<string, unknown> {
+  return {
+    ok: true,
+    service: "lumen-agent-runtime",
+    runtime_version: RUNTIME_VERSION,
+    max_request_bytes: config.maxRequestBytes,
+    max_line_bytes: config.maxLineBytes,
+  };
 }
 
 export function runtimeAuthKeyId(sharedSecret: string): string | null {
@@ -57,7 +63,7 @@ export function runtimeAuthKeyId(sharedSecret: string): string | null {
 
 export function readinessPayload(
   state: ReadinessState,
-  sharedSecret: string,
+  config: RuntimeConfig,
 ): Record<string, unknown> {
   return {
     ok: state.ready,
@@ -65,6 +71,8 @@ export function readinessPayload(
     runtime_version: RUNTIME_VERSION,
     checked_at: state.checkedAt,
     error_code: state.errorCode,
-    auth_key_id: runtimeAuthKeyId(sharedSecret),
+    auth_key_id: runtimeAuthKeyId(config.sharedSecret),
+    max_request_bytes: config.maxRequestBytes,
+    max_line_bytes: config.maxLineBytes,
   };
 }

@@ -28,10 +28,12 @@ from .agent_context_errors import AgentContextError
 from .agent_reference_previews import current_turn_reference_rows, reference_previews
 from .agent_runtime_client import (
     AgentRuntimeCompaction,
+    AgentRuntimeHistoryAssistantText,
+    AgentRuntimeHistoryBlock,
+    AgentRuntimeHistoryBlockToolCall,
+    AgentRuntimeHistoryBlockToolResult,
     AgentRuntimeHistoryImage,
     AgentRuntimeHistoryMessage,
-    AgentRuntimeHistoryToolCall,
-    AgentRuntimeHistoryToolResult,
     AgentRuntimeProviderEnvelope,
     AgentRuntimeReference,
 )
@@ -50,6 +52,92 @@ def _safe_text(value: Any, *, maximum: int = _HISTORY_TEXT_LIMIT) -> str:
     return normalized[:maximum]
 
 
+def _tool_result_text(tool: AgentToolCall) -> str:
+    result = tool.result_jsonb if isinstance(tool.result_jsonb, dict) else {}
+    generation_ids = [
+        value for value in result.get("generation_ids", []) if isinstance(value, str)
+    ][:4]
+    return agent_tool_history_result_text(
+        status=tool.status,
+        mode=tool.mode,
+        generation_ids=generation_ids,
+        error_code=tool.error_code,
+    )
+
+
+def _ordered_history_blocks(
+    run: AgentRun | None,
+    tool_rows: list[AgentToolCall],
+) -> list[AgentRuntimeHistoryBlock]:
+    raw_transcript = getattr(run, "transcript_jsonb", None) if run else None
+    transcript = raw_transcript if isinstance(raw_transcript, dict) else {}
+    if transcript.get("projection") != "ordered_blocks":
+        return []
+    raw_blocks = transcript.get("blocks")
+    if not isinstance(raw_blocks, list):
+        return []
+    tools_by_id = {tool.pi_tool_call_id: tool for tool in tool_rows}
+    tools_by_ordinal = {
+        ordinal: tool
+        for tool in tool_rows
+        if isinstance((ordinal := getattr(tool, "ordinal", None)), int)
+    }
+    result: list[AgentRuntimeHistoryBlock] = []
+    for raw in raw_blocks[:24]:
+        if not isinstance(raw, dict):
+            continue
+        turn = raw.get("turn")
+        if not isinstance(turn, int) or isinstance(turn, bool) or turn < 1:
+            continue
+        if raw.get("kind") == "text":
+            value = raw.get("text")
+            if isinstance(value, str) and value:
+                result.append(
+                    AgentRuntimeHistoryAssistantText(
+                        type="assistant_text",
+                        turn=turn,
+                        text=value[:_HISTORY_TEXT_LIMIT],
+                    )
+                )
+            continue
+        if raw.get("kind") != "tool":
+            continue
+        raw_id = raw.get("tool_call_id")
+        raw_ordinal = raw.get("ordinal")
+        tool = (
+            tools_by_id.get(raw_id)
+            if isinstance(raw_id, str)
+            else tools_by_ordinal.get(raw_ordinal)
+            if isinstance(raw_ordinal, int) and not isinstance(raw_ordinal, bool)
+            else None
+        )
+        if tool is None:
+            continue
+        arguments = (
+            dict(tool.arguments_jsonb) if isinstance(tool.arguments_jsonb, dict) else {}
+        )
+        result.extend(
+            [
+                AgentRuntimeHistoryBlockToolCall(
+                    type="tool_call",
+                    turn=turn,
+                    id=tool.pi_tool_call_id,
+                    name=tool.name,
+                    arguments=dict(list(arguments.items())[:32]),
+                ),
+                AgentRuntimeHistoryBlockToolResult(
+                    type="tool_result",
+                    turn=turn,
+                    tool_call_id=tool.pi_tool_call_id,
+                    name=tool.name,
+                    text=_tool_result_text(tool),
+                    is_error=tool.status != "succeeded",
+                ),
+            ]
+        )
+    return result[:32]
+
+
 def project_history_message(
     message: Message,
     *,
@@ -66,63 +154,53 @@ def project_history_message(
     if isinstance(attachments, list) and not image_previews:
         safe_attachments = [item for item in attachments if isinstance(item, dict)][:4]
         for index, item in enumerate(safe_attachments, 1):
-            role = _safe_text(item.get("role"), maximum=32) or "reference"
+            attachment_role = _safe_text(item.get("role"), maximum=32) or "reference"
             label = _safe_text(item.get("label"), maximum=80)
             suffix = f", label {label}" if label else ""
             notes.append(
-                f"[Historical image attachment {index}: role {role}{suffix}; binary omitted]"
+                f"[Historical image attachment {index}: role {attachment_role}{suffix}; binary omitted]"
             )
-    tools = content.get("tool_calls")
-    if isinstance(tools, list) and not tool_rows:
-        for item in [value for value in tools if isinstance(value, dict)][:8]:
-            name = _safe_text(item.get("name"), maximum=64) or "tool"
-            status = _safe_text(item.get("status"), maximum=32) or "unknown"
-            mode = _safe_text(item.get("mode"), maximum=32)
-            count = item.get("generation_count")
-            details = f", mode {mode}" if mode else ""
-            if isinstance(count, int) and not isinstance(count, bool):
-                details += f", jobs {max(0, min(count, 4))}"
-            notes.append(f"[Historical tool summary: {name}, status {status}{details}]")
-    combined = "\n".join(part for part in (text, *notes) if part).strip()
-    if not combined and not tool_rows and not image_previews:
+    ordered_blocks = _ordered_history_blocks(run, list(tool_rows or []))
+    if not ordered_blocks:
+        tool_sources = list(tool_rows or [])
+        if tool_sources:
+            for tool in tool_sources[:8]:
+                details = f", mode {tool.mode}" if tool.mode else ""
+                raw_result = (
+                    tool.result_jsonb if isinstance(tool.result_jsonb, dict) else {}
+                )
+                generation_count = getattr(tool, "generation_count", None)
+                if not isinstance(generation_count, int):
+                    generation_ids = raw_result.get("generation_ids")
+                    generation_count = (
+                        len(generation_ids) if isinstance(generation_ids, list) else 0
+                    )
+                details += f", jobs {max(0, min(generation_count, 4))}"
+                notes.append(
+                    f"[Historical tool summary: {tool.name}, status {tool.status}{details}]"
+                )
+        else:
+            tools = content.get("tool_calls")
+            if isinstance(tools, list):
+                for item in [value for value in tools if isinstance(value, dict)][:8]:
+                    name = _safe_text(item.get("name"), maximum=64) or "tool"
+                    status = _safe_text(item.get("status"), maximum=32) or "unknown"
+                    mode = _safe_text(item.get("mode"), maximum=32)
+                    details = f", mode {mode}" if mode else ""
+                    count = item.get("generation_count")
+                    if isinstance(count, int) and not isinstance(count, bool):
+                        details += f", jobs {max(0, min(count, 4))}"
+                    notes.append(
+                        f"[Historical tool summary: {name}, status {status}{details}]"
+                    )
+    combined = "\n\n".join(part for part in (text, *notes) if part).strip()
+    if not combined and not ordered_blocks and not image_previews:
         return None
     if not combined:
         combined = "Historical image turn" if image_previews else "Agent tool turn"
     role: Literal["user", "assistant"] = (
         "assistant" if message.role == "assistant" else "user"
     )
-    typed_calls: list[AgentRuntimeHistoryToolCall] = []
-    typed_results: list[AgentRuntimeHistoryToolResult] = []
-    for tool in (tool_rows or [])[:8]:
-        arguments = (
-            dict(tool.arguments_jsonb) if isinstance(tool.arguments_jsonb, dict) else {}
-        )
-        typed_calls.append(
-            AgentRuntimeHistoryToolCall(
-                id=tool.pi_tool_call_id,
-                name=tool.name,
-                arguments=dict(list(arguments.items())[:32]),
-            )
-        )
-        result = tool.result_jsonb if isinstance(tool.result_jsonb, dict) else {}
-        generation_ids = [
-            value
-            for value in result.get("generation_ids", [])
-            if isinstance(value, str)
-        ][:4]
-        typed_results.append(
-            AgentRuntimeHistoryToolResult(
-                tool_call_id=tool.pi_tool_call_id,
-                name=tool.name,
-                text=agent_tool_history_result_text(
-                    status=tool.status,
-                    mode=tool.mode,
-                    generation_ids=generation_ids,
-                    error_code=tool.error_code,
-                ),
-                is_error=tool.status != "succeeded",
-            )
-        )
     dispatch = (
         run.dispatch_jsonb if run and isinstance(run.dispatch_jsonb, dict) else {}
     )
@@ -134,22 +212,15 @@ def project_history_message(
             "lumen-history-"
             + hashlib.sha256(run.provider_name.encode("utf-8")).hexdigest()[:20]
         )
-    final_text = combined[:_HISTORY_TEXT_LIMIT] if typed_calls else None
     return AgentRuntimeHistoryMessage(
         message_id=message.id,
         role=role,
-        text=("Agent image tool request" if typed_calls else combined)[
-            :_HISTORY_TEXT_LIMIT
-        ],
-        final_text=final_text,
+        text=combined[:_HISTORY_TEXT_LIMIT],
         api=cast(Any, api),
         provider_id=provider_id,
         model=run.model[:256] if run and run.model else None,
-        stop_reason=(
-            ("toolUse" if typed_calls else "stop") if role == "assistant" else None
-        ),
-        tool_calls=typed_calls,
-        tool_results=typed_results,
+        stop_reason="stop" if role == "assistant" else None,
+        blocks=ordered_blocks if role == "assistant" else [],
         images=[
             AgentRuntimeHistoryImage(
                 mime_type=item.mime_type,
@@ -199,18 +270,40 @@ def pack_history(
         )
         if item is not None:
             projected.append(item)
-    projected_token_counts = [
-        estimate_agent_runtime_history_tokens(
-            text=item.text,
-            final_text=item.final_text,
-            tool_arguments=(tool.arguments for tool in item.tool_calls),
-            tool_result_texts=(result.text for result in item.tool_results),
-            image_tokens=(
-                image.estimated_input_tokens or 2048 for image in item.images
-            ),
+    projected_token_counts = []
+    for item in projected:
+        block_text = [
+            block.text
+            for block in item.blocks
+            if isinstance(
+                block,
+                (AgentRuntimeHistoryAssistantText, AgentRuntimeHistoryBlockToolResult),
+            )
+        ]
+        block_arguments = [
+            block.arguments
+            for block in item.blocks
+            if isinstance(block, AgentRuntimeHistoryBlockToolCall)
+        ]
+        projected_token_counts.append(
+            estimate_agent_runtime_history_tokens(
+                text="" if item.blocks else item.text,
+                final_text=item.final_text,
+                tool_arguments=(
+                    block_arguments
+                    if item.blocks
+                    else [tool.arguments for tool in item.tool_calls]
+                ),
+                tool_result_texts=(
+                    block_text
+                    if item.blocks
+                    else [result.text for result in item.tool_results]
+                ),
+                image_tokens=(
+                    image.estimated_input_tokens or 2048 for image in item.images
+                ),
+            )
         )
-        for item in projected
-    ]
     projected_tokens = sum(projected_token_counts)
     compaction_tokens = estimate_text_tokens(compaction.summary) if compaction else 0
     context_plan = plan_agent_runtime_context(
@@ -218,9 +311,7 @@ def pack_history(
         max_output_tokens=max_output_tokens,
         fixed_input_tokens=fixed_tokens,
         history_tokens=projected_tokens + compaction_tokens,
-        largest_history_entry_tokens=max(
-            [compaction_tokens, *projected_token_counts]
-        ),
+        largest_history_entry_tokens=max([compaction_tokens, *projected_token_counts]),
     )
     if context_plan.mode == "impossible":
         raise AgentContextError("agent_context_window_exceeded")

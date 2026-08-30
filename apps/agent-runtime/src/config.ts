@@ -150,6 +150,9 @@ export function validateRuntimeConfig(
   if (normalized.maxEventBytes < normalized.maxLineBytes * 2) {
     throw new Error("maxEventBytes must reserve at least two maximum event lines");
   }
+  // Compaction checkpoints are validated against the actual serialized line at
+  // emission time. Keep the minimum configurable line size useful for normal
+  // events; an oversized checkpoint then fails as a typed framing error.
   return normalized;
 }
 

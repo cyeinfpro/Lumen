@@ -7,6 +7,7 @@ Image probe：1024x1024 低质量生图，必须真返回 base64 (>= 1KB) 才算
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -263,6 +264,27 @@ class _StubResponse:
         return self._payload
 
 
+def _responses_sse(
+    text: str = "9801",
+    *,
+    terminal: bool = True,
+    include_usage: bool = True,
+) -> _StubResponse:
+    raw = (
+        "event: response.output_text.delta\n"
+        f'data: {{"type":"response.output_text.delta","delta":"{text}"}}\n\n'
+    )
+    if terminal:
+        response = {"status": "completed"}
+        if include_usage:
+            response["usage"] = {}
+        raw += (
+            "event: response.completed\n"
+            f'data: {{"type":"response.completed","response":{json.dumps(response)}}}\n\n'
+        )
+    return _StubResponse(200, ValueError("streaming response"), raw)
+
+
 class _StubAsyncClient:
     """httpx.AsyncClient 替身：按调用 ID 返回不同响应。"""
 
@@ -285,9 +307,15 @@ class _StubAsyncClient:
 async def test_probe_one_returns_true_when_answer_is_9801(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from app import runtime_settings
+
+    async def configured_model(_key: str) -> str:
+        return "gpt-5.4-mini"
+
+    monkeypatch.setattr(runtime_settings, "resolve", configured_model)
     pool = _make_pool(_cfg("acc1"))
     # 模拟 gpt-5.4-mini 答出 9801
-    stub = _StubAsyncClient(_StubResponse(200, {"output_text": "9801"}))
+    stub = _StubAsyncClient(_responses_sse())
 
     def fake_async_client(*_a: Any, **_kw: Any) -> _StubAsyncClient:
         return stub
@@ -298,7 +326,24 @@ async def test_probe_one_returns_true_when_answer_is_9801(
     # 探活请求一定带正确 prompt + gpt-5.4-mini
     assert stub.posts[0]["json"]["model"] == "gpt-5.4-mini"
     assert stub.posts[0]["json"]["instructions"]
-    assert "99 times 99" in stub.posts[0]["json"]["input"][0]["content"][0]["text"]
+    assert "99 * 99" in stub.posts[0]["json"]["input"]
+    assert stub.posts[0]["json"]["stream"] is True
+
+
+@pytest.mark.asyncio
+async def test_probe_one_rejects_terminal_without_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import runtime_settings
+
+    async def configured_model(_key: str) -> str:
+        return "configured-model"
+
+    monkeypatch.setattr(runtime_settings, "resolve", configured_model)
+    pool = _make_pool(_cfg("acc1"))
+    stub = _StubAsyncClient(_responses_sse(include_usage=False))
+    with _probe_runtime(pool, async_client_factory=lambda *a, **kw: stub):
+        assert await pool._probe_one(pool._providers[0]) is False
 
 
 @pytest.mark.asyncio
@@ -306,7 +351,7 @@ async def test_probe_one_returns_false_when_answer_is_wrong(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pool = _make_pool(_cfg("acc1"))
-    stub = _StubAsyncClient(_StubResponse(200, {"output_text": "9802"}))
+    stub = _StubAsyncClient(_responses_sse("9802"))
     with _probe_runtime(pool, async_client_factory=lambda *a, **kw: stub):
         ok = await pool._probe_one(pool._providers[0])
     assert ok is False
@@ -377,10 +422,10 @@ async def test_probe_one_returns_false_on_network_error(
 
 
 @pytest.mark.asyncio
-async def test_probe_one_extracts_from_output_array(
+async def test_probe_one_rejects_nonstreaming_output_array(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """output_text 缺失但 output[].content[].text 含 9801 时仍算 healthy。"""
+    """A 200 JSON body is not proof that production SSE works."""
     pool = _make_pool(_cfg("acc1"))
     payload = {
         "output": [
@@ -392,7 +437,7 @@ async def test_probe_one_extracts_from_output_array(
     }
     stub = _StubAsyncClient(_StubResponse(200, payload))
     with _probe_runtime(pool, async_client_factory=lambda *a, **kw: stub):
-        assert await pool._probe_one(pool._providers[0]) is True
+        assert await pool._probe_one(pool._providers[0]) is False
 
 
 @pytest.mark.asyncio
@@ -404,7 +449,7 @@ async def test_probe_one_extracts_from_sse_response(
         "event: response.output_text.delta\n"
         'data: {"type":"response.output_text.delta","delta":"9801"}\n\n'
         "event: response.completed\n"
-        'data: {"type":"response.completed"}\n\n'
+        'data: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n'
     )
     stub = _StubAsyncClient(_StubResponse(200, ValueError("not json"), raw))
     with _probe_runtime(pool, async_client_factory=lambda *a, **kw: stub):
@@ -433,16 +478,15 @@ async def test_probe_one_rejects_9801_in_non_output_sse(
 
 
 @pytest.mark.asyncio
-async def test_probe_one_skips_generation_locked_provider_without_http(
+async def test_agent_probe_ignores_image_generation_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pool = _make_pool(_locked_cfg())
+    stub = _StubAsyncClient(_responses_sse())
 
-    def fail_async_client(*_a: Any, **_kw: Any) -> Any:
-        raise AssertionError("locked provider should not call /v1/responses")
-
-    with _probe_runtime(pool, async_client_factory=fail_async_client):
+    with _probe_runtime(pool, async_client_factory=lambda *a, **kw: stub):
         assert await pool._probe_one(pool._providers[0]) is True
+    assert stub.posts[0]["url"].endswith("/v1/responses")
 
 
 # --- image probe ------------------------------------------------------------
@@ -558,16 +602,16 @@ async def test_probe_image_all_calls_per_provider_and_reports() -> None:
 
 
 @pytest.mark.asyncio
-async def test_probe_all_skips_generation_locked_provider(
+async def test_agent_probe_all_includes_generation_locked_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pool = _make_pool(_locked_cfg(), _cfg("responses"))
-    stub = _StubAsyncClient(_StubResponse(200, {"output_text": "9801"}))
+    stub = _StubAsyncClient(_responses_sse())
     with _probe_runtime(pool, async_client_factory=lambda *a, **kw: stub):
         results = await pool.probe_all()
 
-    assert results == {"responses": True}
-    assert len(stub.posts) == 1
+    assert results == {"image2-only": True, "responses": True}
+    assert len(stub.posts) == 2
 
 
 @pytest.mark.asyncio

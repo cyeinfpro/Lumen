@@ -70,6 +70,8 @@ function optimisticRun(
     status: "queued",
     execution_epoch: 0,
     last_event_seq: 0,
+    output_revision: 0,
+    output_runtime_seq: 0,
     idempotency_key: idempotencyKey,
     model: null,
     reasoning_effort:
@@ -120,6 +122,9 @@ function optimisticMessages(
       parentUserMessageId: userMessageId,
       generationIds: [],
       toolCalls: [],
+      blocks: [],
+      outputRevision: 0,
+      outputRuntimeSeq: 0,
       createdAt: now,
       partial: false,
       optimistic: true,

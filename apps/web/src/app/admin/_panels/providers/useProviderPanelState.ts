@@ -185,6 +185,7 @@ function providerAgentPayload(draft: Draft) {
     responses_supported: draft.responses_supported ?? null,
     vision_supported: draft.vision_supported ?? null,
     agent_api: draft.agent_api ?? "openai-responses",
+    agent_base_url: (draft.agent_base_url ?? "").trim(),
     agent_models: draft.agent_models ?? [],
     agent_context_window: Math.max(
       4096,

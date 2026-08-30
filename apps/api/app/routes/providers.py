@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 from datetime import datetime, timezone
@@ -11,13 +10,11 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.providers import ProviderProxyDefinition, parse_proxy_item
 from lumen_core.video_providers import parse_video_provider_config_json
 from lumen_core.models import SystemSetting
 from lumen_core.runtime_settings import get_spec, validate_providers
 from lumen_core.schemas import (
     ProviderItemOut,
-    ProviderProbeResult,
     ProviderProxyOut,
     ProviderStatsItem,
     ProviderStatsOut,
@@ -516,9 +513,7 @@ async def update_providers(
     old_raw, _ = await _read_providers(db)
     old_keys, old_proxy_passwords = _stored_provider_secrets(old_raw)
     old_items, old_proxy_rows = _parse_config(old_raw or "")
-    proxy_rows = _provider_proxy_rows(
-        body, old_proxy_passwords, old_proxy_rows
-    )
+    proxy_rows = _provider_proxy_rows(body, old_proxy_passwords, old_proxy_rows)
     provider_rows = _provider_rows(
         body,
         old_keys=old_keys,
@@ -654,63 +649,20 @@ async def probe_providers(
     items, proxy_items = _parse_config(raw)
     if not items:
         return ProvidersProbeOut(items=[], probed_at=None)
-    proxy_by_name: dict[str, ProviderProxyDefinition] = {}
-    for i, proxy_item in enumerate(proxy_items):
-        try:
-            parsed = parse_proxy_item(proxy_item, index=i)
-        except Exception:  # noqa: BLE001
-            continue
-        proxy_by_name[parsed.name] = parsed
-
     names_filter = set(body.names) if body and body.names else None
-
-    async def _do(it: dict, idx: int) -> ProviderProbeResult:
-        name = it.get("name") or f"provider-{idx}"
-        base_url = it.get("base_url", "")
-        api_key = it.get("api_key", "")
-
-        if names_filter and name not in names_filter:
-            return ProviderProbeResult(name=name, ok=False, status="skipped")
-
-        if not _normalize_bool(it.get("enabled"), default=True):
-            return ProviderProbeResult(name=name, ok=False, status="disabled")
-
-        if _probe_blocked_by_endpoint_lock(it):
-            return ProviderProbeResult(
-                name=name,
-                ok=False,
-                status="skipped",
-                error="endpoint_locked_to_generations",
-            )
-
-        if not base_url or not api_key:
-            return ProviderProbeResult(
-                name=name,
-                ok=False,
-                error="missing config",
-                status="unhealthy",
-            )
-
-        proxy_name = it.get("proxy")
-        proxy = (
-            proxy_by_name.get(proxy_name)
-            if isinstance(proxy_name, str) and proxy_name
-            else None
-        )
-        outcome = await _probe_one(base_url, api_key, proxy=proxy)
-        return ProviderProbeResult(
-            name=name,
-            ok=outcome.ok,
-            latency_ms=outcome.latency_ms,
-            error=outcome.error,
-            status="healthy" if outcome.ok else "unhealthy",
-            capability_signal=outcome.capability_signal,
-            http_status=outcome.http_status,
-        )
-
-    results = await asyncio.gather(*[_do(it, i) for i, it in enumerate(items)])
+    raw_default_model = await _read_setting_value(db, "upstream.default_model")
+    if not isinstance(raw_default_model, str):
+        raw_default_model = getattr(raw_default_model, "value", "")
+    default_model = str(raw_default_model or "").strip()
+    results = await _probe.probe_configured_providers(
+        items,
+        proxy_items,
+        names_filter=names_filter,
+        default_model=default_model,
+        runner=_probe_one,
+    )
     now = datetime.now(timezone.utc).isoformat()
-    return ProvidersProbeOut(items=list(results), probed_at=now)
+    return ProvidersProbeOut(items=results, probed_at=now)
 
 
 # ---------------------------------------------------------------------------

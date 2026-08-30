@@ -88,6 +88,14 @@ class AgentRun(Base, TimestampMixin):
             "last_event_seq >= 0",
             name="ck_agent_runs_event_seq_nonnegative",
         ),
+        CheckConstraint(
+            "output_revision >= 0",
+            name="ck_agent_runs_output_revision_nonnegative",
+        ),
+        CheckConstraint(
+            "output_runtime_seq >= 0",
+            name="ck_agent_runs_output_runtime_seq_nonnegative",
+        ),
         CheckConstraint("turn_count >= 0", name="ck_agent_runs_turn_count_nonnegative"),
         CheckConstraint(
             "tool_call_count >= 0",
@@ -151,6 +159,15 @@ class AgentRun(Base, TimestampMixin):
     last_event_seq: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=0, server_default="0"
     )
+    output_revision: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    output_runtime_seq: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    transcript_jsonb: Mapped[dict[str, Any]] = mapped_column(
+        JsonType(), nullable=False, default=dict, server_default="{}"
+    )
     idempotency_key: Mapped[str] = mapped_column(String(96), nullable=False)
     request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     request_snapshot_jsonb: Mapped[dict[str, Any]] = mapped_column(
@@ -205,6 +222,67 @@ class AgentRun(Base, TimestampMixin):
     cancel_requested_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class AgentProviderCall(Base, TimestampMixin):
+    __tablename__ = "agent_provider_calls"
+    __table_args__ = (
+        UniqueConstraint(
+            "agent_run_id",
+            "execution_epoch",
+            "dispatch_ordinal",
+            name="uq_agent_provider_calls_run_epoch_ordinal",
+        ),
+        CheckConstraint(
+            "execution_epoch >= 0",
+            name="ck_agent_provider_calls_epoch_nonnegative",
+        ),
+        CheckConstraint(
+            "dispatch_ordinal >= 1",
+            name="ck_agent_provider_calls_ordinal_positive",
+        ),
+        CheckConstraint(
+            "evidence_event_seq >= 0",
+            name="ck_agent_provider_calls_event_seq_nonnegative",
+        ),
+        CheckConstraint(
+            "delivery_state IN ('authorized', 'dispatched', 'responded', "
+            "'completed', 'cancelled', 'unknown')",
+            name="ck_agent_provider_calls_delivery_state",
+        ),
+        CheckConstraint(
+            "result_state IN ('pending', 'exact', 'missing', 'failed', 'unknown')",
+            name="ck_agent_provider_calls_result_state",
+        ),
+        Index(
+            "ix_agent_provider_calls_run_epoch",
+            "agent_run_id",
+            "execution_epoch",
+            "dispatch_ordinal",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
+    agent_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    execution_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    dispatch_ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    permit_id: Mapped[str] = mapped_column(String(192), nullable=False)
+    delivery_state: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="authorized", server_default="authorized"
+    )
+    result_state: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="pending", server_default="pending"
+    )
+    response_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    exact_usage_jsonb: Mapped[dict[str, Any]] = mapped_column(
+        JsonType(), nullable=False, default=dict, server_default="{}"
+    )
+    evidence_event_seq: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    uncertainty_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class AgentRunReference(Base, TimestampMixin):
@@ -391,6 +469,7 @@ class AgentToolCall(Base, TimestampMixin):
 
 __all__ = [
     "AgentCapabilityGrant",
+    "AgentProviderCall",
     "AgentRun",
     "AgentRunReference",
     "AgentSessionImage",

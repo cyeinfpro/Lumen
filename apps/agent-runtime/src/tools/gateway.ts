@@ -355,7 +355,8 @@ export function createImageGateway(
       ordinal,
       accepted,
       requireIdentity:
-        request.version === 3 && request.tool_receipt_version === 2,
+        (request.version === 3 || request.version === 4) &&
+        request.tool_receipt_version === 2,
     });
   };
 }

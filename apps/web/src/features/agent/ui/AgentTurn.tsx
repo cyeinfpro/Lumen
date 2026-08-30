@@ -10,10 +10,12 @@ import { cn } from "@/lib/utils";
 import type {
   AgentAssistantMessage,
   AgentMessage,
+  AgentOutputBlock,
   AgentRun,
   AgentToolCall as AgentToolCallContract,
   AgentUserMessage,
 } from "../model/contracts";
+import { neutralizeAgentPseudoProtocol } from "../model/agentTextSafety";
 import { AgentRunStatus } from "./AgentRunStatus";
 import { AgentToolCall } from "./AgentToolCall";
 
@@ -117,35 +119,11 @@ function AgentAssistantTurn({
           <Bot className="h-4 w-4" aria-hidden />
         </span>
         <div className="min-w-0 flex-1">
-          {message.text ? (
-            <div className="relative max-w-[var(--content-text)]">
-              <Markdown className="type-body text-[var(--fg-0)]">{message.text}</Markdown>
-              {active ? (
-                <span className="ml-1 inline-block h-4 w-0.5 animate-pulse bg-accent align-text-bottom" aria-label="回复中" />
-              ) : null}
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => void navigator.clipboard?.writeText(message.text)}
-                aria-label="复制 Agent 回复"
-                className="mt-2 px-2 text-[var(--fg-2)]"
-                leftIcon={<Copy className="h-3.5 w-3.5" aria-hidden />}
-              >
-                复制
-              </Button>
-            </div>
-          ) : active ? (
-            <div role="status" className="flex min-h-10 items-center gap-2 type-body-sm text-[var(--fg-2)]">
-              <Loader2 className="h-4 w-4 animate-spin text-accent" aria-hidden />
-              Agent 运行中
-            </div>
-          ) : null}
-
-          {tools.length > 0 ? (
-            <div className="mt-3 grid gap-2">
-              {tools.map((tool) => <AgentToolCall key={tool.id} tool={tool} />)}
-            </div>
-          ) : null}
+          <AgentOrderedOutput
+            message={message}
+            tools={tools}
+            active={active}
+          />
 
           {generations.length > 0 ? (
             <div className="mt-3 grid gap-4 sm:grid-cols-2">
@@ -174,6 +152,87 @@ function AgentAssistantTurn({
         </div>
       </div>
     </article>
+  );
+}
+
+function toolForBlock(
+  block: AgentOutputBlock,
+  tools: AgentToolCallContract[],
+): AgentToolCallContract | undefined {
+  if (block.kind !== "tool") return undefined;
+  if (block.ordinal !== undefined) {
+    const byOrdinal = tools.find((tool) => tool.ordinal === block.ordinal);
+    if (byOrdinal) return byOrdinal;
+  }
+  return tools.find((tool) => tool.id === block.tool_call_id);
+}
+
+function AgentOrderedOutput({
+  message,
+  tools,
+  active,
+}: {
+  message: AgentAssistantMessage;
+  tools: AgentToolCallContract[];
+  active: boolean;
+}) {
+  const ordered = message.blocks.length > 0;
+  if (!ordered && !message.text && tools.length === 0 && active) {
+    return (
+      <div role="status" className="flex min-h-10 items-center gap-2 type-body-sm text-[var(--fg-2)]">
+        <Loader2 className="h-4 w-4 animate-spin text-accent" aria-hidden />
+        Agent 运行中
+      </div>
+    );
+  }
+  const blocks = ordered
+    ? message.blocks
+    : [
+        ...(message.text
+          ? [{ kind: "text" as const, turn: 1, text: message.text }]
+          : []),
+        ...tools.map((tool) => ({
+          kind: "tool" as const,
+          turn: 1,
+          tool_call_id: tool.id,
+          ordinal: tool.ordinal,
+        })),
+      ];
+  return (
+    <div className="grid gap-3">
+      {blocks.map((block, index) => {
+        if (block.kind === "text") {
+          return (
+            <div key={`text:${block.turn}:${index}`} className="max-w-[var(--content-text)]">
+              <Markdown className="type-body text-[var(--fg-0)]">
+                {neutralizeAgentPseudoProtocol(block.text)}
+              </Markdown>
+              {active && index === blocks.length - 1 ? (
+                <span className="ml-1 inline-block h-4 w-0.5 animate-pulse bg-accent align-text-bottom" aria-label="回复中" />
+              ) : null}
+            </div>
+          );
+        }
+        const tool = toolForBlock(block, tools);
+        return tool ? <AgentToolCall key={`tool:${tool.id}`} tool={tool} /> : null;
+      })}
+      {message.text ? (
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() =>
+            void navigator.clipboard?.writeText(
+              neutralizeAgentPseudoProtocol(message.text),
+            )
+          }
+          aria-label="复制 Agent 回复"
+          className="w-fit px-2 text-[var(--fg-2)]"
+          leftIcon={<Copy className="h-3.5 w-3.5" aria-hidden />}
+        >
+          复制
+        </Button>
+      ) : null}
+    </div>
   );
 }
 

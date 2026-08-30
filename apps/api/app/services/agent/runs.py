@@ -9,6 +9,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core.agent_dispatch import provider_dispatch_evidence_count
+from lumen_core.agent_errors import agent_error_allows_continuation
 from lumen_core.agent_events import (
     AGENT_RUN_ACTIVE_STATUSES,
     AGENT_RUN_TERMINAL_STATUSES,
@@ -17,8 +19,10 @@ from lumen_core.agent_events import (
 )
 from lumen_core.constants import MessageStatus
 from lumen_core.model_entities import (
+    AgentProviderCall,
     AgentRun,
     AgentSession,
+    AgentToolCall,
     Conversation,
     Message,
     User,
@@ -50,6 +54,50 @@ from .submission_planning import ContinuationPlan
 
 
 logger = logging.getLogger(__name__)
+
+
+def _transcript_is_coherent(run: AgentRun, message: Message | None) -> bool:
+    if message is None or not isinstance(message.content, dict):
+        return False
+    revision = int(run.output_revision or 0)
+    runtime_seq = int(run.output_runtime_seq or 0)
+    transcript = run.transcript_jsonb if isinstance(run.transcript_jsonb, dict) else {}
+    if transcript.get("projection") == "ordered_blocks":
+        if (
+            transcript.get("output_revision") != revision
+            or transcript.get("output_runtime_seq") != runtime_seq
+        ):
+            return False
+    message_revision = message.content.get("output_revision")
+    message_runtime_seq = message.content.get("output_runtime_seq")
+    if message_revision is None and message_runtime_seq is None:
+        return revision == 0 and runtime_seq == 0
+    return message_revision == revision and message_runtime_seq == runtime_seq
+
+
+async def _provider_evidence_allows_continuation(
+    db: AsyncSession,
+    source: AgentRun,
+) -> bool:
+    rows = list(
+        (
+            await db.execute(
+                select(AgentProviderCall).where(
+                    AgentProviderCall.agent_run_id == source.id,
+                    AgentProviderCall.execution_epoch == source.execution_epoch,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if rows:
+        return all(row.result_state in {"exact", "missing"} for row in rows)
+    dispatch = source.dispatch_jsonb if isinstance(source.dispatch_jsonb, dict) else {}
+    if provider_dispatch_evidence_count(dispatch) == 0:
+        return True
+    billing = source.billing_jsonb if isinstance(source.billing_jsonb, dict) else {}
+    return billing.get("knowledge") in {"actual", "proven_absent"}
 
 
 async def get_owned_agent_run(
@@ -255,16 +303,34 @@ async def continue_agent_run(
             .limit(1)
         )
     ).scalar_one_or_none()
+    unresolved_tool = (
+        await db.execute(
+            select(AgentToolCall.id)
+            .where(
+                AgentToolCall.agent_run_id == source.id,
+                (
+                    AgentToolCall.status.in_({"queued", "running", "timed_out"})
+                    | (AgentToolCall.error_code == "agent_tool_result_unknown")
+                ),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    source_message = (
+        await db.execute(
+            select(Message)
+            .where(Message.id == source.assistant_message_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    provider_evidence_safe = await _provider_evidence_allows_continuation(db, source)
     if (
         source.status != AgentRunStatus.PARTIAL.value
-        or source.error_code
-        not in {
-            "agent_output_truncated",
-            "agent_safety_budget_reached",
-            "agent_runtime_disconnected",
-            "agent_runtime_event_timeout",
-        }
+        or not agent_error_allows_continuation(source.error_code)
         or latest_run_id != source.id
+        or unresolved_tool is not None
+        or not provider_evidence_safe
+        or not _transcript_is_coherent(source, source_message)
     ):
         raise http_error(
             "agent_run_not_continuable",

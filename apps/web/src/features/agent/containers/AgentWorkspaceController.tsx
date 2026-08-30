@@ -48,6 +48,7 @@ import { getPrivateIdentitySnapshot } from "@/lib/auth/privateIdentityEpoch";
 import {
   selectAgentDraft,
   useAgentStore,
+  type AgentRealtimeStatus,
 } from "@/store/agent/useAgentStore";
 import type { AttachmentRole } from "@/lib/types";
 import {
@@ -141,6 +142,7 @@ export function AgentWorkspaceController({
   const [composerAction, setComposerAction] = useState<{ href: string; label: string } | null>(null);
   const submissionRef = useRef(false);
   const refreshCoordinator = useMemo(() => new AgentRefreshCoordinator(), []);
+  const sseTransportStatusRef = useRef<AgentRealtimeStatus>("idle");
 
   const currentSessionId = useAgentStore((state) => state.currentSessionId);
   const messagesBySession = useAgentStore((state) => state.messagesBySession);
@@ -265,7 +267,9 @@ export function AgentWorkspaceController({
       sessionId: currentSessionId,
       intervalMs: snapshotPollIntervalMs,
       refresh: (signal: AbortSignal) => coordinatedRefresh(signal),
-      setStatus: setRealtimeStatus,
+      setStatus: (status: AgentRealtimeStatus) => {
+        if (sseTransportStatusRef.current !== "open") setRealtimeStatus(status);
+      },
     }),
     [currentSessionId, coordinatedRefresh, setRealtimeStatus, snapshotPollIntervalMs],
   );
@@ -293,11 +297,12 @@ export function AgentWorkspaceController({
         name,
         (payload) => {
           const event = parseAgentEventEnvelope(name, payload);
-          if (!event) return;
           const accepted = applyEvent(event);
           if (
             accepted &&
-            (name.startsWith("agent.tool.") || name.startsWith("agent.run."))
+            (name.startsWith("agent.tool.") ||
+              name.startsWith("agent.run.") ||
+              event.snapshot_required === true)
           ) {
             requestRefresh();
           }
@@ -327,7 +332,11 @@ export function AgentWorkspaceController({
       return { syncedAt: Date.now() };
     },
   });
-  useEffect(() => setRealtimeStatus(channels.length ? sseStatus : "idle"), [channels.length, setRealtimeStatus, sseStatus]);
+  useEffect(() => {
+    const status = channels.length ? sseStatus : "idle";
+    sseTransportStatusRef.current = status;
+    setRealtimeStatus(status);
+  }, [channels.length, setRealtimeStatus, sseStatus]);
 
   const createMutation = useCreateAgentSessionMutation();
   const patchMutation = usePatchAgentSessionMutation();

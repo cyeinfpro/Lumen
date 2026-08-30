@@ -208,6 +208,8 @@ class AgentRunOut(BaseModel):
     status: Literal["queued", "running", "succeeded", "partial", "failed", "cancelled"]
     execution_epoch: int
     last_event_seq: int
+    output_revision: int = 0
+    output_runtime_seq: int = 0
     idempotency_key: str
     model: str | None = None
     reasoning_effort: str | None = None
@@ -298,6 +300,22 @@ class AgentSessionImageListOut(BaseModel):
     maximum: int
 
 
+class AgentEventTextBlock(_StrictAgentIn):
+    kind: Literal["text"]
+    turn: int = Field(ge=1, le=128)
+    text: str = Field(min_length=1, max_length=20_000)
+
+
+class AgentEventToolBlock(_StrictAgentIn):
+    kind: Literal["tool"]
+    turn: int = Field(ge=1, le=128)
+    tool_call_id: str | None = Field(default=None, max_length=128)
+    ordinal: int | None = Field(default=None, ge=0)
+    name: str | None = Field(default=None, max_length=64)
+    status: str | None = Field(default=None, max_length=32)
+    generation_ids: list[str] = Field(default_factory=list, max_length=4)
+
+
 class AgentEventEnvelope(_StrictAgentIn):
     agent_session_id: str = Field(min_length=1, max_length=64)
     agent_run_id: str = Field(min_length=1, max_length=64)
@@ -305,6 +323,19 @@ class AgentEventEnvelope(_StrictAgentIn):
     execution_epoch: int = Field(ge=0)
     event_seq: int = Field(ge=1)
     event_name: str
+    event_id: str | None = Field(default=None, max_length=192)
+    text_delta: str | None = Field(default=None, max_length=20_000)
+    text_operation: Literal["append", "replace"] | None = None
+    replacement_text: str | None = Field(default=None, max_length=20_000)
+    snapshot_required: bool = False
+    blocks: list[AgentEventTextBlock | AgentEventToolBlock] = Field(
+        default_factory=list,
+        max_length=32,
+    )
+    output_revision: int | None = Field(default=None, ge=0)
+    output_runtime_seq: int | None = Field(default=None, ge=0)
+    status: str | None = Field(default=None, max_length=32)
+    error_code: str | None = Field(default=None, max_length=64)
     tool_call_id: str | None = Field(default=None, max_length=64)
     generation_ids: list[str] = Field(default_factory=list, max_length=4)
 
@@ -314,6 +345,27 @@ class AgentEventEnvelope(_StrictAgentIn):
         if value not in AGENT_EVENT_NAMES:
             raise ValueError("unsupported Agent event")
         return value
+
+    @model_validator(mode="after")
+    def validate_event_payload(self) -> "AgentEventEnvelope":
+        if self.event_name == "agent.output.delta":
+            if self.text_delta is None or self.text_operation is None:
+                raise ValueError("Agent output delta is incomplete")
+        elif self.event_name == "agent.output.reset":
+            if self.snapshot_required:
+                if self.replacement_text is not None or self.blocks:
+                    raise ValueError("snapshot marker must not carry replacement data")
+            elif self.text_operation != "replace" or self.replacement_text is None:
+                raise ValueError("Agent output reset is incomplete")
+        elif (
+            self.text_delta is not None
+            or self.text_operation is not None
+            or self.replacement_text is not None
+            or self.snapshot_required
+            or self.blocks
+        ):
+            raise ValueError("non-output Agent event contains output fields")
+        return self
 
 
 class AgentStatusOut(BaseModel):
@@ -380,6 +432,8 @@ __all__ = [
     "AgentCreateImageArgumentsIn",
     "AgentCreateImageNormalized",
     "AgentEventEnvelope",
+    "AgentEventTextBlock",
+    "AgentEventToolBlock",
     "AgentImageDefaultsIn",
     "AgentMessageCreateIn",
     "AgentMessageCreateOut",

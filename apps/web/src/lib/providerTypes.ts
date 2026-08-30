@@ -41,6 +41,7 @@ export interface ProviderItemOut {
   responses_supported: boolean | null;
   vision_supported: boolean | null;
   agent_api: ProviderAgentApi;
+  agent_base_url?: string;
   agent_models?: string[];
   agent_context_window: number;
   agent_max_output_tokens: number;
@@ -88,6 +89,7 @@ export interface ProviderItemIn {
   responses_supported?: boolean | null;
   vision_supported?: boolean | null;
   agent_api?: ProviderAgentApi;
+  agent_base_url?: string;
   agent_models?: string[];
   agent_context_window?: number;
   agent_max_output_tokens?: number;
@@ -131,6 +133,7 @@ export interface ProviderDiscoveredModel {
 export interface ProviderModelsDiscoverIn {
   provider_name?: string | null;
   base_url: string;
+  agent_base_url?: string;
   api_key: string;
   proxy?: string | null;
   agent_api: ProviderAgentApi;

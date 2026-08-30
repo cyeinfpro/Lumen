@@ -26,6 +26,64 @@ class _StubResponse:
         return self._payload
 
 
+def _responses_sse(text: str) -> _StubResponse:
+    raw = (
+        "data: "
+        + json.dumps({"type": "response.output_text.delta", "delta": text})
+        + "\n\n"
+        + "data: "
+        + json.dumps(
+            {
+                "type": "response.completed",
+                "response": {"status": "completed", "usage": {}},
+            }
+        )
+        + "\n\n"
+    )
+    return _StubResponse(200, ValueError("streaming response"), raw)
+
+
+def _adapter_sse(api: str, text: str) -> _StubResponse:
+    if api == "openai-completions":
+        raw = (
+            "data: "
+            + json.dumps(
+                {
+                    "choices": [
+                        {
+                            "delta": {"content": text},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {},
+                }
+            )
+            + "\n\ndata: [DONE]\n\n"
+        )
+    else:
+        raw = (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": text},
+                }
+            )
+            + "\n\ndata: "
+            + json.dumps(
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn"},
+                    "usage": {},
+                }
+            )
+            + "\n\ndata: "
+            + json.dumps({"type": "message_stop"})
+            + "\n\n"
+        )
+    return _StubResponse(200, ValueError("streaming response"), raw)
+
+
 class _StubAsyncClient:
     def __init__(self, response: _StubResponse) -> None:
         self.response = response
@@ -146,7 +204,7 @@ async def test_normalize_base_url_allows_dns_gaierror_in_development(
 async def test_validate_api_key_with_supplier_calls_responses_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = _StubAsyncClient(_StubResponse(200, {"output_text": "42"}))
+    client = _StubAsyncClient(_responses_sse("42"))
 
     def fake_client(**kwargs: Any) -> _StubAsyncClient:
         client.init_kwargs = kwargs
@@ -176,8 +234,57 @@ async def test_validate_api_key_with_supplier_calls_responses_endpoint(
     # Why: pin to the monkeypatched challenge.expression instead of the literal
     # "40 + 2" so future ArithmeticChallenge factory changes (or a different
     # _challenge() return) don't break this test silently.
-    posted_text = client.posts[0]["json"]["input"][0]["content"][0]["text"]
+    posted_text = client.posts[0]["json"]["input"]
     assert challenge.expression in posted_text
+    assert client.posts[0]["json"]["stream"] is True
+
+
+@pytest.mark.parametrize(
+    ("api", "agent_base_url", "expected_path", "auth_header"),
+    [
+        (
+            "openai-completions",
+            "https://gateway.example/openai/v1",
+            "https://gateway.example/openai/v1/chat/completions",
+            "authorization",
+        ),
+        (
+            "anthropic-messages",
+            "https://gateway.example/anthropic",
+            "https://gateway.example/anthropic/v1/messages",
+            "x-api-key",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_byok_validation_uses_configured_agent_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+    api: str,
+    agent_base_url: str,
+    expected_path: str,
+    auth_header: str,
+) -> None:
+    client = _StubAsyncClient(_adapter_sse(api, "42"))
+    monkeypatch.setattr(byok_service, "generate_arithmetic_challenge", _challenge)
+    monkeypatch.setattr(byok_service.httpx, "AsyncClient", lambda **_kwargs: client)
+
+    outcome = await byok_service.validate_api_key_with_supplier(
+        byok_service.SupplierValidationTarget.from_supplier(
+            _supplier(
+                capabilities_jsonb={
+                    "agent_api": api,
+                    "agent_base_url": agent_base_url,
+                }
+            )
+        ),
+        "sk-user",
+    )
+
+    assert outcome.ok is True
+    assert client.posts[0]["url"] == expected_path
+    assert auth_header in client.posts[0]["headers"]
+    assert client.posts[0]["json"]["model"] == "gpt-validate"
+    assert client.posts[0]["json"]["stream"] is True
 
 
 @pytest.mark.parametrize(
@@ -222,7 +329,7 @@ async def test_validate_api_key_with_supplier_rejects_wrong_answer(
     monkeypatch.setattr(
         byok_service.httpx,
         "AsyncClient",
-        lambda **_kwargs: _StubAsyncClient(_StubResponse(200, {"output_text": "41"})),
+        lambda **_kwargs: _StubAsyncClient(_responses_sse("41")),
     )
 
     outcome = await byok_service.validate_api_key_with_supplier(

@@ -29,17 +29,26 @@ import {
 } from "./contracts.js";
 import { RUNTIME_VERSION } from "./config.js";
 import type { RuntimeMetrics } from "./metrics.js";
-import type { EventWriter } from "./ndjson.js";
+import {
+  NdjsonLineTooLargeError,
+  runtimeEventLineBytes,
+  type EventWriter,
+} from "./ndjson.js";
 import { logRuntime } from "./redaction.js";
 import {
   authorizeProviderDispatch,
   ProviderDispatchPermitError,
 } from "./providers/dispatch-permit.js";
 import {
+  omitAutomaticReasoningControls,
   prepareProviderRuntime,
   type PreparedProviderRuntime,
 } from "./providers/runtime-provider.js";
 import { emptyResourceLoader } from "./resource-loader.js";
+import {
+  StreamingTextGuard,
+  completeTextGuardViolation,
+} from "./text-guard.js";
 import { createImageTool, ordinalFor, type ToolRuntimeState } from "./tools/create-image.js";
 import {
   createImageGateway,
@@ -100,6 +109,8 @@ export interface ExecuteResult {
   readonly toolCallCount: number;
   readonly providerDispatchCount: number;
   readonly providerCompletedCount: number;
+  readonly exactUsageCallCount: number;
+  readonly usageEvidence: "exact" | "partial" | "unknown" | "none";
 }
 
 export class RuntimeExecutionError extends Error {
@@ -216,6 +227,65 @@ function addUsage(target: RuntimeUsage, usage: RuntimeUsage): void {
     target.cache_read_tokens + target.cache_write_tokens;
 }
 
+function orderedHistoryMessages(
+  item: RuntimeHistoryMessage,
+  request: RuntimeRequest,
+  timestamp: number,
+): Message[] {
+  const result: Message[] = [];
+  const turns = new Map<number, NonNullable<RuntimeHistoryMessage["blocks"]>>();
+  for (const block of item.blocks ?? []) {
+    const blocks = turns.get(block.turn) ?? [];
+    blocks.push(block);
+    turns.set(block.turn, blocks);
+  }
+  let offset = 0;
+  for (const blocks of turns.values()) {
+    const content: AssistantMessage["content"] = [];
+    const toolResults: Array<Extract<(typeof blocks)[number], { type: "tool_result" }>> = [];
+    for (const block of blocks) {
+      if (block.type === "assistant_text") {
+        content.push({ type: "text", text: block.text });
+      } else if (block.type === "tool_call") {
+        content.push({
+          type: "toolCall",
+          id: block.id,
+          name: block.name,
+          arguments: block.arguments,
+        });
+      } else {
+        toolResults.push(block);
+      }
+    }
+    if (content.length > 0) {
+      const hasTools = content.some((value) => value.type === "toolCall");
+      result.push({
+        role: "assistant",
+        content,
+        api: item.api ?? request.provider.api,
+        provider: item.provider_id ?? request.provider.provider_id,
+        model: item.model ?? request.provider.model,
+        usage: EMPTY_USAGE,
+        stopReason: hasTools ? "toolUse" : "stop",
+        timestamp: timestamp + offset,
+      });
+      offset += 1;
+    }
+    for (const block of toolResults) {
+      result.push({
+        role: "toolResult",
+        toolCallId: block.tool_call_id,
+        toolName: block.name,
+        content: [{ type: "text", text: block.text }],
+        isError: block.is_error,
+        timestamp: timestamp + offset,
+      });
+      offset += 1;
+    }
+  }
+  return result;
+}
+
 function historyMessages(
   item: RuntimeHistoryMessage,
   request: RuntimeRequest,
@@ -234,6 +304,9 @@ function historyMessages(
       ],
       timestamp,
     }];
+  }
+  if ((item.blocks?.length ?? 0) > 0) {
+    return orderedHistoryMessages(item, request, timestamp);
   }
   const toolCalls = (item.tool_calls ?? []).map((toolCall) => ({
     type: "toolCall" as const,
@@ -346,12 +419,25 @@ function assistantMessage(message: AgentMessage): AssistantMessage | null {
 }
 
 function terminalErrorCode(message: AssistantMessage | null): string | null {
-  if (message === null || message.stopReason === "stop" || message.stopReason === "toolUse") {
+  if (message === null) return "agent_provider_empty_response";
+  if (message.stopReason === "stop" || message.stopReason === "toolUse") {
     return null;
   }
   if (message.stopReason === "aborted") return "agent_cancelled";
   if (message.stopReason === "length") return "agent_output_truncated";
   return "agent_provider_error";
+}
+
+function terminalErrorWithEvidence(
+  message: AssistantMessage | null,
+  hasProgress: boolean,
+  successfulCalls: number,
+): string | null {
+  const terminal = terminalErrorCode(message);
+  if (terminal !== null) return terminal;
+  return !hasProgress && successfulCalls === 0
+    ? "agent_provider_empty_response"
+    : null;
 }
 
 function toolDetails(result: unknown): Record<string, unknown> {
@@ -369,7 +455,9 @@ function finalOutcome(
   hasProgress: boolean,
 ): ExecuteResult["outcome"] {
   if (signal.aborted && signal.reason !== "agent_runtime_shutdown") return "cancelled";
-  if (errorCode === null && state.unknownResults === 0) return "succeeded";
+  if (errorCode === null && state.unknownResults === 0 && hasProgress) {
+    return "succeeded";
+  }
   if (errorCode === "agent_runtime_shutdown") return "failed";
   if (hasProgress || state.successfulCalls > 0 || state.unknownResults > 0) return "partial";
   return "failed";
@@ -403,6 +491,61 @@ async function emitOrThrow(
   if (!(await writer.emit(type, payload))) {
     throw new Error("Agent Runtime event could not be emitted");
   }
+}
+
+export function splitRuntimeTextDelta(
+  value: string,
+  options: {
+    readonly maxLineBytes: number;
+    readonly firstSequence: number;
+    readonly runId: string;
+    readonly executionEpoch: number;
+    readonly turn: number;
+  },
+): string[] {
+  const output: string[] = [];
+  let remaining = value;
+  while (remaining.length > 0) {
+    const codePoints = Array.from(remaining);
+    let low = 1;
+    let high = Math.min(codePoints.length, 8_192);
+    let best = 0;
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2);
+      const candidate = codePoints.slice(0, middle).join("");
+      const bytes = runtimeEventLineBytes(
+        "text.delta",
+        options.firstSequence + output.length,
+        options.runId,
+        options.executionEpoch,
+        { delta: candidate, turn: options.turn },
+      );
+      if (bytes <= options.maxLineBytes) {
+        best = middle;
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    if (best < 1) {
+      throw new NdjsonLineTooLargeError(
+        options.maxLineBytes + 1,
+        options.maxLineBytes,
+      );
+    }
+    output.push(codePoints.slice(0, best).join(""));
+    remaining = codePoints.slice(best).join("");
+  }
+  return output;
+}
+
+function usageEvidenceState(
+  providerDispatchCount: number,
+  exactUsageCallCount: number,
+): ExecuteResult["usageEvidence"] {
+  if (providerDispatchCount === 0) return "none";
+  if (exactUsageCallCount === providerDispatchCount) return "exact";
+  return exactUsageCallCount > 0 ? "partial" : "unknown";
 }
 
 function buildToolState(): ToolRuntimeState {
@@ -446,9 +589,14 @@ export async function executeAgentRun(
   let providerDispatches = 0;
   let providerResponses = 0;
   let providerCompletions = 0;
+  let exactUsageCalls = 0;
   const dispatchFailure: { code: string | null } = { code: null };
   let retainedTextChars = 0;
+  let visibleTurn = 0;
+  let currentTurnVisibleText = "";
+  let textGuard = new StreamingTextGuard();
   const safetyState: { reason: string | null } = { reason: null };
+  const protocolState: { code: string | null } = { code: null };
   let abortForSafety: (() => void) | null = null;
   let repeatedToolSignature: string | null = null;
   let repeatedToolCalls = 0;
@@ -486,9 +634,58 @@ export async function executeAgentRun(
     }
     await emitOrThrow(writer, type, payload);
   };
-  const emitTextReset = async (): Promise<void> => {
-    retainedTextChars = 0;
-    await emitRuntimeEvent(RUNTIME_TEXT_RESET_EVENT);
+  const beginVisibleTurn = (turn: number): void => {
+    if (visibleTurn === turn) return;
+    visibleTurn = turn;
+    currentTurnVisibleText = "";
+  };
+  const emitTextChunks = async (value: string, turn: number): Promise<void> => {
+    beginVisibleTurn(turn);
+    const chunks = splitRuntimeTextDelta(value, {
+      maxLineBytes: writer.maxLineBytes ?? Number.MAX_SAFE_INTEGER,
+      firstSequence: writer.sequence + 1,
+      runId: request.run_id,
+      executionEpoch: request.execution_epoch,
+      turn,
+    });
+    for (const chunk of chunks) {
+      await emitRuntimeEvent("text.delta", { delta: chunk, turn });
+      retainedTextChars += chunk.length;
+      currentTurnVisibleText += chunk;
+    }
+  };
+  const emitScopedTextReset = async (turn: number): Promise<void> => {
+    beginVisibleTurn(turn);
+    retainedTextChars = Math.max(
+      0,
+      retainedTextChars - currentTurnVisibleText.length,
+    );
+    currentTurnVisibleText = "";
+    textGuard = new StreamingTextGuard();
+    await emitRuntimeEvent(RUNTIME_TEXT_RESET_EVENT, { turn });
+  };
+  const emitReplacementText = async (
+    safePendingSuffix: string,
+    turn: number,
+  ): Promise<void> => {
+    beginVisibleTurn(turn);
+    const replacement = currentTurnVisibleText + safePendingSuffix;
+    await emitScopedTextReset(turn);
+    await emitTextChunks(replacement, turn);
+  };
+  const applyGuardResult = async (
+    result: ReturnType<StreamingTextGuard["push"]>,
+    turn: number,
+  ): Promise<void> => {
+    if (result.violation !== null) {
+      protocolState.code = result.violation;
+      if (result.replacementText !== null) {
+        await emitReplacementText(result.replacementText, turn);
+      }
+      abortForProtocol?.();
+      return;
+    }
+    if (result.delta) await emitTextChunks(result.delta, turn);
   };
   const countToolSignature = (name: string, args: unknown): boolean => {
     const signature = stableToolSignature(name, args);
@@ -539,6 +736,7 @@ export async function executeAgentRun(
     metrics?.providerRequests.labels("dispatch", "sent").inc();
     await emitRuntimeEvent("provider.dispatched", {
       turn: providerDispatches,
+      dispatch_ordinal: providerDispatches,
     });
   };
   const prepared: PreparedProviderRuntime = await dependencies.prepareProvider(
@@ -546,6 +744,7 @@ export async function executeAgentRun(
     onDispatch,
   );
   let pendingSessionCleanup: (() => Promise<void>) | null = null;
+  let abortForProtocol: (() => void) | null = null;
   try {
   const gateway = dependencies.createGateway(request, dependencies.gatewayPolicy);
   const nativeCompactionEnabled =
@@ -592,9 +791,9 @@ export async function executeAgentRun(
     cwd: "/tmp/lumen-agent-runtime",
     agentDir: "/tmp/lumen-agent-runtime-empty",
     model: prepared.model,
-    ...(request.provider.reasoning_supported && request.reasoning_effort !== null
-      ? { thinkingLevel: request.reasoning_effort }
-      : {}),
+    // Always initialize Pi explicitly. Auto is represented by a model with
+    // reasoning disabled; explicit off remains adapter-visible as a disable.
+    thinkingLevel: request.reasoning_effort ?? "off",
     modelRuntime: prepared.modelRuntime,
     resourceLoader: emptyResourceLoader(request.system_prompt),
     noTools: "builtin",
@@ -603,6 +802,15 @@ export async function executeAgentRun(
     sessionManager,
     settingsManager: settings,
   });
+  const authoritativePrompt = request.system_prompt;
+  const sessionInternals = session as unknown as {
+    _baseSystemPrompt?: string;
+    _systemPromptOverride?: string;
+  };
+  sessionInternals._baseSystemPrompt = authoritativePrompt;
+  sessionInternals._systemPromptOverride = authoritativePrompt;
+  session.agent.state.systemPrompt = authoritativePrompt;
+
   pendingSessionCleanup = async () => {
     const [result] = await Promise.allSettled([
       Promise.resolve().then(() => session.dispose()),
@@ -617,6 +825,10 @@ export async function executeAgentRun(
     }
   };
   abortForSafety = () => {
+    session.abortCompaction();
+    session.agent.abort();
+  };
+  abortForProtocol = () => {
     session.abortCompaction();
     session.agent.abort();
   };
@@ -647,11 +859,19 @@ export async function executeAgentRun(
       transport: "sse",
       timeoutMs: providerTimeoutMs,
       maxRetries: 0,
+      onPayload: async (payload, payloadModel) => {
+        const transformed = await options?.onPayload?.(payload, payloadModel);
+        return omitAutomaticReasoningControls(
+          request,
+          transformed ?? payload,
+        );
+      },
       onResponse: async (response) => {
         providerResponses += 1;
         metrics?.providerRequests.labels("response", String(response.status)).inc();
         await emitRuntimeEvent("provider.response", {
           turn: providerResponses,
+          dispatch_ordinal: providerResponses,
           status: response.status,
         });
       },
@@ -706,12 +926,20 @@ export async function executeAgentRun(
     );
     addUsage(usage, compactionUsage);
     providerCompletions += providerCallCount;
-    await emitRuntimeEvent("compaction.completed", {
-      checkpoint_version: request.version === 3 ? 2 : 1,
+    const compactionUsageExact = compactionUsage.total_tokens > 0;
+    if (compactionUsageExact) exactUsageCalls += providerCallCount;
+    const summaryViolation = completeTextGuardViolation(result.summary);
+    if (summaryViolation !== null) {
+      protocolState.code = summaryViolation;
+      abortForProtocol?.();
+      throw new Error("Pi compaction summary violated the Agent output contract");
+    }
+    const checkpointPayload = {
+      checkpoint_version: request.version >= 3 ? 2 : 1,
       pi_runtime_version: RUNTIME_VERSION,
       summary: result.summary,
       first_kept_message_id: firstKeptMessageId,
-      ...(request.version === 3
+      ...(request.version >= 3
         ? {
             next_message_id: request.user_message_id,
             phase: "pre_prompt",
@@ -720,7 +948,20 @@ export async function executeAgentRun(
       tokens_before: result.tokensBefore,
       provider_call_count: providerCallCount,
       usage: compactionUsage,
-    });
+      usage_evidence: compactionUsageExact ? "exact" : "unknown",
+    };
+    const maximumLineBytes = writer.maxLineBytes ?? Number.MAX_SAFE_INTEGER;
+    const checkpointBytes = runtimeEventLineBytes(
+      "compaction.completed",
+      writer.sequence + 1,
+      request.run_id,
+      request.execution_epoch,
+      checkpointPayload,
+    );
+    if (checkpointBytes > maximumLineBytes) {
+      throw new NdjsonLineTooLargeError(checkpointBytes, maximumLineBytes);
+    }
+    await emitRuntimeEvent("compaction.completed", checkpointPayload);
   };
 
   let runStarted = false;
@@ -730,7 +971,7 @@ export async function executeAgentRun(
     await emitRuntimeEvent("run.started", {
       tools: expectedTools,
       runtime_version: RUNTIME_VERSION,
-      reasoning_effort: session.thinkingLevel,
+      reasoning_effort: request.reasoning_effort,
     });
   };
 
@@ -753,7 +994,7 @@ export async function executeAgentRun(
       context: {
         ...baseContext,
         tools: [],
-        systemPrompt: `${baseContext.systemPrompt}\n\nNo image tool is available for the remainder of this prompt. Conclude naturally and briefly report any accepted asynchronous image jobs.`,
+        systemPrompt: `${authoritativePrompt}\n\nNo image tool is available for the remainder of this prompt. Conclude naturally and briefly report any accepted asynchronous image jobs.`,
       },
     };
   };
@@ -769,15 +1010,13 @@ export async function executeAgentRun(
       event.assistantMessageEvent.type === "text_delta"
     ) {
       const delta = event.assistantMessageEvent.delta;
-      for (let offset = 0; offset < delta.length; offset += 8192) {
-        retainedTextChars += delta.slice(offset, offset + 8192).length;
-        await emitRuntimeEvent("text.delta", {
-          delta: delta.slice(offset, offset + 8192),
-        });
-      }
+      await applyGuardResult(textGuard.push(delta), turnCount + 1);
       return;
     }
     if (event.type === "tool_execution_start") {
+      // A tool call closes the current assistant text block. Flush its held
+      // suffix before publishing the structured tool event.
+      await applyGuardResult(textGuard.finish(), turnCount + 1);
       if (!signatureCountedToolCalls.delete(event.toolCallId)) {
         countToolSignature(event.toolName, event.args);
       }
@@ -787,6 +1026,7 @@ export async function executeAgentRun(
         tool_call_id: event.toolCallId,
         ordinal,
         name: event.toolName,
+        turn: turnCount + 1,
       });
       return;
     }
@@ -800,6 +1040,20 @@ export async function executeAgentRun(
           ? null
           : Number(process.hrtime.bigint() - started) / 1_000_000_000;
       if (event.isError) {
+        if (
+          event.toolName !== AGENT_TOOL_CREATE_IMAGE &&
+          !tools.errors.has(event.toolCallId)
+        ) {
+          tools.calls += 1;
+          tools.failedCalls += 1;
+          tools.lastErrorCode = "agent_provider_protocol_error";
+          tools.errors.set(event.toolCallId, {
+            code: "agent_provider_protocol_error",
+            resultUnknown: false,
+          });
+          protocolState.code = "agent_provider_protocol_error";
+          abortForProtocol?.();
+        }
         if (
           event.toolName === AGENT_TOOL_CREATE_IMAGE &&
           !tools.errors.has(event.toolCallId)
@@ -837,10 +1091,19 @@ export async function executeAgentRun(
           ordinal,
           name: event.toolName,
           mode,
+          turn: turnCount + 1,
           error_code: code,
           result_unknown: recorded?.resultUnknown === true,
         });
+        if (event.toolName !== AGENT_TOOL_CREATE_IMAGE) {
+          protocolState.code = "agent_provider_protocol_error";
+          abortForProtocol?.();
+        }
       } else {
+        if (event.toolName !== AGENT_TOOL_CREATE_IMAGE) {
+          protocolState.code = "agent_provider_protocol_error";
+          abortForProtocol?.();
+        }
         const details = toolDetails(event.result);
         const resultMode = typeof details.mode === "string" ? details.mode : mode;
         metrics?.toolCalls.labels(event.toolName, resultMode, "succeeded").inc();
@@ -852,6 +1115,7 @@ export async function executeAgentRun(
           ordinal,
           name: event.toolName,
           mode: details.mode,
+          turn: turnCount + 1,
           generation_ids: details.generation_ids,
           replayed: details.replayed,
         });
@@ -860,6 +1124,7 @@ export async function executeAgentRun(
     }
     if (event.type === "turn_end") {
       turnCount += 1;
+      await applyGuardResult(textGuard.finish(), turnCount);
       const message = assistantMessage(event.message);
       if (message !== null) {
         lastAssistant = message;
@@ -868,19 +1133,25 @@ export async function executeAgentRun(
         ? zeroUsage()
         : boundedTurnUsage(message.usage, request);
       addUsage(usage, turnUsage);
-      if (
+      const completedTurn =
         message !== null &&
         message.stopReason !== "error" &&
-        message.stopReason !== "aborted" &&
-        turnUsage.total_tokens > 0
-      ) {
-        providerCompletions += 1;
-      }
+        message.stopReason !== "aborted";
+      const turnUsageExact = completedTurn && turnUsage.total_tokens > 0;
+      if (completedTurn) providerCompletions += 1;
+      if (turnUsageExact) exactUsageCalls += 1;
       await emitRuntimeEvent("turn.completed", {
         turn: turnCount,
+        dispatch_ordinal: providerDispatches,
         usage: turnUsage,
+        usage_evidence: message === null
+          ? "none"
+          : turnUsageExact
+            ? "exact"
+            : "unknown",
         stop_reason: message?.stopReason ?? "error",
       });
+      textGuard = new StreamingTextGuard();
     }
   });
 
@@ -892,8 +1163,9 @@ export async function executeAgentRun(
       event.type === "auto_retry_start" &&
       request.event_features?.includes("text-reset-v1")
     ) {
+      // Reset the active assistant turn before regenerated deltas can arrive.
       enqueueSessionEvent(async () => {
-        await emitTextReset();
+        await emitScopedTextReset(Math.max(1, turnCount));
       });
       return;
     }
@@ -920,7 +1192,7 @@ export async function executeAgentRun(
         event.willRetry &&
         request.event_features?.includes("text-reset-v1")
       ) {
-        await emitTextReset();
+        await emitScopedTextReset(Math.max(1, turnCount));
       }
     });
   });
@@ -1022,7 +1294,7 @@ export async function executeAgentRun(
     // overflow checkpoints can retain current-turn Pi entries that do not yet
     // have a durable Lumen message boundary.
     session.setAutoCompactionEnabled(false);
-    if (request.version === 3 && request.operation === "continue") {
+    if ((request.version === 3 || request.version === 4) && request.operation === "continue") {
       await session.prompt(request.current_prompt, {
         images: [],
         expandPromptTemplates: false,
@@ -1044,6 +1316,8 @@ export async function executeAgentRun(
         reason: "agent_safety_budget_reached",
       });
     }
+    const lastStopReason = (lastAssistant as AssistantMessage | null)?.stopReason;
+    const hasProgress = retainedTextChars > 0 || tools.successfulCalls > 0;
     const errorCode =
       signal.aborted
         ? signal.reason === "agent_runtime_shutdown"
@@ -1053,12 +1327,19 @@ export async function executeAgentRun(
           ? "agent_safety_budget_reached"
           : dispatchFailure.code !== null
             ? dispatchFailure.code
-            : tools.unknownResults > 0
-        ? "agent_tool_result_unknown"
-        : tools.failedCalls > 0
-          ? tools.lastErrorCode ?? "agent_tool_failed"
-          : terminalErrorCode(lastAssistant);
-    const hasProgress = retainedTextChars > 0 || tools.successfulCalls > 0;
+            : protocolState.code !== null
+              ? protocolState.code
+              : tools.unknownResults > 0
+                ? "agent_tool_result_unknown"
+                : tools.failedCalls > 0
+                  ? tools.lastErrorCode ?? "agent_tool_failed"
+                  : lastStopReason === "toolUse"
+                    ? "agent_provider_terminal_missing"
+                    : terminalErrorWithEvidence(
+                        lastAssistant,
+                        hasProgress,
+                        tools.successfulCalls,
+                      );
     return {
       outcome: finalOutcome(errorCode, tools, signal, hasProgress),
       errorCode,
@@ -1067,8 +1348,12 @@ export async function executeAgentRun(
       toolCallCount: tools.calls,
       providerDispatchCount: providerDispatches,
       providerCompletedCount: providerCompletions,
+      exactUsageCallCount: exactUsageCalls,
+      usageEvidence: usageEvidenceState(providerDispatches, exactUsageCalls),
     };
   } catch (error) {
+    const lastStopReason = (lastAssistant as AssistantMessage | null)?.stopReason;
+    const hasProgress = retainedTextChars > 0 || tools.successfulCalls > 0;
     const errorCode = signal.aborted
       ? signal.reason === "agent_runtime_shutdown"
         ? "agent_runtime_shutdown"
@@ -1077,12 +1362,19 @@ export async function executeAgentRun(
         ? "agent_safety_budget_reached"
         : dispatchFailure.code !== null
           ? dispatchFailure.code
-          : tools.unknownResults > 0
-          ? "agent_tool_result_unknown"
-          : tools.failedCalls > 0
-            ? tools.lastErrorCode ?? "agent_tool_failed"
-            : terminalErrorCode(lastAssistant) ?? "agent_runtime_error";
-    const hasProgress = retainedTextChars > 0 || tools.successfulCalls > 0;
+          : protocolState.code !== null
+            ? protocolState.code
+            : tools.unknownResults > 0
+              ? "agent_tool_result_unknown"
+              : tools.failedCalls > 0
+                ? tools.lastErrorCode ?? "agent_tool_failed"
+                : lastStopReason === "toolUse"
+                  ? "agent_provider_terminal_missing"
+                  : terminalErrorWithEvidence(
+                      lastAssistant,
+                      hasProgress,
+                      tools.successfulCalls,
+                    ) ?? "agent_runtime_error";
     throw new RuntimeExecutionError(
       {
         outcome: finalOutcome(errorCode, tools, signal, hasProgress),
@@ -1092,6 +1384,8 @@ export async function executeAgentRun(
         toolCallCount: tools.calls,
         providerDispatchCount: providerDispatches,
         providerCompletedCount: providerCompletions,
+        exactUsageCallCount: exactUsageCalls,
+        usageEvidence: usageEvidenceState(providerDispatches, exactUsageCalls),
       },
       error,
     );

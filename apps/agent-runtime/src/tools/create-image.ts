@@ -181,12 +181,12 @@ export function createImageTool(
           {
             type: "text",
             text: JSON.stringify({
-              accepted: true,
+              status: "accepted",
+              asynchronous: true,
               mode: result.mode,
               generation_ids: result.generation_ids,
               replayed: result.replayed,
-              accepted_parameters: result.accepted,
-              instruction: "The jobs run asynchronously in Lumen. Do not poll or resubmit them.",
+              instruction: "The jobs were accepted by Lumen. Do not poll or resubmit them in this run.",
             }),
           },
         ],

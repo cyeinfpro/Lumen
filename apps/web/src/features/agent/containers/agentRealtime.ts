@@ -29,6 +29,18 @@ export function mergeAgentGeneration(
   incoming: Generation,
 ): Generation {
   if (!existing) return incoming;
+  const existingEpoch = existing.execution_epoch ?? 0;
+  const incomingEpoch = incoming.execution_epoch ?? 0;
+  if (incomingEpoch < existingEpoch) return existing;
+  if (incomingEpoch > existingEpoch) {
+    return {
+      ...incoming,
+      image: incoming.image,
+      error_code: incoming.error_code,
+      error_message: incoming.error_message,
+      finished_at: incoming.finished_at,
+    };
+  }
   const existingTerminal =
     existing.status === "succeeded" ||
     existing.status === "failed" ||
@@ -58,18 +70,19 @@ export class AgentRefreshCoordinator {
     }
     const execute = async () => {
       let next: (() => Promise<void>) | null = refresh;
-      let firstError: unknown = null;
+      let lastError: unknown = null;
       while (next) {
         const current = next;
         this.trailing = null;
         try {
           await current();
+          lastError = null;
         } catch (error) {
-          firstError ??= error;
+          lastError = error;
         }
         next = this.trailing;
       }
-      if (firstError) throw firstError;
+      if (lastError) throw lastError;
     };
     const pending = execute().finally(() => {
       if (this.running === pending) this.running = null;

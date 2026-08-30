@@ -6,9 +6,40 @@ export interface EventWriter {
   emit(type: string, payload?: Record<string, unknown>, force?: boolean): Promise<boolean>;
   readonly sequence: number;
   readonly bytesWritten: number;
+  readonly maxLineBytes?: number;
+}
+
+export class NdjsonLineTooLargeError extends Error {
+  constructor(
+    readonly lineBytes: number,
+    readonly maximumBytes: number,
+  ) {
+    super("NDJSON event exceeds the negotiated line-byte limit");
+    this.name = "NdjsonLineTooLargeError";
+  }
 }
 
 const DRAIN_TIMEOUT_MS = 30_000;
+
+export function runtimeEventLineBytes(
+  type: string,
+  sequence: number,
+  runId: string,
+  executionEpoch: number,
+  payload: Record<string, unknown>,
+): number {
+  return Buffer.byteLength(
+    JSON.stringify({
+      ...payload,
+      version: 1,
+      type,
+      seq: sequence,
+      run_id: runId,
+      execution_epoch: executionEpoch,
+    }),
+    "utf8",
+  ) + 1;
+}
 
 function runtimeEvent(
   type: string,
@@ -73,7 +104,7 @@ export class NdjsonEventWriter implements EventWriter {
     private readonly response: ServerResponse,
     private readonly runId: string,
     private readonly executionEpoch: number,
-    private readonly maxLineBytes: number,
+    readonly maxLineBytes: number,
     private readonly drainTimeoutMs: number = DRAIN_TIMEOUT_MS,
   ) {}
 
@@ -113,8 +144,16 @@ export class NdjsonEventWriter implements EventWriter {
         payload,
       );
       const line = `${JSON.stringify(event)}\n`;
-      const lineBytes = Buffer.byteLength(line, "utf8");
-      if (lineBytes > this.maxLineBytes) return;
+      const lineBytes = runtimeEventLineBytes(
+        type,
+        this.nextSequence,
+        this.runId,
+        this.executionEpoch,
+        payload,
+      );
+      if (lineBytes > this.maxLineBytes) {
+        throw new NdjsonLineTooLargeError(lineBytes, this.maxLineBytes);
+      }
       try {
         if (this.response.destroyed || this.response.writableEnded) {
           throw new Error("NDJSON response is not writable");
@@ -145,6 +184,7 @@ export class CollectingEventWriter implements EventWriter {
   constructor(
     private readonly runId: string,
     private readonly executionEpoch: number,
+    readonly maxLineBytes: number = Number.MAX_SAFE_INTEGER,
   ) {}
 
   get sequence(): number {
@@ -168,8 +208,12 @@ export class CollectingEventWriter implements EventWriter {
       this.executionEpoch,
       payload,
     );
+    const lineBytes = Buffer.byteLength(JSON.stringify(event), "utf8") + 1;
+    if (lineBytes > this.maxLineBytes) {
+      throw new NdjsonLineTooLargeError(lineBytes, this.maxLineBytes);
+    }
     this.events.push(event);
-    this.totalBytes += Buffer.byteLength(JSON.stringify(event), "utf8") + 1;
+    this.totalBytes += lineBytes;
     return true;
   }
 }

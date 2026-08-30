@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import Any
 
 from ..agent_model_profiles import default_agent_context_window_for_models
+from ..agent_provider_contract import effective_agent_base_url
 from ..immutables import immutable_mapping
 from .definitions import (
     AGENT_API_VALUES,
@@ -312,6 +313,16 @@ def parse_provider_item(item: dict[str, Any], *, index: int) -> ProviderDefiniti
     )
     image_concurrency = _image_concurrency(item.get("image_concurrency", 1))
     agent_models = _agent_models(item.get("agent_models"))
+    agent_api = _agent_api(item.get("agent_api"))
+    raw_agent_base = _normalized_optional_base_url(item.get("agent_base_url"))
+    try:
+        agent_base_url = effective_agent_base_url(
+            base_url.strip().rstrip("/"),
+            agent_api,
+            agent_base_url=raw_agent_base or None,
+        )
+    except ValueError as exc:
+        raise ValueError(f"provider {name}: {exc}") from exc
     return ProviderDefinition(
         name=name,
         base_url=base_url.strip().rstrip("/"),
@@ -340,7 +351,8 @@ def parse_provider_item(item: dict[str, Any], *, index: int) -> ProviderDefiniti
         image_concurrency=image_concurrency,
         responses_supported=parse_optional_bool(item.get("responses_supported")),
         vision_supported=parse_optional_bool(item.get("vision_supported")),
-        agent_api=_agent_api(item.get("agent_api")),
+        agent_api=agent_api,
+        agent_base_url=agent_base_url,
         agent_models=agent_models,
         agent_context_window=_bounded_agent_int(
             item.get("agent_context_window"),

@@ -2,22 +2,22 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import secrets
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core.agent_errors import public_agent_error_code
 from lumen_core.agent_events import (
     AGENT_RUN_TERMINAL_STATUSES,
     AGENT_TOOL_TERMINAL_STATUSES,
     EV_AGENT_OUTPUT_DELTA,
     EV_AGENT_OUTPUT_RESET,
     EV_AGENT_RUN_STARTED,
-    EV_AGENT_TOOL_FAILED,
     AgentRunStatus,
     AgentToolCallStatus,
     agent_channel,
@@ -30,7 +30,6 @@ from lumen_core.agent_dispatch import (
 from lumen_core.constants import MessageStatus
 from lumen_core.model_entities import (
     AgentRun,
-    AgentSession,
     AgentToolCall,
     Generation,
     Message,
@@ -47,12 +46,8 @@ from ...agent_billing import (
 from ...agent_runtime_client import AgentRuntimeEvent
 from ...db import SessionLocal
 from ...sse_publish import publish_event
-from .compaction_checkpoint import (
-    build_pi_compaction_checkpoint,
-    checkpoint_provider_dispatched,
-    checkpoint_provider_response,
-)
-from .contracts import AGENT_USAGE_KEYS, AgentClaim
+from . import runtime_checkpoints as _runtime_checkpoints
+from .contracts import AgentClaim
 from .terminal_policy import (
     cancelled_dispatch_unknown as _cancelled_dispatch_unknown,
     has_partial_result as _has_partial_result,
@@ -64,68 +59,10 @@ from .terminal_policy import (
 logger = logging.getLogger(__name__)
 
 
-def _dispatch(run: AgentRun) -> dict[str, Any]:
-    return dict(run.dispatch_jsonb) if isinstance(run.dispatch_jsonb, dict) else {}
-
-
-def _canonical_usage(value: Any) -> dict[str, int]:
-    source = value if isinstance(value, dict) else {}
-    usage: dict[str, int] = {}
-    for key in AGENT_USAGE_KEYS:
-        raw = source.get(key)
-        usage[key] = (
-            max(0, int(raw))
-            if isinstance(raw, int) and not isinstance(raw, bool)
-            else 0
-        )
-    usage["total_tokens"] = sum(
-        usage[key]
-        for key in (
-            "input_tokens",
-            "output_tokens",
-            "cache_read_tokens",
-            "cache_write_tokens",
-        )
-    )
-    return usage
-
-
-def _add_usage(current: Any, incoming: Any) -> dict[str, int]:
-    left = _canonical_usage(current)
-    right = _canonical_usage(incoming)
-    result = {
-        key: left[key] + right[key] for key in AGENT_USAGE_KEYS if key != "total_tokens"
-    }
-    result["total_tokens"] = sum(
-        result[key]
-        for key in (
-            "input_tokens",
-            "output_tokens",
-            "cache_read_tokens",
-            "cache_write_tokens",
-        )
-    )
-    return result
-
-
-def _max_usage(current: Any, incoming: Any) -> dict[str, int]:
-    left = _canonical_usage(current)
-    right = _canonical_usage(incoming)
-    result = {
-        key: max(left[key], right[key])
-        for key in AGENT_USAGE_KEYS
-        if key != "total_tokens"
-    }
-    result["total_tokens"] = sum(
-        result[key]
-        for key in (
-            "input_tokens",
-            "output_tokens",
-            "cache_read_tokens",
-            "cache_write_tokens",
-        )
-    )
-    return result
+_dispatch = _runtime_checkpoints.dispatch_snapshot
+_canonical_usage = _runtime_checkpoints.canonical_usage
+_add_usage = _runtime_checkpoints.add_usage
+_max_usage = _runtime_checkpoints.max_usage
 
 
 def _stage_event(
@@ -136,21 +73,26 @@ def _stage_event(
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     run.last_event_seq = int(run.last_event_seq or 0) + 1
-    data = AgentEventEnvelope(
-        agent_session_id=run.agent_session_id,
-        agent_run_id=run.id,
-        assistant_message_id=run.assistant_message_id,
-        execution_epoch=run.execution_epoch,
-        event_seq=run.last_event_seq,
-        event_name=event_name,
-    ).model_dump(mode="json")
-    data["event_id"] = agent_event_id(
-        run.id,
-        run.execution_epoch,
-        run.last_event_seq,
-    )
+    payload: dict[str, Any] = {
+        "agent_session_id": run.agent_session_id,
+        "agent_run_id": run.id,
+        "assistant_message_id": run.assistant_message_id,
+        "execution_epoch": run.execution_epoch,
+        "event_seq": run.last_event_seq,
+        "event_name": event_name,
+        "event_id": agent_event_id(
+            run.id,
+            run.execution_epoch,
+            run.last_event_seq,
+        ),
+    }
     if extra:
-        data.update(extra)
+        payload.update(extra)
+    data = AgentEventEnvelope.model_validate(payload).model_dump(
+        mode="json",
+        exclude_none=True,
+        exclude_defaults=True,
+    )
     db.add(
         OutboxEvent(
             kind="sse",
@@ -295,276 +237,48 @@ async def update_dispatch_state(
             return True
 
 
-async def _record_runtime_tool_failure(
-    db: AsyncSession,
-    *,
-    run: AgentRun,
-    event: AgentRuntimeEvent,
-) -> None:
-    if event.ordinal is None or not event.tool_call_id:
-        return
-    existing = (
-        await db.execute(
-            select(AgentToolCall).where(
-                AgentToolCall.agent_run_id == run.id,
-                (
-                    (AgentToolCall.pi_tool_call_id == event.tool_call_id)
-                    | (AgentToolCall.ordinal == event.ordinal)
-                ),
-            )
-        )
-    ).scalar_one_or_none()
-    if existing is not None and existing.status in AGENT_TOOL_TERMINAL_STATUSES:
-        return
-    now = datetime.now(timezone.utc)
-    status = (
-        AgentToolCallStatus.TIMED_OUT.value
-        if event.result_unknown is True
-        else AgentToolCallStatus.FAILED.value
-    )
-    error_code = event.error_code or (
-        "agent_tool_result_unknown"
-        if event.result_unknown is True
-        else "agent_tool_failed"
-    )
-    failure_receipt = {
-        "receipt_version": 1,
-        "status": status,
-        "http_status": 504 if event.result_unknown is True else 409,
-        "error_code": error_code,
-        "runtime_receipt_only": True,
-    }
-    if existing is None:
-        identity = (
-            f"{run.id}\n{run.execution_epoch}\n{event.ordinal}\n{event.tool_call_id}"
-        ).encode("utf-8")
-        request_hash = hashlib.sha256(b"runtime-tool-arguments-unavailable").hexdigest()
-        existing = AgentToolCall(
-            agent_run_id=run.id,
-            capability_id=f"runtime-unacknowledged:{run.execution_epoch}",
-            pi_tool_call_id=event.tool_call_id,
-            ordinal=event.ordinal,
-            execution_epoch=run.execution_epoch,
-            name=event.name or "lumen_create_image",
-            mode=(
-                event.mode
-                if event.mode in {"text_to_image", "image_to_image"}
-                else None
-            ),
-            status=status,
-            request_hash=request_hash,
-            semantic_key=hashlib.sha256(identity).hexdigest(),
-            arguments_jsonb={},
-            result_jsonb=failure_receipt,
-            generation_count=0,
-            error_code=error_code,
-            error_message=None,
-            started_at=now,
-            finished_at=now,
-        )
-        db.add(existing)
-    else:
-        existing.status = status
-        existing.error_code = error_code
-        existing.error_message = None
-        existing.result_jsonb = failure_receipt
-        existing.finished_at = now
-    _stage_event(
-        db,
-        run=run,
-        event_name=EV_AGENT_TOOL_FAILED,
-        extra={
-            "tool_call_id": existing.id,
-            "error_code": error_code,
-        },
-    )
-
-
-async def _checkpoint_runtime_started(
-    db: AsyncSession,
-    run: AgentRun,
-    dispatch: dict[str, Any],
-    event: AgentRuntimeEvent,
-) -> None:
-    if not event.runtime_version:
-        return
-    session = await db.get(AgentSession, run.agent_session_id)
-    if session is not None:
-        session.runtime_version = event.runtime_version
-    dispatch["runtime_version"] = event.runtime_version
-    if event.reasoning_effort is not None:
-        dispatch["effective_reasoning_effort"] = event.reasoning_effort
-
-
-async def _checkpoint_pi_compaction(
-    db: AsyncSession,
-    run: AgentRun,
-    dispatch: dict[str, Any],
-    event: AgentRuntimeEvent,
-) -> None:
-    checkpoint = build_pi_compaction_checkpoint(run, event)
-    session = await db.get(AgentSession, run.agent_session_id)
-    if session is None or session.user_id != run.user_id:
-        raise ValueError("Pi compaction session is unavailable")
-    boundary_exists = (
-        await db.execute(
-            select(Message.id).where(
-                Message.id == event.first_kept_message_id,
-                Message.conversation_id == session.conversation_id,
-                Message.deleted_at.is_(None),
-            )
-        )
-    ).scalar_one_or_none()
-    if boundary_exists is None:
-        raise ValueError("Pi compaction boundary is unavailable")
-    run.usage_jsonb = _add_usage(
-        run.usage_jsonb,
-        event.usage.model_dump(mode="json"),
-    )
-    dispatch["runtime_delivery"] = "compaction_ready"
-    dispatch["provider_completed_count"] = (
-        int(dispatch.get("provider_completed_count") or 0) + event.provider_call_count
-    )
-    dispatch["pi_compaction_count"] = int(dispatch.get("pi_compaction_count") or 0) + 1
-    dispatch["pi_compaction_first_kept_message_id"] = event.first_kept_message_id
-    dispatch["pi_compaction"] = checkpoint
-    session.active_pi_compaction_run_id = run.id
-    session.active_pi_compaction_schema_version = event.checkpoint_version
-    session.active_pi_compaction_event_seq = event.seq
-
-
-def _checkpoint_turn(
-    run: AgentRun,
-    dispatch: dict[str, Any],
-    event: AgentRuntimeEvent,
-) -> None:
-    if event.turn is not None:
-        run.turn_count = max(int(run.turn_count or 0), event.turn)
-    if (
-        event.usage is not None
-        and event.usage.total_tokens > 0
-        and event.stop_reason not in {"error", "aborted"}
-    ):
-        dispatch["provider_completed_count"] = (
-            int(dispatch.get("provider_completed_count") or 0) + 1
-        )
-    if event.usage is not None:
-        run.usage_jsonb = _add_usage(
-            run.usage_jsonb,
-            event.usage.model_dump(mode="json"),
-        )
-
-
-def _checkpoint_terminal(
-    run: AgentRun,
-    dispatch: dict[str, Any],
-    event: AgentRuntimeEvent,
-) -> None:
-    dispatch["runtime_delivery"] = "terminal_received"
-    if event.usage is not None:
-        run.usage_jsonb = _max_usage(
-            run.usage_jsonb,
-            event.usage.model_dump(mode="json"),
-        )
-    if event.turn_count is not None:
-        run.turn_count = max(int(run.turn_count or 0), event.turn_count)
-    if event.tool_call_count is not None:
-        run.tool_call_count = max(int(run.tool_call_count or 0), event.tool_call_count)
-    if event.provider_dispatch_count is not None:
-        dispatch["provider_dispatch_count"] = max(
-            int(dispatch.get("provider_dispatch_count") or 0),
-            event.provider_dispatch_count,
-        )
-    if event.provider_completed_count is not None:
-        dispatch["provider_completed_count"] = max(
-            int(dispatch.get("provider_completed_count") or 0),
-            event.provider_completed_count,
-        )
-    dispatch["runtime_terminal"] = {
-        "type": event.type,
-        "status": event.status,
-        "error_code": event.error_code,
-        "turn_count": event.turn_count,
-        "tool_call_count": event.tool_call_count,
-        "provider_dispatch_count": event.provider_dispatch_count,
-        "provider_completed_count": event.provider_completed_count,
-        "usage": _canonical_usage(run.usage_jsonb),
-    }
-
-
-async def _checkpoint_runtime_activity(
-    db: AsyncSession,
-    run: AgentRun,
-    dispatch: dict[str, Any],
-    event: AgentRuntimeEvent,
-) -> None:
-    if event.type == "run.heartbeat":
-        dispatch["runtime_heartbeat_at"] = datetime.now(timezone.utc).isoformat()
-        return
-    await _checkpoint_runtime_started(db, run, dispatch, event)
-
-
-async def _apply_runtime_checkpoint(
-    db: AsyncSession,
-    run: AgentRun,
-    dispatch: dict[str, Any],
-    event: AgentRuntimeEvent,
-) -> None:
-    if event.type in {"run.started", "run.heartbeat"}:
-        await _checkpoint_runtime_activity(db, run, dispatch, event)
-    elif event.type == "provider.dispatched":
-        checkpoint_provider_dispatched(dispatch)
-    elif event.type == "provider.response":
-        checkpoint_provider_response(dispatch, event)
-    elif event.type == "turn.completed":
-        _checkpoint_turn(run, dispatch, event)
-    elif event.type == "compaction.completed":
-        await _checkpoint_pi_compaction(db, run, dispatch, event)
-    elif event.type == "tool.failed":
-        await _record_runtime_tool_failure(db, run=run, event=event)
-    else:
-        _checkpoint_terminal(run, dispatch, event)
-
-
 async def record_runtime_checkpoint(
     run_id: str,
     execution_epoch: int,
     event: AgentRuntimeEvent,
 ) -> bool:
-    if event.type not in {
-        "run.started",
-        "run.heartbeat",
-        "provider.dispatched",
-        "provider.response",
-        "turn.completed",
-        "compaction.completed",
-        "tool.failed",
-        "run.completed",
-        "run.failed",
-        "run.cancelled",
-    }:
-        return True
-    async with SessionLocal() as db:
-        async with db.begin():
-            run = (
-                await db.execute(
-                    select(AgentRun).where(AgentRun.id == run_id).with_for_update()
-                )
-            ).scalar_one_or_none()
-            if (
-                run is None
-                or run.status != AgentRunStatus.RUNNING.value
-                or run.execution_epoch != execution_epoch
-            ):
-                return False
-            dispatch = _dispatch(run)
-            last_runtime_seq = int(dispatch.get("last_runtime_seq") or 0)
-            if event.seq <= last_runtime_seq:
-                return True
-            await _apply_runtime_checkpoint(db, run, dispatch, event)
-            dispatch["last_runtime_seq"] = event.seq
-            run.dispatch_jsonb = dispatch
-            return True
+    dependencies = _runtime_checkpoints.RuntimeCheckpointDependencies(
+        session_factory=SessionLocal,
+        stage_event=_stage_event,
+    )
+    return await _runtime_checkpoints.record_runtime_checkpoint(
+        dependencies,
+        run_id,
+        execution_epoch,
+        event,
+    )
+
+
+def _replacement_event_fits(
+    run: AgentRun,
+    *,
+    text: str,
+    blocks: list[dict[str, Any]],
+    output_revision: int,
+    output_runtime_seq: int,
+) -> bool:
+    try:
+        AgentEventEnvelope(
+            agent_session_id=run.agent_session_id,
+            agent_run_id=run.id,
+            assistant_message_id=run.assistant_message_id,
+            execution_epoch=run.execution_epoch,
+            event_seq=int(run.last_event_seq or 0) + 1,
+            event_name=EV_AGENT_OUTPUT_RESET,
+            replacement_text=text,
+            text_operation="replace",
+            blocks=blocks,
+            output_revision=output_revision,
+            output_runtime_seq=output_runtime_seq,
+        )
+    except ValueError:
+        return False
+    return True
 
 
 async def flush_agent_text(
@@ -575,10 +289,14 @@ async def flush_agent_text(
     text: str,
     delta: str,
     replace: bool = False,
+    blocks: list[dict[str, Any]] | None = None,
+    output_revision: int = 0,
+    output_runtime_seq: int = 0,
+    snapshot_only: bool = False,
 ) -> bool:
-    if not delta and not replace:
+    if not delta and not replace and not snapshot_only:
         return True
-    public: dict[str, Any] | None = None
+    public_events: list[dict[str, Any]] = []
     async with SessionLocal() as db:
         async with db.begin():
             run = (
@@ -601,9 +319,37 @@ async def flush_agent_text(
             ).scalar_one_or_none()
             if message is None:
                 return False
+            current_revision = int(run.output_revision or 0)
+            current_runtime_seq = int(run.output_runtime_seq or 0)
+            if (output_revision > 0 or output_runtime_seq > 0) and (
+                output_revision < current_revision
+                or (
+                    output_revision == current_revision
+                    and output_runtime_seq <= current_runtime_seq
+                )
+            ):
+                return True
             content = dict(message.content) if isinstance(message.content, dict) else {}
-            content.update({"source": "agent", "agent_run_id": run.id, "text": text})
+            content.update(
+                {
+                    "source": "agent",
+                    "agent_run_id": run.id,
+                    "text": text,
+                    "output_revision": output_revision,
+                    "output_runtime_seq": output_runtime_seq,
+                    "blocks": list(blocks or []),
+                }
+            )
             message.content = content
+            run.output_revision = output_revision
+            run.output_runtime_seq = output_runtime_seq
+            run.transcript_jsonb = {
+                "schema_version": 1,
+                "projection": "ordered_blocks",
+                "output_revision": output_revision,
+                "output_runtime_seq": output_runtime_seq,
+                "blocks": list(blocks or []),
+            }
             message.status = MessageStatus.STREAMING.value
             dispatch = _dispatch(run)
             dispatch["runtime_delivery"] = (
@@ -611,16 +357,62 @@ async def flush_agent_text(
             )
             dispatch["flushed_text_chars"] = len(text)
             run.dispatch_jsonb = dispatch
-            data = _stage_event(
-                db,
-                run=run,
-                event_name=(
-                    EV_AGENT_OUTPUT_RESET if replace else EV_AGENT_OUTPUT_DELTA
-                ),
-                extra={} if replace else {"text_delta": delta},
-            )
-            public = _public_event(run, data)
-    if public is not None:
+            common = {
+                "output_revision": output_revision,
+                "output_runtime_seq": output_runtime_seq,
+            }
+            projected_blocks = list(blocks or [])
+            if replace:
+                replacement_fits = _replacement_event_fits(
+                    run,
+                    text=text,
+                    blocks=projected_blocks,
+                    output_revision=output_revision,
+                    output_runtime_seq=output_runtime_seq,
+                )
+                reset_extra = (
+                    {
+                        **common,
+                        "replacement_text": text,
+                        "text_operation": "replace",
+                        "blocks": projected_blocks,
+                    }
+                    if replacement_fits
+                    else {**common, "snapshot_required": True}
+                )
+                reset = _stage_event(
+                    db,
+                    run=run,
+                    event_name=EV_AGENT_OUTPUT_RESET,
+                    extra=reset_extra,
+                )
+                public_events.append(_public_event(run, reset))
+                if text and replacement_fits:
+                    replacement = _stage_event(
+                        db,
+                        run=run,
+                        event_name=EV_AGENT_OUTPUT_DELTA,
+                        extra={
+                            **common,
+                            "text_delta": text,
+                            "text_operation": "replace",
+                            "blocks": projected_blocks,
+                        },
+                    )
+                    public_events.append(_public_event(run, replacement))
+            elif delta:
+                data = _stage_event(
+                    db,
+                    run=run,
+                    event_name=EV_AGENT_OUTPUT_DELTA,
+                    extra={
+                        **common,
+                        "text_delta": delta,
+                        "text_operation": "append",
+                    },
+                )
+                public_events.append(_public_event(run, data))
+    for public in public_events:
         await publish_agent_event_fast_path(redis, public)
     return True
 
@@ -689,31 +481,113 @@ async def _settle_billing(
     return await settle_agent_text_unknown(db, run=run, reason=reason)
 
 
+@dataclass(frozen=True, slots=True)
+class AgentRunFinalization:
+    run_id: str
+    execution_epoch: int
+    requested_status: Literal["succeeded", "partial", "failed", "cancelled"]
+    text: str
+    usage: dict[str, Any]
+    turn_count: int
+    runtime_tool_count: int
+    error_code: str | None
+    knowledge: Literal["actual", "proven_absent", "unknown"]
+    reason: str
+    blocks: list[dict[str, Any]] | None = None
+    output_revision: int = 0
+    output_runtime_seq: int = 0
+    used_memory_summary: tuple[dict[str, str], ...] = ()
+
+
+def _finalize_message(
+    message: Message | None,
+    run: AgentRun,
+    tools: list[AgentToolCall],
+    *,
+    request: AgentRunFinalization,
+    final_status: str,
+) -> str | None:
+    if message is None:
+        return None
+    content = dict(message.content) if isinstance(message.content, dict) else {}
+    durable_text = content.get("text")
+    durable_text = durable_text if isinstance(durable_text, str) else ""
+    current_revision = int(run.output_revision or 0)
+    current_runtime_seq = int(run.output_runtime_seq or 0)
+    current_output = (current_revision, current_runtime_seq)
+    incoming_output = (request.output_revision, request.output_runtime_seq)
+    no_replacement = request.blocks is None and not request.text
+    if incoming_output < current_output or no_replacement:
+        final_text = durable_text
+        final_blocks = (
+            run.transcript_jsonb.get("blocks", [])
+            if isinstance(run.transcript_jsonb, dict)
+            else []
+        )
+    else:
+        final_text = request.text
+        final_blocks = list(request.blocks or [])
+        run.output_revision = max(current_revision, request.output_revision)
+        run.output_runtime_seq = max(
+            current_runtime_seq,
+            request.output_runtime_seq,
+        )
+        run.transcript_jsonb = {
+            "schema_version": 1,
+            "projection": "ordered_blocks",
+            "output_revision": run.output_revision,
+            "output_runtime_seq": run.output_runtime_seq,
+            "blocks": final_blocks,
+        }
+    projected_tools = [_tool_projection(tool) for tool in tools]
+    generation_ids = list(
+        dict.fromkeys(
+            generation_id
+            for tool in projected_tools
+            for generation_id in tool.get("generation_ids", [])
+            if isinstance(generation_id, str)
+        )
+    )
+    content.update(
+        {
+            "source": "agent",
+            "agent_run_id": run.id,
+            "text": final_text,
+            "blocks": final_blocks,
+            "output_revision": int(run.output_revision or 0),
+            "output_runtime_seq": int(run.output_runtime_seq or 0),
+            "tool_calls": projected_tools,
+            "generation_ids": generation_ids,
+        }
+    )
+    if request.used_memory_summary:
+        content["used_memory_summary"] = list(request.used_memory_summary)
+    message.content = content
+    message.status = {
+        AgentRunStatus.SUCCEEDED.value: MessageStatus.SUCCEEDED.value,
+        AgentRunStatus.PARTIAL.value: MessageStatus.PARTIAL.value,
+        AgentRunStatus.CANCELLED.value: MessageStatus.CANCELED.value,
+    }.get(final_status, MessageStatus.FAILED.value)
+    return message.conversation_id
+
+
 async def finalize_agent_run(
     redis: Any,
     *,
-    run_id: str,
-    execution_epoch: int,
-    requested_status: Literal["succeeded", "partial", "failed", "cancelled"],
-    text: str,
-    usage: dict[str, Any],
-    turn_count: int,
-    runtime_tool_count: int,
-    error_code: str | None,
-    knowledge: Literal["actual", "proven_absent", "unknown"],
-    reason: str,
-    used_memory_summary: tuple[dict[str, str], ...] = (),
+    request: AgentRunFinalization,
 ) -> tuple[str, AgentBillingResult | None, str | None]:
     public: dict[str, Any] | None = None
     conversation_id: str | None = None
     billing_result: AgentBillingResult | None = None
-    final_status = requested_status
+    final_status = request.requested_status
     now = datetime.now(timezone.utc)
     async with SessionLocal() as db:
         async with db.begin():
             run = (
                 await db.execute(
-                    select(AgentRun).where(AgentRun.id == run_id).with_for_update()
+                    select(AgentRun)
+                    .where(AgentRun.id == request.run_id)
+                    .with_for_update()
                 )
             ).scalar_one_or_none()
             if run is None:
@@ -722,7 +596,7 @@ async def finalize_agent_run(
                 return run.status, None, None
             if (
                 run.status != AgentRunStatus.RUNNING.value
-                or run.execution_epoch != execution_epoch
+                or run.execution_epoch != request.execution_epoch
             ):
                 return "superseded", None, None
             message = (
@@ -755,7 +629,12 @@ async def finalize_agent_run(
                 .scalars()
                 .all()
             )
-            _repair_tools(tools, generations, now=now, unknown=knowledge == "unknown")
+            _repair_tools(
+                tools,
+                generations,
+                now=now,
+                unknown=request.knowledge == "unknown",
+            )
             has_side_effect = any(
                 tool.status == AgentToolCallStatus.SUCCEEDED.value
                 and int(tool.generation_count or 0) > 0
@@ -763,87 +642,56 @@ async def finalize_agent_run(
             )
             has_partial_result = _has_partial_result(
                 message,
-                text,
+                request.text,
                 has_side_effect=has_side_effect,
             )
-            if requested_status == "partial":
+            if request.requested_status == "partial":
                 final_status = AgentRunStatus.PARTIAL.value
-            elif requested_status == "failed" and has_partial_result:
+            elif request.requested_status == "failed" and has_partial_result:
                 final_status = AgentRunStatus.PARTIAL.value
-            elif requested_status == "cancelled":
+            elif request.requested_status == "cancelled":
                 final_status = AgentRunStatus.CANCELLED.value
-            elif requested_status == "succeeded":
+            elif request.requested_status == "succeeded":
                 final_status = AgentRunStatus.SUCCEEDED.value
             else:
                 final_status = AgentRunStatus.FAILED.value
             run.status = final_status
             run.finished_at = now
-            run.turn_count = max(int(run.turn_count or 0), max(0, turn_count))
+            run.turn_count = max(
+                int(run.turn_count or 0),
+                max(0, request.turn_count),
+            )
             run.tool_call_count = max(
                 int(run.tool_call_count or 0),
-                max(0, runtime_tool_count),
+                max(0, request.runtime_tool_count),
                 len(tools),
             )
-            effective_usage = _max_usage(run.usage_jsonb, usage)
+            effective_usage = _max_usage(run.usage_jsonb, request.usage)
             run.usage_jsonb = effective_usage
-            run.error_code = error_code if final_status != "succeeded" else None
+            run.error_code = request.error_code if final_status != "succeeded" else None
             run.error_message = None
             dispatch = _dispatch(run)
             dispatch.update(
                 {
                     "runtime_delivery": "finalized",
-                    "billing_knowledge": knowledge,
+                    "billing_knowledge": request.knowledge,
                     "finalized_at": now.isoformat(),
                 }
             )
             run.dispatch_jsonb = dispatch
-            if message is not None:
-                content = (
-                    dict(message.content) if isinstance(message.content, dict) else {}
-                )
-                durable_text = content.get("text")
-                durable_text = durable_text if isinstance(durable_text, str) else ""
-                if not text or durable_text.startswith(text):
-                    final_text = durable_text
-                elif text.startswith(durable_text):
-                    final_text = text
-                else:
-                    final_text = (
-                        text if len(text) >= len(durable_text) else durable_text
-                    )
-                projected_tools = [_tool_projection(tool) for tool in tools]
-                generation_ids = list(
-                    dict.fromkeys(
-                        generation_id
-                        for tool in projected_tools
-                        for generation_id in tool.get("generation_ids", [])
-                        if isinstance(generation_id, str)
-                    )
-                )
-                content.update(
-                    {
-                        "source": "agent",
-                        "agent_run_id": run.id,
-                        "text": final_text,
-                        "tool_calls": projected_tools,
-                        "generation_ids": generation_ids,
-                    }
-                )
-                if used_memory_summary:
-                    content["used_memory_summary"] = list(used_memory_summary)
-                message.content = content
-                message.status = {
-                    AgentRunStatus.SUCCEEDED.value: MessageStatus.SUCCEEDED.value,
-                    AgentRunStatus.PARTIAL.value: MessageStatus.PARTIAL.value,
-                    AgentRunStatus.CANCELLED.value: MessageStatus.CANCELED.value,
-                }.get(final_status, MessageStatus.FAILED.value)
-                conversation_id = message.conversation_id
+            conversation_id = _finalize_message(
+                message,
+                run,
+                tools,
+                request=request,
+                final_status=final_status,
+            )
             billing_result = await _settle_billing(
                 db,
                 run=run,
-                knowledge=knowledge,
+                knowledge=request.knowledge,
                 usage=effective_usage,
-                reason=reason,
+                reason=request.reason,
             )
             run.text_hold_micro = 0
             data = _stage_event(
@@ -852,7 +700,13 @@ async def finalize_agent_run(
                 event_name=_terminal_event_name(final_status),
                 extra={
                     "status": final_status,
-                    **({"error_code": error_code} if error_code else {}),
+                    "output_revision": int(run.output_revision or 0),
+                    "output_runtime_seq": int(run.output_runtime_seq or 0),
+                    **(
+                        {"error_code": public_agent_error_code(request.error_code)}
+                        if request.error_code
+                        else {}
+                    ),
                 },
             )
             public = _public_event(run, data)
@@ -904,6 +758,7 @@ async def reconcile_cancelled_agent_hold(run_id: str) -> bool:
             if billing.get("state") in {
                 "settled",
                 "settled_unknown",
+                "settled_evidenced_unknown",
                 "released",
                 "not_applicable",
             }:
@@ -979,6 +834,7 @@ async def reconcile_cancelled_agent_hold(run_id: str) -> bool:
 
 
 __all__ = [
+    "AgentRunFinalization",
     "claim_agent_run",
     "finalize_agent_run",
     "flush_agent_text",

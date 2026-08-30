@@ -610,6 +610,59 @@ async def release(
     )
 
 
+async def credit_correction(
+    db: AsyncSession,
+    user_id: str,
+    amount_micro: int,
+    *,
+    ref_type: str,
+    ref_id: str,
+    idempotency_key: str,
+    reason: str,
+    meta: dict[str, Any] | None = None,
+) -> WalletTransaction | None:
+    """Append an idempotent service-cost correction without counting a top-up."""
+    amount = int(amount_micro)
+    if amount <= 0:
+        return None
+    request_meta = {"reason": reason, **(meta or {})}
+    semantics = _IdempotencySemantics(
+        kind="correction_credit",
+        ref_type=ref_type,
+        ref_id=ref_id,
+        amount_micro=amount,
+        request_meta=request_meta,
+        legacy_transaction_amount_micro=amount,
+    )
+    existing = _idempotent_replay(
+        await _existing_tx(db, user_id, idempotency_key),
+        semantics,
+    )
+    if existing is not None:
+        return existing
+    wallet = _require_wallet(await get_wallet(db, user_id, lock=True))
+    existing = _idempotent_replay(
+        await _existing_tx(db, user_id, idempotency_key),
+        semantics,
+    )
+    if existing is not None:
+        return existing
+    wallet.balance_micro += amount
+    wallet.lifetime_spend_micro = max(0, wallet.lifetime_spend_micro - amount)
+    wallet.version += 1
+    return await _insert_tx(
+        db,
+        wallet,
+        user_id=user_id,
+        kind="correction_credit",
+        amount_micro=amount,
+        ref_type=ref_type,
+        ref_id=ref_id,
+        idempotency_key=idempotency_key,
+        meta=_idempotency_meta(request_meta, semantics),
+    )
+
+
 async def charge(
     db: AsyncSession,
     user_id: str,
