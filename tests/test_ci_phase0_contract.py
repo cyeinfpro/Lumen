@@ -15,9 +15,7 @@ def _docker_copy_sources(source: str) -> list[str]:
         if not line.startswith("COPY "):
             continue
         tokens = [
-            token
-            for token in shlex.split(line)[1:]
-            if not token.startswith("--")
+            token for token in shlex.split(line)[1:] if not token.startswith("--")
         ]
         copied.extend(token.rstrip("/") for token in tokens[:-1])
     return copied
@@ -43,10 +41,27 @@ def test_backend_ci_uses_real_redis_without_repeating_frontend() -> None:
     assert 'if [ "${LUMEN_TEST_SKIP_WEB:-0}" != "1" ]; then' in test_script
 
 
+def test_cross_language_contract_tooling_precedes_backend_tests() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    release = (ROOT / ".github" / "workflows" / "docker-release.yml").read_text(
+        encoding="utf-8"
+    )
+    test_script = (ROOT / "scripts" / "test.sh").read_text(encoding="utf-8")
+
+    ci_dependencies = workflow.index("Install Agent Runtime contract dependencies")
+    assert ci_dependencies < workflow.index("Run impacted backend tests")
+    assert ci_dependencies < workflow.index("Run full backend tests")
+    assert release.index("Agent Runtime dependencies") < release.index("Python tests")
+    assert 'node_modules/.bin/tsx"' in test_script
+    assert test_script.index("ensure_agent_runtime_deps\n") < test_script.index(
+        'echo "==> apps/worker/tests"'
+    )
+
+
 def test_python_dockerfile_stages_every_uv_workspace_member() -> None:
-    workspace = tomllib.loads(
-        (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    )["tool"]["uv"]["workspace"]["members"]
+    workspace = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+        "tool"
+    ]["uv"]["workspace"]["members"]
     dockerfile = (ROOT / "Dockerfile.python").read_text(encoding="utf-8")
     before_sync, after_sync = dockerfile.split(
         "RUN uv sync --frozen --no-dev --all-packages",

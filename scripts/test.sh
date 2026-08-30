@@ -69,6 +69,7 @@ ensure_web_deps() {
 ensure_agent_runtime_deps() {
     if [ -x "apps/agent-runtime/node_modules/.bin/eslint" ] &&
        [ -x "apps/agent-runtime/node_modules/.bin/tsc" ] &&
+       [ -x "apps/agent-runtime/node_modules/.bin/tsx" ] &&
        [ -x "apps/agent-runtime/node_modules/.bin/vitest" ]; then
         return
     fi
@@ -77,6 +78,8 @@ ensure_agent_runtime_deps() {
     echo "==> apps/agent-runtime dependencies"
     npm --prefix apps/agent-runtime ci --ignore-scripts
 }
+
+ensure_agent_runtime_deps
 
 echo "==> apps/worker/tests"
 uv run pytest apps/worker/tests "$@"
@@ -109,8 +112,6 @@ echo "==> tests (operations scripts)"
 uv run pytest tests "$@"
 
 if [ "${LUMEN_TEST_SKIP_AGENT_RUNTIME:-0}" != "1" ]; then
-    ensure_agent_runtime_deps
-
     echo
     echo "==> apps/agent-runtime tests"
     npm --prefix apps/agent-runtime test
