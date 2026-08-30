@@ -135,6 +135,8 @@ export interface AgentRun {
   status: AgentRunStatus;
   execution_epoch: number;
   last_event_seq: number;
+  output_revision?: number;
+  output_runtime_seq?: number;
   idempotency_key: string;
   model: string | null;
   reasoning_effort: string | null;
@@ -197,10 +199,31 @@ export interface AgentMessageToolProjection {
   error_code?: string | null;
 }
 
+export interface AgentOutputTextBlock {
+  kind: "text";
+  turn: number;
+  text: string;
+}
+
+export interface AgentOutputToolBlock {
+  kind: "tool";
+  turn: number;
+  tool_call_id?: string;
+  ordinal?: number;
+  name?: string;
+  status?: AgentToolStatus;
+  generation_ids?: string[];
+}
+
+export type AgentOutputBlock = AgentOutputTextBlock | AgentOutputToolBlock;
+
 export interface AgentMessageContent {
   text?: string;
   source?: "agent" | string;
   agent_run_id?: string;
+  blocks?: AgentOutputBlock[];
+  output_revision?: number;
+  output_runtime_seq?: number;
   attachments?: AgentMessageAttachment[];
   tool_calls?: AgentMessageToolProjection[];
   generation_ids?: string[];
@@ -239,6 +262,9 @@ export interface AgentAssistantMessage {
   parentUserMessageId: string | null;
   generationIds: string[];
   toolCalls: AgentMessageToolProjection[];
+  blocks: AgentOutputBlock[];
+  outputRevision: number;
+  outputRuntimeSeq: number;
   createdAt: string;
   partial: boolean;
   optimistic?: boolean;
@@ -335,6 +361,14 @@ export interface AgentEventEnvelope {
   event_seq: number;
   event_name: AgentEventName;
   text_delta?: string;
+  text_operation?: "append" | "replace";
+  replacement_text?: string;
+  snapshot_required?: boolean;
+  output_revision?: number;
+  output_runtime_seq?: number;
+  blocks?: AgentOutputBlock[];
+  status?: AgentRunStatus;
+  error_code?: string;
   tool_call_id?: string | null;
   generation_ids?: string[];
   event_id?: string;

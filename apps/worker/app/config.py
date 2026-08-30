@@ -89,7 +89,7 @@ class Settings(BaseSettings):
 
     providers: str = ""
     # 探活默认值（runtime_settings DB 优先，这里是 env / 启动 fallback）
-    # 文本算术 probe：120s 一次，让 gpt-5.4-mini 算 99×99 验答案
+    # Agent 算术 probe：120s 一次，使用配置的 API/默认模型并验证终态
     providers_auto_probe_interval: int = 120
     # Image probe：默认 0 = 关闭（每张 probe 烧一次账号配额，生产先关）
     providers_auto_image_probe_interval: int = 0

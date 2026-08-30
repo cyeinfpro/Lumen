@@ -10,6 +10,10 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core.agent_content_safety import (
+    AgentContentSafetyViolation,
+    require_agent_content_safe,
+)
 from lumen_core.agent_events import (
     AGENT_RUN_ACTIVE_STATUSES,
     AGENT_TOOL_CREATE_IMAGE,
@@ -161,7 +165,7 @@ async def _request_snapshot(
     credential = value.pin.credential
     continuation = value.pin.continuation
     return {
-        "runtime_request_version": 3,
+        "runtime_request_version": 4,
         "image_defaults": body.image_defaults.model_dump(mode="json"),
         "allow_image": body.allow_image,
         "allowed_tools": [AGENT_TOOL_CREATE_IMAGE] if body.allow_image else [],
@@ -196,11 +200,21 @@ async def _request_snapshot(
             ),
         },
         "context_plan": {
-            "version": 1,
+            "version": 2,
             "mode": value.pin.context_plan,
             "estimated_input_tokens": value.pin.estimated_input_tokens,
             "context_window": value.pin.context_window,
             "max_output_tokens": value.pin.max_output_tokens,
+            "history_truncated": value.pin.history_truncated,
+            "history_first_retained_message_id": (
+                value.pin.history_first_retained_message_id
+            ),
+            "history_removed_entries": value.pin.history_removed_entries,
+            "history_removed_tokens": value.pin.history_removed_tokens,
+            "estimated_runtime_request_bytes": (
+                value.pin.estimated_runtime_request_bytes
+            ),
+            "runtime_request_max_bytes": settings.agent_runtime_max_request_bytes,
         },
         "internal_agent_callback_base_url": settings.agent_internal_callback_base_url,
         "tool_receipt": {"version": 2},
@@ -657,6 +671,14 @@ async def submit_agent_message(
     request: Any | None,
     continuation: AgentContinuationSubmission | None = None,
 ) -> AgentMessageCreateOut:
+    try:
+        require_agent_content_safe(body.text)
+    except AgentContentSafetyViolation as exc:
+        raise http_error(
+            exc.code,
+            "The request cannot be processed under the content policy",
+            400,
+        ) from exc
     request_user_id = str(user.id)
     request_fingerprint = agent_message_request_fingerprint(body)
     prior = await _idempotent_agent_message(
@@ -710,6 +732,14 @@ async def submit_agent_message(
         body=body,
         references=submission_references.turn,
     )
+    try:
+        require_agent_content_safe(pin.system_prompt or "")
+    except AgentContentSafetyViolation as exc:
+        raise http_error(
+            exc.code,
+            "The request cannot be processed under the content policy",
+            400,
+        ) from exc
     pin = replace(pin, continuation=continuation)
     staged = await _stage_submission(
         db,

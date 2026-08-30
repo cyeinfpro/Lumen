@@ -41,6 +41,18 @@ export function DraftAgentCapabilityFields({
           <option value="anthropic-messages">Anthropic Messages</option>
         </Select>
       </AgentField>
+      <AgentField label="Agent SDK Base URL" hint="探活与实际 Agent 调用使用同一地址">
+        <Input
+          type="url"
+          value={draft.agent_base_url ?? ""}
+          placeholder={
+            draft.agent_api === "anthropic-messages"
+              ? "https://api.anthropic.com"
+              : "https://api.openai.com/v1"
+          }
+          onChange={(event) => onUpdate({ agent_base_url: event.target.value })}
+        />
+      </AgentField>
       <AgentField label="上下文窗口" hint="模型可接收的总 token 上限">
         <BoundedInput
           value={draft.agent_context_window ?? 128_000}

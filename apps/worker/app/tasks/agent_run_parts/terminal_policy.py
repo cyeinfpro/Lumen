@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from lumen_core.agent_events import (
     EV_AGENT_RUN_CANCELLED,
@@ -17,7 +17,7 @@ from lumen_core.agent_dispatch import (
 )
 from lumen_core.model_entities import AgentToolCall, Message
 
-from .contracts import AGENT_NO_COST_HTTP_STATUSES
+from .contracts import AGENT_NO_COST_HTTP_STATUSES, AgentRuntimeAccumulator
 
 
 def cancelled_dispatch_unknown(dispatch: dict[str, Any]) -> bool:
@@ -42,6 +42,77 @@ def cancelled_dispatch_unknown(dispatch: dict[str, Any]) -> bool:
         authorized > checkpointed
         or (pending > 0 and not pending_proven_absent)
         or (dispatch_count == 0 and delivery in {"starting", "unknown"})
+    )
+
+
+def terminal_request(
+    accumulator: AgentRuntimeAccumulator,
+) -> tuple[
+    Literal["succeeded", "partial", "failed", "cancelled"],
+    str | None,
+    Literal["actual", "proven_absent", "unknown"],
+    str,
+]:
+    unresolved = accumulator.has_unresolved_dispatch
+    if accumulator.terminal_status == "cancelled":
+        knowledge: Literal["actual", "proven_absent", "unknown"] = (
+            "unknown"
+            if unresolved
+            else "actual"
+            if accumulator.has_exact_usage
+            else "proven_absent"
+            if accumulator.provider_dispatch_count == 0
+            else "unknown"
+        )
+        return "cancelled", "agent_cancelled", knowledge, "runtime_cancelled"
+    if accumulator.terminal_status == "partial":
+        knowledge = (
+            "unknown" if unresolved or not accumulator.has_exact_usage else "actual"
+        )
+        return (
+            "partial",
+            accumulator.terminal_error_code or "agent_result_unknown",
+            knowledge,
+            "runtime_partial",
+        )
+    if accumulator.terminal_status == "succeeded":
+        if unresolved:
+            return (
+                "succeeded",
+                None,
+                "unknown",
+                "runtime_success_with_unknown_billing",
+            )
+        return "succeeded", None, "actual", "runtime_success"
+    if accumulator.has_exact_usage and not unresolved:
+        return (
+            "failed",
+            accumulator.terminal_error_code or "agent_provider_error",
+            "actual",
+            "runtime_failed_with_usage",
+        )
+    if accumulator.response_proves_no_cost and not unresolved:
+        return (
+            "failed",
+            accumulator.terminal_error_code or "agent_provider_error",
+            "proven_absent",
+            "provider_rejected_before_usage",
+        )
+    if (
+        accumulator.terminal_status == "failed"
+        and accumulator.provider_dispatch_count == 0
+    ):
+        return (
+            "failed",
+            accumulator.terminal_error_code or "agent_runtime_error",
+            "proven_absent",
+            "runtime_failed_before_provider_dispatch",
+        )
+    return (
+        "failed",
+        accumulator.terminal_error_code or "agent_result_unknown",
+        "unknown",
+        "provider_result_unknown",
     )
 
 
@@ -91,5 +162,6 @@ __all__ = [
     "cancelled_dispatch_unknown",
     "has_partial_result",
     "terminal_event_name",
+    "terminal_request",
     "tool_projection",
 ]

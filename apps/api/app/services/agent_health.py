@@ -32,6 +32,8 @@ class AgentRuntimeProbe:
     runtime_version: str | None
     error_code: str | None
     auth_key_id: str | None = None
+    max_request_bytes: int | None = None
+    max_line_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,14 +48,11 @@ class AgentHealthSnapshot:
 
     @property
     def operational(self) -> bool:
-        return (
-            not self.enabled
-            or (
-                self.runtime_auth_configured
-                and self.tool_gateway_configured
-                and self.runtime_live is True
-                and self.runtime_ready is True
-            )
+        return not self.enabled or (
+            self.runtime_auth_configured
+            and self.tool_gateway_configured
+            and self.runtime_live is True
+            and self.runtime_ready is True
         )
 
 
@@ -70,13 +69,20 @@ async def effective_agent_enabled(executor: Any) -> bool:
 
 def _probe_payload(
     response: httpx.Response,
-) -> tuple[bool, str | None, str | None, str | None]:
+) -> tuple[
+    bool,
+    str | None,
+    str | None,
+    str | None,
+    int | None,
+    int | None,
+]:
     try:
         payload = response.json()
     except ValueError:
-        return False, None, "agent_runtime_invalid_health_response", None
+        return False, None, "agent_runtime_invalid_health_response", None, None, None
     if not isinstance(payload, dict):
-        return False, None, "agent_runtime_invalid_health_response", None
+        return False, None, "agent_runtime_invalid_health_response", None, None, None
     version = payload.get("runtime_version")
     runtime_version = version if isinstance(version, str) and version else None
     ok = response.status_code == 200 and payload.get("ok") is True
@@ -92,7 +98,16 @@ def _probe_payload(
         and all(char in "0123456789abcdef" for char in raw_key_id)
         else None
     )
-    return ok, runtime_version, error_code, auth_key_id
+    max_request = payload.get("max_request_bytes")
+    max_line = payload.get("max_line_bytes")
+    return (
+        ok,
+        runtime_version,
+        error_code,
+        auth_key_id,
+        max_request if isinstance(max_request, int) else None,
+        max_line if isinstance(max_line, int) else None,
+    )
 
 
 async def probe_agent_runtime(endpoint: str) -> AgentRuntimeProbe:
@@ -107,7 +122,14 @@ async def probe_agent_runtime(endpoint: str) -> AgentRuntimeProbe:
             trust_env=False,
         ) as client:
             response = await client.get(f"{settings.agent_runtime_url}/{endpoint}")
-        ok, runtime_version, error_code, auth_key_id = _probe_payload(response)
+        (
+            ok,
+            runtime_version,
+            error_code,
+            auth_key_id,
+            max_request_bytes,
+            max_line_bytes,
+        ) = _probe_payload(response)
         outcome = "ready" if ok else "not_ready"
         return AgentRuntimeProbe(
             ok=ok,
@@ -115,6 +137,8 @@ async def probe_agent_runtime(endpoint: str) -> AgentRuntimeProbe:
             runtime_version=runtime_version,
             error_code=error_code,
             auth_key_id=auth_key_id,
+            max_request_bytes=max_request_bytes,
+            max_line_bytes=max_line_bytes,
         )
     except httpx.HTTPError:
         logger.warning("Agent Runtime %s probe failed", endpoint)
@@ -142,12 +166,8 @@ async def agent_health_snapshot(
         if enabled_override is not None
         else await effective_agent_enabled(executor)
     )
-    runtime_auth_configured = _secret_configured(
-        settings.agent_runtime_shared_secret
-    )
-    tool_gateway_configured = _secret_configured(
-        settings.agent_tool_capability_secret
-    )
+    runtime_auth_configured = _secret_configured(settings.agent_runtime_shared_secret)
+    tool_gateway_configured = _secret_configured(settings.agent_tool_capability_secret)
     if not enabled:
         return AgentHealthSnapshot(
             enabled=False,
@@ -192,6 +212,19 @@ async def agent_health_snapshot(
             runtime_ready=False,
             runtime_version=ready.runtime_version or live.runtime_version,
             error_code="agent_runtime_auth_mismatch",
+        )
+    if (
+        ready.max_request_bytes is not None
+        and ready.max_request_bytes != settings.agent_runtime_max_request_bytes
+    ):
+        return AgentHealthSnapshot(
+            enabled=True,
+            runtime_auth_configured=True,
+            tool_gateway_configured=True,
+            runtime_live=True,
+            runtime_ready=False,
+            runtime_version=ready.runtime_version or live.runtime_version,
+            error_code="agent_runtime_limit_mismatch",
         )
     return AgentHealthSnapshot(
         enabled=True,

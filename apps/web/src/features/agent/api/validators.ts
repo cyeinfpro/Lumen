@@ -205,6 +205,9 @@ export function parseAgentRun(
   ] as const) {
     number(item[field], endpoint, `${path}.${field}`);
   }
+  for (const field of ["output_revision", "output_runtime_seq"] as const) {
+    if (item[field] !== undefined) number(item[field], endpoint, `${path}.${field}`);
+  }
   for (const field of [
     "model",
     "reasoning_effort",

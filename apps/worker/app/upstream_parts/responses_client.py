@@ -9,6 +9,7 @@ from ..provider_runtime.upstream_services import (
 )
 
 import asyncio
+import hashlib
 import json
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -287,11 +288,13 @@ async def _raise_response_status_error(
         response_headers.get("x-request-id") if response_headers is not None else None
     )
     services.infrastructure.logger.warning(
-        "%s non-2xx status=%s url=%s body=%.1000s trace_id=%s x_request_id=%s",
+        "%s non-2xx status=%s url=%s response_bytes=%d response_digest=%s "
+        "trace_id=%s x_request_id=%s",
         log_prefix,
         response.status_code,
         url,
-        raw_text,
+        len(raw),
+        hashlib.sha256(raw).hexdigest()[:16],
         trace_id,
         request_id,
     )

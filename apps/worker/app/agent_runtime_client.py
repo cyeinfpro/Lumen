@@ -86,6 +86,36 @@ class AgentRuntimeHistoryToolResult(_StrictModel):
     is_error: bool
 
 
+class AgentRuntimeHistoryAssistantText(_StrictModel):
+    type: Literal["assistant_text"]
+    turn: int = Field(ge=1, le=128)
+    text: str = Field(min_length=1, max_length=20000)
+
+
+class AgentRuntimeHistoryBlockToolCall(_StrictModel):
+    type: Literal["tool_call"]
+    turn: int = Field(ge=1, le=128)
+    id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=64)
+    arguments: dict[str, Any] = Field(default_factory=dict, max_length=32)
+
+
+class AgentRuntimeHistoryBlockToolResult(_StrictModel):
+    type: Literal["tool_result"]
+    turn: int = Field(ge=1, le=128)
+    tool_call_id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=64)
+    text: str = Field(min_length=1, max_length=20000)
+    is_error: bool
+
+
+AgentRuntimeHistoryBlock = (
+    AgentRuntimeHistoryAssistantText
+    | AgentRuntimeHistoryBlockToolCall
+    | AgentRuntimeHistoryBlockToolResult
+)
+
+
 class AgentRuntimeHistoryImage(_StrictModel):
     mime_type: Literal["image/png", "image/jpeg", "image/webp"]
     data_base64: str = Field(min_length=4, max_length=700000, repr=False)
@@ -110,6 +140,10 @@ class AgentRuntimeHistoryMessage(_StrictModel):
         default_factory=list, max_length=8
     )
     images: list[AgentRuntimeHistoryImage] = Field(default_factory=list, max_length=16)
+    blocks: list[AgentRuntimeHistoryBlock] = Field(
+        default_factory=list,
+        max_length=32,
+    )
 
 
 class AgentRuntimeCompaction(_StrictModel):
@@ -152,7 +186,7 @@ class AgentRuntimeSafetyBudget(_StrictModel):
 
 
 class AgentRuntimeRequest(_StrictModel):
-    version: Literal[2, 3] = 2
+    version: Literal[2, 3, 4] = 2
     run_id: str = Field(min_length=1, max_length=96)
     agent_session_id: str = Field(min_length=1, max_length=96)
     user_id: str = Field(min_length=1, max_length=96)
@@ -265,6 +299,9 @@ class AgentRuntimeEvent(_StrictModel):
     run_id: str = Field(min_length=1, max_length=96)
     execution_epoch: int = Field(ge=1)
     delta: str | None = Field(default=None, max_length=8192)
+    replacement_text: str | None = Field(default=None, max_length=20000)
+    output_revision: int | None = Field(default=None, ge=0)
+    output_runtime_seq: int | None = Field(default=None, ge=0)
     status: str | int | None = None
     error_code: str | None = Field(default=None, max_length=64)
     usage: AgentRuntimeUsage | None = None
@@ -296,6 +333,9 @@ class AgentRuntimeEvent(_StrictModel):
     ) = None
     provider_dispatch_count: int | None = Field(default=None, ge=0)
     provider_completed_count: int | None = Field(default=None, ge=0)
+    dispatch_ordinal: int | None = Field(default=None, ge=1)
+    usage_evidence: Literal["exact", "partial", "unknown", "none"] | None = None
+    no_charge_receipt: bool | None = None
 
     @field_validator("type")
     @classmethod
@@ -305,7 +345,7 @@ class AgentRuntimeEvent(_StrictModel):
         return value
 
     @model_validator(mode="after")
-    def validate_compaction(self) -> "AgentRuntimeEvent":
+    def validate_event_contract(self) -> "AgentRuntimeEvent":
         fields = (
             self.checkpoint_version,
             self.pi_runtime_version,
@@ -322,6 +362,40 @@ class AgentRuntimeEvent(_StrictModel):
         if self.type == "compaction.completed" and self.checkpoint_version == 2:
             if self.next_message_id is None or self.phase != "pre_prompt":
                 raise ValueError("compaction v2 placement is incomplete")
+        if self.type == "text.delta" and self.delta is None:
+            raise ValueError("text delta event is incomplete")
+        if self.type == "text.reset" and self.delta is not None:
+            raise ValueError("text reset cannot carry a delta")
+        if self.type in RUNTIME_TERMINAL_EVENTS:
+            if (
+                self.status is None
+                or self.usage is None
+                or self.turn_count is None
+                or self.tool_call_count is None
+                or self.provider_dispatch_count is None
+                or self.provider_completed_count is None
+            ):
+                raise ValueError("terminal event is incomplete")
+            expected_statuses = {
+                "run.completed": {"succeeded", "partial"},
+                "run.failed": {"failed"},
+                "run.cancelled": {"cancelled"},
+            }
+            if self.status not in expected_statuses[self.type]:
+                raise ValueError("terminal event type and status disagree")
+            if self.status == "succeeded" and self.error_code is not None:
+                raise ValueError("successful terminal cannot carry an error")
+            if self.status != "succeeded" and not self.error_code:
+                raise ValueError("non-success terminal requires an error code")
+            if self.provider_completed_count > self.provider_dispatch_count:
+                raise ValueError("terminal provider counters are contradictory")
+            if (
+                self.usage_evidence == "exact"
+                and self.provider_completed_count != self.provider_dispatch_count
+            ):
+                raise ValueError(
+                    "exact terminal evidence does not cover every dispatch"
+                )
         return self
 
 
@@ -483,7 +557,7 @@ def _encoded_runtime_request(payload: dict[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
-def _runtime_request_body(request: AgentRuntimeRequest) -> bytes:
+def runtime_request_body(request: AgentRuntimeRequest) -> bytes:
     complete_payload = request.model_dump(mode="json")
     payload = request.model_dump(mode="json", exclude_none=True)
     for key in (
@@ -528,9 +602,14 @@ def _runtime_request_body(request: AgentRuntimeRequest) -> bytes:
                 "tool_results",
                 "final_text",
                 "images",
+                "blocks",
             ):
                 history.pop(key, None)
     return _encoded_runtime_request(payload)
+
+
+# Backward-compatible private alias for queued v2/v3 contract tests.
+_runtime_request_body = runtime_request_body
 
 
 def sign_runtime_request(
@@ -583,6 +662,42 @@ class AgentRuntimeClient:
         if client is not None:
             await client.aclose()
 
+    async def verify_contract(self) -> None:
+        if not self.configured:
+            raise AgentRuntimeClientError(
+                "agent_runtime_unconfigured",
+                delivery="proven_absent",
+            )
+        try:
+            response = await self._http().get("/readyz")
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            raise AgentRuntimeClientError(
+                "agent_runtime_unavailable",
+                delivery="proven_absent",
+            ) from exc
+        if response.status_code != 200:
+            raise AgentRuntimeClientError(
+                "agent_runtime_not_ready",
+                delivery="proven_absent",
+                status_code=response.status_code,
+            )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise AgentRuntimeClientError(
+                "agent_runtime_invalid_response",
+                delivery="proven_absent",
+            ) from exc
+        if (
+            not isinstance(payload, dict)
+            or payload.get("max_request_bytes") != self.max_request_bytes
+            or payload.get("max_line_bytes") != self.max_line_bytes
+        ):
+            raise AgentRuntimeClientError(
+                "agent_runtime_limit_mismatch",
+                delivery="proven_absent",
+            )
+
     async def stream(
         self,
         request: AgentRuntimeRequest,
@@ -594,7 +709,7 @@ class AgentRuntimeClient:
             raise AgentRuntimeClientError(
                 "agent_runtime_unconfigured", delivery="proven_absent"
             )
-        body = _runtime_request_body(request)
+        body = runtime_request_body(request)
         if len(body) > self.max_request_bytes:
             raise AgentRuntimeClientError(
                 "agent_runtime_request_too_large",
@@ -687,6 +802,10 @@ __all__ = [
     "AgentRuntimeClientError",
     "AgentRuntimeCompaction",
     "AgentRuntimeEvent",
+    "AgentRuntimeHistoryAssistantText",
+    "AgentRuntimeHistoryBlock",
+    "AgentRuntimeHistoryBlockToolCall",
+    "AgentRuntimeHistoryBlockToolResult",
     "AgentRuntimeHistoryMessage",
     "AgentRuntimeHistoryImage",
     "AgentRuntimeHistoryToolCall",
@@ -699,5 +818,6 @@ __all__ = [
     "AgentRuntimeSafetyBudget",
     "AgentRuntimeUsage",
     "canonical_runtime_request",
+    "runtime_request_body",
     "sign_runtime_request",
 ]

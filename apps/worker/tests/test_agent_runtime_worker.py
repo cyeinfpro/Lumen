@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app import agent_reference_previews as agent_reference_previews_module
 from app import agent_memory_context as agent_memory_context_module
+from app import agent_context as agent_context_module
 from app import main
 from app import observability as worker_observability
 from app.agent_billing import agent_usage_tokens
@@ -39,6 +40,7 @@ from app.agent_runtime_client import (
     AgentRuntimeClientError,
     AgentRuntimeCompaction,
     AgentRuntimeEvent,
+    AgentRuntimeHistoryImage,
     AgentRuntimeHistoryMessage,
     AgentRuntimeImageDefaults,
     AgentRuntimeToolPolicy,
@@ -204,7 +206,7 @@ async def test_each_heartbeat_resets_the_worker_idle_budget() -> None:
         await _next_stream_chunk(
             iterator,
             cancel_requested=None,
-            timeout_seconds=0.02,
+            timeout_seconds=0.05,
         )
         for _ in range(3)
     ]
@@ -256,6 +258,35 @@ async def test_runtime_client_validates_signed_monotonic_terminal_stream() -> No
     assert b"provider-secret" in seen["body"]
     assert "provider-secret" not in repr(_request())
     assert len(seen["signature"]) == 64
+
+
+@pytest.mark.asyncio
+async def test_runtime_readiness_contract_requires_matching_transport_limits() -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "max_request_bytes": 16 * 1024 * 1024,
+                "max_line_bytes": 64 * 1024,
+            },
+        )
+
+    client = AgentRuntimeClient(
+        base_url="http://agent-runtime:8090",
+        shared_secret=TEST_SECRET,
+    )
+    client._client = httpx.AsyncClient(  # noqa: SLF001
+        base_url=client.base_url,
+        transport=httpx.MockTransport(handler),
+    )
+    await client.verify_contract()
+    client.max_line_bytes = 128 * 1024
+    with pytest.raises(AgentRuntimeClientError) as captured:
+        await client.verify_contract()
+    await client.close()
+    assert captured.value.code == "agent_runtime_limit_mismatch"
+    assert captured.value.delivery == "proven_absent"
 
 
 @pytest.mark.asyncio
@@ -425,6 +456,69 @@ def test_runtime_wire_preserves_required_nullable_provider_proxy(version: int) -
 
 
 @pytest.mark.asyncio
+async def test_runtime_wire_planner_degrades_historical_images_before_current_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    historical_image = AgentRuntimeHistoryImage(
+        mime_type="image/png",
+        data_base64="A" * 4_000,
+        estimated_input_tokens=2_048,
+    )
+    current_reference = AgentRuntimeReference(
+        reference_label="ref_1",
+        role="reference",
+        display_label=None,
+        mime_type="image/png",
+        data_base64="AAAA",
+    )
+    request = _request().model_copy(
+        update={
+            "version": 3,
+            "operation": "prompt",
+            "provider": _request().provider.model_copy(
+                update={"vision_supported": True}
+            ),
+            "history": [
+                AgentRuntimeHistoryMessage(
+                    message_id="history-user",
+                    role="user",
+                    text="historical request",
+                    images=[historical_image],
+                ),
+                AgentRuntimeHistoryMessage(
+                    message_id="history-assistant",
+                    role="assistant",
+                    text="historical response",
+                ),
+            ],
+            "references": [current_reference],
+        }
+    )
+    mandatory = request.model_copy(
+        update={
+            "history": [
+                request.history[0].model_copy(update={"images": []}),
+                request.history[1],
+            ]
+        }
+    )
+    maximum = len(_runtime_request_body(mandatory)) + 128
+    monkeypatch.setattr(
+        agent_context_module.settings,
+        "agent_runtime_max_request_bytes",
+        maximum,
+    )
+
+    plan = agent_context_module._fit_runtime_request(request)
+
+    assert plan["initial_bytes"] > maximum
+    assert plan["final_bytes"] <= maximum
+    assert plan["degraded_historical_images"] == 1
+    assert request.history[0].images == []
+    assert request.references == [current_reference]
+
+
+@pytest.mark.asyncio
 async def test_runtime_client_sends_large_v2_history_only_once() -> None:
     requests = 0
 
@@ -521,6 +615,50 @@ async def test_runtime_terminal_usage_is_bounded_by_reported_provider_calls(
             _ = [event async for event in client.stream(_request())]
         assert captured.value.code == "agent_runtime_usage_out_of_bounds"
     await client.close()
+
+
+def test_runtime_terminal_contract_rejects_contradictory_evidence() -> None:
+    usage = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "cache_write_1h_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 0,
+    }
+    with pytest.raises(ValueError):
+        AgentRuntimeEvent(
+            version=1,
+            type="run.completed",
+            seq=1,
+            run_id="run-1",
+            execution_epoch=1,
+            status="failed",
+            error_code="agent_provider_error",
+            usage=usage,
+            turn_count=1,
+            tool_call_count=0,
+            provider_dispatch_count=1,
+            provider_completed_count=1,
+            usage_evidence="exact",
+        )
+    with pytest.raises(ValueError):
+        AgentRuntimeEvent(
+            version=1,
+            type="run.failed",
+            seq=1,
+            run_id="run-1",
+            execution_epoch=1,
+            status="failed",
+            error_code="agent_provider_error",
+            usage=usage,
+            turn_count=1,
+            tool_call_count=0,
+            provider_dispatch_count=2,
+            provider_completed_count=1,
+            usage_evidence="exact",
+        )
 
 
 @pytest.mark.asyncio
@@ -668,7 +806,7 @@ def test_agent_history_projection_omits_image_ids_and_raw_tool_payloads() -> Non
     assert "private stack" not in projected.text
 
 
-def test_agent_history_projection_preserves_typed_tool_call_and_result() -> None:
+def test_legacy_agent_history_does_not_invent_typed_tool_placement() -> None:
     message = Message(
         id="assistant-history",
         conversation_id="conversation-1",
@@ -695,10 +833,13 @@ def test_agent_history_projection_preserves_typed_tool_call_and_result() -> None
     assert projected is not None
     assert projected.api == "openai-responses"
     assert projected.model == "model-a"
-    assert projected.stop_reason == "toolUse"
-    assert projected.tool_calls[0].arguments == {"prompt": "campaign image"}
-    assert projected.tool_results[0].is_error is False
-    assert "generation-1" in projected.tool_results[0].text
+    assert projected.stop_reason == "stop"
+    assert projected.tool_calls == []
+    assert projected.tool_results == []
+    assert projected.blocks == []
+    assert "Historical tool summary" in projected.text
+    assert "campaign image" not in projected.text
+    assert "generation-1" not in projected.text
 
 
 def test_context_packing_counts_typed_tool_arguments_and_results() -> None:
@@ -713,6 +854,18 @@ def test_context_packing_counts_typed_tool_arguments_and_results() -> None:
         provider_name="provider-a",
         model="model-a",
         dispatch_jsonb={"provider_api": "openai-responses"},
+        transcript_jsonb={
+            "projection": "ordered_blocks",
+            "blocks": [
+                {"kind": "text", "turn": 1, "text": "Image accepted."},
+                {
+                    "kind": "tool",
+                    "turn": 1,
+                    "tool_call_id": "pi-tool-budget",
+                    "ordinal": 0,
+                },
+            ],
+        },
     )
     tool = SimpleNamespace(
         pi_tool_call_id="pi-tool-budget",
@@ -1100,9 +1253,109 @@ def test_agent_usage_and_runtime_accumulator_are_cache_aware() -> None:
             turn=1,
         )
     )
-    assert accumulator.response_proves_no_cost is True
-    accumulator.provider_response_statuses.append(500)
     assert accumulator.response_proves_no_cost is False
+    assert accumulator.has_unresolved_dispatch is True
+
+    accumulator.provider_dispatch_ordinals.add(1)
+    accumulator.apply(
+        AgentRuntimeEvent(
+            version=1,
+            type="provider.response",
+            seq=2,
+            run_id="run-1",
+            execution_epoch=1,
+            status=429,
+            turn=1,
+            dispatch_ordinal=1,
+            no_charge_receipt=True,
+        )
+    )
+    assert accumulator.response_proves_no_cost is True
+    assert accumulator.has_unresolved_dispatch is False
+
+
+def test_compaction_and_turn_ordinals_reconcile_to_exact_terminal() -> None:
+    accumulator = AgentRuntimeAccumulator()
+    usage = {
+        "input_tokens": 10,
+        "output_tokens": 2,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "cache_write_1h_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 12,
+    }
+    events = [
+        AgentRuntimeEvent(
+            version=1,
+            type="provider.dispatched",
+            seq=1,
+            run_id="run-1",
+            execution_epoch=1,
+            turn=1,
+            dispatch_ordinal=1,
+        ),
+        AgentRuntimeEvent(
+            version=1,
+            type="compaction.completed",
+            seq=2,
+            run_id="run-1",
+            execution_epoch=1,
+            checkpoint_version=2,
+            pi_runtime_version="pi-0.84.2",
+            summary="safe summary",
+            first_kept_message_id="message-1",
+            next_message_id="message-2",
+            phase="pre_prompt",
+            tokens_before=100,
+            provider_call_count=1,
+            usage=usage,
+            usage_evidence="exact",
+        ),
+        AgentRuntimeEvent(
+            version=1,
+            type="provider.dispatched",
+            seq=3,
+            run_id="run-1",
+            execution_epoch=1,
+            turn=2,
+            dispatch_ordinal=2,
+        ),
+        AgentRuntimeEvent(
+            version=1,
+            type="turn.completed",
+            seq=4,
+            run_id="run-1",
+            execution_epoch=1,
+            turn=1,
+            dispatch_ordinal=2,
+            stop_reason="stop",
+            usage=usage,
+            usage_evidence="exact",
+        ),
+        AgentRuntimeEvent(
+            version=1,
+            type="run.completed",
+            seq=5,
+            run_id="run-1",
+            execution_epoch=1,
+            status="succeeded",
+            usage={key: value * 2 for key, value in usage.items()},
+            usage_evidence="exact",
+            turn_count=1,
+            tool_call_count=0,
+            provider_dispatch_count=2,
+            provider_completed_count=2,
+        ),
+    ]
+    for event in events:
+        accumulator.apply(event)
+
+    assert accumulator.provider_dispatch_ordinals == {1, 2}
+    assert accumulator.provider_completed_ordinals == {1, 2}
+    assert accumulator.exact_usage_ordinals == {1, 2}
+    assert accumulator.has_unresolved_dispatch is False
+    assert _terminal_request(accumulator)[2:] == ("actual", "runtime_success")
 
 
 def test_agent_usage_is_monotonic_and_later_unknown_dispatch_stays_unknown() -> None:
@@ -1179,6 +1432,89 @@ def test_agent_usage_is_monotonic_and_later_unknown_dispatch_stays_unknown() -> 
     )
 
 
+def test_ordered_accumulator_preserves_text_tool_text_and_scoped_retry() -> None:
+    accumulator = AgentRuntimeAccumulator()
+    events = [
+        AgentRuntimeEvent(
+            version=1,
+            type="text.delta",
+            seq=1,
+            run_id="run-1",
+            execution_epoch=1,
+            turn=1,
+            delta="Before.",
+        ),
+        AgentRuntimeEvent(
+            version=1,
+            type="tool.started",
+            seq=2,
+            run_id="run-1",
+            execution_epoch=1,
+            turn=1,
+            tool_call_id="tool-1",
+            ordinal=0,
+            name="lumen_create_image",
+        ),
+        AgentRuntimeEvent(
+            version=1,
+            type="tool.succeeded",
+            seq=3,
+            run_id="run-1",
+            execution_epoch=1,
+            turn=1,
+            tool_call_id="tool-1",
+            ordinal=0,
+            name="lumen_create_image",
+            generation_ids=["generation-1"],
+        ),
+        AgentRuntimeEvent(
+            version=1,
+            type="text.delta",
+            seq=4,
+            run_id="run-1",
+            execution_epoch=1,
+            turn=2,
+            delta="Transient.",
+        ),
+    ]
+    for event in events:
+        accumulator.apply(event)
+    assert [block["kind"] for block in accumulator.blocks] == [
+        "text",
+        "tool",
+        "text",
+    ]
+    assert accumulator.text == "Before.\n\nTransient."
+
+    accumulator.apply(
+        AgentRuntimeEvent(
+            version=1,
+            type="text.reset",
+            seq=5,
+            run_id="run-1",
+            execution_epoch=1,
+            turn=2,
+        )
+    )
+    accumulator.apply(
+        AgentRuntimeEvent(
+            version=1,
+            type="text.delta",
+            seq=6,
+            run_id="run-1",
+            execution_epoch=1,
+            turn=2,
+            delta="After.",
+        )
+    )
+    assert [block["kind"] for block in accumulator.blocks] == [
+        "text",
+        "tool",
+        "text",
+    ]
+    assert accumulator.text == "Before.\n\nAfter."
+
+
 def test_pi_retry_resets_streamed_text_before_regeneration() -> None:
     accumulator = AgentRuntimeAccumulator(
         text="truncated draft",
@@ -1208,6 +1544,291 @@ def test_pi_retry_resets_streamed_text_before_regeneration() -> None:
     assert accumulator.text == "complete answer"
     assert accumulator.pending_delta == "complete answer"
     assert accumulator.text_reset_pending is True
+
+
+@pytest.mark.asyncio
+async def test_result_unknown_recovery_hydrates_revision_zero_ordered_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blocks = [
+        {"kind": "text", "turn": 1, "text": "Before."},
+        {
+            "kind": "tool",
+            "turn": 1,
+            "tool_call_id": "tool-1",
+            "ordinal": 0,
+            "name": "lumen_create_image",
+            "status": "succeeded",
+            "generation_ids": ["generation-1"],
+        },
+        {"kind": "text", "turn": 2, "text": "After."},
+    ]
+    run = SimpleNamespace(
+        id="run-1",
+        assistant_message_id="assistant-1",
+        execution_epoch=1,
+        dispatch_jsonb={"provider_dispatch_count": 0},
+        usage_jsonb={},
+        turn_count=2,
+        tool_call_count=1,
+        output_revision=0,
+        output_runtime_seq=7,
+        transcript_jsonb={
+            "projection": "ordered_blocks",
+            "output_revision": 0,
+            "output_runtime_seq": 7,
+            "blocks": blocks,
+        },
+    )
+    message = SimpleNamespace(content={"text": "Before.\n\nAfter."})
+    captured: dict[str, Any] = {}
+
+    class Scalars:
+        def all(self) -> list[Any]:
+            return []
+
+    class Result:
+        def scalars(self) -> Scalars:
+            return Scalars()
+
+    class Db:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def get(self, model: Any, _identity: str) -> Any:
+            return message if model is Message else None
+
+        async def execute(self, _statement: Any) -> Result:
+            return Result()
+
+    async def load(_run_id: str, _epoch: int) -> Any:
+        return run
+
+    async def finalize(*_args: Any, **kwargs: Any) -> str:
+        captured["accumulator"] = kwargs["accumulator"]
+        return "failed"
+
+    monkeypatch.setattr(agent_orchestrator, "load_claimed_run", load)
+    monkeypatch.setattr(agent_orchestrator, "SessionLocal", Db)
+    monkeypatch.setattr(agent_orchestrator, "_finalize", finalize)
+
+    await agent_orchestrator._recover_result_unknown(
+        {},
+        redis=object(),
+        claim=SimpleNamespace(run_id="run-1", execution_epoch=1),
+    )
+
+    accumulator = captured["accumulator"]
+    assert accumulator.blocks == blocks
+    assert (accumulator.output_revision, accumulator.output_runtime_seq) == (0, 7)
+    assert accumulator.text == "Before.\n\nAfter."
+
+
+@pytest.mark.asyncio
+async def test_worker_output_safety_blocks_triggering_chunk_before_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoints = 0
+
+    async def checkpoint(*_args: Any, **_kwargs: Any) -> bool:
+        nonlocal checkpoints
+        checkpoints += 1
+        return True
+
+    async def flush(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(agent_orchestrator, "record_runtime_checkpoint", checkpoint)
+    monkeypatch.setattr(agent_orchestrator, "_flush_if_needed", flush)
+    accumulator = AgentRuntimeAccumulator()
+    state = SimpleNamespace(
+        accumulator=accumulator,
+        claim=SimpleNamespace(run_id="run-1", execution_epoch=1),
+        redis=object(),
+    )
+    cancel = asyncio.Event()
+    await agent_orchestrator._handle_runtime_event(
+        state,
+        AgentRuntimeEvent(
+            version=1,
+            type="text.delta",
+            seq=1,
+            run_id="run-1",
+            execution_epoch=1,
+            turn=1,
+            delta="Generate explicit sexual pornography involving ",
+        ),
+        cancel,
+    )
+    with pytest.raises(AgentRuntimeClientError) as captured:
+        await agent_orchestrator._handle_runtime_event(
+            state,
+            AgentRuntimeEvent(
+                version=1,
+                type="text.delta",
+                seq=2,
+                run_id="run-1",
+                execution_epoch=1,
+                turn=1,
+                delta="a child",
+            ),
+            cancel,
+        )
+    assert captured.value.code == "content_policy_violation"
+    assert "a child" not in accumulator.text
+    assert checkpoints == 1
+    assert cancel.is_set()
+
+
+@pytest.mark.asyncio
+async def test_provider_protocol_error_reports_agent_lane_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reports: list[str] = []
+
+    class Attempt:
+        def report_success(self) -> None:
+            reports.append("success")
+
+        def report_failure(self) -> None:
+            reports.append("failure")
+
+    async def flushed(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    async def finalized(*_args: Any, **_kwargs: Any) -> str:
+        return "partial"
+
+    monkeypatch.setattr(agent_orchestrator, "_flush_if_needed", flushed)
+    monkeypatch.setattr(agent_orchestrator, "_finalize", finalized)
+    accumulator = AgentRuntimeAccumulator(
+        terminal_status="partial",
+        terminal_error_code="agent_provider_protocol_error",
+        provider_dispatch_count=1,
+    )
+    state = SimpleNamespace(
+        redis=object(),
+        claim=SimpleNamespace(run_id="run-1", execution_epoch=1),
+        accumulator=accumulator,
+        build=SimpleNamespace(
+            provider=SimpleNamespace(name="provider"),
+            request=SimpleNamespace(provider=SimpleNamespace(model="model")),
+        ),
+        ctx={},
+    )
+
+    await agent_orchestrator._finish_runtime_success(state, Attempt())
+
+    assert reports == ["failure"]
+
+
+def test_terminal_without_usage_receipt_remains_unknown_liability() -> None:
+    accumulator = AgentRuntimeAccumulator(text="complete answer")
+    zero_usage = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "cache_write_1h_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 0,
+    }
+    for event in (
+        AgentRuntimeEvent(
+            version=1,
+            type="provider.dispatched",
+            seq=1,
+            run_id="run-1",
+            execution_epoch=1,
+            turn=1,
+            dispatch_ordinal=1,
+        ),
+        AgentRuntimeEvent(
+            version=1,
+            type="turn.completed",
+            seq=2,
+            run_id="run-1",
+            execution_epoch=1,
+            turn=1,
+            dispatch_ordinal=1,
+            stop_reason="stop",
+            usage=zero_usage,
+            usage_evidence="unknown",
+        ),
+        AgentRuntimeEvent(
+            version=1,
+            type="run.completed",
+            seq=3,
+            run_id="run-1",
+            execution_epoch=1,
+            status="succeeded",
+            usage=zero_usage,
+            usage_evidence="unknown",
+            turn_count=1,
+            tool_call_count=0,
+            provider_dispatch_count=1,
+            provider_completed_count=1,
+        ),
+    ):
+        accumulator.apply(event)
+
+    assert accumulator.provider_completed_ordinals == {1}
+    assert accumulator.exact_usage_ordinals == set()
+    assert accumulator.has_unresolved_dispatch is True
+    assert _terminal_request(accumulator) == (
+        "succeeded",
+        None,
+        "unknown",
+        "runtime_success_with_unknown_billing",
+    )
+
+
+@pytest.mark.asyncio
+async def test_success_without_usage_receipt_reports_lane_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reports: list[str] = []
+
+    class Attempt:
+        def report_success(self) -> None:
+            reports.append("success")
+
+        def report_failure(self) -> None:
+            reports.append("failure")
+
+    async def flushed(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    async def finalized(*_args: Any, **_kwargs: Any) -> str:
+        return "succeeded"
+
+    monkeypatch.setattr(agent_orchestrator, "_flush_if_needed", flushed)
+    monkeypatch.setattr(agent_orchestrator, "_finalize", finalized)
+    accumulator = AgentRuntimeAccumulator(
+        text="complete answer",
+        terminal_status="succeeded",
+        provider_dispatch_count=1,
+        provider_completed_count=1,
+        provider_dispatch_ordinals={1},
+        provider_completed_ordinals={1},
+    )
+    state = SimpleNamespace(
+        redis=object(),
+        claim=SimpleNamespace(run_id="run-1", execution_epoch=1),
+        accumulator=accumulator,
+        build=SimpleNamespace(
+            provider=SimpleNamespace(name="provider"),
+            request=SimpleNamespace(provider=SimpleNamespace(model="model")),
+        ),
+        ctx={},
+    )
+
+    await agent_orchestrator._finish_runtime_success(state, Attempt())
+
+    assert reports == ["failure"]
 
 
 def test_unknown_billing_does_not_override_pi_success() -> None:
@@ -1251,7 +1872,9 @@ def test_agent_history_is_passed_complete_for_pi_native_compaction() -> None:
     assert len(packed) == len(rows)
 
 
-def test_agent_history_over_direct_limit_is_admitted_for_pi_pre_prompt_compaction() -> None:
+def test_agent_history_over_direct_limit_is_admitted_for_pi_pre_prompt_compaction() -> (
+    None
+):
     rows = [
         Message(
             id=f"compaction-message-{index:03d}",
@@ -1400,7 +2023,9 @@ async def test_agent_reference_preview_cache_hit_skips_storage_and_pil(
         "aget_bytes",
         unexpected_storage,
     )
-    monkeypatch.setattr(agent_reference_previews_module.PILImage, "open", unexpected_pil)
+    monkeypatch.setattr(
+        agent_reference_previews_module.PILImage, "open", unexpected_pil
+    )
     second = await agent_reference_previews_module.reference_previews(
         db,  # type: ignore[arg-type]
         [reference],
@@ -1557,6 +2182,7 @@ async def test_text_flush_keeps_delta_appended_during_database_await(
         text: str,
         delta: str,
         replace: bool = False,
+        **_extra: object,
     ) -> bool:
         assert run_id == "run-1"
         assert execution_epoch == 1

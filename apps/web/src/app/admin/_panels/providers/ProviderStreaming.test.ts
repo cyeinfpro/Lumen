@@ -28,6 +28,7 @@ const provider: ProviderItemOut = {
   responses_supported: true,
   vision_supported: true,
   agent_api: "anthropic-messages",
+  agent_base_url: "https://agent.flux.example",
   agent_context_window: 200_000,
   agent_max_output_tokens: 8192,
   agent_reasoning_supported: false,
@@ -42,6 +43,10 @@ test("provider drafts preserve streaming and default it off", () => {
   strictEqual(emptyDraft().image_streaming_enabled, false);
   strictEqual(toDraft(provider).vision_supported, true);
   strictEqual(providerOutToIn(provider).agent_api, "anthropic-messages");
+  strictEqual(
+    providerOutToIn(provider).agent_base_url,
+    "https://agent.flux.example",
+  );
   strictEqual(providerOutToIn(provider).agent_context_window, 200_000);
   strictEqual(providerOutToIn(provider).agent_reasoning_supported, false);
   strictEqual(providerOutToIn(provider).agent_thinking_level_map?.max, "high");
@@ -60,6 +65,10 @@ test("provider save payload and editor expose image streaming", () => {
     new URL("./agentCapabilities.tsx", import.meta.url),
     "utf8",
   );
+  const discoverySource = readFileSync(
+    new URL("./useProviderModelDiscovery.ts", import.meta.url),
+    "utf8",
+  );
 
   match(
     stateSource,
@@ -68,6 +77,8 @@ test("provider save payload and editor expose image streaming", () => {
   match(editorSource, /label="流式生图"/);
   match(agentCapabilitiesSource, /label="图片输入"/);
   match(stateSource, /agent_thinking_level_map/);
+  match(discoverySource, /"agent_base_url"/);
+  match(discoverySource, /agent_base_url: \(draft\.agent_base_url/);
   match(
     editorSource,
     /支持 Images API stream，最终图片事件到达后立即结束等待。/,

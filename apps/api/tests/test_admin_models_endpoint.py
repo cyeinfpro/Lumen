@@ -94,7 +94,7 @@ async def test_build_models_response_dedupes_and_keeps_provider_errors(
 
 
 @pytest.mark.asyncio
-async def test_build_models_response_skips_endpoint_locked_providers(
+async def test_build_models_response_ignores_image_endpoint_locks_for_agent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_read_providers(_db: object) -> tuple[str, str]:
@@ -111,9 +111,9 @@ async def test_build_models_response_skips_endpoint_locked_providers(
 
     out = await admin_models._build_models_response(object())  # type: ignore[arg-type]
 
-    assert fetched == ["unlocked"]
+    assert fetched == ["image2-only", "responses-only", "unlocked"]
     assert [(model.id, model.providers) for model in out.models] == [
-        ("gpt-5.5", ["unlocked"]),
+        ("gpt-5.5", ["image2-only", "responses-only", "unlocked"]),
     ]
 
 
@@ -247,4 +247,21 @@ async def test_discover_models_reuses_saved_key_only_for_unchanged_url(
         object(),  # type: ignore[arg-type]
     )
     assert changed.models == []
-    assert changed.error == "API key is required to discover models"
+    assert changed.error == "API key is required when the Agent connection changes"
+
+    changed_agent_base = await admin_models.discover_provider_models(
+        AdminProviderModelsDiscoverIn(
+            provider_name="main",
+            base_url="https://main.example/v1",
+            agent_base_url="https://attacker.example/v1",
+            api_key="",
+            agent_api="openai-responses",
+        ),
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+    )
+    assert changed_agent_base.models == []
+    assert changed_agent_base.error == (
+        "API key is required when the Agent connection changes"
+    )
+    assert captured["api_key"] == "sk-main"

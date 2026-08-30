@@ -14,16 +14,18 @@ import httpx
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core.agent_provider_contract import (
+    agent_endpoint_contract,
+    agent_probe_headers,
+    parse_agent_probe_sse,
+)
 from lumen_core.byok import (
     BYOK_DEFAULT_PENDING_TOKEN_TTL_SECONDS,
     BYOK_DEFAULT_VALIDATION_MODEL,
     BYOK_DEFAULT_VALIDATION_TIMEOUT_MS,
     answer_matches_expected,
     api_key_hint,
-    build_validation_request,
     encrypt_api_key,
-    extract_response_output_text,
-    extract_sse_output_text,
     generate_arithmetic_challenge,
     hash_api_key,
     hash_verification_token,
@@ -89,6 +91,8 @@ class SupplierValidationTarget:
     base_url: str
     validation_model: str | None
     validation_timeout_ms: int | None
+    default_chat_model: str | None = None
+    capabilities_jsonb: dict[str, Any] | None = None
 
     @classmethod
     def from_supplier(cls, supplier: ApiSupplierTemplate) -> SupplierValidationTarget:
@@ -101,6 +105,12 @@ class SupplierValidationTarget:
                 int(getattr(supplier, "validation_timeout_ms"))
                 if getattr(supplier, "validation_timeout_ms", None) is not None
                 else None
+            ),
+            default_chat_model=(
+                str(getattr(supplier, "default_chat_model", "") or "") or None
+            ),
+            capabilities_jsonb=(
+                dict(getattr(supplier, "capabilities_jsonb", {}) or {})
             ),
         )
 
@@ -369,11 +379,32 @@ def supplier_to_public_out(
     )
 
 
-def _responses_url(base_url: str) -> str:
-    base = base_url.strip().rstrip("/")
-    if base.endswith("/v1"):
-        return f"{base}/responses"
-    return f"{base}/v1/responses"
+def _validation_request(api: str, model: str, expression: str) -> dict[str, Any]:
+    instruction = "Return only the final integer. No words or punctuation."
+    prompt = f"Calculate {expression}."
+    if api == "openai-responses":
+        return {
+            "model": model,
+            "instructions": instruction,
+            "input": prompt,
+            "stream": True,
+            "store": False,
+        }
+    if api == "openai-completions":
+        return {
+            "model": model,
+            "messages": [{"role": "user", "content": f"{instruction}\n\n{prompt}"}],
+            "stream": True,
+        }
+    if api == "anthropic-messages":
+        return {
+            "model": model,
+            "system": instruction,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": True,
+            "max_tokens": 16,
+        }
+    raise ValueError("unsupported Agent API")
 
 
 async def resolve_supplier_proxy(
@@ -415,10 +446,23 @@ async def validate_api_key_with_supplier(
             key_hint=None,
             challenge_jsonb={},
         )
+    capabilities = (
+        supplier.capabilities_jsonb
+        if isinstance(supplier.capabilities_jsonb, dict)
+        else {}
+    )
+    agent_api = str(capabilities.get("agent_api") or "openai-responses")
     try:
         base_url = await normalize_base_url(supplier.base_url)
-        target = await resolve_public_http_target(
+        endpoint = agent_endpoint_contract(
             base_url,
+            agent_api,
+            agent_base_url=(
+                str(capabilities.get("agent_base_url") or "").strip() or None
+            ),
+        )
+        target = await resolve_public_http_target(
+            endpoint.sdk_base_url,
             allow_http=is_dev_env(),
             allow_private=is_dev_env(),
             allow_unresolved=is_dev_env(),
@@ -435,13 +479,13 @@ async def validate_api_key_with_supplier(
     challenge = generate_arithmetic_challenge()
     challenge_jsonb = challenge.as_json()
     model = (
-        validation_model or supplier.validation_model or BYOK_DEFAULT_VALIDATION_MODEL
+        validation_model
+        or supplier.validation_model
+        or supplier.default_chat_model
+        or BYOK_DEFAULT_VALIDATION_MODEL
     )
-    body = build_validation_request(challenge, model=model)
-    headers = {
-        "authorization": f"Bearer {key}",
-        "content-type": "application/json",
-    }
+    body = _validation_request(agent_api, model, challenge.expression)
+    headers = agent_probe_headers(agent_api, key)
     proxy_url = await resolve_provider_proxy_url(proxy)
     effective_timeout = max(
         1000,
@@ -464,7 +508,7 @@ async def validate_api_key_with_supplier(
             client_kwargs["transport"] = transport
         async with httpx.AsyncClient(**client_kwargs) as client:
             resp = await client.post(
-                _responses_url(base_url),
+                endpoint.request_url,
                 json=body,
                 headers=headers,
             )
@@ -480,19 +524,19 @@ async def validate_api_key_with_supplier(
                 challenge_jsonb=challenge_jsonb,
             )
         try:
-            payload = resp.json()
-            text = extract_response_output_text(payload)
-        except Exception:  # noqa: BLE001
-            text = extract_sse_output_text(resp.text)
-            if not text:
-                return ValidationOutcome(
-                    ok=False,
-                    error_code="invalid_supplier_response",
-                    http_status=http_status,
-                    latency_ms=latency_ms,
-                    key_hint=api_key_hint(key),
-                    challenge_jsonb=challenge_jsonb,
-                )
+            parsed = parse_agent_probe_sse(agent_api, resp.text)
+            text = parsed.text
+            if not parsed.terminal or not parsed.usage_present:
+                raise ValueError("terminal usage evidence missing")
+        except (TypeError, ValueError):
+            return ValidationOutcome(
+                ok=False,
+                error_code="invalid_supplier_response",
+                http_status=http_status,
+                latency_ms=latency_ms,
+                key_hint=api_key_hint(key),
+                challenge_jsonb=challenge_jsonb,
+            )
         if not answer_matches_expected(text, challenge.expected):
             return ValidationOutcome(
                 ok=False,

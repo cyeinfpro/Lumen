@@ -6,6 +6,7 @@ from typing import Any
 
 from arq.cron import cron
 
+from ..agent_billing_corrections import correct_agent_unknown_charges
 from ..agent_runtime_client import AgentRuntimeClient
 from .agent_run_parts import orchestrate_agent_run, reconcile_agent_runs
 
@@ -27,4 +28,9 @@ cron_jobs = (
 )
 
 
-__all__ = ["cron_jobs", "reconcile_agent_runs", "run_agent"]
+__all__ = [
+    "correct_agent_unknown_charges",
+    "cron_jobs",
+    "reconcile_agent_runs",
+    "run_agent",
+]

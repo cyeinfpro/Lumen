@@ -66,6 +66,22 @@ def provider_supports_route(
     if route == "models":
         return _provider_capability(provider, "responses_supported") is not False
 
+    if route == "agent":
+        api = (
+            provider.get("agent_api")
+            if isinstance(provider, dict)
+            else getattr(provider, "agent_api", None)
+        )
+        if api not in {
+            "openai-responses",
+            "openai-completions",
+            "anthropic-messages",
+        }:
+            return False
+        return api != "openai-responses" or (
+            _provider_capability(provider, "responses_supported") is not False
+        )
+
     if route != "image":
         return _provider_capability(provider, "responses_supported") is not False
 

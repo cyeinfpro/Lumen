@@ -19,7 +19,18 @@ from lumen_core.agent_history import (
     estimate_agent_runtime_history_tokens,
     plan_agent_runtime_context,
 )
+from lumen_core.agent_history_selection import (
+    AGENT_HISTORY_MAX_ENTRIES,
+    AGENT_HISTORY_SCAN_LIMIT,
+    select_agent_history_tail,
+    semantic_agent_message,
+)
 from lumen_core.agent_model_profiles import default_agent_context_window
+from lumen_core.agent_wire_budget import (
+    DEFAULT_AGENT_RUNTIME_MAX_REQUEST_BYTES,
+    encoded_json_bytes,
+    estimate_agent_runtime_request_bytes,
+)
 from lumen_core.context_window import estimate_text_tokens
 from lumen_core.message_content import public_message_content
 from lumen_core.model_entities import (
@@ -33,6 +44,7 @@ from lumen_core.model_entities import (
 )
 from lumen_core.schema_models import AgentMessageCreateIn
 
+from ...config import settings
 from ..message_submission_prompting import (
     TaskCredentialPin,
     resolve_system_prompt_for_message,
@@ -63,6 +75,11 @@ class ExecutionPin:
     reasoning_supported: bool
     context_plan: str = "direct"
     estimated_input_tokens: int = 0
+    history_truncated: bool = False
+    history_first_retained_message_id: str | None = None
+    history_removed_entries: int = 0
+    history_removed_tokens: int = 0
+    estimated_runtime_request_bytes: int = 0
     continuation: ContinuationPlan | None = None
 
 
@@ -211,9 +228,9 @@ async def _history_context_estimate(
             for image in history_images
         }
         for message_id, image_ids in images_by_message.items():
-            tokens_by_message[message_id] = tokens_by_message.get(
-                message_id, 0
-            ) + sum(image_tokens.get(image_id, 0) for image_id in image_ids)
+            tokens_by_message[message_id] = tokens_by_message.get(message_id, 0) + sum(
+                image_tokens.get(image_id, 0) for image_id in image_ids
+            )
     return _HistoryContextEstimate(
         total_tokens=checkpoint_tokens + sum(tokens_by_message.values()),
         largest_entry_tokens=max([checkpoint_tokens, *tokens_by_message.values()]),
@@ -274,6 +291,145 @@ async def _checkpoint_boundary(
     return (boundary.created_at, boundary.id), summary_tokens
 
 
+@dataclass(frozen=True, slots=True)
+class _SubmissionContextEstimate:
+    fixed_input_tokens: int
+    history_tokens: int
+    largest_history_entry_tokens: int
+    estimated_input_tokens: int
+    estimated_runtime_request_bytes: int
+    history_truncated: bool
+    history_first_retained_message_id: str | None
+    history_removed_entries: int
+    history_removed_tokens: int
+
+
+async def _submission_context_estimate(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    conversation: Conversation,
+    prompt: str,
+    system_prompt: str | None,
+    references: tuple[SubmissionReference, ...],
+) -> _SubmissionContextEstimate:
+    history_boundary, checkpoint_tokens = await _checkpoint_boundary(
+        db, conversation=conversation, user_id=user_id
+    )
+    history_statement = (
+        select(Message)
+        .where(
+            Message.conversation_id == conversation.id,
+            Message.deleted_at.is_(None),
+        )
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(AGENT_HISTORY_SCAN_LIMIT + 1)
+    )
+    if history_boundary is not None:
+        history_statement = history_statement.where(
+            or_(
+                Message.created_at > history_boundary[0],
+                and_(
+                    Message.created_at == history_boundary[0],
+                    Message.id >= history_boundary[1],
+                ),
+            )
+        )
+    history_desc = list((await db.execute(history_statement)).scalars().all())
+    scan_truncated = len(history_desc) > AGENT_HISTORY_SCAN_LIMIT
+    history_candidates = list(reversed(history_desc[:AGENT_HISTORY_SCAN_LIMIT]))
+    selection = select_agent_history_tail(
+        history_candidates,
+        item_id=lambda item: item.id,
+        role=lambda item: item.role,
+        semantic=lambda item: semantic_agent_message(
+            role=item.role,
+            content=item.content,
+            status=item.status,
+        ),
+        token_estimate=lambda item: estimate_text_tokens(
+            str(item.content.get("text") or "")
+            if isinstance(item.content, dict)
+            else ""
+        ),
+        max_entries=AGENT_HISTORY_MAX_ENTRIES,
+    )
+    history_rows = list(selection.items)
+    history_estimate = await _history_context_estimate(
+        db,
+        history_rows,
+        checkpoint_tokens=checkpoint_tokens,
+    )
+    image_rows = list(
+        (
+            await db.execute(
+                select(Image).where(
+                    Image.id.in_([reference.image_id for reference in references])
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    reference_tokens = sum(
+        estimate_agent_image_tokens(
+            "unknown", *agent_preview_dimensions(image.width, image.height)
+        ).upper
+        for image in image_rows
+    )
+    fixed_input_tokens = (
+        estimate_text_tokens(system_prompt or "")
+        + estimate_text_tokens(prompt)
+        + reference_tokens
+        + AGENT_PI_CONTEXT_OVERHEAD_TOKENS
+    )
+    history_contents = [
+        public_message_content(item.content if isinstance(item.content, dict) else {})
+        for item in history_rows
+    ]
+    historical_reference_count = sum(
+        len(content.get("attachments", []))
+        for content in history_contents
+        if isinstance(content.get("attachments"), list)
+    )
+    wire_budget = estimate_agent_runtime_request_bytes(
+        system_prompt=system_prompt or "",
+        current_prompt=prompt,
+        history_texts=(str(content.get("text") or "") for content in history_contents),
+        history_structured_bytes=sum(
+            encoded_json_bytes(content) for content in history_contents
+        ),
+        current_reference_count=len(references),
+        historical_reference_count=historical_reference_count,
+        maximum_bytes=int(
+            getattr(
+                settings,
+                "agent_runtime_max_request_bytes",
+                DEFAULT_AGENT_RUNTIME_MAX_REQUEST_BYTES,
+            )
+        ),
+    )
+    if not wire_budget.admitted:
+        raise http_error(
+            "agent_runtime_request_too_large",
+            "Agent request exceeds the Runtime transport limit",
+            413,
+            estimated_bytes=wire_budget.estimated_bytes,
+            maximum_bytes=wire_budget.maximum_bytes,
+        )
+    return _SubmissionContextEstimate(
+        fixed_input_tokens=fixed_input_tokens,
+        history_tokens=history_estimate.total_tokens,
+        largest_history_entry_tokens=history_estimate.largest_entry_tokens,
+        estimated_input_tokens=fixed_input_tokens + history_estimate.total_tokens,
+        estimated_runtime_request_bytes=wire_budget.estimated_bytes,
+        history_truncated=scan_truncated or selection.truncated,
+        history_first_retained_message_id=selection.first_retained_id,
+        history_removed_entries=selection.removed_entries + int(scan_truncated),
+        history_removed_tokens=selection.removed_tokens,
+    )
+
+
 async def resolve_execution_pin(
     db: AsyncSession,
     *,
@@ -295,66 +451,14 @@ async def resolve_execution_pin(
         conv=conversation,
         explicit_prompt=None,
     )
-    history_boundary, checkpoint_tokens = await _checkpoint_boundary(
-        db, conversation=conversation, user_id=user_id
-    )
-    history_statement = (
-        select(Message)
-        .where(
-            Message.conversation_id == conversation.id,
-            Message.deleted_at.is_(None),
-        )
-        .order_by(Message.created_at.asc(), Message.id.asc())
-        .limit(2049)
-    )
-    if history_boundary is not None:
-        history_statement = history_statement.where(
-            or_(
-                Message.created_at > history_boundary[0],
-                and_(
-                    Message.created_at == history_boundary[0],
-                    Message.id >= history_boundary[1],
-                ),
-            )
-        )
-    history_rows = list((await db.execute(history_statement)).scalars().all())
-    if len(history_rows) > 2048:
-        raise http_error(
-            "agent_history_transport_limit",
-            "Agent history exceeds the Runtime transport limit",
-            412,
-        )
-    history_estimate = await _history_context_estimate(
+    context = await _submission_context_estimate(
         db,
-        history_rows,
-        checkpoint_tokens=checkpoint_tokens,
+        user_id=user_id,
+        conversation=conversation,
+        prompt=body.text,
+        system_prompt=system_prompt,
+        references=references,
     )
-    history_tokens = history_estimate.total_tokens
-    largest_history_entry_tokens = history_estimate.largest_entry_tokens
-    image_rows = list(
-        (
-            await db.execute(
-                select(Image).where(
-                    Image.id.in_([reference.image_id for reference in references])
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    reference_tokens = sum(
-        estimate_agent_image_tokens(
-            "unknown", *agent_preview_dimensions(image.width, image.height)
-        ).upper
-        for image in image_rows
-    )
-    fixed_input_tokens = (
-        estimate_text_tokens(system_prompt or "")
-        + estimate_text_tokens(body.text)
-        + reference_tokens
-        + AGENT_PI_CONTEXT_OVERHEAD_TOKENS
-    )
-    estimated_input_tokens = fixed_input_tokens + history_tokens
     context_plan = "direct"
     if account_mode == "byok":
         credential = await resolve_task_credential_pin(
@@ -395,9 +499,9 @@ async def resolve_execution_pin(
         plan = plan_agent_runtime_context(
             context_window=context_window,
             max_output_tokens=max_output_tokens,
-            fixed_input_tokens=fixed_input_tokens,
-            history_tokens=history_tokens,
-            largest_history_entry_tokens=largest_history_entry_tokens,
+            fixed_input_tokens=context.fixed_input_tokens,
+            history_tokens=context.history_tokens,
+            largest_history_entry_tokens=context.largest_history_entry_tokens,
         )
         context_plan = plan.mode
         if plan.mode == "impossible":
@@ -405,7 +509,9 @@ async def resolve_execution_pin(
                 "agent_context_window_exceeded",
                 "the active API key cannot compact and carry the session context",
                 412,
-                minimum_context_window=estimated_input_tokens + max_output_tokens,
+                minimum_context_window=(
+                    context.estimated_input_tokens + max_output_tokens
+                ),
                 direct_input_limit=plan.direct_input_limit,
                 compaction_source_limit=plan.compaction_source_limit,
             )
@@ -414,9 +520,9 @@ async def resolve_execution_pin(
             db,
             require_vision=references_required,
             require_reasoning=reasoning_requested,
-            fixed_input_tokens=fixed_input_tokens,
-            history_context_tokens=history_tokens,
-            largest_history_entry_tokens=largest_history_entry_tokens,
+            fixed_input_tokens=context.fixed_input_tokens,
+            history_context_tokens=context.history_tokens,
+            largest_history_entry_tokens=context.largest_history_entry_tokens,
         )
         model = provider.model
         provider_names = provider.eligible_provider_names
@@ -433,7 +539,12 @@ async def resolve_execution_pin(
         max_output_tokens,
         reasoning_supported,
         context_plan,
-        estimated_input_tokens,
+        context.estimated_input_tokens,
+        context.history_truncated,
+        context.history_first_retained_message_id,
+        context.history_removed_entries,
+        context.history_removed_tokens,
+        context.estimated_runtime_request_bytes,
     )
 
 

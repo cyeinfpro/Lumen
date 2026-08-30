@@ -206,6 +206,8 @@ def resolved_image_provider(provider: ProviderConfig) -> ResolvedProvider:
         responses_supported=provider.responses_supported,
         vision_supported=provider.vision_supported,
         agent_api=provider.agent_api,
+        agent_base_url=provider.agent_base_url,
+        agent_models=provider.agent_models,
         agent_context_window=provider.agent_context_window,
         agent_max_output_tokens=provider.agent_max_output_tokens,
         agent_reasoning_supported=provider.agent_reasoning_supported,

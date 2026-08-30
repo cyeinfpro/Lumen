@@ -38,6 +38,15 @@ class AgentRuntimeAccumulator:
     text: str = ""
     pending_delta: str = ""
     text_reset_pending: bool = False
+    force_next_delta: bool = False
+    blocks_dirty: bool = False
+    blocks: list[dict[str, Any]] = field(default_factory=list)
+    output_revision: int = 0
+    output_runtime_seq: int = 0
+    provider_dispatch_ordinals: set[int] = field(default_factory=set)
+    provider_completed_ordinals: set[int] = field(default_factory=set)
+    exact_usage_ordinals: set[int] = field(default_factory=set)
+    no_charge_ordinals: set[int] = field(default_factory=set)
     last_flush_at: float = 0.0
     usage: dict[str, int] = field(
         default_factory=lambda: {
@@ -63,40 +72,109 @@ class AgentRuntimeAccumulator:
 
     def apply(self, event: AgentRuntimeEvent) -> None:
         if event.type == "text.reset":
-            self.text = ""
-            self.pending_delta = ""
-            self.text_reset_pending = True
+            self._apply_text_reset(event)
             return
-        if event.type == "text.delta" and event.delta:
-            self.text += event.delta
-            self.pending_delta += event.delta
+        if event.type == "text.delta":
+            self._apply_text_delta(event)
             return
         if event.type == "provider.dispatched":
             self.provider_dispatch_count += 1
+            ordinal = event.dispatch_ordinal or self.provider_dispatch_count
+            self.provider_dispatch_ordinals.add(ordinal)
             return
         if event.type == "provider.response":
-            raw_status = event.status
-            if isinstance(raw_status, int) and not isinstance(raw_status, bool):
-                self.provider_response_statuses.append(raw_status)
+            self._apply_provider_response(event)
             return
         if event.type == "turn.completed":
             self._apply_turn(event)
             return
         if event.type == "compaction.completed":
-            self.pi_compaction_count += 1
-            self.provider_completed_count += event.provider_call_count or 0
-            self._add_usage(event.usage.model_dump() if event.usage else {})
+            self._apply_compaction(event)
             return
-        if event.type == "tool.started" and event.name == "lumen_create_image":
-            self.runtime_tool_call_count += 1
-            if event.tool_call_id:
-                self.tool_started_at[event.tool_call_id] = time.monotonic()
+        if event.type == "tool.started":
+            self._apply_tool_started(event)
+            return
+        if event.type in {"tool.succeeded", "tool.failed"}:
+            self.blocks_dirty = True
+            self.output_runtime_seq = max(self.output_runtime_seq, event.seq)
+            self._upsert_tool_block(
+                event,
+                "succeeded" if event.type == "tool.succeeded" else "failed",
+            )
             return
         if event.type == "limit.reached":
             self.limit_reason = event.reason
             return
         if event.type in {"run.completed", "run.failed", "run.cancelled"}:
             self._apply_terminal(event)
+
+    def _apply_text_reset(self, event: AgentRuntimeEvent) -> None:
+        reset_turn = event.turn
+        if reset_turn is None:
+            self.blocks.clear()
+        else:
+            self.blocks = [
+                block
+                for block in self.blocks
+                if int(block.get("turn") or 0) < reset_turn
+            ]
+        replacement = event.replacement_text
+        if isinstance(replacement, str) and replacement:
+            self.blocks.append(
+                {
+                    "kind": "text",
+                    "turn": reset_turn or 1,
+                    "text": replacement,
+                }
+            )
+        self.text = self._render_text()
+        self.pending_delta = ""
+        self.text_reset_pending = True
+        self.force_next_delta = True
+        self.output_revision = max(
+            self.output_revision + 1,
+            int(event.output_revision or 0),
+        )
+        self.output_runtime_seq = max(self.output_runtime_seq, event.seq)
+
+    def _apply_text_delta(self, event: AgentRuntimeEvent) -> None:
+        if not event.delta:
+            return
+        turn = event.turn or (self.turn_count + 1)
+        self._append_text(turn, event.delta)
+        self.pending_delta += event.delta
+        self.output_runtime_seq = max(self.output_runtime_seq, event.seq)
+
+    def _apply_provider_response(self, event: AgentRuntimeEvent) -> None:
+        raw_status = event.status
+        ordinal = event.dispatch_ordinal or len(self.provider_response_statuses) + 1
+        if isinstance(raw_status, int) and not isinstance(raw_status, bool):
+            self.provider_response_statuses.append(raw_status)
+            if event.no_charge_receipt is True:
+                self.no_charge_ordinals.add(ordinal)
+
+    def _apply_compaction(self, event: AgentRuntimeEvent) -> None:
+        self.pi_compaction_count += 1
+        call_count = event.provider_call_count or 0
+        covered = sorted(
+            self.provider_dispatch_ordinals
+            - self.provider_completed_ordinals
+            - self.no_charge_ordinals
+        )[:call_count]
+        self.provider_completed_ordinals.update(covered)
+        if event.usage_evidence == "exact":
+            self.exact_usage_ordinals.update(covered)
+        self.provider_completed_count += call_count
+        self._add_usage(event.usage.model_dump() if event.usage else {})
+
+    def _apply_tool_started(self, event: AgentRuntimeEvent) -> None:
+        self.blocks_dirty = True
+        self.output_runtime_seq = max(self.output_runtime_seq, event.seq)
+        if event.name == "lumen_create_image":
+            self.runtime_tool_call_count += 1
+        self._upsert_tool_block(event, "running")
+        if event.tool_call_id:
+            self.tool_started_at[event.tool_call_id] = time.monotonic()
 
     def consume_tool_duration(self, event: AgentRuntimeEvent) -> float | None:
         if not event.tool_call_id:
@@ -109,17 +187,23 @@ class AgentRuntimeAccumulator:
     def _apply_turn(self, event: AgentRuntimeEvent) -> None:
         if event.turn is not None:
             self.turn_count = max(self.turn_count, event.turn)
-        if (
-            event.usage is not None
-            and event.usage.total_tokens > 0
-            and event.stop_reason not in {"error", "aborted"}
-        ):
+        ordinal = event.dispatch_ordinal
+        if ordinal is not None and event.stop_reason not in {"error", "aborted"}:
+            self.provider_completed_ordinals.add(ordinal)
+            if event.usage_evidence == "exact":
+                self.exact_usage_ordinals.add(ordinal)
+        if event.usage is not None and event.stop_reason not in {"error", "aborted"}:
             self.provider_completed_count += 1
         self._add_usage(event.usage.model_dump() if event.usage else {})
 
     def _apply_terminal(self, event: AgentRuntimeEvent) -> None:
         self.terminal_status = str(event.status) if event.status is not None else None
         self.terminal_error_code = event.error_code
+        if event.usage_evidence == "exact":
+            self.provider_completed_ordinals.update(self.provider_dispatch_ordinals)
+            self.exact_usage_ordinals.update(self.provider_dispatch_ordinals)
+        if event.no_charge_receipt is True:
+            self.no_charge_ordinals.update(self.provider_dispatch_ordinals)
         if event.turn_count is not None:
             self.turn_count = max(self.turn_count, event.turn_count)
         if event.tool_call_count is not None:
@@ -162,30 +246,69 @@ class AgentRuntimeAccumulator:
             )
         )
 
+    def _append_text(self, turn: int, value: str) -> None:
+        if (
+            self.blocks
+            and self.blocks[-1].get("kind") == "text"
+            and self.blocks[-1].get("turn") == turn
+        ):
+            self.blocks[-1]["text"] = str(self.blocks[-1].get("text") or "") + value
+        else:
+            self.blocks.append({"kind": "text", "turn": turn, "text": value})
+        self.text = self._render_text()
+
+    def _upsert_tool_block(self, event: AgentRuntimeEvent, status: str) -> None:
+        if not event.tool_call_id:
+            return
+        for block in self.blocks:
+            if (
+                block.get("kind") == "tool"
+                and block.get("tool_call_id") == event.tool_call_id
+            ):
+                block["status"] = status
+                if event.generation_ids:
+                    block["generation_ids"] = list(event.generation_ids)
+                return
+        self.blocks.append(
+            {
+                "kind": "tool",
+                "turn": event.turn or (self.turn_count + 1),
+                "tool_call_id": event.tool_call_id,
+                "ordinal": event.ordinal,
+                "name": event.name,
+                "status": status,
+                "generation_ids": list(event.generation_ids or []),
+            }
+        )
+
+    def _render_text(self) -> str:
+        return "\n\n".join(
+            str(block.get("text") or "")
+            for block in self.blocks
+            if block.get("kind") == "text" and str(block.get("text") or "")
+        )
+
     @property
     def has_exact_usage(self) -> bool:
-        return any(self.usage.get(key, 0) > 0 for key in self.usage)
+        return bool(self.exact_usage_ordinals)
 
     @property
     def response_proves_no_cost(self) -> bool:
-        return (
-            self.provider_dispatch_count > 0
-            and len(self.provider_response_statuses) >= self.provider_dispatch_count
-            and all(
-                status in AGENT_NO_COST_HTTP_STATUSES
-                for status in self.provider_response_statuses
-            )
+        return bool(
+            self.provider_dispatch_ordinals
+            and self.provider_dispatch_ordinals.issubset(self.no_charge_ordinals)
         )
 
     @property
     def has_unresolved_dispatch(self) -> bool:
+        if self.provider_dispatch_ordinals:
+            return bool(
+                self.provider_dispatch_ordinals
+                - self.exact_usage_ordinals
+                - self.no_charge_ordinals
+            )
         pending = self.provider_dispatch_count - self.provider_completed_count
-        if pending <= 0:
-            return False
-        pending_statuses = self.provider_response_statuses[-pending:]
-        return len(pending_statuses) < pending or any(
-            status not in AGENT_NO_COST_HTTP_STATUSES for status in pending_statuses
-        )
+        return pending > 0
 
 
 __all__ = [

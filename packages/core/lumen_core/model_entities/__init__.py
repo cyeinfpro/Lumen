@@ -22,6 +22,7 @@ from .conversations import (
 
 from .agents import (
     AgentCapabilityGrant,
+    AgentProviderCall,
     AgentSession,
     AgentRun,
     AgentRunReference,
@@ -90,6 +91,7 @@ __all__ = [
     "UserMemoryStaging",
     "MemoryAudit",
     "AgentCapabilityGrant",
+    "AgentProviderCall",
     "AgentSession",
     "AgentRun",
     "AgentRunReference",

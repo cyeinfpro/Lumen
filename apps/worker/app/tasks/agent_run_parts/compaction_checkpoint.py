@@ -10,10 +10,15 @@ from lumen_core.model_entities import AgentRun
 from ...agent_runtime_client import AgentRuntimeEvent
 
 
-def checkpoint_provider_dispatched(dispatch: dict[str, Any]) -> None:
+def checkpoint_provider_dispatched(
+    dispatch: dict[str, Any],
+    event: AgentRuntimeEvent,
+) -> None:
     dispatch["runtime_delivery"] = "provider_dispatched"
-    dispatch["provider_dispatch_count"] = (
-        int(dispatch.get("provider_dispatch_count") or 0) + 1
+    ordinal = event.dispatch_ordinal or event.turn or 0
+    dispatch["provider_dispatch_count"] = max(
+        int(dispatch.get("provider_dispatch_count") or 0),
+        ordinal,
     )
 
 
@@ -29,7 +34,21 @@ def checkpoint_provider_response(
     ]
     if isinstance(event.status, int) and not isinstance(event.status, bool):
         statuses.append(event.status)
-    dispatch["provider_response_statuses"] = statuses[-16:]
+    dispatch["provider_response_statuses"] = statuses[-128:]
+    response_evidence = [
+        value
+        for value in dispatch.get("provider_response_evidence", [])
+        if isinstance(value, dict)
+    ]
+    response_evidence.append(
+        {
+            "ordinal": event.dispatch_ordinal or event.turn,
+            "status": event.status,
+            "no_charge_receipt": event.no_charge_receipt is True,
+            "event_seq": event.seq,
+        }
+    )
+    dispatch["provider_response_evidence"] = response_evidence[-128:]
 
 
 def build_pi_compaction_checkpoint(

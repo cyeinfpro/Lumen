@@ -26,6 +26,7 @@ function generation(
     status,
     stage: "queued",
     attempt: 0,
+    execution_epoch: 0,
     started_at: createdAt,
     created_at: createdAt,
   };
@@ -72,6 +73,48 @@ test("Agent refreshes run as one in-flight request plus one trailing pass", asyn
   release?.();
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(calls, 2);
+});
+
+test("a successful trailing refresh supersedes an older failed pass", async () => {
+  const coordinator = new AgentRefreshCoordinator();
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let calls = 0;
+  const first = coordinator.request(async () => {
+    calls += 1;
+    await gate;
+    throw new Error("stale first pass");
+  });
+  coordinator.request(async () => {
+    calls += 1;
+  });
+  release?.();
+  await first;
+  assert.equal(calls, 2);
+});
+
+test("new generation epochs permit terminal to queued retry transitions", () => {
+  const failed = {
+    ...generation("generation-retry", "failed", 1),
+    execution_epoch: 1,
+    attempt: 3,
+    error_code: "failed",
+  };
+  const queued = {
+    ...generation("generation-retry", "queued", 2),
+    execution_epoch: 2,
+    attempt: 0,
+  };
+  const merged = mergeAgentGeneration(failed, queued);
+  assert.equal(merged.status, "queued");
+  assert.equal(merged.execution_epoch, 2);
+  assert.equal(merged.error_code, undefined);
+  assert.equal(
+    mergeAgentGeneration(merged, { ...failed, status: "running" }).status,
+    "queued",
+  );
 });
 
 test("stale running generation snapshots cannot regress terminal state", () => {

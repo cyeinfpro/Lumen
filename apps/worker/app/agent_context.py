@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal, cast
 from urllib.parse import urlsplit
@@ -20,6 +20,13 @@ from lumen_core.agent_capability import (
     new_agent_capability_nonce,
 )
 from lumen_core.agent_events import AGENT_TOOL_CREATE_IMAGE
+from lumen_core.agent_history_selection import (
+    AGENT_HISTORY_MAX_ENTRIES,
+    AGENT_HISTORY_SCAN_LIMIT,
+    select_agent_history_tail,
+    semantic_agent_message,
+)
+from lumen_core.context_window import estimate_text_tokens
 from lumen_core.model_base import new_uuid7
 from lumen_core.model_entities import (
     AgentRun,
@@ -52,6 +59,7 @@ from .agent_runtime_client import (
     AgentRuntimeReference,
     AgentRuntimeRequest,
     AgentRuntimeSafetyBudget,
+    runtime_request_body,
 )
 from .byok_runtime import resolve_user_credential_runtime
 from .config import settings
@@ -65,7 +73,6 @@ from .provider_runtime.errors import UpstreamError
 
 logger = logging.getLogger(__name__)
 
-_HISTORY_FETCH_LIMIT = 2048
 _SYSTEM_PROMPT_LIMIT = 65_536
 _AGENT_APIS = frozenset(
     {"openai-responses", "openai-completions", "anthropic-messages"}
@@ -88,6 +95,8 @@ class AgentContextBuild:
     memory_state: Literal["disabled", "empty", "ready", "degraded"]
     pi_compaction_restored: bool
     pi_compaction_degraded: bool
+    history_plan: dict[str, Any] = field(default_factory=dict)
+    wire_plan: dict[str, Any] = field(default_factory=dict)
 
 
 def _snapshot_dict(run: AgentRun, key: str) -> dict[str, Any]:
@@ -170,10 +179,9 @@ async def resolve_agent_chat_provider(
         return None, provider
 
     pool = await get_pool()
-    candidates = await pool.select(
-        route="text",
+    candidates = await pool.select_agent(
+        model=run.model or "",
         purpose="chat",
-        endpoint_kind="responses",
     )
     eligible_names = _eligible_provider_names(run)
     references_required = bool(_snapshot_list(run, "references"))
@@ -226,7 +234,11 @@ async def provider_envelope(
         "lumen-" + hashlib.sha256(provider.name.encode("utf-8")).hexdigest()[:20]
     )
     proxy_url = await _provider_proxy_url(provider)
-    pinned_target = getattr(provider, "_byok_http_target", None)
+    pinned_target = getattr(
+        provider,
+        "_byok_agent_http_target",
+        getattr(provider, "_byok_http_target", None),
+    )
     resolved_ips = (
         list(getattr(pinned_target, "resolved_ips", ()) or ())[:4]
         if proxy_url is None
@@ -235,7 +247,7 @@ async def provider_envelope(
     return AgentRuntimeProviderEnvelope(
         provider_id=provider_id,
         api=cast(Any, _safe_agent_api(provider)),
-        base_url=provider.base_url,
+        base_url=getattr(provider, "agent_base_url", "") or provider.base_url,
         api_key=provider.api_key,
         headers={},
         proxy_url=proxy_url,
@@ -366,7 +378,7 @@ async def _history_rows(
     conversation: Conversation,
     current_user: Message,
     first_kept_message_id: str | None,
-) -> tuple[list[Message], bool]:
+) -> tuple[list[Message], bool, dict[str, Any]]:
     before_current = or_(
         Message.created_at < current_user.created_at,
         and_(
@@ -402,21 +414,52 @@ async def _history_rows(
                 )
             )
             boundary_applied = True
-    rows = list(
+    rows_desc = list(
         (
             await db.execute(
                 select(Message)
                 .where(*conditions)
-                .order_by(Message.created_at.asc(), Message.id.asc())
-                .limit(_HISTORY_FETCH_LIMIT + 1)
+                .order_by(Message.created_at.desc(), Message.id.desc())
+                .limit(AGENT_HISTORY_SCAN_LIMIT + 1)
             )
         )
         .scalars()
         .all()
     )
-    if len(rows) > _HISTORY_FETCH_LIMIT:
-        raise AgentContextError("agent_history_transport_limit")
-    return rows, boundary_applied
+    scan_truncated = len(rows_desc) > AGENT_HISTORY_SCAN_LIMIT
+    candidates = list(reversed(rows_desc[:AGENT_HISTORY_SCAN_LIMIT]))
+    selection = select_agent_history_tail(
+        candidates,
+        item_id=lambda item: item.id,
+        role=lambda item: item.role,
+        semantic=lambda item: semantic_agent_message(
+            role=item.role,
+            content=item.content,
+            status=item.status,
+        ),
+        token_estimate=lambda item: estimate_text_tokens(
+            str(item.content.get("text") or "")
+            if isinstance(item.content, dict)
+            else ""
+        ),
+        max_entries=AGENT_HISTORY_MAX_ENTRIES,
+    )
+    rows = list(selection.items)
+    if first_kept_message_id and first_kept_message_id not in {row.id for row in rows}:
+        boundary_applied = False
+    return (
+        rows,
+        boundary_applied,
+        {
+            "version": 1,
+            "history_truncated": scan_truncated or selection.truncated,
+            "first_retained_message_id": selection.first_retained_id,
+            "removed_entries": selection.removed_entries + int(scan_truncated),
+            "removed_tokens": selection.removed_tokens,
+            "retained_entries": len(rows),
+            "retained_tokens": selection.retained_tokens,
+        },
+    )
 
 
 def _base_system_prompt(
@@ -626,13 +669,71 @@ async def _provider_dispatch_capability(
     )
 
 
-async def build_agent_context(
+def _history_units(history: list[Any]) -> list[list[Any]]:
+    units: list[list[Any]] = []
+    for item in history:
+        if item.role == "user" or not units:
+            units.append([item])
+        else:
+            units[-1].append(item)
+    return units
+
+
+def _fit_runtime_request(request: AgentRuntimeRequest) -> dict[str, Any]:
+    maximum = settings.agent_runtime_max_request_bytes
+    initial_bytes = len(runtime_request_body(request))
+    degraded_images = 0
+    removed_entries = 0
+    if initial_bytes > maximum:
+        for item in request.history:
+            if not item.images:
+                continue
+            degraded_images += len(item.images)
+            item.images = []
+            omission = "\n[Historical image binary omitted to fit the Runtime transport budget.]"
+            item.text = f"{item.text}{omission}"[:20_000]
+            if len(runtime_request_body(request)) <= maximum:
+                break
+    while len(runtime_request_body(request)) > maximum and request.history:
+        units = _history_units(request.history)
+        if not units:
+            break
+        removed_entries += len(units[0])
+        request.history = [item for unit in units[1:] for item in unit]
+        if (
+            request.compaction is not None
+            and request.compaction.first_kept_message_id
+            not in {item.message_id for item in request.history}
+        ):
+            request.compaction = None
+    final_bytes = len(runtime_request_body(request))
+    if final_bytes > maximum:
+        raise AgentContextError("agent_runtime_request_too_large")
+    return {
+        "version": 1,
+        "maximum_bytes": maximum,
+        "initial_bytes": initial_bytes,
+        "final_bytes": final_bytes,
+        "degraded_historical_images": degraded_images,
+        "removed_history_entries": removed_entries,
+        "mandatory_current_references": len(request.references),
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class _AgentContextSource:
+    conversation: Conversation
+    current_user: Message
+    history_anchor: Message
+    operation: Literal["prompt", "continue"]
+    request_version: Literal[2, 3, 4]
+    had_compaction_pointer: bool
+
+
+async def _agent_context_source(
     db: AsyncSession,
-    *,
     run: AgentRun,
-    provider: ResolvedProvider,
-    redis: Any,
-) -> AgentContextBuild:
+) -> _AgentContextSource:
     row = (
         await db.execute(
             select(AgentSession, Conversation)
@@ -648,7 +749,6 @@ async def build_agent_context(
     if row is None:
         raise AgentContextError("agent_snapshot_incomplete")
     agent_session, conversation = row
-    had_compaction_pointer = bool(agent_session.active_pi_compaction_run_id)
     current_user = await db.get(Message, run.user_message_id)
     if (
         current_user is None
@@ -663,8 +763,12 @@ async def build_agent_context(
         if isinstance(run.request_snapshot_jsonb, dict)
         else {}
     )
-    request_version: Literal[2, 3] = (
-        3 if raw_snapshot.get("runtime_request_version") == 3 else 2
+    request_version: Literal[2, 3, 4] = (
+        4
+        if raw_snapshot.get("runtime_request_version") == 4
+        else 3
+        if raw_snapshot.get("runtime_request_version") == 3
+        else 2
     )
     if run.continuation_source_run_id or raw_snapshot.get("operation") == "continue":
         source_id = run.continuation_source_run_id or raw_snapshot.get(
@@ -689,6 +793,29 @@ async def build_agent_context(
             raise AgentContextError("agent_continuation_unavailable")
         operation = "continue"
         current_user = source_user
+    return _AgentContextSource(
+        conversation=conversation,
+        current_user=current_user,
+        history_anchor=history_anchor,
+        operation=operation,
+        request_version=request_version,
+        had_compaction_pointer=bool(agent_session.active_pi_compaction_run_id),
+    )
+
+
+async def build_agent_context(
+    db: AsyncSession,
+    *,
+    run: AgentRun,
+    provider: ResolvedProvider,
+    redis: Any,
+) -> AgentContextBuild:
+    source = await _agent_context_source(db, run)
+    conversation = source.conversation
+    current_user = source.current_user
+    history_anchor = source.history_anchor
+    operation = source.operation
+    request_version = source.request_version
     reference_rows = list(
         (
             await db.execute(
@@ -739,7 +866,7 @@ async def build_agent_context(
     )
     tool_policy = _runtime_tool_policy(run)
     compaction = await _pi_compaction(db, run)
-    history_rows, compaction_boundary_applied = await _history_rows(
+    history_rows, compaction_boundary_applied, history_plan = await _history_rows(
         db,
         conversation=conversation,
         current_user=history_anchor,
@@ -807,15 +934,21 @@ async def build_agent_context(
         provider_dispatch_url=dispatch_url,
         provider_dispatch_capability=dispatch_capability,
         safety_budget=safety_budget,
-        operation=operation if request_version == 3 else None,
+        operation=operation if request_version >= 3 else None,
         tool_receipt_version=(
             2
             if tools
-            and request_version == 3
+            and request_version >= 3
             and _snapshot_dict(run, "tool_receipt").get("version") == 2
             else None
         ),
     )
+    wire_plan = _fit_runtime_request(request)
+    history_plan = {
+        **history_plan,
+        "wire_removed_entries": wire_plan["removed_history_entries"],
+        "wire_degraded_historical_images": wire_plan["degraded_historical_images"],
+    }
     return AgentContextBuild(
         request=request,
         provider=provider,
@@ -823,8 +956,12 @@ async def build_agent_context(
         used_memory_ids=tuple(used_ids),
         used_memory_summary=tuple(used_summary),
         memory_state=memory_state,
-        pi_compaction_restored=compaction is not None,
-        pi_compaction_degraded=had_compaction_pointer and compaction is None,
+        pi_compaction_restored=request.compaction is not None,
+        pi_compaction_degraded=(
+            source.had_compaction_pointer and request.compaction is None
+        ),
+        history_plan=history_plan,
+        wire_plan=wire_plan,
     )
 
 

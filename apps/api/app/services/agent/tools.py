@@ -11,6 +11,10 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.agent_capability import AgentCapabilityClaims
+from lumen_core.agent_content_safety import (
+    AgentContentSafetyViolation,
+    require_agent_content_safe,
+)
 from lumen_core.agent_dispatch import mark_provider_dispatch_authorized
 from lumen_core.agent_events import (
     AGENT_TOOL_CREATE_IMAGE,
@@ -22,6 +26,7 @@ from lumen_core.agent_events import (
 from lumen_core.constants import Intent
 from lumen_core.model_entities import (
     AgentCapabilityGrant,
+    AgentProviderCall,
     AgentRun,
     AgentRunReference,
     AgentSession,
@@ -321,6 +326,14 @@ async def _prepare_create_image_tool(
         _snapshot_dict(run, "image_defaults")
     )
     normalized = normalize_create_image_arguments(body.arguments, defaults)
+    try:
+        require_agent_content_safe(normalized.prompt)
+    except AgentContentSafetyViolation as exc:
+        raise http_error(
+            exc.code,
+            "The request cannot be processed under the content policy",
+            400,
+        ) from exc
     request_hash, semantic_key = agent_tool_semantic_key(
         run.id, body.ordinal, normalized
     )
@@ -786,6 +799,18 @@ async def authorize_provider_dispatch(
     mark_provider_dispatch_authorized(dispatch, body.dispatch_ordinal)
     run.dispatch_jsonb = dispatch
     permit_id = f"{grant.capability_id}:{body.dispatch_ordinal}"
+    db.add(
+        AgentProviderCall(
+            agent_run_id=run.id,
+            execution_epoch=run.execution_epoch,
+            dispatch_ordinal=body.dispatch_ordinal,
+            permit_id=permit_id,
+            delivery_state="authorized",
+            result_state="pending",
+            exact_usage_jsonb={},
+            evidence_event_seq=0,
+        )
+    )
     await db.commit()
     return AgentProviderDispatchOut(
         permit_id=permit_id,

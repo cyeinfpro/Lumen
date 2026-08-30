@@ -251,7 +251,8 @@ SUPPORTED_SETTINGS: tuple[SettingSpec, ...] = (
         key="providers.auto_probe_interval",
         description=(
             "文本算术 probe 间隔（秒）。0 = 关闭自动探活。默认 120。"
-            "探活内容：让 gpt-5.4-mini 算 99×99，必须答 9801 才算 healthy。"
+            "探活使用 Agent 配置的 API 与默认模型计算 99×99，必须答 9801 "
+            "且完整结束流才算 healthy。"
         ),
         sensitive=False,
         parser=int,

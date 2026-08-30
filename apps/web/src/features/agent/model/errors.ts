@@ -29,6 +29,11 @@ const ERROR_PRESENTATIONS: Record<string, AgentErrorPresentation> = {
     detail: "已保留当前结果，可从同一 Agent 会话继续。",
     recoverable: true,
   },
+  agent_output_limit_reached: {
+    title: "输出达到长度限制",
+    detail: "已保留当前结果，可从同一 Agent 会话继续。",
+    recoverable: true,
+  },
   agent_safety_budget_reached: {
     title: "运行达到安全上限",
     detail: "已保留当前文本和已接受的任务。",
@@ -48,6 +53,31 @@ const ERROR_PRESENTATIONS: Record<string, AgentErrorPresentation> = {
     title: "运行连接中断",
     detail: "已保留当前结果，可以继续生成。",
     recoverable: true,
+  },
+  agent_runtime_error: {
+    title: "Agent 运行异常",
+    detail: "已保留可验证的当前结果，稍后可以继续。",
+    recoverable: true,
+  },
+  agent_runtime_protocol_error: {
+    title: "Agent 协议异常",
+    detail: "未采用无效的运行时输出，已保留安全结果。",
+    recoverable: true,
+  },
+  agent_provider_protocol_error: {
+    title: "供应商响应不兼容",
+    detail: "未执行文本中的伪工具协议，已保留安全结果。",
+    recoverable: true,
+  },
+  content_policy_violation: {
+    title: "内容无法处理",
+    detail: "该请求不符合内容安全政策。",
+    recoverable: false,
+  },
+  agent_runtime_request_too_large: {
+    title: "请求内容过大",
+    detail: "当前文本和图片超过 Agent 运行时传输上限。",
+    recoverable: false,
   },
   agent_provider_unavailable: {
     title: "对话通道不可用",
@@ -106,7 +136,12 @@ const ERROR_PRESENTATIONS: Record<string, AgentErrorPresentation> = {
   },
   agent_run_not_continuable: {
     title: "无法安全继续",
-    detail: "该运行包含图片或工具状态，请编辑后重新提交。",
+    detail: "该运行不是最新的可继续结果，或仍有未确认的付费操作。",
+    recoverable: false,
+  },
+  agent_continuation_unavailable: {
+    title: "无法安全继续",
+    detail: "该运行不是最新的可继续结果，或仍有未确认的付费操作。",
     recoverable: false,
   },
   INSUFFICIENT_BALANCE: {

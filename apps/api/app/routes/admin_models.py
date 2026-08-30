@@ -18,12 +18,13 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.agent_model_profiles import GPT_56_AGENT_CONTEXT_WINDOW
+from lumen_core.agent_provider_contract import agent_endpoint_contract
 from lumen_core.providers import (
     DEFAULT_LEGACY_PROVIDER_BASE_URL,
     ProviderDefinition,
     build_effective_provider_config,
-    endpoint_kind_allowed,
 )
+from lumen_core.providers_parts.selection import provider_supports_route
 from lumen_core.schemas import (
     AdminModelOut,
     AdminModelsErrorOut,
@@ -47,13 +48,6 @@ router = APIRouter(prefix="/admin", tags=["admin-models"])
 _MODELS_TIMEOUT_S = 5.0
 _DEFAULT_CONTEXT_WINDOW = 128_000
 _DEFAULT_MAX_OUTPUT_TOKENS = 16_384
-
-
-def _models_url(base_url: str) -> str:
-    base = base_url.strip().rstrip("/")
-    if base.endswith("/v1"):
-        return f"{base}/models"
-    return f"{base}/v1/models"
 
 
 def _model_ids(payload: Any) -> list[str]:
@@ -245,11 +239,17 @@ def _models_headers(agent_api: str, api_key: str) -> dict[str, str]:
 async def _fetch_models_payload(
     *,
     base_url: str,
+    agent_base_url: str | None,
     api_key: str,
     proxy: Any | None,
     agent_api: str,
 ) -> tuple[Any | None, str | None]:
     try:
+        endpoint = agent_endpoint_contract(
+            base_url,
+            agent_api,
+            agent_base_url=agent_base_url,
+        )
         proxy_url = await resolve_provider_proxy_url(proxy)
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(_MODELS_TIMEOUT_S),
@@ -258,7 +258,7 @@ async def _fetch_models_payload(
             trust_env=False,
         ) as client:
             response = await client.get(
-                _models_url(base_url),
+                endpoint.models_url,
                 headers=_models_headers(agent_api, api_key),
             )
         if response.status_code >= 400:
@@ -278,6 +278,7 @@ async def _fetch_provider_models(
 ) -> tuple[str, list[str], str | None]:
     payload, error = await _fetch_models_payload(
         base_url=provider.base_url,
+        agent_base_url=provider.agent_base_url,
         api_key=provider.api_key,
         proxy=provider.proxy,
         agent_api=provider.agent_api,
@@ -294,7 +295,17 @@ async def _build_models_response(db: AsyncSession) -> AdminModelsOut:
         ),
         legacy_api_key=os.environ.get("UPSTREAM_API_KEY"),
     )
-    enabled = [p for p in providers if p.enabled and endpoint_kind_allowed(p, "models")]
+    enabled = [
+        provider
+        for provider in providers
+        if provider.enabled
+        and "chat" in provider.purposes
+        and provider_supports_route(
+            provider,
+            route="agent",
+            endpoint_kind=None,
+        )
+    ]
     results = await asyncio.gather(
         *[_fetch_provider_models(provider) for provider in enabled],
         return_exceptions=False,
@@ -366,27 +377,55 @@ async def discover_provider_models(
         ),
         None,
     )
+    try:
+        requested_endpoint = agent_endpoint_contract(
+            base_url,
+            body.agent_api,
+            agent_base_url=body.agent_base_url.strip() or None,
+        )
+    except ValueError as exc:
+        return AdminProviderModelsDiscoverOut(
+            models=[],
+            fetched_at=datetime.now(timezone.utc),
+            error=str(exc),
+        )
+    requested_proxy_name = (body.proxy or "").strip()
+    saved_proxy_name = saved.proxy_name if saved is not None else None
+    agent_target_matches = bool(
+        saved is not None
+        and saved.agent_api == body.agent_api
+        and saved.agent_base_url == requested_endpoint.sdk_base_url
+    )
+    effective_proxy_name = requested_proxy_name or (
+        saved_proxy_name if agent_target_matches else None
+    )
+    connection_matches = bool(
+        agent_target_matches
+        and (effective_proxy_name or None) == (saved_proxy_name or None)
+    )
     api_key = body.api_key.strip()
-    if not api_key and saved is not None and saved.base_url.rstrip("/") == base_url:
+    if not api_key and connection_matches and saved is not None:
         api_key = saved.api_key
     if not api_key:
         return AdminProviderModelsDiscoverOut(
             models=[],
             fetched_at=datetime.now(timezone.utc),
-            error="API key is required to discover models",
+            error="API key is required when the Agent connection changes",
         )
-    proxy_name = (body.proxy or "").strip()
-    proxy = next((item for item in proxies if item.name == proxy_name), None)
-    if proxy_name and (proxy is None or not proxy.enabled):
+    proxy = next(
+        (item for item in proxies if item.name == effective_proxy_name),
+        None,
+    )
+    if effective_proxy_name and (proxy is None or not proxy.enabled):
         return AdminProviderModelsDiscoverOut(
             models=[],
             fetched_at=datetime.now(timezone.utc),
             error="selected proxy is unavailable",
         )
-    if not proxy_name and saved is not None and saved.base_url.rstrip("/") == base_url:
-        proxy = saved.proxy
+    effective_agent_base = requested_endpoint.sdk_base_url
     payload, error = await _fetch_models_payload(
         base_url=base_url,
+        agent_base_url=effective_agent_base,
         api_key=api_key,
         proxy=proxy,
         agent_api=body.agent_api,

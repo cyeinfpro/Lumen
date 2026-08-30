@@ -260,6 +260,7 @@ export interface Generation {
   cost_class?: string | null;
   queue_wait_ms?: number | null;
   attempt: number;
+  execution_epoch?: number;
   max_attempts?: number;
   retry_eta?: number;
   retry_error?: string;

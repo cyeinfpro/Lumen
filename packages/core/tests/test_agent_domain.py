@@ -406,7 +406,7 @@ def test_agent_runtime_settings_are_closed_and_bounded() -> None:
 
 def test_provider_contract_carries_verified_vision_capability() -> None:
     providers, errors = parse_provider_json(
-        '[{"name":"vision","base_url":"https://provider.example/v1",'
+        '[{"name":"vision","base_url":"https://provider.example",'
         '"api_key":"secret","purposes":["chat"],"vision_supported":true,'
         '"agent_api":"anthropic-messages","agent_context_window":200000,'
         '"agent_max_output_tokens":8192,"agent_reasoning_supported":false}]'

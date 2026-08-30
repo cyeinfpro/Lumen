@@ -160,6 +160,7 @@ class ProviderConfig:
     responses_supported: bool | None = None
     vision_supported: bool | None = None
     agent_api: str = "openai-responses"
+    agent_base_url: str = ""
     agent_models: tuple[str, ...] = ()
     agent_context_window: int = 128000
     agent_max_output_tokens: int = 16384
@@ -228,6 +229,7 @@ class ResolvedProvider:
     responses_supported: bool | None = None
     vision_supported: bool | None = None
     agent_api: str = "openai-responses"
+    agent_base_url: str = ""
     agent_models: tuple[str, ...] = ()
     agent_context_window: int = 128000
     agent_max_output_tokens: int = 16384

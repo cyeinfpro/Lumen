@@ -73,6 +73,7 @@ class ProviderItemOut(BaseModel):
     agent_api: Literal[
         "openai-responses", "openai-completions", "anthropic-messages"
     ] = "openai-responses"
+    agent_base_url: str = Field(default="", max_length=2048)
     agent_models: list[str] = Field(default_factory=list, max_length=128)
     agent_context_window: int = Field(default=128000, ge=4096, le=2_000_000)
     agent_max_output_tokens: int = Field(default=16384, ge=1, le=128000)
@@ -138,6 +139,7 @@ class AdminProviderModelsDiscoverIn(BaseModel):
 
     provider_name: str | None = Field(default=None, max_length=120)
     base_url: str = Field(min_length=8, max_length=2048)
+    agent_base_url: str = Field(default="", max_length=2048)
     api_key: str = Field(default="", max_length=8192, repr=False)
     proxy: str | None = Field(default=None, max_length=120)
     agent_api: Literal[
@@ -175,6 +177,7 @@ class ProviderItemIn(BaseModel):
     agent_api: Literal[
         "openai-responses", "openai-completions", "anthropic-messages"
     ] = "openai-responses"
+    agent_base_url: str = Field(default="", max_length=2048)
     agent_models: list[str] = Field(default_factory=list, max_length=128)
     agent_context_window: int = Field(default=128000, ge=4096, le=2_000_000)
     agent_max_output_tokens: int = Field(default=16384, ge=1, le=128000)

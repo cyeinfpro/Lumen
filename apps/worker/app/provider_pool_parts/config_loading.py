@@ -65,6 +65,7 @@ def _runtime_provider(definition: Any) -> ProviderConfig:
         responses_supported=getattr(definition, "responses_supported", None),
         vision_supported=getattr(definition, "vision_supported", None),
         agent_api=getattr(definition, "agent_api", "openai-responses"),
+        agent_base_url=getattr(definition, "agent_base_url", definition.base_url),
         agent_models=getattr(definition, "agent_models", ()),
         agent_context_window=getattr(definition, "agent_context_window", 128000),
         agent_max_output_tokens=getattr(definition, "agent_max_output_tokens", 16384),
@@ -110,6 +111,7 @@ def _validated_runtime_provider(
         responses_supported=provider.responses_supported,
         vision_supported=provider.vision_supported,
         agent_api=provider.agent_api,
+        agent_base_url=provider.agent_base_url,
         agent_models=provider.agent_models,
         agent_context_window=provider.agent_context_window,
         agent_max_output_tokens=provider.agent_max_output_tokens,
@@ -231,6 +233,9 @@ class ProviderConfigLoadingMixin:
         self._providers = []
         self._proxies = {}
         self._health.clear()
+        agent_health = getattr(self, "_agent_health", None)
+        if isinstance(agent_health, dict):
+            agent_health.clear()
         self._rr_state.clear()
 
     async def _validate_provider_load(
@@ -260,6 +265,11 @@ class ProviderConfigLoadingMixin:
         new_names = {provider.name for provider in new_providers}
         for removed in old_names - new_names:
             del self._health[removed]
+        agent_health = getattr(self, "_agent_health", None)
+        if isinstance(agent_health, dict):
+            for key in list(agent_health):
+                if key[0] not in new_names:
+                    del agent_health[key]
         for name in new_names - old_names:
             self._health[name] = ProviderHealth()
         for priority, state in list(self._rr_state.items()):

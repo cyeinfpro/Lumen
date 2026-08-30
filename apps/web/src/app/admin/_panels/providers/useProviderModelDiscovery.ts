@@ -126,12 +126,13 @@ export function useProviderModelDiscovery({
       const draftKey = draftsRef.current?.[index]?._key;
       const invalidatesDiscovery = [
         "base_url",
+        "agent_base_url",
         "api_key",
         "proxy",
         "agent_api",
       ].some((key) => Object.prototype.hasOwnProperty.call(patch, key));
-      const changesConnection = ["base_url", "api_key"].some((key) =>
-        Object.prototype.hasOwnProperty.call(patch, key),
+      const changesConnection = ["base_url", "agent_base_url", "api_key"].some(
+        (key) => Object.prototype.hasOwnProperty.call(patch, key),
       );
       if (invalidatesDiscovery) remove(draftKey);
       draftsRef.current = patchedDrafts(
@@ -176,6 +177,7 @@ export function useProviderModelDiscovery({
           {
             provider_name: draft.name.trim() || null,
             base_url: draft.base_url.trim(),
+            agent_base_url: (draft.agent_base_url ?? "").trim(),
             api_key: draft.api_key.trim(),
             proxy: draft.proxy || null,
             agent_api: draft.agent_api ?? "openai-responses",

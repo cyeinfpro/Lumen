@@ -48,6 +48,7 @@ export interface BackendGeneration {
   thumb_url?: string | null;
   created_at?: string | null;
   attempt: number;
+  execution_epoch?: number;
   error_code: string | null;
   error_message: string | null;
   started_at: string | null;

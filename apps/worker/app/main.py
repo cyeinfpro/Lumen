@@ -264,6 +264,11 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
         )
         ctx["agent_runtime_client"] = agent_runtime_client
         lifecycle.own("agent_runtime_client", agent_runtime_client.close)
+        if (
+            agent_runtime_client.configured
+            and await runtime_settings.resolve("agent.enabled") == "1"
+        ):
+            await agent_runtime_client.verify_contract()
 
         worker_runtime = WorkerRuntime(
             _runtime_settings=runtime_settings_cache,
@@ -306,6 +311,7 @@ class WorkerSettings:
             agent_run_tasks.run_agent,
             timeout=_PI_NATIVE_ARQ_TIMEOUT_SECONDS,
         ),
+        agent_run_tasks.correct_agent_unknown_charges,
         canvas_reconcile_tasks.reconcile_canvas_execution,
         outbox_tasks.publish_outbox,
         auto_title_tasks.auto_title_conversation,

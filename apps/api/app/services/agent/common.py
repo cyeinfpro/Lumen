@@ -135,7 +135,10 @@ async def wallet_chat_provider_preflight(
         for provider in providers
         if provider.enabled
         and "chat" in provider.purposes
-        and provider.responses_supported is not False
+        and (
+            getattr(provider, "agent_api", "openai-responses") != "openai-responses"
+            or provider.responses_supported is not False
+        )
         and (not provider.agent_models or model in provider.agent_models)
     ]
     if not eligible:
@@ -411,14 +414,14 @@ def stage_agent_event(
         execution_epoch=run.execution_epoch,
         event_seq=run.last_event_seq,
         event_name=event_name,
+        event_id=agent_event_id(
+            run.id,
+            run.execution_epoch,
+            run.last_event_seq,
+        ),
         tool_call_id=tool_call_id,
         generation_ids=list(generation_ids or []),
-    ).model_dump(mode="json")
-    envelope["event_id"] = agent_event_id(
-        run.id,
-        run.execution_epoch,
-        run.last_event_seq,
-    )
+    ).model_dump(mode="json", exclude_none=True, exclude_defaults=True)
     db.add(
         OutboxEvent(
             kind="sse",

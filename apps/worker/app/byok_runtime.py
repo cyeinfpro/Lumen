@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core.agent_provider_contract import effective_agent_base_url
 from lumen_core.byok import ByokCryptoError, decrypt_api_key
 from lumen_core.constants import GenerationErrorCode as EC
 from lumen_core.models import (
@@ -227,6 +228,20 @@ async def resolve_user_credential_runtime(
     except ValueError:
         image_jobs_enabled = False
     image_jobs_endpoint = str(caps.get("image_jobs_endpoint", "auto"))
+    agent_api = _agent_api(caps)
+    try:
+        agent_base_url = effective_agent_base_url(
+            safe_target.url,
+            agent_api,
+            agent_base_url=(str(caps.get("agent_base_url") or "").strip() or None),
+        )
+        agent_safe_target = await _resolve_supplier_base_target(agent_base_url)
+    except ValueError as exc:
+        raise UpstreamError(
+            "user API supplier Agent URL is invalid",
+            status_code=503,
+            error_code="agent_provider_configuration_invalid",
+        ) from exc
     provider = ResolvedProvider(
         name=_credential_provider_name(supplier, credential.id),
         base_url=safe_target.url,
@@ -249,7 +264,8 @@ async def resolve_user_credential_runtime(
                 and "image" in caps["input_modalities"]
             )
         ),
-        agent_api=_agent_api(caps),
+        agent_api=agent_api,
+        agent_base_url=agent_base_url,
         agent_context_window=_capability_int(
             caps,
             "agent_context_window",
@@ -273,6 +289,7 @@ async def resolve_user_credential_runtime(
     # bind their transport to these addresses; proxy callers intentionally keep
     # the existing proxy path and ignore this target.
     object.__setattr__(provider, "_byok_http_target", safe_target)
+    object.__setattr__(provider, "_byok_agent_http_target", agent_safe_target)
     return provider
 
 

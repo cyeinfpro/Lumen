@@ -130,7 +130,16 @@ test("reference upload expands a collapsed composer and shows the attachment", a
     return route.fallback();
   });
 
+  const authenticated = page.waitForResponse((response) => {
+    const request = response.request();
+    return (
+      new URL(response.url()).pathname === "/api/auth/me" &&
+      request.method() === "GET" &&
+      response.ok()
+    );
+  });
   await page.goto("/?conversationId=conversation-1");
+  await authenticated;
   const viewport = page.viewportSize();
   if ((viewport?.width ?? 0) < 768) {
     await expect(page.locator('[data-app-viewport="true"]')).toBeVisible();

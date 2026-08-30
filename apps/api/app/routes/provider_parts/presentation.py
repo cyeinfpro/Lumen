@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, cast
 
+from lumen_core.agent_provider_contract import effective_agent_base_url
 from lumen_core.providers_parts.config import (
     normalize_image_edit_input_transport,
     normalize_provider_purposes,
@@ -176,6 +177,7 @@ def provider_out(item: dict[str, Any], index: int) -> ProviderItemOut:
             in {"openai-responses", "openai-completions", "anthropic-messages"}
             else "openai-responses"
         ),
+        agent_base_url=_effective_agent_base_url(item),
         agent_models=[
             value.strip()
             for value in item.get("agent_models", [])
@@ -204,6 +206,20 @@ def provider_out(item: dict[str, Any], index: int) -> ProviderItemOut:
     )
 
 
+def _effective_agent_base_url(item: dict[str, Any]) -> str:
+    api = item.get("agent_api")
+    if api not in {"openai-responses", "openai-completions", "anthropic-messages"}:
+        api = "openai-responses"
+    try:
+        return effective_agent_base_url(
+            str(item.get("base_url") or ""),
+            api,
+            agent_base_url=str(item.get("agent_base_url") or "") or None,
+        )
+    except ValueError:
+        return str(item.get("agent_base_url") or "")
+
+
 def provider_agent_update_fields(
     provider_input: Any,
     old_item: dict[str, Any],
@@ -217,6 +233,7 @@ def provider_agent_update_fields(
 
     output = {
         "agent_api": preserved("agent_api", provider_input.agent_api),
+        "agent_base_url": preserved("agent_base_url", provider_input.agent_base_url),
         "agent_models": preserved("agent_models", provider_input.agent_models),
         "agent_context_window": preserved(
             "agent_context_window", provider_input.agent_context_window
@@ -254,13 +271,33 @@ def provider_update_credentials(
     submitted_key = provider_input.api_key.strip()
     new_base_url = provider_input.base_url.strip().rstrip("/")
     old_base_url = str(old_item.get("base_url") or "").strip().rstrip("/")
-    if (
-        not submitted_key
-        and old_keys.get(name)
-        and old_base_url
-        and old_base_url != new_base_url
-    ):
+    base_changed = bool(old_base_url and old_base_url != new_base_url)
+    agent_connection_changed = False
+    if old_item:
+        old_agent_base = _effective_agent_base_url(old_item)
+        new_agent_api = (
+            provider_input.agent_api
+            if "agent_api" in provider_input.model_fields_set
+            else old_item.get("agent_api", "openai-responses")
+        )
+        new_agent_raw = (
+            provider_input.agent_base_url
+            if "agent_base_url" in provider_input.model_fields_set
+            else old_item.get("agent_base_url", "")
+        )
+        try:
+            new_agent_base = effective_agent_base_url(
+                new_base_url,
+                new_agent_api,
+                agent_base_url=new_agent_raw or None,
+            )
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        agent_connection_changed = old_agent_base != new_agent_base
+    if not submitted_key and old_keys.get(name) and base_changed:
         raise ValueError("修改 base_url 后必须重新填写 api_key")
+    if not submitted_key and old_keys.get(name) and agent_connection_changed:
+        raise ValueError("修改 agent_base_url 后必须重新填写 api_key")
     return new_base_url, submitted_key or old_keys.get(name, "")
 
 
