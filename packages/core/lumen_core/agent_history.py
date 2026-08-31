@@ -63,8 +63,7 @@ def plan_agent_runtime_context(
     )
     retained_history = min(
         history,
-        keep_recent
-        + max(AGENT_PI_COMPACTION_BOUNDARY_SLACK_TOKENS, largest_entry),
+        keep_recent + max(AGENT_PI_COMPACTION_BOUNDARY_SLACK_TOKENS, largest_entry),
     )
     post_compaction = fixed + retained_history + summary_tokens
     if estimated_input <= direct_limit:
@@ -91,7 +90,23 @@ def agent_tool_history_result_text(
     mode: str | None,
     generation_ids: Iterable[object],
     error_code: str | None,
+    name: str | None = None,
+    result_text: str | None = None,
 ) -> str:
+    if isinstance(result_text, str) and result_text:
+        if status == "succeeded":
+            return result_text[:AGENT_HISTORY_TEXT_LIMIT]
+        return json.dumps(
+            {
+                "status": status,
+                "name": name,
+                "mode": mode,
+                "error_code": error_code,
+                "result": result_text,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )[:AGENT_HISTORY_TEXT_LIMIT]
     safe_generation_ids = [value for value in generation_ids if isinstance(value, str)][
         :4
     ]

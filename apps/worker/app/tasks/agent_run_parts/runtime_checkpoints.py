@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -12,8 +13,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.agent_events import (
+    AGENT_FILE_TOOLS,
+    AGENT_FIRST_PARTY_TOOLS,
     AGENT_TOOL_TERMINAL_STATUSES,
+    AGENT_TOOL_WEB_SEARCH,
     EV_AGENT_TOOL_FAILED,
+    EV_AGENT_TOOL_STARTED,
+    EV_AGENT_TOOL_SUCCEEDED,
     AgentRunStatus,
     AgentToolCallStatus,
 )
@@ -105,6 +111,120 @@ def max_usage(current: Any, incoming: Any) -> dict[str, int]:
     return result
 
 
+_RUNTIME_LOCAL_TOOLS = frozenset({AGENT_TOOL_WEB_SEARCH, *AGENT_FILE_TOOLS})
+_RUNTIME_TOOL_MODES = frozenset({"web_search", "file_list", "file_read", "file_search"})
+
+
+def _runtime_tool_identity(
+    run: AgentRun,
+    event: AgentRuntimeEvent,
+) -> tuple[str, str, dict[str, Any]]:
+    arguments = dict(event.arguments or {})
+    encoded = json.dumps(
+        arguments,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    request_hash = hashlib.sha256(encoded).hexdigest()
+    identity = (
+        f"{run.id}\n{run.execution_epoch}\n{event.ordinal}\n"
+        f"{event.tool_call_id}\n{event.name}\n{request_hash}"
+    ).encode("utf-8")
+    return request_hash, hashlib.sha256(identity).hexdigest(), arguments
+
+
+async def _runtime_tool_row(
+    db: AsyncSession,
+    *,
+    run: AgentRun,
+    event: AgentRuntimeEvent,
+) -> AgentToolCall | None:
+    if (
+        event.ordinal is None
+        or not event.tool_call_id
+        or event.name not in _RUNTIME_LOCAL_TOOLS
+    ):
+        return None
+    existing = (
+        await db.execute(
+            select(AgentToolCall).where(
+                AgentToolCall.agent_run_id == run.id,
+                (
+                    (AgentToolCall.pi_tool_call_id == event.tool_call_id)
+                    | (AgentToolCall.ordinal == event.ordinal)
+                ),
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+    request_hash, semantic_key, arguments = _runtime_tool_identity(run, event)
+    existing = AgentToolCall(
+        agent_run_id=run.id,
+        capability_id=f"runtime-local:{run.execution_epoch}",
+        pi_tool_call_id=event.tool_call_id,
+        ordinal=event.ordinal,
+        execution_epoch=run.execution_epoch,
+        name=event.name,
+        mode=event.mode if event.mode in _RUNTIME_TOOL_MODES else None,
+        status=AgentToolCallStatus.RUNNING.value,
+        request_hash=request_hash,
+        semantic_key=semantic_key,
+        arguments_jsonb=arguments,
+        result_jsonb={},
+        generation_count=0,
+        error_code=None,
+        error_message=None,
+        started_at=datetime.now(timezone.utc),
+        finished_at=None,
+    )
+    db.add(existing)
+    await db.flush()
+    return existing
+
+
+async def _record_runtime_local_tool(
+    db: AsyncSession,
+    *,
+    run: AgentRun,
+    event: AgentRuntimeEvent,
+    stage_event: Callable[..., dict[str, Any]],
+) -> None:
+    if event.name not in _RUNTIME_LOCAL_TOOLS:
+        return
+    tool = await _runtime_tool_row(db, run=run, event=event)
+    if tool is None:
+        return
+    if event.type == "tool.started":
+        stage_event(
+            db,
+            run=run,
+            event_name=EV_AGENT_TOOL_STARTED,
+            extra={"tool_call_id": tool.id},
+        )
+        return
+    if event.type != "tool.succeeded" or tool.status in AGENT_TOOL_TERMINAL_STATUSES:
+        return
+    tool.status = AgentToolCallStatus.SUCCEEDED.value
+    tool.mode = event.mode if event.mode in _RUNTIME_TOOL_MODES else tool.mode
+    tool.result_jsonb = {
+        "receipt_version": 1,
+        "runtime_local": True,
+        "history_text": (event.result_text or "")[:20_000],
+    }
+    tool.error_code = None
+    tool.error_message = None
+    tool.finished_at = datetime.now(timezone.utc)
+    stage_event(
+        db,
+        run=run,
+        event_name=EV_AGENT_TOOL_SUCCEEDED,
+        extra={"tool_call_id": tool.id},
+    )
+
+
 async def _record_runtime_tool_failure(
     db: AsyncSession,
     *,
@@ -112,7 +232,11 @@ async def _record_runtime_tool_failure(
     event: AgentRuntimeEvent,
     stage_event: Callable[..., dict[str, Any]],
 ) -> None:
-    if event.ordinal is None or not event.tool_call_id:
+    if (
+        event.ordinal is None
+        or not event.tool_call_id
+        or event.name not in AGENT_FIRST_PARTY_TOOLS
+    ):
         return
     existing = (
         await db.execute(
@@ -144,28 +268,27 @@ async def _record_runtime_tool_failure(
         "http_status": 504 if event.result_unknown is True else 409,
         "error_code": error_code,
         "runtime_receipt_only": True,
+        "history_text": (event.result_text or "")[:20_000],
     }
     if existing is None:
-        identity = (
-            f"{run.id}\n{run.execution_epoch}\n{event.ordinal}\n{event.tool_call_id}"
-        ).encode("utf-8")
-        request_hash = hashlib.sha256(b"runtime-tool-arguments-unavailable").hexdigest()
+        request_hash, semantic_key, arguments = _runtime_tool_identity(run, event)
         existing = AgentToolCall(
             agent_run_id=run.id,
             capability_id=f"runtime-unacknowledged:{run.execution_epoch}",
             pi_tool_call_id=event.tool_call_id,
             ordinal=event.ordinal,
             execution_epoch=run.execution_epoch,
-            name=event.name or "lumen_create_image",
+            name=event.name,
             mode=(
                 event.mode
-                if event.mode in {"text_to_image", "image_to_image"}
+                if event.mode
+                in {"text_to_image", "image_to_image", *_RUNTIME_TOOL_MODES}
                 else None
             ),
             status=status,
             request_hash=request_hash,
-            semantic_key=hashlib.sha256(identity).hexdigest(),
-            arguments_jsonb={},
+            semantic_key=semantic_key,
+            arguments_jsonb=arguments,
             result_jsonb=failure_receipt,
             generation_count=0,
             error_code=error_code,
@@ -468,13 +591,21 @@ async def _apply_runtime_checkpoint(
         _checkpoint_turn(run, dispatch, event)
     elif event.type == "compaction.completed":
         await _checkpoint_pi_compaction(db, run, dispatch, event)
-    elif event.type == "tool.failed":
-        await _record_runtime_tool_failure(
-            db,
-            run=run,
-            event=event,
-            stage_event=dependencies.stage_event,
-        )
+    elif event.type in {"tool.started", "tool.succeeded", "tool.failed"}:
+        if event.type == "tool.failed":
+            await _record_runtime_tool_failure(
+                db,
+                run=run,
+                event=event,
+                stage_event=dependencies.stage_event,
+            )
+        else:
+            await _record_runtime_local_tool(
+                db,
+                run=run,
+                event=event,
+                stage_event=dependencies.stage_event,
+            )
     else:
         _checkpoint_terminal(run, dispatch, event)
 
@@ -492,6 +623,8 @@ async def record_runtime_checkpoint(
         "provider.response",
         "turn.completed",
         "compaction.completed",
+        "tool.started",
+        "tool.succeeded",
         "tool.failed",
         "run.completed",
         "run.failed",

@@ -131,7 +131,7 @@ def agent_run_out(
 
 def conversation_agent_defaults(
     conversation: Conversation,
-) -> tuple[AgentImageDefaultsIn, bool]:
+) -> tuple[AgentImageDefaultsIn, bool, bool, bool]:
     params = (
         conversation.default_params
         if isinstance(conversation.default_params, dict)
@@ -139,7 +139,7 @@ def conversation_agent_defaults(
     )
     raw_agent = params.get("agent")
     if not isinstance(raw_agent, dict):
-        return AgentImageDefaultsIn(), True
+        return AgentImageDefaultsIn(), True, False, True
     try:
         defaults = AgentImageDefaultsIn.model_validate(
             raw_agent.get("image_defaults", {})
@@ -147,7 +147,14 @@ def conversation_agent_defaults(
     except (TypeError, ValueError):
         defaults = AgentImageDefaultsIn()
     allow_image = raw_agent.get("allow_image")
-    return defaults, allow_image if isinstance(allow_image, bool) else True
+    allow_web_search = raw_agent.get("allow_web_search")
+    allow_file_tools = raw_agent.get("allow_file_tools")
+    return (
+        defaults,
+        allow_image if isinstance(allow_image, bool) else True,
+        allow_web_search if isinstance(allow_web_search, bool) else False,
+        allow_file_tools if isinstance(allow_file_tools, bool) else True,
+    )
 
 
 def agent_session_out(
@@ -156,7 +163,12 @@ def agent_session_out(
     *,
     active_run: AgentRunOut | None = None,
 ) -> AgentSessionOut:
-    image_defaults, allow_image = conversation_agent_defaults(conversation)
+    (
+        image_defaults,
+        allow_image,
+        allow_web_search,
+        allow_file_tools,
+    ) = conversation_agent_defaults(conversation)
     return AgentSessionOut(
         id=session.id,
         conversation_id=conversation.id,
@@ -169,6 +181,8 @@ def agent_session_out(
         default_system_prompt_id=conversation.default_system_prompt_id,
         image_defaults=image_defaults,
         allow_image=allow_image,
+        allow_web_search=allow_web_search,
+        allow_file_tools=allow_file_tools,
         runtime_version=session.runtime_version,
         last_activity_at=conversation.last_activity_at,
         created_at=session.created_at,
@@ -181,12 +195,16 @@ def agent_default_params(
     *,
     image_defaults: AgentImageDefaultsIn,
     allow_image: bool,
+    allow_web_search: bool,
+    allow_file_tools: bool,
     existing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     params = dict(existing or {})
     params["agent"] = {
         "image_defaults": image_defaults.model_dump(mode="json"),
         "allow_image": allow_image,
+        "allow_web_search": allow_web_search,
+        "allow_file_tools": allow_file_tools,
     }
     return params
 

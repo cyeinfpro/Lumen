@@ -15,8 +15,10 @@ from lumen_core.agent_content_safety import (
     require_agent_content_safe,
 )
 from lumen_core.agent_events import (
+    AGENT_FILE_TOOLS,
     AGENT_RUN_ACTIVE_STATUSES,
     AGENT_TOOL_CREATE_IMAGE,
+    AGENT_TOOL_WEB_SEARCH,
     EV_AGENT_RUN_QUEUED,
     AgentRunStatus,
 )
@@ -155,6 +157,9 @@ class _SnapshotInput:
     run_reference_content: tuple[dict[str, Any], ...]
     max_image_tool_calls: int
     max_images_per_run: int
+    max_web_search_calls: int
+    max_file_tool_calls: int
+    max_tool_calls: int
 
 
 async def _request_snapshot(
@@ -164,11 +169,34 @@ async def _request_snapshot(
     body = value.body
     credential = value.pin.credential
     continuation = value.pin.continuation
+    allowed_tools: list[str] = []
+    if body.allow_image:
+        allowed_tools.append(AGENT_TOOL_CREATE_IMAGE)
+    if body.allow_web_search:
+        allowed_tools.append(AGENT_TOOL_WEB_SEARCH)
+    if body.allow_file_tools and body.files:
+        allowed_tools.extend(sorted(AGENT_FILE_TOOLS))
+    enabled_tool_limit = min(
+        value.max_tool_calls,
+        (value.max_image_tool_calls if body.allow_image else 0)
+        + (value.max_web_search_calls if body.allow_web_search else 0)
+        + (value.max_file_tool_calls if body.allow_file_tools and body.files else 0),
+    )
     return {
-        "runtime_request_version": 4,
+        "runtime_request_version": 5,
         "image_defaults": body.image_defaults.model_dump(mode="json"),
         "allow_image": body.allow_image,
-        "allowed_tools": [AGENT_TOOL_CREATE_IMAGE] if body.allow_image else [],
+        "allow_web_search": body.allow_web_search,
+        "allow_file_tools": body.allow_file_tools,
+        "allowed_tools": allowed_tools,
+        "workspace_file_manifest": [
+            {
+                "name": item.name,
+                "mime_type": item.mime_type,
+                "size": item.size,
+            }
+            for item in body.files
+        ],
         "references": [
             {
                 "reference_label": item["reference_label"],
@@ -192,12 +220,17 @@ async def _request_snapshot(
                 value.max_image_tool_calls if body.allow_image else 0
             ),
             "max_images_per_run": value.max_images_per_run,
+            "max_web_search_calls": (
+                value.max_web_search_calls if body.allow_web_search else 0
+            ),
+            "max_file_tool_calls": (
+                value.max_file_tool_calls if body.allow_file_tools and body.files else 0
+            ),
+            "max_tool_calls": enabled_tool_limit,
         },
         "provider_dispatch": {
             "version": 1,
-            "max_dispatches": agent_provider_call_budget(
-                value.max_image_tool_calls if body.allow_image else 0
-            ),
+            "max_dispatches": agent_provider_call_budget(enabled_tool_limit),
         },
         "context_plan": {
             "version": 2,
@@ -533,6 +566,7 @@ async def _stage_submission(
                 "text": body.text,
                 "source": "agent",
                 "attachments": reference_content,
+                "files": [item.model_dump(mode="json") for item in body.files],
             }
         ),
         intent="agent",
@@ -596,6 +630,21 @@ async def _stage_submission(
     await db.flush()
     max_image_tool_calls = await agent_setting_int(db, "agent.max_image_tool_calls")
     max_images_per_run = await agent_setting_int(db, "agent.max_images_per_run")
+    max_web_search_calls = (
+        await agent_setting_int(db, "agent.max_web_search_calls")
+        if body.allow_web_search
+        else 0
+    )
+    max_file_tool_calls = (
+        await agent_setting_int(db, "agent.max_file_tool_calls")
+        if body.allow_file_tools and body.files
+        else 0
+    )
+    max_tool_calls = (
+        await agent_setting_int(db, "agent.max_tool_calls")
+        if max_web_search_calls or max_file_tool_calls
+        else max_image_tool_calls
+    )
     run.request_snapshot_jsonb = await _request_snapshot(
         db,
         _SnapshotInput(
@@ -605,6 +654,9 @@ async def _stage_submission(
             run_reference_content=tuple(run_reference_content),
             max_image_tool_calls=max_image_tool_calls,
             max_images_per_run=max_images_per_run,
+            max_web_search_calls=max_web_search_calls,
+            max_file_tool_calls=max_file_tool_calls,
+            max_tool_calls=max_tool_calls,
         ),
     )
     for index, reference in enumerate(references):
@@ -630,7 +682,12 @@ async def _stage_submission(
         reference_count=len(references),
         context_window=pin.context_window,
         provider_max_output_tokens=pin.max_output_tokens,
-        max_image_tool_calls=(max_image_tool_calls if body.allow_image else 0),
+        max_tool_calls=min(
+            max_tool_calls,
+            (max_image_tool_calls if body.allow_image else 0)
+            + (max_web_search_calls if body.allow_web_search else 0)
+            + (max_file_tool_calls if body.allow_file_tools and body.files else 0),
+        ),
     )
     run.text_hold_micro = reservation.hold_micro
     run.billing_jsonb = reservation.billing_snapshot
@@ -640,6 +697,8 @@ async def _stage_submission(
     conversation.default_params = agent_default_params(
         image_defaults=body.image_defaults,
         allow_image=body.allow_image,
+        allow_web_search=body.allow_web_search,
+        allow_file_tools=body.allow_file_tools,
         existing=conversation.default_params,
     )
     session.updated_at = now
@@ -655,6 +714,8 @@ async def _stage_submission(
             "explicit_reference_count": len(body.attachments),
             "session_reference_count": len(catalog_references),
             "allow_image": body.allow_image,
+            "allow_web_search": body.allow_web_search,
+            "file_count": len(body.files),
             "account_mode": account_mode,
         },
         autocommit=False,

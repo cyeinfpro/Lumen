@@ -11,6 +11,7 @@ import {
 import {
   createAgentSession,
   type AgentSessionEvent,
+  type ToolDefinition,
   type CompactionResult,
   estimateTokens,
   ModelRuntime,
@@ -20,7 +21,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import {
+  AGENT_FILE_TOOLS,
   AGENT_TOOL_CREATE_IMAGE,
+  AGENT_TOOL_WEB_SEARCH,
   RUNTIME_TEXT_RESET_EVENT,
   runtimeToolPolicy,
   type RuntimeHistoryMessage,
@@ -50,6 +53,8 @@ import {
   completeTextGuardViolation,
 } from "./text-guard.js";
 import { createImageTool, ordinalFor, type ToolRuntimeState } from "./tools/create-image.js";
+import { createVirtualFileTools } from "./tools/virtual-files.js";
+import { createWebSearchTool } from "./tools/web-search.js";
 import {
   createImageGateway,
   type CreateImageGateway,
@@ -448,6 +453,35 @@ function toolDetails(result: unknown): Record<string, unknown> {
     : {};
 }
 
+function boundedToolResultText(result: unknown): string | undefined {
+  const details = toolDetails(result);
+  if (typeof details.result_text === "string") {
+    return details.result_text.slice(0, 20_000);
+  }
+  if (result === null || typeof result !== "object") return undefined;
+  const content = (result as { content?: unknown }).content;
+  if (!Array.isArray(content)) return undefined;
+  const text = content
+    .filter(
+      (item): item is { type: "text"; text: string } =>
+        item !== null &&
+        typeof item === "object" &&
+        (item as { type?: unknown }).type === "text" &&
+        typeof (item as { text?: unknown }).text === "string",
+    )
+    .map((item) => item.text)
+    .join("\n");
+  return text ? text.slice(0, 20_000) : undefined;
+}
+
+function knownRuntimeTool(name: string): boolean {
+  return (
+    name === AGENT_TOOL_CREATE_IMAGE ||
+    name === AGENT_TOOL_WEB_SEARCH ||
+    (AGENT_FILE_TOOLS as readonly string[]).includes(name)
+  );
+}
+
 function finalOutcome(
   errorCode: string | null,
   state: ToolRuntimeState,
@@ -556,6 +590,8 @@ function buildToolState(): ToolRuntimeState {
     nextOrdinal: 0,
     calls: 0,
     imageCalls: 0,
+    webSearchCalls: 0,
+    fileCalls: 0,
     acceptedImages: 0,
     successfulCalls: 0,
     failedCalls: 0,
@@ -763,10 +799,26 @@ export async function executeAgentRun(
       ),
     ),
   );
-  const customTools =
-    request.allowed_tools.length === 1
-      ? [createImageTool(request, gateway, tools)]
-      : [];
+  const registeredTools = new Map<string, ToolDefinition>();
+  const allowedTools = request.allowed_tools as readonly string[];
+  if (allowedTools.includes(AGENT_TOOL_CREATE_IMAGE)) {
+    const imageTool = createImageTool(request, gateway, tools);
+    registeredTools.set(imageTool.name, imageTool);
+  }
+  if (allowedTools.includes(AGENT_TOOL_WEB_SEARCH)) {
+    const webTool = createWebSearchTool(request, tools);
+    registeredTools.set(webTool.name, webTool);
+  }
+  if (request.allowed_tools.some((name) =>
+    (AGENT_FILE_TOOLS as readonly string[]).includes(name),
+  )) {
+    for (const fileTool of createVirtualFileTools(request, tools)) {
+      registeredTools.set(fileTool.name, fileTool);
+    }
+  }
+  const customTools = request.allowed_tools
+    .map((name) => registeredTools.get(name))
+    .filter((tool): tool is ToolDefinition => tool !== undefined);
   const settings = SettingsManager.inMemory({
     compaction: {
       enabled: nativeCompactionEnabled,
@@ -979,22 +1031,32 @@ export async function executeAgentRun(
   session.agent.prepareNextTurnWithContext = async (context, turnSignal) => {
     const previous = await previousPrepare?.(context, turnSignal);
     const baseContext = previous?.context ?? context.context;
-    const toolCapacityExhausted =
-      context.toolResults.length > 0 &&
-      (tools.limitReason !== null ||
+    const baseTools = baseContext.tools ?? [];
+    if (context.toolResults.length === 0) return previous;
+    const disabled = new Set<string>();
+    if (tools.calls >= toolPolicy.max_tool_calls) {
+      baseTools.forEach((tool) => disabled.add(tool.name));
+      tools.limitReason ??= "tool_calls";
+    } else {
+      if (
         tools.imageCalls >= toolPolicy.max_image_tool_calls ||
-        tools.acceptedImages >= toolPolicy.max_images_per_run);
-    if (!toolCapacityExhausted) return previous;
-    tools.limitReason ??=
-      tools.imageCalls >= toolPolicy.max_image_tool_calls
-        ? "tool_calls"
-        : "images";
+        tools.acceptedImages >= toolPolicy.max_images_per_run
+      ) {
+        disabled.add(AGENT_TOOL_CREATE_IMAGE);
+      }
+      if (tools.webSearchCalls >= toolPolicy.max_web_search_calls) {
+        disabled.add(AGENT_TOOL_WEB_SEARCH);
+      }
+      if (tools.fileCalls >= toolPolicy.max_file_tool_calls) {
+        AGENT_FILE_TOOLS.forEach((tool) => disabled.add(tool));
+      }
+    }
+    if (disabled.size === 0) return previous;
     return {
       ...previous,
       context: {
         ...baseContext,
-        tools: [],
-        systemPrompt: `${authoritativePrompt}\n\nNo image tool is available for the remainder of this prompt. Conclude naturally and briefly report any accepted asynchronous image jobs.`,
+        tools: baseTools.filter((tool) => !disabled.has(tool.name)),
       },
     };
   };
@@ -1026,6 +1088,7 @@ export async function executeAgentRun(
         tool_call_id: event.toolCallId,
         ordinal,
         name: event.toolName,
+        arguments: event.args,
         turn: turnCount + 1,
       });
       return;
@@ -1039,37 +1102,35 @@ export async function executeAgentRun(
         started === undefined
           ? null
           : Number(process.hrtime.bigint() - started) / 1_000_000_000;
+      const known =
+        knownRuntimeTool(event.toolName) &&
+        allowedTools.includes(event.toolName);
+      if (!known) {
+        protocolState.code = "agent_provider_protocol_error";
+        abortForProtocol?.();
+        await emitRuntimeEvent("tool.failed", {
+          tool_call_id: event.toolCallId,
+          ordinal,
+          name: event.toolName,
+          mode,
+          turn: turnCount + 1,
+          error_code: "agent_tool_not_allowed",
+          result_unknown: false,
+        });
+        return;
+      }
       if (event.isError) {
-        if (
-          event.toolName !== AGENT_TOOL_CREATE_IMAGE &&
-          !tools.errors.has(event.toolCallId)
-        ) {
-          tools.calls += 1;
-          tools.failedCalls += 1;
-          tools.lastErrorCode = "agent_provider_protocol_error";
-          tools.errors.set(event.toolCallId, {
-            code: "agent_provider_protocol_error",
-            resultUnknown: false,
-          });
-          protocolState.code = "agent_provider_protocol_error";
-          abortForProtocol?.();
-        }
-        if (
-          event.toolName === AGENT_TOOL_CREATE_IMAGE &&
-          !tools.errors.has(event.toolCallId)
-        ) {
-          const fallbackCode =
-            tools.imageCalls >= toolPolicy.max_image_tool_calls
-              ? "agent_tool_limit_reached"
-              : tools.acceptedImages >= toolPolicy.max_images_per_run
-                ? "agent_image_limit_reached"
-                : "agent_tool_failed";
-          if (fallbackCode === "agent_tool_limit_reached") {
-            tools.limitReason = "tool_calls";
-          } else if (fallbackCode === "agent_image_limit_reached") {
-            tools.limitReason = "images";
+        if (!tools.errors.has(event.toolCallId)) {
+          let fallbackCode = "agent_tool_failed";
+          if (event.toolName === AGENT_TOOL_CREATE_IMAGE) {
+            fallbackCode =
+              tools.imageCalls >= toolPolicy.max_image_tool_calls
+                ? "agent_tool_limit_reached"
+                : tools.acceptedImages >= toolPolicy.max_images_per_run
+                  ? "agent_image_limit_reached"
+                  : fallbackCode;
           }
-          tools.calls += 1;
+          if (!tools.modes.has(event.toolCallId)) tools.calls += 1;
           tools.failedCalls += 1;
           tools.lastErrorCode = fallbackCode;
           tools.errors.set(event.toolCallId, {
@@ -1078,10 +1139,7 @@ export async function executeAgentRun(
           });
         }
         const recorded = tools.errors.get(event.toolCallId);
-        const code =
-          event.toolName === AGENT_TOOL_CREATE_IMAGE
-            ? recorded?.code ?? "agent_tool_failed"
-            : "agent_tool_not_allowed";
+        const code = recorded?.code ?? "agent_tool_failed";
         metrics?.toolCalls.labels(event.toolName, mode, "failed").inc();
         if (toolDuration !== null) {
           metrics?.toolDuration.labels(event.toolName, mode, "failed").observe(toolDuration);
@@ -1094,16 +1152,9 @@ export async function executeAgentRun(
           turn: turnCount + 1,
           error_code: code,
           result_unknown: recorded?.resultUnknown === true,
+          result_text: boundedToolResultText(event.result),
         });
-        if (event.toolName !== AGENT_TOOL_CREATE_IMAGE) {
-          protocolState.code = "agent_provider_protocol_error";
-          abortForProtocol?.();
-        }
       } else {
-        if (event.toolName !== AGENT_TOOL_CREATE_IMAGE) {
-          protocolState.code = "agent_provider_protocol_error";
-          abortForProtocol?.();
-        }
         const details = toolDetails(event.result);
         const resultMode = typeof details.mode === "string" ? details.mode : mode;
         metrics?.toolCalls.labels(event.toolName, resultMode, "succeeded").inc();
@@ -1114,10 +1165,11 @@ export async function executeAgentRun(
           tool_call_id: event.toolCallId,
           ordinal,
           name: event.toolName,
-          mode: details.mode,
+          mode: resultMode,
           turn: turnCount + 1,
           generation_ids: details.generation_ids,
           replayed: details.replayed,
+          result_text: boundedToolResultText(event.result),
         });
       }
       return;
@@ -1294,7 +1346,10 @@ export async function executeAgentRun(
     // overflow checkpoints can retain current-turn Pi entries that do not yet
     // have a durable Lumen message boundary.
     session.setAutoCompactionEnabled(false);
-    if ((request.version === 3 || request.version === 4) && request.operation === "continue") {
+    if (
+      (request.version === 3 || request.version === 4 || request.version === 5) &&
+      request.operation === "continue"
+    ) {
       await session.prompt(request.current_prompt, {
         images: [],
         expandPromptTemplates: false,

@@ -2,6 +2,7 @@ import type { RuntimeRequest } from "../src/contracts.js";
 
 type RuntimeRequestV2 = Extract<RuntimeRequest, { version: 2 }>;
 type RuntimeRequestV3 = Extract<RuntimeRequest, { version: 3 }>;
+type RuntimeRequestV5 = Extract<RuntimeRequest, { version: 5 }>;
 
 export const TEST_SECRET = "runtime-test-secret-0123456789-abcdef";
 
@@ -55,6 +56,28 @@ export function runtimeRequest(
     },
   };
   return { ...base, ...overrides };
+}
+
+export function runtimeRequestV5(
+  overrides: Partial<RuntimeRequestV5> = {},
+): RuntimeRequestV5 {
+  return {
+    ...runtimeRequest(),
+    version: 5,
+    operation: "prompt",
+    allowed_tools: [],
+    workspace_files: [],
+    tool_gateway_url: null,
+    tool_capability: null,
+    tool_policy: {
+      max_image_tool_calls: 0,
+      max_images_per_run: 4,
+      max_web_search_calls: 0,
+      max_file_tool_calls: 0,
+      max_tool_calls: 0,
+    },
+    ...overrides,
+  };
 }
 
 export function runtimeRequestV3(

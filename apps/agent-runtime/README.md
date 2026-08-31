@@ -34,7 +34,11 @@ pre-prompt Pi compaction checkpoints are persisted; current-turn automatic
 compaction is disabled until every retained Pi entry has a durable projection.
 It must
 not be published on a host port or mounted to a repository, media
-directory, user home, or Pi config path.
+directory, user home, or Pi config path. Pi built-ins and resource discovery
+remain disabled. Runtime v5 exposes only Lumen's first-party image, bounded
+public web-search, and in-memory virtual text-file tools. Web search calls fixed
+public endpoints and cannot fetch a model-supplied URL; file tools cannot read
+or write a host/container path.
 
 Production Compose keeps one always-running replica on `lumen_backend` with a
 read-only root filesystem, bounded `/tmp`, non-root UID, dropped capabilities,

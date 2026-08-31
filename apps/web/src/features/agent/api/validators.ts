@@ -157,8 +157,14 @@ function toolCall(
   nonempty(item.name, endpoint, `${path}.name`);
   if (
     item.mode !== null &&
-    item.mode !== "text_to_image" &&
-    item.mode !== "image_to_image"
+    !new Set([
+      "text_to_image",
+      "image_to_image",
+      "web_search",
+      "file_list",
+      "file_read",
+      "file_search",
+    ]).has(String(item.mode))
   ) {
     invalid(endpoint, `${path}.mode`);
   }
@@ -263,6 +269,8 @@ export function parseAgentSession(
     "archived",
     "memory_disabled",
     "allow_image",
+    "allow_web_search",
+    "allow_file_tools",
   ] as const) {
     boolean(item[field], endpoint, `${path}.${field}`);
   }

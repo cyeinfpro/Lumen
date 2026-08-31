@@ -218,7 +218,9 @@ function session(
     default_system_prompt_id: null,
     image_defaults: imageDefaults(),
     allow_image: true,
-    runtime_version: "0.84.2",
+    allow_web_search: false,
+    allow_file_tools: true,
+    runtime_version: "0.84.4",
     last_activity_at: NOW,
     created_at: NOW,
     updated_at: NOW,
@@ -534,8 +536,14 @@ export async function openAgent(page: Page) {
 }
 
 export async function assertImagePixels(page: Page, selector: string) {
-  const pixels = await page.locator(selector).evaluate((node) => {
+  const imageLocator = page.locator(selector);
+  await imageLocator.scrollIntoViewIfNeeded();
+  await expect.poll(() =>
+    imageLocator.evaluate((node) => (node as HTMLImageElement).naturalWidth),
+  ).toBeGreaterThan(0);
+  const pixels = await imageLocator.evaluate(async (node) => {
     const image = node as HTMLImageElement;
+    await image.decode().catch(() => undefined);
     const canvas = document.createElement("canvas");
     canvas.width = image.naturalWidth;
     canvas.height = image.naturalHeight;

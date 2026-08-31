@@ -90,7 +90,7 @@ async def _seed(factory: async_sessionmaker[AsyncSession]) -> None:
             id="session-agent-persist",
             user_id=user.id,
             conversation_id=conversation.id,
-            runtime_version="pi-0.84.2",
+            runtime_version="pi-0.84.4",
         )
         user_message = Message(
             id="message-user-persist",
@@ -239,7 +239,7 @@ async def test_pi_compaction_checkpoint_is_epoch_fenced_and_usage_accounted(
         run_id=claim.run_id,
         execution_epoch=claim.execution_epoch,
         checkpoint_version=2,
-        pi_runtime_version="pi-0.84.2",
+        pi_runtime_version="pi-0.84.4",
         summary="## Goal\nPreserve the complete Agent task context.",
         first_kept_message_id="message-user-persist",
         next_message_id="message-user-persist",
@@ -324,7 +324,7 @@ async def test_unsafe_compaction_is_quarantined_but_usage_is_persisted(
         run_id=claim.run_id,
         execution_epoch=claim.execution_epoch,
         checkpoint_version=2,
-        pi_runtime_version="pi-0.84.2",
+        pi_runtime_version="pi-0.84.4",
         summary=summary,
         first_kept_message_id="message-user-persist",
         next_message_id="message-user-persist",
@@ -377,7 +377,7 @@ async def test_checkpoint_restore_survives_source_cancel_and_rejects_legacy_v1(
         run_id=claim.run_id,
         execution_epoch=claim.execution_epoch,
         checkpoint_version=2,
-        pi_runtime_version="pi-0.84.2",
+        pi_runtime_version="pi-0.84.4",
         summary="durable summary",
         first_kept_message_id="message-user-persist",
         next_message_id="message-user-next",
@@ -933,6 +933,63 @@ async def test_gateway_unreachable_persists_unknown_tool_terminal(
 
 
 @pytest.mark.asyncio
+async def test_runtime_local_search_tool_persists_arguments_and_bounded_history(
+    agent_db: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed(agent_db)
+    claim, _started = await persistence.claim_agent_run("run-agent-persist")
+    assert await persistence.record_runtime_checkpoint(
+        claim.run_id,
+        claim.execution_epoch,
+        AgentRuntimeEvent(
+            version=1,
+            type="tool.started",
+            seq=1,
+            run_id=claim.run_id,
+            execution_epoch=claim.execution_epoch,
+            tool_call_id="pi-web-search",
+            ordinal=0,
+            name="lumen_web_search",
+            arguments={"query": "current sources"},
+        ),
+    )
+    result_text = '{"sources":[{"title":"Docs","url":"https://example.com"}]}'
+    assert await persistence.record_runtime_checkpoint(
+        claim.run_id,
+        claim.execution_epoch,
+        AgentRuntimeEvent(
+            version=1,
+            type="tool.succeeded",
+            seq=2,
+            run_id=claim.run_id,
+            execution_epoch=claim.execution_epoch,
+            tool_call_id="pi-web-search",
+            ordinal=0,
+            name="lumen_web_search",
+            mode="web_search",
+            result_text=result_text,
+        ),
+    )
+
+    async with agent_db() as db:
+        tool = (await db.execute(select(AgentToolCall))).scalar_one()
+        assert tool.status == "succeeded"
+        assert tool.mode == "web_search"
+        assert tool.arguments_jsonb == {"query": "current sources"}
+        assert tool.result_jsonb["history_text"] == result_text
+        events = list(
+            (await db.execute(select(OutboxEvent).where(OutboxEvent.kind == "sse")))
+            .scalars()
+            .all()
+        )
+        assert [item.payload["event_name"] for item in events] == [
+            "agent.run.started",
+            "agent.tool.started",
+            "agent.tool.succeeded",
+        ]
+
+
+@pytest.mark.asyncio
 async def test_runtime_started_persists_actual_runtime_version(
     agent_db: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -947,14 +1004,14 @@ async def test_runtime_started_persists_actual_runtime_version(
             seq=1,
             run_id=claim.run_id,
             execution_epoch=claim.execution_epoch,
-            runtime_version="pi-0.84.2+runtime-build",
+            runtime_version="pi-0.84.4+runtime-build",
             tools=[],
         ),
     )
     async with agent_db() as db:
         session = await db.get(AgentSession, "session-agent-persist")
         assert session is not None
-        assert session.runtime_version == "pi-0.84.2+runtime-build"
+        assert session.runtime_version == "pi-0.84.4+runtime-build"
 
 
 @pytest.mark.asyncio

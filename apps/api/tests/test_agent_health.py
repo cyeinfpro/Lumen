@@ -46,7 +46,7 @@ async def test_enabled_agent_health_requires_paid_call_free_runtime_readiness(
         return agent_health.AgentRuntimeProbe(
             ok=True,
             status_code=200,
-            runtime_version="pi-0.84.2",
+            runtime_version="pi-0.84.4",
             error_code=None,
             auth_key_id=runtime_key_id if endpoint == "readyz" else None,
         )
@@ -65,7 +65,7 @@ async def test_enabled_agent_health_requires_paid_call_free_runtime_readiness(
 
     assert calls == ["healthz", "readyz"]
     assert snapshot.operational is True
-    assert snapshot.runtime_version == "pi-0.84.2"
+    assert snapshot.runtime_version == "pi-0.84.4"
 
 
 @pytest.mark.asyncio
@@ -79,7 +79,7 @@ async def test_enabled_agent_health_rejects_runtime_hmac_key_mismatch(
         return agent_health.AgentRuntimeProbe(
             ok=True,
             status_code=200,
-            runtime_version="pi-0.84.2",
+            runtime_version="pi-0.84.4",
             error_code=None,
             auth_key_id="0" * 16 if endpoint == "readyz" else None,
         )

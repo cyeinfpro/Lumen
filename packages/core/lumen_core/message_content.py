@@ -14,6 +14,7 @@ _AGENT_PUBLIC_KEYS = frozenset(
         "output_revision",
         "output_runtime_seq",
         "attachments",
+        "files",
         "input_images",
         "images",
         "tool_calls",
@@ -27,6 +28,7 @@ _AGENT_PUBLIC_KEYS = frozenset(
 _AGENT_ATTACHMENT_KEYS = frozenset(
     {"image_id", "role", "label", "reference_label", "weight"}
 )
+_AGENT_FILE_KEYS = frozenset({"name", "mime_type", "size"})
 _AGENT_TOOL_CALL_KEYS = frozenset(
     {
         "id",
@@ -49,6 +51,7 @@ _AGENT_BLOCK_KEYS = frozenset(
         "name",
         "status",
         "generation_ids",
+        "result_text",
     }
 )
 _AGENT_IMAGE_KEYS = frozenset(
@@ -81,6 +84,8 @@ def _public_agent_content(content: dict[str, Any]) -> dict[str, Any]:
                 projected[key],
                 _AGENT_ATTACHMENT_KEYS,
             )
+    if "files" in projected:
+        projected["files"] = _public_dict_list(projected["files"], _AGENT_FILE_KEYS)
     if "blocks" in projected:
         projected["blocks"] = _public_dict_list(projected["blocks"], _AGENT_BLOCK_KEYS)
     if "tool_calls" in projected:

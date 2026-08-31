@@ -49,7 +49,10 @@ test("optimistic attachments wait for server labels and Auto is omitted", () => 
         previewUrl: "/image-1",
       },
     ],
+    files: [],
     allowImage: true,
+    allowWebSearch: false,
+    allowFileTools: true,
     reasoningEffort: "auto" as const,
     imageDefaults: {
       count: 1,
@@ -82,8 +85,9 @@ test("optimistic attachments wait for server labels and Auto is omitted", () => 
     "reference_label" in (optimisticAttachment ?? {}),
     false,
   );
-  assert.equal(
-    "reasoning_effort" in agentMessageBody(draft, true, "message-key"),
-    false,
-  );
+  const body = agentMessageBody(draft, true, "message-key");
+  assert.equal("reasoning_effort" in body, false);
+  assert.deepEqual(body.files, []);
+  assert.equal(body.allow_web_search, false);
+  assert.equal(body.allow_file_tools, true);
 });

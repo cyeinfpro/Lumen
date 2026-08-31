@@ -8,9 +8,11 @@ import {
 } from "@/components/ui/shell/PrivateSidebarShell";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { useUiStore } from "@/store/useUiStore";
+import { useAgentWorkspaceScroll } from "../containers/useAgentScrollManager";
 import { AgentComposer } from "./AgentComposer";
 import { AgentContextBar } from "./AgentContextBar";
 import { AgentConversation } from "./AgentConversation";
+import { AgentScrollToLatest } from "./AgentScrollToLatest";
 import { AgentSidebar } from "./AgentSidebar";
 import type { AgentWorkspaceProps } from "./AgentWorkspace.types";
 
@@ -22,7 +24,17 @@ export function DesktopAgent(props: AgentWorkspaceProps) {
   const [composerHeight, setComposerHeight] = useState(120);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const workspaceRef = useRef<HTMLDivElement | null>(null);
-  const scrollRef = useRef<HTMLElement | null>(null);
+  const {
+    scrollRef,
+    newOutputBelow,
+    prepareForPrepend,
+    scrollToLatest,
+  } = useAgentWorkspaceScroll({
+    messages: props.messages,
+    runsById: props.runsById,
+    generationsById: props.generationsById,
+    threshold: 140,
+  });
 
   const toggle = useCallback(() => {
     if (wide === true) toggleSidebar();
@@ -44,16 +56,6 @@ export function DesktopAgent(props: AgentWorkspaceProps) {
       window.removeEventListener("keydown", onKey);
     };
   }, [toggle]);
-
-  useEffect(() => {
-    if (!props.messages.length) return;
-    const root = scrollRef.current;
-    if (!root) return;
-    const distance = root.scrollHeight - root.scrollTop - root.clientHeight;
-    const localSubmission = props.messages.at(-1)?.optimistic === true;
-    if (!localSubmission && distance > 140) return;
-    root.scrollTo({ top: root.scrollHeight, behavior: "auto" });
-  }, [props.messages, props.generationsById]);
 
   const sidebar = (
     <AgentSidebar
@@ -103,6 +105,7 @@ export function DesktopAgent(props: AgentWorkspaceProps) {
               platform="desktop"
               session={props.currentSession}
               realtimeStatus={props.realtimeStatus}
+              activeRun={props.activeRun}
               toolGatewayConfigured={props.toolGatewayConfigured}
               prompts={props.prompts}
               saving={props.sessionSaving}
@@ -137,9 +140,18 @@ export function DesktopAgent(props: AgentWorkspaceProps) {
                 onContinue={props.onContinue}
                 hasMore={props.messagesHaveMore}
                 loadingMore={props.messagesLoadingMore}
-                onLoadOlder={props.onLoadOlderMessages}
+                onLoadOlder={() => {
+                  const clearAnchor = prepareForPrepend();
+                  void Promise.resolve(props.onLoadOlderMessages()).finally(clearAnchor);
+                }}
               />
             </main>
+            <AgentScrollToLatest
+              visible={newOutputBelow}
+              onClick={scrollToLatest}
+              className="absolute right-4 z-[calc(var(--z-composer)+1)]"
+              style={{ bottom: `${composerHeight + 36}px` }}
+            />
             <AgentComposer
               platform="desktop"
               {...composerProps(props)}
@@ -181,6 +193,8 @@ function composerProps(props: AgentWorkspaceProps) {
     onRemoveAttachment: props.onRemoveAttachment,
     onMoveAttachment: props.onMoveAttachment,
     onRoleChange: props.onRoleChange,
+    onAddFile: props.onAddFile,
+    onRemoveFile: props.onRemoveFile,
     onPreviewAttachment: props.onPreviewAttachment,
     onPickAsset: props.onPickAsset,
     onSubmit: props.onSubmit,

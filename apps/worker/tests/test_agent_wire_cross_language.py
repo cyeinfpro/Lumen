@@ -10,6 +10,7 @@ from app.agent_runtime_client import (
     AgentRuntimeProviderEnvelope,
     AgentRuntimeRequest,
     AgentRuntimeToolPolicy,
+    AgentRuntimeWorkspaceFile,
     _RuntimeEventDecoder,
     runtime_request_body,
 )
@@ -50,7 +51,23 @@ def _request(version: int) -> AgentRuntimeRequest:
         compaction=None,
         current_prompt="hello",
         references=[],
-        allowed_tools=[],
+        allowed_tools=(
+            ["lumen_list_files", "lumen_read_file", "lumen_search_files"]
+            if version == 5
+            else []
+        ),
+        workspace_files=(
+            [
+                AgentRuntimeWorkspaceFile(
+                    name="brief.md",
+                    mime_type="text/markdown",
+                    size=7,
+                    content="# Brief",
+                )
+            ]
+            if version == 5
+            else []
+        ),
         image_defaults=AgentRuntimeImageDefaults(
             count=1,
             aspect_ratio="1:1",
@@ -65,6 +82,8 @@ def _request(version: int) -> AgentRuntimeRequest:
         tool_policy=AgentRuntimeToolPolicy(
             max_image_tool_calls=0,
             max_images_per_run=4,
+            max_file_tool_calls=4 if version == 5 else 0,
+            max_tool_calls=4 if version == 5 else 0,
         ),
         operation="prompt" if version >= 3 else None,
     )
@@ -72,7 +91,7 @@ def _request(version: int) -> AgentRuntimeRequest:
 
 def test_python_runtime_requests_parse_in_typescript_receiver() -> None:
     requests = [
-        json.loads(runtime_request_body(_request(version))) for version in (2, 3, 4)
+        json.loads(runtime_request_body(_request(version))) for version in (2, 3, 4, 5)
     ]
     completed = subprocess.run(
         [str(TSX), str(SCRIPT)],
@@ -83,7 +102,7 @@ def test_python_runtime_requests_parse_in_typescript_receiver() -> None:
         check=True,
         timeout=30,
     )
-    assert json.loads(completed.stdout) == [2, 3, 4]
+    assert json.loads(completed.stdout) == [2, 3, 4, 5]
 
 
 def test_typescript_large_text_chunks_fit_python_receiver_contract() -> None:

@@ -37,6 +37,9 @@ AGENT_SETTING_DEFAULTS = MappingProxyType(
     {
         "agent.max_image_tool_calls": 2,
         "agent.max_images_per_run": 4,
+        "agent.max_web_search_calls": 4,
+        "agent.max_file_tool_calls": 8,
+        "agent.max_tool_calls": 12,
         "agent.max_reference_images": 16,
         "agent.max_session_images": 64,
     }
@@ -60,8 +63,8 @@ class AgentTextReservation:
     billing_snapshot: dict[str, Any]
 
 
-def agent_provider_call_budget(max_image_tool_calls: int) -> int:
-    native_tool_turns = max(0, min(8, max_image_tool_calls))
+def agent_provider_call_budget(max_tool_calls: int) -> int:
+    native_tool_turns = max(0, min(48, max_tool_calls))
     return (
         1
         + native_tool_turns
@@ -287,6 +290,7 @@ async def reserve_agent_text(
     context_window: int = 128_000,
     provider_max_output_tokens: int = 32_000,
     max_image_tool_calls: int = 0,
+    max_tool_calls: int | None = None,
 ) -> AgentTextReservation:
     if account_mode != "wallet" or not await billing_enabled(db):
         return AgentTextReservation(hold_micro=0, billing_snapshot={})
@@ -294,8 +298,11 @@ async def reserve_agent_text(
     max_output_tokens = max(1, provider_max_output_tokens)
     bounded_context_window = max(4096, min(2_000_000, context_window))
     input_per_turn = max(1, bounded_context_window - max_output_tokens)
-    native_tool_turns = max(0, min(8, max_image_tool_calls))
-    reserved_provider_calls = agent_provider_call_budget(max_image_tool_calls)
+    effective_tool_calls = (
+        max_image_tool_calls if max_tool_calls is None else max_tool_calls
+    )
+    native_tool_turns = max(0, min(48, effective_tool_calls))
+    reserved_provider_calls = agent_provider_call_budget(effective_tool_calls)
     input_upper = input_per_turn * reserved_provider_calls
     output_upper = max_output_tokens * reserved_provider_calls
     try:

@@ -2,12 +2,15 @@
 
 import { create } from "zustand";
 import {
+  AGENT_MAX_FILES,
   AGENT_MAX_REFERENCES,
+  AGENT_MAX_TOTAL_FILE_BYTES,
   AGENT_NEW_DRAFT_KEY,
   createAgentDraft,
   type AgentAssistantMessage,
   type AgentDraft,
   type AgentDraftAttachment,
+  type AgentDraftFile,
   type AgentEventEnvelope,
   type AgentMessage,
   type AgentMessageCreateResult,
@@ -91,6 +94,8 @@ interface AgentStoreState {
     imageId: string,
     role: AgentDraftAttachment["role"],
   ) => void;
+  addDraftFile: (sessionId: string | null, file: AgentDraftFile) => boolean;
+  removeDraftFile: (sessionId: string | null, name: string) => void;
   clearDraft: (sessionId: string | null) => void;
   clearDraftContent: (sessionId: string | null) => void;
   migrateDraft: (fromSessionId: string | null, toSessionId: string) => void;
@@ -420,6 +425,28 @@ function createAgentStore() {
         ),
       });
     },
+    addDraftFile: (sessionId, file) => {
+      const draft = currentDraft(get().draftsBySession, sessionId);
+      const duplicate = draft.files.some(
+        (item) => item.name.toLocaleLowerCase() === file.name.toLocaleLowerCase(),
+      );
+      const totalBytes = draft.files.reduce((total, item) => total + item.size, 0);
+      if (
+        duplicate ||
+        draft.files.length >= AGENT_MAX_FILES ||
+        totalBytes + file.size > AGENT_MAX_TOTAL_FILE_BYTES
+      ) {
+        return false;
+      }
+      get().setDraft(sessionId, { files: [...draft.files, file] });
+      return true;
+    },
+    removeDraftFile: (sessionId, name) => {
+      const draft = currentDraft(get().draftsBySession, sessionId);
+      get().setDraft(sessionId, {
+        files: draft.files.filter((item) => item.name !== name),
+      });
+    },
     clearDraft: (sessionId) =>
       set((state) => {
         const draftsBySession = { ...state.draftsBySession };
@@ -428,7 +455,7 @@ function createAgentStore() {
         return { draftsBySession, composerError: null };
       }),
     clearDraftContent: (sessionId) => {
-      get().setDraft(sessionId, { text: "", attachments: [] });
+      get().setDraft(sessionId, { text: "", attachments: [], files: [] });
       set({ composerError: null });
     },
     migrateDraft: (fromSessionId, toSessionId) =>

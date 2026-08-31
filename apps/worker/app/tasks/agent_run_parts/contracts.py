@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 import time
 from typing import Any, Literal
 
+from lumen_core.agent_events import AGENT_FIRST_PARTY_TOOLS
+
 from ...agent_runtime_client import AgentRuntimeEvent
 
 
@@ -170,7 +172,7 @@ class AgentRuntimeAccumulator:
     def _apply_tool_started(self, event: AgentRuntimeEvent) -> None:
         self.blocks_dirty = True
         self.output_runtime_seq = max(self.output_runtime_seq, event.seq)
-        if event.name == "lumen_create_image":
+        if event.name in AGENT_FIRST_PARTY_TOOLS:
             self.runtime_tool_call_count += 1
         self._upsert_tool_block(event, "running")
         if event.tool_call_id:
@@ -268,6 +270,8 @@ class AgentRuntimeAccumulator:
                 block["status"] = status
                 if event.generation_ids:
                     block["generation_ids"] = list(event.generation_ids)
+                if event.result_text:
+                    block["result_text"] = event.result_text[:20_000]
                 return
         self.blocks.append(
             {
@@ -278,6 +282,11 @@ class AgentRuntimeAccumulator:
                 "name": event.name,
                 "status": status,
                 "generation_ids": list(event.generation_ids or []),
+                **(
+                    {"result_text": event.result_text[:20_000]}
+                    if event.result_text
+                    else {}
+                ),
             }
         )
 

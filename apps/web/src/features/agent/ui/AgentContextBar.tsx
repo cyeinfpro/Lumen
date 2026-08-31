@@ -8,6 +8,7 @@ import { BottomSheet } from "@/components/ui/primitives/mobile";
 import { cn } from "@/lib/utils";
 import type { AgentRealtimeStatus, } from "@/store/agent/useAgentStore";
 import type {
+  AgentRun,
   AgentSession,
   AgentSessionImageList,
   AgentSessionPatchInput,
@@ -22,6 +23,7 @@ export function AgentContextBar({
   platform,
   session,
   realtimeStatus,
+  activeRun,
   toolGatewayConfigured,
   prompts,
   saving,
@@ -34,6 +36,7 @@ export function AgentContextBar({
   platform: "desktop" | "mobile";
   session: AgentSession | null;
   realtimeStatus: AgentRealtimeStatus;
+  activeRun: AgentRun | null;
   toolGatewayConfigured: boolean;
   prompts: AgentPromptOption[];
   saving: boolean;
@@ -74,6 +77,15 @@ export function AgentContextBar({
         <p className="min-w-0 flex-1 truncate type-nav text-[var(--fg-0)]">
           {session?.title || "新会话"}
         </p>
+        {activeRun ? (
+          <span
+            role="status"
+            className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-full border border-accent-border bg-accent-soft px-2 type-caption text-[var(--fg-1)]"
+          >
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" aria-hidden />
+            {agentRunPhaseLabel(activeRun)}
+          </span>
+        ) : null}
         <span
           role="status"
           className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 type-caption text-[var(--fg-2)]"
@@ -126,6 +138,20 @@ export function AgentContextBar({
       )}
     </>
   );
+}
+
+function agentRunPhaseLabel(run: AgentRun): string {
+  if (run.status === "queued") return "排队中";
+  if (run.cancel_requested_at) return "停止中";
+  const activeTool = run.tool_calls.find(
+    (tool) => tool.status === "queued" || tool.status === "running",
+  );
+  if (activeTool?.name === "lumen_web_search") return "搜索中";
+  if (activeTool?.name?.startsWith("lumen_") && activeTool.name.includes("file")) {
+    return "读取文件";
+  }
+  if (activeTool) return "调用工具";
+  return run.turn_count > 0 ? "生成回复" : "思考中";
 }
 
 function agentConnectionLabel(status: AgentRealtimeStatus): string {

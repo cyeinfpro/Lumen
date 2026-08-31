@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronDown, Plus } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { LandscapeBanner } from "@/components/ui/shell/LandscapeBanner";
 import { MobileConversationDrawer } from "@/components/ui/shell/MobileConversationDrawer";
 import { MobileTabBar } from "@/components/ui/shell/MobileTabBar";
@@ -10,9 +10,11 @@ import { MobileIconButton } from "@/components/ui/primitives/mobile/MobileIconBu
 import { Pressable } from "@/components/ui/primitives/mobile/Pressable";
 import { TaskIsland } from "@/components/ui/tray/TaskIsland";
 import { useKeyboardInset } from "@/hooks/useKeyboardInset";
+import { useAgentWorkspaceScroll } from "../containers/useAgentScrollManager";
 import { AgentComposer } from "./AgentComposer";
 import { AgentContextBar } from "./AgentContextBar";
 import { AgentConversation } from "./AgentConversation";
+import { AgentScrollToLatest } from "./AgentScrollToLatest";
 import { AgentSidebar } from "./AgentSidebar";
 import { agentComposerProps } from "./DesktopAgent";
 import type { AgentWorkspaceProps } from "./AgentWorkspace.types";
@@ -21,16 +23,17 @@ export function MobileAgent(props: AgentWorkspaceProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [composerHeight, setComposerHeight] = useState(120);
   const { isKeyboardOpen } = useKeyboardInset();
-  const scrollRef = useRef<HTMLElement | null>(null);
-
-  useEffect(() => {
-    const root = scrollRef.current;
-    if (!root || props.messages.length === 0) return;
-    const distance = root.scrollHeight - root.scrollTop - root.clientHeight;
-    const localSubmission = props.messages.at(-1)?.optimistic === true;
-    if (!localSubmission && distance > 96) return;
-    root.scrollTo({ top: root.scrollHeight, behavior: "auto" });
-  }, [props.messages, props.generationsById]);
+  const {
+    scrollRef,
+    newOutputBelow,
+    prepareForPrepend,
+    scrollToLatest,
+  } = useAgentWorkspaceScroll({
+    messages: props.messages,
+    runsById: props.runsById,
+    generationsById: props.generationsById,
+    threshold: 96,
+  });
 
   const sidebar = (
     <AgentSidebar
@@ -104,6 +107,7 @@ export function MobileAgent(props: AgentWorkspaceProps) {
                 platform="mobile"
                 session={props.currentSession}
                 realtimeStatus={props.realtimeStatus}
+                activeRun={props.activeRun}
                 toolGatewayConfigured={props.toolGatewayConfigured}
                 prompts={props.prompts}
                 saving={props.sessionSaving}
@@ -142,9 +146,20 @@ export function MobileAgent(props: AgentWorkspaceProps) {
           onContinue={props.onContinue}
           hasMore={props.messagesHaveMore}
           loadingMore={props.messagesLoadingMore}
-          onLoadOlder={props.onLoadOlderMessages}
+          onLoadOlder={() => {
+            const clearAnchor = prepareForPrepend();
+            void Promise.resolve(props.onLoadOlderMessages()).finally(clearAnchor);
+          }}
         />
       </main>
+      <AgentScrollToLatest
+        visible={newOutputBelow}
+        onClick={scrollToLatest}
+        className="fixed right-3 z-[calc(var(--z-composer)+2)]"
+        style={{
+          bottom: `calc(var(--agent-mobile-nav-offset) + ${composerHeight}px + var(--space-3))`,
+        }}
+      />
       <div
         className="fixed left-1/2 z-[calc(var(--z-composer)+1)] -translate-x-1/2"
         style={{

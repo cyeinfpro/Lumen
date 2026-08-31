@@ -51,6 +51,7 @@ function userMessage(message: AgentBackendMessage): AgentUserMessage {
     attachments: Array.isArray(message.content.attachments)
       ? message.content.attachments
       : [],
+    files: Array.isArray(message.content.files) ? message.content.files : [],
     createdAt: message.created_at,
   };
 }

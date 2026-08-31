@@ -138,7 +138,7 @@ describe("Runtime HTTP boundary", () => {
       const readyPayload: unknown = await ready.json();
       expect(readyPayload).toMatchObject({
         ok: true,
-        runtime_version: "pi-0.84.2",
+        runtime_version: "pi-0.84.4",
       });
       expect(
         (readyPayload as { auth_key_id?: unknown }).auth_key_id,

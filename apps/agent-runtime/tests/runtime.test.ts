@@ -26,7 +26,7 @@ import {
   omitAutomaticReasoningControls,
   runtimeModel,
 } from "../src/providers/runtime-provider.js";
-import { runtimeRequest, runtimeRequestV3 } from "./fixtures.js";
+import { runtimeRequest, runtimeRequestV3, runtimeRequestV5 } from "./fixtures.js";
 
 async function fakeDependencies(
   responses: Parameters<ReturnType<typeof fauxProvider>["setResponses"]>[0],
@@ -249,7 +249,7 @@ describe("Pi Runtime execution", () => {
       (event) => event.type === "compaction.completed",
     );
     expect(checkpoint?.checkpoint_version).toBe(1);
-    expect(checkpoint?.pi_runtime_version).toBe("pi-0.84.2");
+    expect(checkpoint?.pi_runtime_version).toBe("pi-0.84.4");
     expect(String(checkpoint?.summary)).toContain(
       "Preserve the full creative session",
     );
@@ -1126,6 +1126,75 @@ describe("Pi Runtime execution", () => {
     expect(writer.events).toContainEqual(
       expect.objectContaining({ type: "limit.reached", reason: "tool_calls" }),
     );
+  });
+
+  it("keeps user files virtual and exposes only bounded first-party file tools", async () => {
+    const dependencies = await fakeDependencies(
+      [
+        fauxAssistantMessage(
+          fauxToolCall("lumen_list_files", {}, { id: "file-list" }),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage(
+          fauxToolCall("lumen_search_files", { query: "needle" }, { id: "file-search" }),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage(
+          fauxToolCall(
+            "lumen_read_file",
+            { name: "notes.txt", line_start: 1, line_count: 2 },
+            { id: "file-read" },
+          ),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage("The supplied file contains the requested value."),
+      ],
+      async () => {
+        throw new Error("image gateway must not run for virtual files");
+      },
+    );
+    const request = runtimeRequestV5({
+      allowed_tools: [
+        "lumen_list_files",
+        "lumen_read_file",
+        "lumen_search_files",
+      ],
+      workspace_files: [
+        {
+          name: "notes.txt",
+          mime_type: "text/plain",
+          size: 19,
+          content: "first line\nneedle here",
+        },
+      ],
+      tool_policy: {
+        max_image_tool_calls: 0,
+        max_images_per_run: 4,
+        max_web_search_calls: 0,
+        max_file_tool_calls: 6,
+        max_tool_calls: 6,
+      },
+    });
+    const writer = new CollectingEventWriter(request.run_id, request.execution_epoch);
+
+    const result = await executeAgentRun(
+      request,
+      writer,
+      new AbortController().signal,
+      undefined,
+      dependencies,
+    );
+
+    expect(result).toMatchObject({ outcome: "succeeded", toolCallCount: 3 });
+    const searchEvent = writer.events.find(
+      (event) => event.type === "tool.succeeded" && event.name === "lumen_search_files",
+    );
+    const readEvent = writer.events.find(
+      (event) => event.type === "tool.succeeded" && event.name === "lumen_read_file",
+    );
+    expect(searchEvent).toMatchObject({ mode: "file_search" });
+    expect(String(searchEvent?.result_text)).toContain("needle here");
+    expect(String(readEvent?.result_text)).toContain("first line");
   });
 
   it("lets Pi finish naturally across every business-authorized tool turn", async () => {

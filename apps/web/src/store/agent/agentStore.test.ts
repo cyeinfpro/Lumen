@@ -54,7 +54,10 @@ test("draft persistence strips URLs and rejects another owner", () => {
           mime: "image/png",
         },
       ],
+      files: [],
       allowImage: true,
+      allowWebSearch: false,
+      allowFileTools: true,
       imageDefaults: {
         count: 2,
         aspect_ratio: "3:4",
@@ -138,6 +141,40 @@ test("Agent attachment limit matches GPT Image 2 sixteen-image input", () => {
       previewUrl: "/image-17",
     }),
     false,
+  );
+});
+
+test("Agent virtual files are bounded, persisted, and cleared after send", () => {
+  useAgentStore.getState().resetForIdentity({ userId: "user-files", epoch: 3 });
+  assert.equal(
+    useAgentStore.getState().addDraftFile("session-files", {
+      name: "brief.md",
+      mimeType: "text/markdown",
+      size: 7,
+      content: "# Brief",
+    }),
+    true,
+  );
+  assert.equal(
+    useAgentStore.getState().addDraftFile("session-files", {
+      name: "BRIEF.MD",
+      mimeType: "text/markdown",
+      size: 7,
+      content: "duplicate",
+    }),
+    false,
+  );
+  const serialized = serializeAgentDrafts("user-files", {
+    "session-files": useAgentStore.getState().draftsBySession["session-files"],
+  });
+  assert.equal(
+    deserializeAgentDrafts(serialized, "user-files")["session-files"].files[0].content,
+    "# Brief",
+  );
+  useAgentStore.getState().clearDraftContent("session-files");
+  assert.deepEqual(
+    useAgentStore.getState().draftsBySession["session-files"].files,
+    [],
   );
 });
 
