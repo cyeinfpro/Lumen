@@ -573,6 +573,29 @@ async def _checkpoint_provider_call(
         row.uncertainty_reason = None if exact else "provider_usage_missing"
 
 
+async def _checkpoint_tool_event(
+    db: AsyncSession,
+    *,
+    run: AgentRun,
+    event: AgentRuntimeEvent,
+    stage_event: Callable[..., dict[str, Any]],
+) -> None:
+    if event.type == "tool.failed":
+        await _record_runtime_tool_failure(
+            db,
+            run=run,
+            event=event,
+            stage_event=stage_event,
+        )
+        return
+    await _record_runtime_local_tool(
+        db,
+        run=run,
+        event=event,
+        stage_event=stage_event,
+    )
+
+
 async def _apply_runtime_checkpoint(
     db: AsyncSession,
     run: AgentRun,
@@ -592,20 +615,12 @@ async def _apply_runtime_checkpoint(
     elif event.type == "compaction.completed":
         await _checkpoint_pi_compaction(db, run, dispatch, event)
     elif event.type in {"tool.started", "tool.succeeded", "tool.failed"}:
-        if event.type == "tool.failed":
-            await _record_runtime_tool_failure(
-                db,
-                run=run,
-                event=event,
-                stage_event=dependencies.stage_event,
-            )
-        else:
-            await _record_runtime_local_tool(
-                db,
-                run=run,
-                event=event,
-                stage_event=dependencies.stage_event,
-            )
+        await _checkpoint_tool_event(
+            db,
+            run=run,
+            event=event,
+            stage_event=dependencies.stage_event,
+        )
     else:
         _checkpoint_terminal(run, dispatch, event)
 

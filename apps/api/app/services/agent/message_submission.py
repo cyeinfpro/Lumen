@@ -162,6 +162,40 @@ class _SnapshotInput:
     max_tool_calls: int
 
 
+async def _submission_tool_limits(
+    db: AsyncSession,
+    body: AgentMessageCreateIn,
+) -> dict[str, int]:
+    image_calls = await agent_setting_int(db, "agent.max_image_tool_calls")
+    images_per_run = await agent_setting_int(db, "agent.max_images_per_run")
+    web_calls = (
+        await agent_setting_int(db, "agent.max_web_search_calls")
+        if body.allow_web_search
+        else 0
+    )
+    file_calls = (
+        await agent_setting_int(db, "agent.max_file_tool_calls")
+        if body.allow_file_tools and body.files
+        else 0
+    )
+    aggregate = (
+        await agent_setting_int(db, "agent.max_tool_calls")
+        if web_calls or file_calls
+        else image_calls
+    )
+    enabled = min(
+        aggregate,
+        (image_calls if body.allow_image else 0) + web_calls + file_calls,
+    )
+    return {
+        "max_image_tool_calls": image_calls,
+        "max_images_per_run": images_per_run,
+        "max_web_search_calls": web_calls,
+        "max_file_tool_calls": file_calls,
+        "max_tool_calls": enabled,
+    }
+
+
 async def _request_snapshot(
     db: AsyncSession,
     value: _SnapshotInput,
@@ -176,12 +210,7 @@ async def _request_snapshot(
         allowed_tools.append(AGENT_TOOL_WEB_SEARCH)
     if body.allow_file_tools and body.files:
         allowed_tools.extend(sorted(AGENT_FILE_TOOLS))
-    enabled_tool_limit = min(
-        value.max_tool_calls,
-        (value.max_image_tool_calls if body.allow_image else 0)
-        + (value.max_web_search_calls if body.allow_web_search else 0)
-        + (value.max_file_tool_calls if body.allow_file_tools and body.files else 0),
-    )
+    enabled_tool_limit = value.max_tool_calls
     return {
         "runtime_request_version": 5,
         "image_defaults": body.image_defaults.model_dump(mode="json"),
@@ -628,23 +657,7 @@ async def _stage_submission(
     )
     db.add(run)
     await db.flush()
-    max_image_tool_calls = await agent_setting_int(db, "agent.max_image_tool_calls")
-    max_images_per_run = await agent_setting_int(db, "agent.max_images_per_run")
-    max_web_search_calls = (
-        await agent_setting_int(db, "agent.max_web_search_calls")
-        if body.allow_web_search
-        else 0
-    )
-    max_file_tool_calls = (
-        await agent_setting_int(db, "agent.max_file_tool_calls")
-        if body.allow_file_tools and body.files
-        else 0
-    )
-    max_tool_calls = (
-        await agent_setting_int(db, "agent.max_tool_calls")
-        if max_web_search_calls or max_file_tool_calls
-        else max_image_tool_calls
-    )
+    tool_limits = await _submission_tool_limits(db, body)
     run.request_snapshot_jsonb = await _request_snapshot(
         db,
         _SnapshotInput(
@@ -652,11 +665,11 @@ async def _stage_submission(
             pin=pin,
             catalog_references=catalog_references,
             run_reference_content=tuple(run_reference_content),
-            max_image_tool_calls=max_image_tool_calls,
-            max_images_per_run=max_images_per_run,
-            max_web_search_calls=max_web_search_calls,
-            max_file_tool_calls=max_file_tool_calls,
-            max_tool_calls=max_tool_calls,
+            max_image_tool_calls=tool_limits["max_image_tool_calls"],
+            max_images_per_run=tool_limits["max_images_per_run"],
+            max_web_search_calls=tool_limits["max_web_search_calls"],
+            max_file_tool_calls=tool_limits["max_file_tool_calls"],
+            max_tool_calls=tool_limits["max_tool_calls"],
         ),
     )
     for index, reference in enumerate(references):
@@ -682,12 +695,7 @@ async def _stage_submission(
         reference_count=len(references),
         context_window=pin.context_window,
         provider_max_output_tokens=pin.max_output_tokens,
-        max_tool_calls=min(
-            max_tool_calls,
-            (max_image_tool_calls if body.allow_image else 0)
-            + (max_web_search_calls if body.allow_web_search else 0)
-            + (max_file_tool_calls if body.allow_file_tools and body.files else 0),
-        ),
+        max_tool_calls=tool_limits["max_tool_calls"],
     )
     run.text_hold_micro = reservation.hold_micro
     run.billing_jsonb = reservation.billing_snapshot

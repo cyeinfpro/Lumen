@@ -243,8 +243,7 @@ class AgentRuntimeRequest(_StrictModel):
     operation: Literal["prompt", "continue"] | None = None
     tool_receipt_version: Literal[2] | None = None
 
-    @model_validator(mode="after")
-    def validate_bindings(self) -> "AgentRuntimeRequest":
+    def _validate_history_bindings(self) -> None:
         history_ids = [message.message_id for message in self.history]
         if len(set(history_ids)) != len(history_ids):
             raise ValueError("history message ids must be unique")
@@ -259,6 +258,8 @@ class AgentRuntimeRequest(_StrictModel):
             and self.compaction.next_message_id != self.user_message_id
         ):
             raise ValueError("compaction continuation is absent from history")
+
+    def _validate_tool_bindings(self) -> None:
         if len(set(self.allowed_tools)) != len(self.allowed_tools):
             raise ValueError("allowed_tools must be unique")
         image_enabled = "lumen_create_image" in self.allowed_tools
@@ -269,10 +270,6 @@ class AgentRuntimeRequest(_StrictModel):
             or any(tool != "lumen_create_image" for tool in self.allowed_tools)
         ):
             raise ValueError("legacy Runtime requests only support image tools")
-        if self.references and not self.provider.vision_supported:
-            raise ValueError("reference images require a vision-capable provider")
-        if set(self.event_features) != {"heartbeat-v1", "text-reset-v1"}:
-            raise ValueError("Pi-native Runtime features are incomplete")
         if image_enabled and self.tool_policy.max_image_tool_calls < 1:
             raise ValueError("image tool requires a positive call allowance")
         if (
@@ -285,11 +282,18 @@ class AgentRuntimeRequest(_StrictModel):
             "lumen_read_file",
             "lumen_search_files",
         }
-        if any(tool in file_tools for tool in self.allowed_tools):
-            if not self.workspace_files or self.tool_policy.max_file_tool_calls < 1:
-                raise ValueError("file tools require workspace files and an allowance")
+        if any(tool in file_tools for tool in self.allowed_tools) and (
+            not self.workspace_files or self.tool_policy.max_file_tool_calls < 1
+        ):
+            raise ValueError("file tools require workspace files and an allowance")
         if self.allowed_tools and self.tool_policy.max_tool_calls < 1:
             raise ValueError("tools require a positive aggregate allowance")
+
+    def _validate_runtime_bindings(self) -> None:
+        if self.references and not self.provider.vision_supported:
+            raise ValueError("reference images require a vision-capable provider")
+        if set(self.event_features) != {"heartbeat-v1", "text-reset-v1"}:
+            raise ValueError("Pi-native Runtime features are incomplete")
         if self.provider.thinking_level_map and not self.provider.reasoning_supported:
             raise ValueError("thinking level map requires reasoning support")
         if self.operation == "continue" and (
@@ -301,6 +305,12 @@ class AgentRuntimeRequest(_StrictModel):
         )
         if dispatch_enabled != bool(self.safety_budget):
             raise ValueError("provider dispatch bindings require a safety budget")
+
+    @model_validator(mode="after")
+    def validate_bindings(self) -> "AgentRuntimeRequest":
+        self._validate_history_bindings()
+        self._validate_tool_bindings()
+        self._validate_runtime_bindings()
         return self
 
 

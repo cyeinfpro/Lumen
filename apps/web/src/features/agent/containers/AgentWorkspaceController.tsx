@@ -38,8 +38,6 @@ import {
 } from "../api/queries";
 import { parseAgentEventEnvelope } from "../model/events";
 import { agentErrorPresentation } from "../model/errors";
-import { DesktopAgent } from "../ui/DesktopAgent";
-import { MobileAgent } from "../ui/MobileAgent";
 import { flattenFeed, useStreamFeedQuery } from "@/features/assets";
 import { useSSE, type SSEHandlers } from "@/features/realtime";
 import { useSystemPromptsQuery } from "@/lib/queries";
@@ -72,7 +70,13 @@ import {
   stageOptimisticSubmission,
   uniqueAgentId,
 } from "./agentSubmission";
-import type { AgentWorkspaceProps } from "../ui/AgentWorkspace.types";
+import {
+  AgentWorkspaceView,
+  agentChannels,
+  busySessionId,
+  removingImageId,
+  snapshotPollInterval,
+} from "./agentWorkspaceView";
 
 const GENERATION_EVENT_NAMES = [
   "generation.queued",
@@ -84,50 +88,6 @@ const GENERATION_EVENT_NAMES = [
   "generation.canceled",
   "generation.retrying",
 ] as const;
-
-function snapshotPollInterval(active: boolean): number {
-  return active ? 2_000 : 8_000;
-}
-
-function agentChannels(sessionId: string | null, generationIds: string[]): string[] {
-  if (!sessionId) return [];
-  return [
-    `agent:${sessionId}`,
-    ...generationIds.map((id) => `task:${id}`),
-  ];
-}
-
-function busySessionId(input: {
-  patching: boolean;
-  patchSessionId?: string;
-  deleting: boolean;
-  deleteSessionId?: string;
-}): string | null {
-  if (input.patching) return input.patchSessionId ?? null;
-  if (input.deleting) return input.deleteSessionId ?? null;
-  return null;
-}
-
-function removingImageId(
-  pending: boolean,
-  imageId: string | undefined,
-): string | null {
-  return pending ? imageId ?? null : null;
-}
-
-function AgentWorkspaceView({
-  platform,
-  props,
-}: {
-  platform: "desktop" | "mobile";
-  props: AgentWorkspaceProps;
-}) {
-  return platform === "mobile" ? (
-    <MobileAgent {...props} />
-  ) : (
-    <DesktopAgent {...props} />
-  );
-}
 
 export function AgentWorkspaceController({
   platform,
