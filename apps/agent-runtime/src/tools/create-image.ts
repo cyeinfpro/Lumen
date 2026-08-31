@@ -14,13 +14,23 @@ const AspectRatio = Type.Union(
   ),
 );
 
+export type ToolMode =
+  | "text_to_image"
+  | "image_to_image"
+  | "web_search"
+  | "file_list"
+  | "file_read"
+  | "file_search";
+
 export interface ToolRuntimeState {
   readonly ordinals: Map<string, number>;
   readonly errors: Map<string, { code: string; resultUnknown: boolean }>;
-  readonly modes: Map<string, "text_to_image" | "image_to_image">;
+  readonly modes: Map<string, ToolMode>;
   nextOrdinal: number;
   calls: number;
   imageCalls: number;
+  webSearchCalls: number;
+  fileCalls: number;
   acceptedImages: number;
   successfulCalls: number;
   failedCalls: number;
@@ -38,7 +48,7 @@ export function ordinalFor(state: ToolRuntimeState, toolCallId: string): number 
   return ordinal;
 }
 
-function rejectTool(
+export function rejectTool(
   state: ToolRuntimeState,
   toolCallId: string,
   code: string,
@@ -121,6 +131,10 @@ export function createImageTool(
           "agent_tool_result_unknown",
           true,
         );
+      }
+      if (state.calls >= policy.max_tool_calls) {
+        state.limitReason = "tool_calls";
+        rejectTool(state, toolCallId, "agent_tool_limit_reached");
       }
       if (
         state.imageCalls >= policy.max_image_tool_calls

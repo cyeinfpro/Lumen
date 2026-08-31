@@ -255,7 +255,10 @@ function validBlock(value: unknown): value is AgentOutputBlock {
   const validToolId =
     item.tool_call_id === undefined || boundedString(item.tool_call_id, 128);
   const validOrdinal = item.ordinal === undefined || nonnegativeInteger(item.ordinal);
-  return item.kind === "tool" && validToolId && validOrdinal;
+  const validResult =
+    item.result_text === undefined ||
+    (typeof item.result_text === "string" && item.result_text.length <= 20_000);
+  return item.kind === "tool" && validToolId && validOrdinal && validResult;
 }
 
 function validBlocks(value: unknown): value is AgentOutputBlock[] {

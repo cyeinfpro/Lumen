@@ -25,6 +25,11 @@ from .video import ImageOut
 AGENT_MAX_REFERENCE_IMAGES = 16
 AGENT_MAX_SESSION_IMAGES = 64
 AGENT_MAX_IMAGES_PER_TOOL = 4
+AGENT_MAX_TEXT_FILES = 8
+AGENT_MAX_FILE_BYTES = 256 * 1024
+AGENT_MAX_FILE_CHARS = 200_000
+AGENT_MAX_TOTAL_FILE_BYTES = 1024 * 1024
+AGENT_MAX_TOTAL_FILE_CHARS = 800_000
 AGENT_REFERENCE_LABEL_PREFIX = "ref_"
 
 
@@ -55,12 +60,66 @@ class AgentReferenceIn(_StrictAgentIn):
         return normalized or None
 
 
+class AgentTextFileIn(_StrictAgentIn):
+    name: str = Field(min_length=1, max_length=128)
+    mime_type: str = Field(default="text/plain", min_length=1, max_length=96)
+    size: int = Field(ge=0, le=AGENT_MAX_FILE_BYTES)
+    content: str = Field(max_length=AGENT_MAX_FILE_CHARS)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if (
+            not normalized
+            or normalized in {".", ".."}
+            or "/" in normalized
+            or "\\" in normalized
+            or any(ord(char) < 32 for char in normalized)
+        ):
+            raise ValueError("invalid Agent file name")
+        return normalized
+
+    @field_validator("mime_type")
+    @classmethod
+    def validate_mime_type(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not normalized.startswith("text/") and normalized not in {
+            "application/json",
+            "application/xml",
+            "application/yaml",
+            "application/x-yaml",
+            "application/javascript",
+            "application/typescript",
+            "application/sql",
+        }:
+            raise ValueError("unsupported Agent file type")
+        return normalized
+
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("Agent text files cannot contain NUL bytes")
+        return value
+
+    @model_validator(mode="after")
+    def normalize_size(self) -> "AgentTextFileIn":
+        actual_size = len(self.content.encode("utf-8"))
+        if actual_size > AGENT_MAX_FILE_BYTES:
+            raise ValueError("Agent text file exceeds the byte limit")
+        self.size = actual_size
+        return self
+
+
 class AgentSessionCreateIn(_StrictAgentIn):
     title: str = Field(default="", max_length=255)
     default_system: str | None = Field(default=None, max_length=MAX_PROMPT_CHARS)
     default_system_prompt_id: str | None = Field(default=None, max_length=64)
     image_defaults: AgentImageDefaultsIn = Field(default_factory=AgentImageDefaultsIn)
     allow_image: bool = True
+    allow_web_search: bool = False
+    allow_file_tools: bool = True
 
 
 class AgentSessionPatchIn(_StrictAgentIn):
@@ -73,6 +132,8 @@ class AgentSessionPatchIn(_StrictAgentIn):
     default_system_prompt_id: str | None = Field(default=None, max_length=64)
     image_defaults: AgentImageDefaultsIn | None = None
     allow_image: bool | None = None
+    allow_web_search: bool | None = None
+    allow_file_tools: bool | None = None
 
 
 class AgentMessageCreateIn(_StrictAgentIn):
@@ -82,19 +143,34 @@ class AgentMessageCreateIn(_StrictAgentIn):
         default_factory=list,
         max_length=AGENT_MAX_REFERENCE_IMAGES,
     )
+    files: list[AgentTextFileIn] = Field(
+        default_factory=list,
+        max_length=AGENT_MAX_TEXT_FILES,
+    )
     image_defaults: AgentImageDefaultsIn = Field(default_factory=AgentImageDefaultsIn)
     allow_image: bool = True
+    allow_web_search: bool = False
+    allow_file_tools: bool = True
     reasoning_effort: (
         Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None
     ) = None
 
     @model_validator(mode="after")
     def validate_message(self) -> "AgentMessageCreateIn":
-        if not self.text.strip() and not self.attachments:
-            raise ValueError("text or at least one attachment is required")
+        if not self.text.strip() and not self.attachments and not self.files:
+            raise ValueError("text, image attachment, or text file is required")
         image_ids = [attachment.image_id for attachment in self.attachments]
         if len(set(image_ids)) != len(image_ids):
             raise ValueError("attachment image_id values must be unique")
+        file_names = [item.name.casefold() for item in self.files]
+        if len(set(file_names)) != len(file_names):
+            raise ValueError("Agent file names must be unique")
+        if sum(item.size for item in self.files) > AGENT_MAX_TOTAL_FILE_BYTES:
+            raise ValueError("Agent files exceed the total byte limit")
+        if sum(len(item.content) for item in self.files) > AGENT_MAX_TOTAL_FILE_CHARS:
+            raise ValueError("Agent files exceed the total text limit")
+        if self.files and not self.allow_file_tools:
+            raise ValueError("Agent files require file tools")
         return self
 
 
@@ -187,7 +263,17 @@ class AgentToolCallOut(BaseModel):
     agent_run_id: str
     ordinal: int
     name: str
-    mode: Literal["text_to_image", "image_to_image"] | None = None
+    mode: (
+        Literal[
+            "text_to_image",
+            "image_to_image",
+            "web_search",
+            "file_list",
+            "file_read",
+            "file_search",
+        ]
+        | None
+    ) = None
     status: Literal[
         "queued", "running", "succeeded", "failed", "cancelled", "timed_out"
     ]
@@ -241,6 +327,8 @@ class AgentSessionOut(BaseModel):
     default_system_prompt_id: str | None = None
     image_defaults: AgentImageDefaultsIn = Field(default_factory=AgentImageDefaultsIn)
     allow_image: bool = True
+    allow_web_search: bool = False
+    allow_file_tools: bool = True
     runtime_version: str
     last_activity_at: datetime
     created_at: datetime
@@ -314,6 +402,7 @@ class AgentEventToolBlock(_StrictAgentIn):
     name: str | None = Field(default=None, max_length=64)
     status: str | None = Field(default=None, max_length=32)
     generation_ids: list[str] = Field(default_factory=list, max_length=4)
+    result_text: str | None = Field(default=None, max_length=20_000)
 
 
 class AgentEventEnvelope(_StrictAgentIn):
@@ -426,9 +515,14 @@ def agent_tool_semantic_key(
 
 
 __all__ = [
+    "AGENT_MAX_FILE_BYTES",
+    "AGENT_MAX_FILE_CHARS",
     "AGENT_MAX_IMAGES_PER_TOOL",
     "AGENT_MAX_REFERENCE_IMAGES",
     "AGENT_MAX_SESSION_IMAGES",
+    "AGENT_MAX_TEXT_FILES",
+    "AGENT_MAX_TOTAL_FILE_BYTES",
+    "AGENT_MAX_TOTAL_FILE_CHARS",
     "AgentCreateImageArgumentsIn",
     "AgentCreateImageNormalized",
     "AgentEventEnvelope",
@@ -453,6 +547,7 @@ __all__ = [
     "AgentStatusOut",
     "AgentToolCallOut",
     "AgentToolCreateImageIn",
+    "AgentTextFileIn",
     "AgentToolCreateImageOut",
     "agent_message_request_fingerprint",
     "agent_tool_semantic_key",

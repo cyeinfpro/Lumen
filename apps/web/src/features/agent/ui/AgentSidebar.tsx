@@ -6,7 +6,7 @@ import {
   Button,
   ConfirmDialog,
   Input,
-  Spinner,
+  Skeleton,
 } from "@/components/ui/primitives";
 import type { AgentSession } from "../model/contracts";
 import { AgentSessionItem } from "./AgentSessionItem";
@@ -111,8 +111,14 @@ export function AgentSidebar({
         className="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-2 pb-4"
       >
         {loading && sessions.length === 0 ? (
-          <div role="status" className="flex items-center gap-2 px-3 py-6 type-caption text-[var(--fg-2)]">
-            <Spinner size={16} /> 加载中
+          <div role="status" aria-label="正在载入 Agent 会话" className="grid gap-1 px-2 py-2">
+            <span className="sr-only">正在载入 Agent 会话</span>
+            {[0, 1, 2, 3, 4].map((index) => (
+              <div key={index} className="flex h-11 items-center gap-2 px-2">
+                <Skeleton className="h-7 w-7 shrink-0" />
+                <Skeleton className={index % 2 === 0 ? "h-3.5 w-2/3" : "h-3.5 w-1/2"} />
+              </div>
+            ))}
           </div>
         ) : filtered.length === 0 ? (
           <p className="px-3 py-8 text-center type-caption text-[var(--fg-2)]">

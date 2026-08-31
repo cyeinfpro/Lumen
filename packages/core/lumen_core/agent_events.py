@@ -9,6 +9,16 @@ from .immutables import immutable_mapping
 
 
 AGENT_TOOL_CREATE_IMAGE = "lumen_create_image"
+AGENT_TOOL_WEB_SEARCH = "lumen_web_search"
+AGENT_TOOL_LIST_FILES = "lumen_list_files"
+AGENT_TOOL_READ_FILE = "lumen_read_file"
+AGENT_TOOL_SEARCH_FILES = "lumen_search_files"
+AGENT_FILE_TOOLS = frozenset(
+    {AGENT_TOOL_LIST_FILES, AGENT_TOOL_READ_FILE, AGENT_TOOL_SEARCH_FILES}
+)
+AGENT_FIRST_PARTY_TOOLS = frozenset(
+    {AGENT_TOOL_CREATE_IMAGE, AGENT_TOOL_WEB_SEARCH, *AGENT_FILE_TOOLS}
+)
 
 
 class AgentRunStatus(StrEnum):
@@ -156,8 +166,14 @@ __all__ = [
     "AGENT_EVENT_NAMES",
     "AGENT_RUN_ACTIVE_STATUSES",
     "AGENT_RUN_TERMINAL_STATUSES",
+    "AGENT_FILE_TOOLS",
+    "AGENT_FIRST_PARTY_TOOLS",
     "AGENT_TOOL_CREATE_IMAGE",
+    "AGENT_TOOL_LIST_FILES",
+    "AGENT_TOOL_READ_FILE",
+    "AGENT_TOOL_SEARCH_FILES",
     "AGENT_TOOL_TERMINAL_STATUSES",
+    "AGENT_TOOL_WEB_SEARCH",
     "AgentRunStatus",
     "AgentToolCallStatus",
     "EV_AGENT_OUTPUT_DELTA",

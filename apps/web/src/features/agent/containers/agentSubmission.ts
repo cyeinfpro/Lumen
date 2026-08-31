@@ -46,8 +46,16 @@ export function agentMessageBody(
       role: attachment.role,
       label: attachment.label,
     })),
+    files: draft.files.map((file) => ({
+      name: file.name,
+      mime_type: file.mimeType,
+      size: file.size,
+      content: file.content,
+    })),
     image_defaults: draft.imageDefaults,
     allow_image: draft.allowImage && toolGatewayConfigured,
+    allow_web_search: draft.allowWebSearch,
+    allow_file_tools: draft.allowFileTools,
     ...(draft.reasoningEffort && draft.reasoningEffort !== "auto"
       ? { reasoning_effort: draft.reasoningEffort }
       : {}),
@@ -110,6 +118,11 @@ function optimisticMessages(
         role: attachment.role,
         label: attachment.label,
       })),
+      files: draft.files.map((file) => ({
+        name: file.name,
+        mime_type: file.mimeType,
+        size: file.size,
+      })),
       createdAt: now,
       optimistic: true,
     },
@@ -151,6 +164,8 @@ export async function createSessionForSubmission(input: {
   create: (body: {
     image_defaults: AgentImageDefaults;
     allow_image: boolean;
+    allow_web_search: boolean;
+    allow_file_tools: boolean;
   }) => Promise<AgentSession>;
   upsert: (session: AgentSession) => void;
   migrateDraft: (from: string | null, to: string) => void;
@@ -160,6 +175,8 @@ export async function createSessionForSubmission(input: {
   const session = await input.create({
     image_defaults: input.draft.imageDefaults,
     allow_image: input.draft.allowImage && input.toolGatewayConfigured,
+    allow_web_search: input.draft.allowWebSearch,
+    allow_file_tools: input.draft.allowFileTools,
   });
   input.upsert(session);
   input.migrateDraft(null, session.id);

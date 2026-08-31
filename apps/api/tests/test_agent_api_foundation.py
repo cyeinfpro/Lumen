@@ -34,7 +34,12 @@ from app.services.agent.session_images import (
 )
 from app.services.agent.common import AgentProviderPreflight, AgentTextReservation
 from lumen_core.agent_capability import AgentCapabilityClaims
-from lumen_core.agent_events import AGENT_TOOL_CREATE_IMAGE, AgentRunStatus
+from lumen_core.agent_events import (
+    AGENT_FILE_TOOLS,
+    AGENT_TOOL_CREATE_IMAGE,
+    AGENT_TOOL_WEB_SEARCH,
+    AgentRunStatus,
+)
 from lumen_core.model_base import Base
 from lumen_core.model_entities import (
     AgentRun,
@@ -307,6 +312,9 @@ def _patch_agent_message_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
         return {
             "agent.max_image_tool_calls": 3,
             "agent.max_images_per_run": 4,
+            "agent.max_web_search_calls": 4,
+            "agent.max_file_tool_calls": 8,
+            "agent.max_tool_calls": 12,
             "agent.max_reference_images": 16,
             "agent.max_session_images": 64,
         }[key]
@@ -749,7 +757,7 @@ async def test_agent_message_is_idempotent_owned_and_hidden_from_studio(
         assert persisted is not None
         assert persisted.reasoning_effort is None
         assert persisted.request_snapshot_jsonb["execution_policy"] == "pi-native"
-        assert persisted.request_snapshot_jsonb["runtime_request_version"] == 4
+        assert persisted.request_snapshot_jsonb["runtime_request_version"] == 5
         assert persisted.request_snapshot_jsonb["tool_receipt"] == {"version": 2}
         context_plan = persisted.request_snapshot_jsonb["context_plan"]
         assert context_plan["version"] == 2
@@ -767,7 +775,13 @@ async def test_agent_message_is_idempotent_owned_and_hidden_from_studio(
         assert persisted.request_snapshot_jsonb["tool_policy"] == {
             "max_image_tool_calls": 3,
             "max_images_per_run": 4,
+            "max_web_search_calls": 0,
+            "max_file_tool_calls": 0,
+            "max_tool_calls": 3,
         }
+        assert persisted.request_snapshot_jsonb["allowed_tools"] == [
+            AGENT_TOOL_CREATE_IMAGE
+        ]
         assert persisted.request_snapshot_jsonb["reference_policy"] == {
             "max_reference_images": 16,
             "max_session_images": 64,
@@ -845,6 +859,58 @@ async def test_agent_message_is_idempotent_owned_and_hidden_from_studio(
         )
         assert second.agent_run.id != first.agent_run.id
         assert await db.scalar(select(func.count(AgentRun.id))) == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_submission_snapshots_web_and_virtual_file_tools(
+    db_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_agent_message_dependencies(monkeypatch)
+    async with db_factory() as db:
+        user, session, _conversation = await _seed_session(db)
+        submitted = await agent_sessions_service.submit_agent_message(
+            db,
+            session_id=session.id,
+            user=user,
+            body=AgentMessageCreateIn(
+                idempotency_key="agent-tools",
+                text="Research the supplied brief",
+                files=[
+                    {
+                        "name": "brief.md",
+                        "mime_type": "text/markdown",
+                        "size": 7,
+                        "content": "# Brief",
+                    }
+                ],
+                allow_image=False,
+                allow_web_search=True,
+                allow_file_tools=True,
+            ),
+            request=None,
+        )
+        run = await db.get(AgentRun, submitted.agent_run.id)
+        assert run is not None
+        snapshot = run.request_snapshot_jsonb
+        assert snapshot["runtime_request_version"] == 5
+        assert set(snapshot["allowed_tools"]) == {
+            AGENT_TOOL_WEB_SEARCH,
+            *AGENT_FILE_TOOLS,
+        }
+        assert snapshot["tool_policy"] == {
+            "max_image_tool_calls": 0,
+            "max_images_per_run": 4,
+            "max_web_search_calls": 4,
+            "max_file_tool_calls": 8,
+            "max_tool_calls": 12,
+        }
+        assert snapshot["workspace_file_manifest"] == [
+            {"name": "brief.md", "mime_type": "text/markdown", "size": 7}
+        ]
+        assert submitted.user_message.content["files"] == [
+            {"name": "brief.md", "mime_type": "text/markdown", "size": 7}
+        ]
 
 
 @pytest.mark.asyncio

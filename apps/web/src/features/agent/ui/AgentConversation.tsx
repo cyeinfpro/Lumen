@@ -2,7 +2,7 @@
 
 import { Bot, RefreshCw } from "lucide-react";
 import { useEffect } from "react";
-import { Button, ErrorState, Spinner } from "@/components/ui/primitives";
+import { Button, ErrorState, Skeleton } from "@/components/ui/primitives";
 import type { Generation } from "@/lib/types";
 import type {
   AgentAssistantMessage,
@@ -16,6 +16,31 @@ const SUGGESTIONS = [
   "为新品写一组视觉创意概念",
   "生成一张自然光商品主图",
 ] as const;
+
+function AgentConversationSkeleton() {
+  return (
+    <div role="status" aria-label="正在载入 Agent 会话" className="px-4 py-6 sm:px-6">
+      <span className="sr-only">正在载入 Agent 会话</span>
+      <div className="mx-auto grid w-full max-w-[var(--content-media)] gap-8">
+        <div className="ml-auto w-[min(76%,40rem)] border-l border-[var(--border-subtle)] pl-4">
+          <Skeleton className="h-4 w-3/4" />
+          <Skeleton className="mt-2 h-4 w-1/2" />
+        </div>
+        <div className="flex gap-3">
+          <Skeleton className="h-8 w-8 shrink-0 rounded-full" />
+          <div className="min-w-0 flex-1">
+            <Skeleton className="h-4 w-[min(100%,42rem)]" />
+            <Skeleton className="mt-2 h-4 w-[min(82%,34rem)]" />
+            <Skeleton className="mt-2 h-4 w-[min(64%,28rem)]" />
+          </div>
+        </div>
+        <div className="ml-auto w-[min(58%,32rem)] border-l border-[var(--border-subtle)] pl-4">
+          <Skeleton className="h-4 w-full" />
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export function AgentConversation({
   messages,
@@ -61,14 +86,7 @@ export function AgentConversation({
   }, [messages.length, scrollToMessageId]);
 
   if (loading && messages.length === 0) {
-    return (
-      <div
-        role="status"
-        className="flex min-h-80 items-center justify-center gap-2 type-body-sm text-[var(--fg-2)]"
-      >
-        <Spinner size={20} /> 加载中
-      </div>
-    );
+    return <AgentConversationSkeleton />;
   }
   if (error && messages.length === 0) {
     return (
@@ -118,7 +136,7 @@ export function AgentConversation({
   return (
     <div
       role="log"
-      aria-live="polite"
+      aria-live="off"
       aria-label="Agent 对话"
       className="px-3 pb-4 sm:px-5"
     >

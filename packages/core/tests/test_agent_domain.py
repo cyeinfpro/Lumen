@@ -16,6 +16,7 @@ from lumen_core.agent_dispatch import (
     provider_dispatch_evidence_count,
 )
 from lumen_core.agent_events import (
+    AGENT_FIRST_PARTY_TOOLS,
     AGENT_TOOL_CREATE_IMAGE,
     AgentRunStatus,
     agent_channel,
@@ -121,6 +122,58 @@ def test_agent_input_contracts_are_strict_and_bounded() -> None:
                 "arguments": {"prompt": "image", "callback_url": "https://bad"},
             }
         )
+
+
+def test_agent_text_files_and_first_party_tool_scope_are_bounded() -> None:
+    body = AgentMessageCreateIn(
+        idempotency_key="files",
+        files=[
+            {
+                "name": "brief.md",
+                "mime_type": "text/markdown",
+                "size": 1,
+                "content": "# Brief",
+            }
+        ],
+        allow_file_tools=True,
+    )
+    assert body.files[0].name == "brief.md"
+    assert body.files[0].size == 7
+    assert set(
+        AgentCapabilityClaims.model_validate(
+            {
+                **_claims().model_dump(),
+                "allowed_tools": sorted(AGENT_FIRST_PARTY_TOOLS),
+            }
+        ).allowed_tools
+    ) == set(AGENT_FIRST_PARTY_TOOLS)
+    with pytest.raises(ValidationError):
+        AgentMessageCreateIn(
+            idempotency_key="path",
+            files=[
+                {
+                    "name": "../secret.txt",
+                    "mime_type": "text/plain",
+                    "size": 1,
+                    "content": "x",
+                }
+            ],
+        )
+    with pytest.raises(ValidationError):
+        AgentMessageCreateIn(
+            idempotency_key="disabled",
+            files=[
+                {
+                    "name": "brief.txt",
+                    "mime_type": "text/plain",
+                    "size": 1,
+                    "content": "x",
+                }
+            ],
+            allow_file_tools=False,
+        )
+    with pytest.raises(ValidationError):
+        _claims(allowed_tools=["bash"])
 
 
 def test_agent_image_token_estimate_is_dimension_and_provider_aware() -> None:
@@ -384,6 +437,9 @@ def test_agent_runtime_settings_are_closed_and_bounded() -> None:
         "ui.nav.agent_visible": ("UI_NAV_AGENT_VISIBLE", "0", "1"),
         "agent.max_image_tool_calls": ("AGENT_MAX_IMAGE_TOOL_CALLS", "0", "8"),
         "agent.max_images_per_run": ("AGENT_MAX_IMAGES_PER_RUN", "1", "16"),
+        "agent.max_web_search_calls": ("AGENT_MAX_WEB_SEARCH_CALLS", "0", "8"),
+        "agent.max_file_tool_calls": ("AGENT_MAX_FILE_TOOL_CALLS", "0", "32"),
+        "agent.max_tool_calls": ("AGENT_MAX_TOOL_CALLS", "0", "48"),
     }
     for key, (environment, minimum, maximum) in expected.items():
         spec = get_spec(key)
@@ -395,7 +451,6 @@ def test_agent_runtime_settings_are_closed_and_bounded() -> None:
             parse_value(spec, str(int(maximum) + 1))
     for removed in (
         "agent.max_turns",
-        "agent.max_tool_calls",
         "agent.max_output_tokens",
         "agent.run_timeout_seconds",
         "agent.tool_timeout_seconds",

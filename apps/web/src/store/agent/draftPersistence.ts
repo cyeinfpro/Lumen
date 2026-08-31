@@ -1,9 +1,13 @@
 import type {
   AgentDraft,
   AgentDraftAttachment,
+  AgentDraftFile,
 } from "@/features/agent/model/contracts";
 import {
+  AGENT_MAX_FILE_BYTES,
+  AGENT_MAX_FILES,
   AGENT_MAX_REFERENCES,
+  AGENT_MAX_TOTAL_FILE_BYTES,
   createAgentDraft,
 } from "@/features/agent/model/contracts";
 
@@ -32,13 +36,16 @@ interface PersistedAttachment {
 interface PersistedDraft {
   text: string;
   attachments: PersistedAttachment[];
+  files?: AgentDraftFile[];
   allowImage: boolean;
+  allowWebSearch?: boolean;
+  allowFileTools?: boolean;
   imageDefaults: AgentDraft["imageDefaults"];
   reasoningEffort?: AgentDraft["reasoningEffort"];
 }
 
 interface PersistedEnvelope {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   ownerUserId: string;
   drafts: Record<string, PersistedDraft>;
 }
@@ -65,7 +72,10 @@ function persistedDraft(draft: AgentDraft): PersistedDraft {
       role: attachment.role,
       label: attachment.label,
     })),
+    files: draft.files.map((file) => ({ ...file })),
     allowImage: draft.allowImage,
+    allowWebSearch: draft.allowWebSearch,
+    allowFileTools: draft.allowFileTools,
     imageDefaults: { ...draft.imageDefaults },
     reasoningEffort: draft.reasoningEffort,
   };
@@ -79,10 +89,97 @@ export function serializeAgentDrafts(
     Object.entries(drafts).map(([key, draft]) => [key, persistedDraft(draft)]),
   );
   return JSON.stringify({
-    version: 2,
+    version: 3,
     ownerUserId,
     drafts: safeDrafts,
   } satisfies PersistedEnvelope);
+}
+
+function restoreAttachments(draft: PersistedDraft): AgentDraftAttachment[] {
+  if (!Array.isArray(draft.attachments)) return [];
+  return draft.attachments
+    .filter(
+      (item) =>
+        item &&
+        typeof item.imageId === "string" &&
+        item.imageId.length > 0 &&
+        typeof item.role === "string",
+    )
+    .slice(0, AGENT_MAX_REFERENCES)
+    .map((item, index) => ({
+      imageId: item.imageId,
+      role: item.role,
+      label: typeof item.label === "string" ? item.label : null,
+      name: item.label || `参考图 ${index + 1}`,
+      previewUrl: attachmentPreviewUrl(item.imageId),
+    }));
+}
+
+function restoredFile(
+  item: AgentDraftFile,
+  totalFileBytes: number,
+): AgentDraftFile | null {
+  if (
+    !item ||
+    typeof item.name !== "string" ||
+    !item.name ||
+    typeof item.mimeType !== "string" ||
+    typeof item.size !== "number" ||
+    item.size < 0 ||
+    item.size > AGENT_MAX_FILE_BYTES ||
+    typeof item.content !== "string" ||
+    item.content.includes("\u0000") ||
+    totalFileBytes + item.size > AGENT_MAX_TOTAL_FILE_BYTES
+  ) {
+    return null;
+  }
+  return {
+    name: item.name.slice(0, 128),
+    mimeType: item.mimeType.slice(0, 96),
+    size: item.size,
+    content: item.content.slice(0, 200_000),
+  };
+}
+
+function restoreFiles(draft: PersistedDraft): AgentDraftFile[] {
+  if (!Array.isArray(draft.files)) return [];
+  const files: AgentDraftFile[] = [];
+  let totalFileBytes = 0;
+  for (const item of draft.files.slice(0, AGENT_MAX_FILES)) {
+    const restored = restoredFile(item, totalFileBytes);
+    if (!restored) continue;
+    files.push(restored);
+    totalFileBytes += restored.size;
+  }
+  return files;
+}
+
+function restoreDraft(
+  draft: PersistedDraft,
+  version: PersistedEnvelope["version"],
+): AgentDraft {
+  return createAgentDraft({
+    text: typeof draft.text === "string" ? draft.text : "",
+    attachments: restoreAttachments(draft),
+    files: restoreFiles(draft),
+    allowImage: draft.allowImage !== false,
+    allowWebSearch: draft.allowWebSearch === true,
+    allowFileTools: draft.allowFileTools !== false,
+    imageDefaults: draft.imageDefaults,
+    reasoningEffort: restoredReasoningEffort(version, draft.reasoningEffort),
+  });
+}
+
+function validEnvelope(
+  parsed: Partial<PersistedEnvelope>,
+  ownerUserId: string,
+): parsed is PersistedEnvelope {
+  return (
+    (parsed.version === 1 || parsed.version === 2 || parsed.version === 3) &&
+    parsed.ownerUserId === ownerUserId &&
+    Boolean(parsed.drafts) &&
+    typeof parsed.drafts === "object"
+  );
 }
 
 export function deserializeAgentDrafts(
@@ -92,46 +189,11 @@ export function deserializeAgentDrafts(
   if (!raw) return {};
   try {
     const parsed = JSON.parse(raw) as Partial<PersistedEnvelope>;
-    if (
-      (parsed.version !== 1 && parsed.version !== 2) ||
-      parsed.ownerUserId !== ownerUserId ||
-      !parsed.drafts ||
-      typeof parsed.drafts !== "object"
-    ) {
-      return {};
-    }
+    if (!validEnvelope(parsed, ownerUserId)) return {};
     const drafts: Record<string, AgentDraft> = {};
     for (const [key, value] of Object.entries(parsed.drafts)) {
       if (!value || typeof value !== "object") continue;
-      const draft = value as PersistedDraft;
-      const attachments = Array.isArray(draft.attachments)
-        ? draft.attachments
-            .filter(
-              (item) =>
-                item &&
-                typeof item.imageId === "string" &&
-                item.imageId.length > 0 &&
-                typeof item.role === "string",
-            )
-            .slice(0, AGENT_MAX_REFERENCES)
-            .map((item, index) => ({
-              imageId: item.imageId,
-              role: item.role,
-              label: typeof item.label === "string" ? item.label : null,
-              name: item.label || `参考图 ${index + 1}`,
-              previewUrl: attachmentPreviewUrl(item.imageId),
-            }))
-        : [];
-      drafts[key] = createAgentDraft({
-        text: typeof draft.text === "string" ? draft.text : "",
-        attachments,
-        allowImage: draft.allowImage !== false,
-        imageDefaults: draft.imageDefaults,
-        reasoningEffort: restoredReasoningEffort(
-          parsed.version,
-          draft.reasoningEffort,
-        ),
-      });
+      drafts[key] = restoreDraft(value, parsed.version);
     }
     return drafts;
   } catch {

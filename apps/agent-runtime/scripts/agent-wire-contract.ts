@@ -26,7 +26,7 @@ function runtimeEvents(): unknown[] {
   return [
     event("run.started", 1, {
       tools: ["lumen_create_image"],
-      runtime_version: "pi-0.84.2",
+      runtime_version: "pi-0.84.4",
       reasoning_effort: null,
     }),
     event("run.heartbeat", 2),
@@ -47,7 +47,7 @@ function runtimeEvents(): unknown[] {
     }),
     event("compaction.completed", 8, {
       checkpoint_version: 2,
-      pi_runtime_version: "pi-0.84.2",
+      pi_runtime_version: "pi-0.84.4",
       summary: "summary",
       first_kept_message_id: "message-1",
       next_message_id: "message-2",
@@ -61,6 +61,7 @@ function runtimeEvents(): unknown[] {
       tool_call_id: "tool-1",
       ordinal: 0,
       name: "lumen_create_image",
+      arguments: { prompt: "wire image" },
     }),
     event("tool.succeeded", 10, {
       turn: 1,
@@ -70,6 +71,7 @@ function runtimeEvents(): unknown[] {
       mode: "text_to_image",
       generation_ids: ["generation-1"],
       replayed: false,
+      result_text: '{"status":"accepted"}',
     }),
     event("tool.failed", 11, {
       turn: 1,

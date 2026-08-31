@@ -167,6 +167,13 @@ class AgentRuntimeReference(_StrictModel):
     token_policy: str | None = Field(default=None, min_length=1, max_length=64)
 
 
+class AgentRuntimeWorkspaceFile(_StrictModel):
+    name: str = Field(min_length=1, max_length=128)
+    mime_type: str = Field(min_length=1, max_length=96)
+    size: int = Field(ge=0, le=256 * 1024)
+    content: str = Field(max_length=200_000, repr=False)
+
+
 class AgentRuntimeImageDefaults(_StrictModel):
     count: int = Field(ge=1, le=4)
     aspect_ratio: str = Field(min_length=3, max_length=5)
@@ -179,6 +186,9 @@ class AgentRuntimeImageDefaults(_StrictModel):
 class AgentRuntimeToolPolicy(_StrictModel):
     max_image_tool_calls: int = Field(ge=0, le=8)
     max_images_per_run: int = Field(ge=1, le=16)
+    max_web_search_calls: int = Field(default=0, ge=0, le=8)
+    max_file_tool_calls: int = Field(default=0, ge=0, le=32)
+    max_tool_calls: int = Field(default=8, ge=0, le=48)
 
 
 class AgentRuntimeSafetyBudget(_StrictModel):
@@ -186,7 +196,7 @@ class AgentRuntimeSafetyBudget(_StrictModel):
 
 
 class AgentRuntimeRequest(_StrictModel):
-    version: Literal[2, 3, 4] = 2
+    version: Literal[2, 3, 4, 5] = 2
     run_id: str = Field(min_length=1, max_length=96)
     agent_session_id: str = Field(min_length=1, max_length=96)
     user_id: str = Field(min_length=1, max_length=96)
@@ -205,7 +215,19 @@ class AgentRuntimeRequest(_StrictModel):
     compaction: AgentRuntimeCompaction | None = None
     current_prompt: str = Field(min_length=1, max_length=40000)
     references: list[AgentRuntimeReference] = Field(max_length=16)
-    allowed_tools: list[Literal["lumen_create_image"]] = Field(max_length=1)
+    allowed_tools: list[
+        Literal[
+            "lumen_create_image",
+            "lumen_web_search",
+            "lumen_list_files",
+            "lumen_read_file",
+            "lumen_search_files",
+        ]
+    ] = Field(max_length=5)
+    workspace_files: list[AgentRuntimeWorkspaceFile] = Field(
+        default_factory=list,
+        max_length=8,
+    )
     image_defaults: AgentRuntimeImageDefaults
     tool_gateway_url: str | None = Field(default=None, max_length=2048)
     tool_capability: str | None = Field(default=None, max_length=8192, repr=False)
@@ -237,19 +259,43 @@ class AgentRuntimeRequest(_StrictModel):
             and self.compaction.next_message_id != self.user_message_id
         ):
             raise ValueError("compaction continuation is absent from history")
-        tools_enabled = bool(self.allowed_tools)
-        if tools_enabled != bool(self.tool_gateway_url and self.tool_capability):
-            raise ValueError("tool gateway bindings do not match allowed_tools")
+        if len(set(self.allowed_tools)) != len(self.allowed_tools):
+            raise ValueError("allowed_tools must be unique")
+        image_enabled = "lumen_create_image" in self.allowed_tools
+        if image_enabled != bool(self.tool_gateway_url and self.tool_capability):
+            raise ValueError("image gateway bindings do not match allowed_tools")
+        if self.version < 5 and (
+            self.workspace_files
+            or any(tool != "lumen_create_image" for tool in self.allowed_tools)
+        ):
+            raise ValueError("legacy Runtime requests only support image tools")
         if self.references and not self.provider.vision_supported:
             raise ValueError("reference images require a vision-capable provider")
         if set(self.event_features) != {"heartbeat-v1", "text-reset-v1"}:
             raise ValueError("Pi-native Runtime features are incomplete")
-        if self.allowed_tools and self.tool_policy.max_image_tool_calls < 1:
+        if image_enabled and self.tool_policy.max_image_tool_calls < 1:
             raise ValueError("image tool requires a positive call allowance")
+        if (
+            "lumen_web_search" in self.allowed_tools
+            and self.tool_policy.max_web_search_calls < 1
+        ):
+            raise ValueError("web search requires a positive call allowance")
+        file_tools = {
+            "lumen_list_files",
+            "lumen_read_file",
+            "lumen_search_files",
+        }
+        if any(tool in file_tools for tool in self.allowed_tools):
+            if not self.workspace_files or self.tool_policy.max_file_tool_calls < 1:
+                raise ValueError("file tools require workspace files and an allowance")
+        if self.allowed_tools and self.tool_policy.max_tool_calls < 1:
+            raise ValueError("tools require a positive aggregate allowance")
         if self.provider.thinking_level_map and not self.provider.reasoning_supported:
             raise ValueError("thinking level map requires reasoning support")
-        if self.operation == "continue" and (self.references or self.allowed_tools):
-            raise ValueError("continuation cannot replay image or paid tool input")
+        if self.operation == "continue" and (
+            self.references or self.allowed_tools or self.workspace_files
+        ):
+            raise ValueError("continuation cannot replay tool input")
         dispatch_enabled = bool(
             self.provider_dispatch_url and self.provider_dispatch_capability
         )
@@ -312,12 +358,14 @@ class AgentRuntimeEvent(_StrictModel):
     ordinal: int | None = Field(default=None, ge=0)
     name: str | None = Field(default=None, max_length=64)
     mode: str | None = Field(default=None, max_length=32)
+    arguments: dict[str, Any] | None = Field(default=None, max_length=32)
+    result_text: str | None = Field(default=None, max_length=20000)
     generation_ids: list[str] | None = Field(default=None, max_length=4)
     replayed: bool | None = None
     result_unknown: bool | None = None
     reason: str | None = Field(default=None, max_length=64)
     stop_reason: str | None = Field(default=None, max_length=32)
-    tools: list[str] | None = Field(default=None, max_length=1)
+    tools: list[str] | None = Field(default=None, max_length=5)
     runtime_version: str | None = Field(default=None, max_length=64)
     checkpoint_version: Literal[1, 2] | None = None
     pi_runtime_version: str | None = Field(default=None, max_length=64)
@@ -571,6 +619,16 @@ def runtime_request_body(request: AgentRuntimeRequest) -> bytes:
     complete_provider = complete_payload.get("provider")
     if isinstance(provider, dict) and isinstance(complete_provider, dict):
         provider["proxy_url"] = complete_provider["proxy_url"]
+    if request.version < 5:
+        payload.pop("workspace_files", None)
+        tool_policy = payload.get("tool_policy")
+        if isinstance(tool_policy, dict):
+            for key in (
+                "max_web_search_calls",
+                "max_file_tool_calls",
+                "max_tool_calls",
+            ):
+                tool_policy.pop(key, None)
     if request.version == 2:
         payload.pop("operation", None)
         payload.pop("tool_receipt_version", None)
@@ -817,6 +875,7 @@ __all__ = [
     "AgentRuntimeRequest",
     "AgentRuntimeSafetyBudget",
     "AgentRuntimeUsage",
+    "AgentRuntimeWorkspaceFile",
     "canonical_runtime_request",
     "runtime_request_body",
     "sign_runtime_request",

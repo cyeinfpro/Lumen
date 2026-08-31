@@ -15,13 +15,13 @@ transport.
 The implementation was developed against these installed versions:
 
 - Node `22.22.0`
-- `@earendil-works/pi-coding-agent` `0.84.2`
-- `@earendil-works/pi-agent-core` `0.84.2`
-- `@earendil-works/pi-ai` `0.84.2`
+- `@earendil-works/pi-coding-agent` `0.84.4`
+- `@earendil-works/pi-agent-core` `0.84.4`
+- `@earendil-works/pi-ai` `0.84.4`
 - `typebox` `1.3.7`
 
 The Runtime package pins those versions exactly and commits its complete npm
-lockfile. Pi `0.84.2` requires Node `>=22.19.0`.
+lockfile. Pi `0.84.4` requires Node `>=22.19.0`.
 
 ## Decision
 
@@ -47,9 +47,12 @@ PostgreSQL, SSE, and Web. Paid image submission remains protected by semantic
 idempotency and unknown results are never automatically resubmitted.
 
 The Runtime uses `noTools: "builtin"`, an explicit tool allowlist, and checks
-both active and configured tool names after session construction. The only
-possible tool is `lumen_create_image`; a run with image actions disabled has no
-tools. Execution is sequential at both agent and tool level.
+both active and configured tool names after session construction. Runtime v5
+admits only five first-party custom tools: `lumen_create_image`,
+`lumen_web_search`, `lumen_list_files`, `lumen_read_file`, and
+`lumen_search_files`. It never enables Pi's host `read`, `write`, `edit`,
+`bash`, package discovery, or third-party extension loading. Execution is
+sequential at both agent and tool level.
 
 ### Service authentication and framing
 
@@ -97,11 +100,12 @@ those addresses while preserving the original Host and TLS SNI; a redirect to
 another host fails the pin. When a configured proxy is used, the existing proxy
 trust path remains authoritative and no direct IP pin is sent.
 
-Worker issues the existing HMAC capability token for the Tool Gateway. It binds
-run, user, session, epoch, tool, reference labels, capability ID, and expiry.
-Runtime sends only tool ordinal, Pi call ID, epoch, and validated business
-arguments. The API recomputes normalization and semantic idempotency and remains
-the only process that creates Generation, wallet hold, and Outbox rows.
+Worker issues the existing HMAC capability token for the image Tool Gateway. It
+binds run, user, session, epoch, tool, reference labels, capability ID, and
+expiry. Runtime sends only tool ordinal, Pi call ID, epoch, and validated
+business arguments. The API recomputes normalization and semantic idempotency
+and remains the only process that creates Generation, wallet hold, and Outbox
+rows.
 Each token also carries a random nonce backed by an `agent_capability_grants`
 row. API locks that grant with the run, validates every claim binding and
 expiry, and consumes one bounded redemption only for a new tool ordinal. Exact
@@ -111,6 +115,15 @@ most 16 selected `ref_N` inputs per call. The session catalog retains at most
 Generation reservations share that limit so asynchronous work cannot overbook
 it. Ownership, readiness, deletion, and BYOK retention visibility are checked
 again when Worker loads preview bytes and when the Tool Gateway redeems labels.
+
+The web tool performs bounded read-only requests to fixed public search
+endpoints, rejects redirects, credentials, non-HTTP(S) result URLs, oversized
+responses, and control characters, and returns at most eight sanitized sources.
+It cannot fetch an arbitrary model-supplied URL. File tools operate only on at
+most eight text files embedded in the signed Runtime v5 request after API
+validation. They accept exact virtual names and literal searches, never paths,
+mounts, commands, or writes. File and search results are bounded before they
+enter Pi history and are persisted as generic `AgentToolCall` receipts.
 
 ### Provider and proxy compatibility
 
@@ -123,7 +136,7 @@ The accepted adapter set is:
 | Anthropic Messages | supported by model declaration | supported | enabled |
 | Google Generative AI / Vertex | SDK supports image input | adapter rejects custom fetch | disabled |
 
-Source inspection verified that Pi `0.84.2` forwards custom `fetch` through the
+Source inspection verified that Pi `0.84.4` forwards custom `fetch` through the
 three enabled adapters and explicitly rejects it in the Google adapters. Google
 is excluded instead of bypassing Lumen proxy policy.
 
@@ -166,8 +179,10 @@ if reported usage exceeds the reservation snapshot.
 The automated faux-provider suite verifies:
 
 - `text -> lumen_create_image -> text` ordering through Pi's real agent loop;
+- virtual file list/search/read ordering and bounded persisted results;
+- fixed-provider web-search normalization and unavailable-provider failure;
 - no built-in tools or discovered resources;
-- disabled-image runs have no tools;
+- disabled tools are absent from the Pi session;
 - a model-emitted `bash` call cannot execute;
 - in-memory sessions have no session file;
 - HMAC tamper, expiry, and nonce replay rejection;

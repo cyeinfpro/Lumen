@@ -16,6 +16,7 @@ import {
   isAgentRunTerminal,
   type AgentAssistantMessage,
   type AgentDraftAttachment,
+  type AgentDraftFile,
   type AgentImageDefaults,
   type AgentSession,
   type AgentSessionPatchInput,
@@ -166,6 +167,8 @@ export function AgentWorkspaceController({
   const removeDraftAttachment = useAgentStore((state) => state.removeDraftAttachment);
   const moveDraftAttachment = useAgentStore((state) => state.moveDraftAttachment);
   const setDraftAttachmentRole = useAgentStore((state) => state.setDraftAttachmentRole);
+  const addDraftFile = useAgentStore((state) => state.addDraftFile);
+  const removeDraftFile = useAgentStore((state) => state.removeDraftFile);
   const clearDraftContent = useAgentStore((state) => state.clearDraftContent);
   const migrateDraft = useAgentStore((state) => state.migrateDraft);
   const setComposerError = useAgentStore((state) => state.setComposerError);
@@ -200,6 +203,8 @@ export function AgentWorkspaceController({
     if (!currentSession || draftsBySession[currentSession.id]) return;
     setDraft(currentSession.id, {
       allowImage: currentSession.allow_image,
+      allowWebSearch: currentSession.allow_web_search,
+      allowFileTools: currentSession.allow_file_tools,
       imageDefaults: currentSession.image_defaults,
     });
   }, [currentSession, draftsBySession, setDraft]);
@@ -354,6 +359,8 @@ export function AgentWorkspaceController({
       const session = await createMutation.mutateAsync({
         image_defaults: draft.imageDefaults,
         allow_image: draft.allowImage && toolGatewayConfigured,
+        allow_web_search: draft.allowWebSearch,
+        allow_file_tools: draft.allowFileTools,
       });
       upsertSession(session);
       migrateDraft(null, session.id);
@@ -367,7 +374,18 @@ export function AgentWorkspaceController({
           : null,
       );
     }
-  }, [createMutation, draft.allowImage, draft.imageDefaults, migrateDraft, selectWithRoute, setComposerError, toolGatewayConfigured, upsertSession]);
+  }, [
+    createMutation,
+    draft.allowFileTools,
+    draft.allowImage,
+    draft.allowWebSearch,
+    draft.imageDefaults,
+    migrateDraft,
+    selectWithRoute,
+    setComposerError,
+    toolGatewayConfigured,
+    upsertSession,
+  ]);
 
   const patchSession = useCallback((patch: AgentSessionPatchInput) => {
     const sessionId = useAgentStore.getState().currentSessionId;
@@ -384,7 +402,11 @@ export function AgentWorkspaceController({
     let sessionId = useAgentStore.getState().currentSessionId;
     let sendDraft = selectAgentDraft(useAgentStore.getState(), sessionId);
     let optimistic: ReturnType<typeof stageOptimisticSubmission> | null = null;
-    if (!sendDraft.text.trim() && sendDraft.attachments.length === 0) return;
+    if (
+      !sendDraft.text.trim() &&
+      sendDraft.attachments.length === 0 &&
+      sendDraft.files.length === 0
+    ) return;
     if (!acquireAgentSubmissionFence(submissionRef)) return;
     setSubmitting(true);
     try {
@@ -426,6 +448,8 @@ export function AgentWorkspaceController({
           ...existingSession,
           image_defaults: sendDraft.imageDefaults,
           allow_image: sendDraft.allowImage && toolGatewayConfigured,
+          allow_web_search: sendDraft.allowWebSearch,
+          allow_file_tools: sendDraft.allowFileTools,
         });
       }
       void queryClient.invalidateQueries({ queryKey: qk.user(userScope.userId).agentAll() });
@@ -544,7 +568,9 @@ export function AgentWorkspaceController({
     onLoadMoreAssets: () => void assetQuery.fetchNextPage(),
     onLoadMoreSessions: () => void sessionsQuery.fetchNextPage(),
     onSessionSearchChange: setSessionSearch,
-    onLoadOlderMessages: () => void messagesQuery.fetchNextPage(),
+    onLoadOlderMessages: async () => {
+      await messagesQuery.fetchNextPage();
+    },
     onCreateSession: () => void createSession(),
     onSelectSession: selectSession,
     onRenameSession: (sessionId: string, title: string) =>
@@ -581,6 +607,8 @@ export function AgentWorkspaceController({
     onRemoveAttachment: (imageId: string) => removeDraftAttachment(currentSessionId, imageId),
     onMoveAttachment: (imageId: string, direction: -1 | 1) => moveDraftAttachment(currentSessionId, imageId, direction),
     onRoleChange: (imageId: string, role: AttachmentRole) => setDraftAttachmentRole(currentSessionId, imageId, role),
+    onAddFile: (file: AgentDraftFile) => addDraftFile(currentSessionId, file),
+    onRemoveFile: (name: string) => removeDraftFile(currentSessionId, name),
     onPreviewAttachment: previewAttachment,
     onPickAsset: pickAsset,
     onPreviewGeneration: previewGeneration,

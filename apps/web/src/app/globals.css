@@ -1475,14 +1475,15 @@
     padding-bottom: max(env(safe-area-inset-bottom, 0px), 0.5rem);
   }
 
-  [data-agent-workspace] [data-agent-mobile-context] {
-    display: none;
+  [data-agent-workspace] [data-agent-mobile-context] > * {
+    min-height: 2.25rem;
+    height: 2.25rem;
   }
 
   [data-agent-workspace] .agent-empty-state {
     min-height: 100%;
     max-width: none;
-    justify-content: center;
+    justify-content: flex-start;
     padding-block: 0;
   }
 
@@ -1494,11 +1495,13 @@
   [data-agent-workspace] .agent-empty-state-suggestions {
     width: 100%;
     max-width: none;
+    max-height: 0;
     flex-wrap: nowrap;
     justify-content: flex-start;
-    overflow-x: auto;
+    overflow: hidden;
+    visibility: hidden;
     margin-top: 0;
-    padding-block: 2px;
+    padding-block: 0;
   }
 
   [data-agent-workspace] .agent-empty-state-suggestions > * {

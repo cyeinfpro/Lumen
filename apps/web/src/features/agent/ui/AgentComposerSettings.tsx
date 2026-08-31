@@ -1,5 +1,6 @@
 "use client";
 
+import { FileText, Globe2, ImageIcon } from "lucide-react";
 import { AspectRatioPicker } from "@/components/ui/composer/shared/AspectRatioPicker";
 import { Select, Switch } from "@/components/ui/primitives";
 import type {
@@ -12,12 +13,16 @@ export function AgentComposerSettings({
   draft,
   disabled,
   onAllowImageChange,
+  onAllowWebSearchChange,
+  onAllowFileToolsChange,
   onReasoningEffortChange,
   onDefaultsChange,
 }: {
   draft: AgentDraft;
   disabled: boolean;
   onAllowImageChange: (enabled: boolean) => void;
+  onAllowWebSearchChange: (enabled: boolean) => void;
+  onAllowFileToolsChange: (enabled: boolean) => void;
   onReasoningEffortChange: (effort: AgentReasoningEffort) => void;
   onDefaultsChange: (patch: Partial<AgentImageDefaults>) => void;
 }) {
@@ -47,16 +52,30 @@ export function AgentComposerSettings({
         </Select>
       </SettingField>
 
-      <div className="flex min-h-11 items-center justify-between gap-4 border-b border-[var(--border-subtle)] pb-3">
-        <div>
-          <p className="type-label text-[var(--fg-0)]">允许生图</p>
-          <p className="type-caption">关闭后只进行文本对话</p>
-        </div>
-        <Switch
-          checked={draft.allowImage}
-          onCheckedChange={onAllowImageChange}
+      <div className="grid divide-y divide-[var(--border-subtle)] border-y border-[var(--border-subtle)]">
+        <ToolToggle
+          icon={<Globe2 className="h-4 w-4" aria-hidden />}
+          label="联网搜索"
+          detail="查询公开网页与来源"
+          checked={draft.allowWebSearch}
           disabled={disabled}
-          aria-label="允许 Agent 调用生图工具"
+          onChange={onAllowWebSearchChange}
+        />
+        <ToolToggle
+          icon={<FileText className="h-4 w-4" aria-hidden />}
+          label="文件工具"
+          detail={draft.files.length > 0 ? `已添加 ${draft.files.length} 个文件` : "读取本轮文本文件"}
+          checked={draft.allowFileTools}
+          disabled={disabled || draft.files.length > 0}
+          onChange={onAllowFileToolsChange}
+        />
+        <ToolToggle
+          icon={<ImageIcon className="h-4 w-4" aria-hidden />}
+          label="生成图片"
+          detail="允许提交异步生图任务"
+          checked={draft.allowImage}
+          disabled={disabled}
+          onChange={onAllowImageChange}
         />
       </div>
 
@@ -141,6 +160,40 @@ export function AgentComposerSettings({
           </Select>
         </SettingField>
       </fieldset>
+    </div>
+  );
+}
+
+function ToolToggle({
+  icon,
+  label,
+  detail,
+  checked,
+  disabled,
+  onChange,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  detail: string;
+  checked: boolean;
+  disabled: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <div className="flex min-h-14 items-center gap-3 py-2.5">
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] bg-[var(--bg-2)] text-accent">
+        {icon}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block type-label text-[var(--fg-0)]">{label}</span>
+        <span className="block truncate type-caption text-[var(--fg-2)]">{detail}</span>
+      </span>
+      <Switch
+        checked={checked}
+        onCheckedChange={onChange}
+        disabled={disabled}
+        aria-label={label}
+      />
     </div>
   );
 }

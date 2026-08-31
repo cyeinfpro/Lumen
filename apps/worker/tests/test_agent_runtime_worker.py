@@ -147,7 +147,7 @@ def _terminal_stream() -> bytes:
     }
     return b"".join(
         (
-            _line("run.started", 1, tools=[], runtime_version="pi-0.84.2"),
+            _line("run.started", 1, tools=[], runtime_version="pi-0.84.4"),
             _line("provider.dispatched", 2, turn=1),
             _line("provider.response", 3, turn=1, status=200),
             _line("run.heartbeat", 4),
@@ -579,7 +579,7 @@ async def test_runtime_terminal_usage_is_bounded_by_reported_provider_calls(
         "run.started",
         1,
         tools=[],
-        runtime_version="pi-0.84.2",
+        runtime_version="pi-0.84.4",
     ) + _line(
         "run.completed",
         2,
@@ -692,11 +692,11 @@ async def test_runtime_client_rejects_oversized_request_before_delivery() -> Non
     ("content", "code"),
     [
         (
-            _line("run.started", 1, tools=[], runtime_version="pi-0.84.2"),
+            _line("run.started", 1, tools=[], runtime_version="pi-0.84.4"),
             "agent_runtime_terminal_missing",
         ),
         (
-            _line("run.started", 2, tools=[], runtime_version="pi-0.84.2")
+            _line("run.started", 2, tools=[], runtime_version="pi-0.84.4")
             + _line(
                 "run.failed",
                 3,
@@ -718,12 +718,12 @@ async def test_runtime_client_rejects_oversized_request_before_delivery() -> Non
             "agent_runtime_invalid_framing",
         ),
         (
-            _line("run.started", 1, tools=[], runtime_version="pi-0.84.2")
+            _line("run.started", 1, tools=[], runtime_version="pi-0.84.4")
             + _line(
                 "compaction.completed",
                 2,
                 checkpoint_version=1,
-                pi_runtime_version="pi-0.84.2",
+                pi_runtime_version="pi-0.84.4",
                 summary="forged checkpoint",
                 first_kept_message_id="message-outside-request",
                 tokens_before=260_000,
@@ -1302,7 +1302,7 @@ def test_compaction_and_turn_ordinals_reconcile_to_exact_terminal() -> None:
             run_id="run-1",
             execution_epoch=1,
             checkpoint_version=2,
-            pi_runtime_version="pi-0.84.2",
+            pi_runtime_version="pi-0.84.4",
             summary="safe summary",
             first_kept_message_id="message-1",
             next_message_id="message-2",
@@ -2124,6 +2124,9 @@ def test_runtime_tool_policy_defaults_without_lifecycle_deadlines() -> None:
     assert _runtime_tool_policy(run).model_dump() == {  # type: ignore[arg-type]
         "max_image_tool_calls": 2,
         "max_images_per_run": 4,
+        "max_web_search_calls": 0,
+        "max_file_tool_calls": 0,
+        "max_tool_calls": 8,
     }
 
 
@@ -2139,6 +2142,9 @@ def test_runtime_tool_policy_restores_legacy_snapshots() -> None:
     assert _runtime_tool_policy(run).model_dump() == {  # type: ignore[arg-type]
         "max_image_tool_calls": 3,
         "max_images_per_run": 6,
+        "max_web_search_calls": 0,
+        "max_file_tool_calls": 0,
+        "max_tool_calls": 8,
     }
 
 

@@ -1,9 +1,10 @@
 "use client";
 
-import { Bot, Copy, ImageIcon, Loader2 } from "lucide-react";
+import { Bot, Check, Copy, FileText, ImageIcon, Loader2 } from "lucide-react";
 import { Markdown } from "@/components/ui/Markdown";
 import { FinalImage } from "@/components/ui/chat/ConversationVisualAtoms";
 import { Button } from "@/components/ui/primitives";
+import { memo, useState } from "react";
 import type { Generation } from "@/lib/types";
 import { aspectRatioToCss } from "@/lib/sizing";
 import { cn } from "@/lib/utils";
@@ -19,15 +20,7 @@ import { neutralizeAgentPseudoProtocol } from "../model/agentTextSafety";
 import { AgentRunStatus } from "./AgentRunStatus";
 import { AgentToolCall } from "./AgentToolCall";
 
-export function AgentTurn({
-  message,
-  run,
-  generations,
-  platform,
-  onPreviewGeneration,
-  onUseReference,
-  onContinue,
-}: {
+interface AgentTurnProps {
   message: AgentMessage;
   run?: AgentRun;
   generations: Generation[];
@@ -35,7 +28,17 @@ export function AgentTurn({
   onPreviewGeneration: (generation: Generation) => void;
   onUseReference: (generation: Generation) => void;
   onContinue: (message: AgentAssistantMessage) => void;
-}) {
+}
+
+export const AgentTurn = memo(function AgentTurn({
+  message,
+  run,
+  generations,
+  platform,
+  onPreviewGeneration,
+  onUseReference,
+  onContinue,
+}: AgentTurnProps) {
   if (message.role === "user") return <AgentUserTurn message={message} />;
   return (
     <AgentAssistantTurn
@@ -47,6 +50,19 @@ export function AgentTurn({
       onUseReference={onUseReference}
       onContinue={onContinue}
     />
+  );
+}, areAgentTurnPropsEqual);
+
+function areAgentTurnPropsEqual(previous: AgentTurnProps, next: AgentTurnProps): boolean {
+  return (
+    previous.message === next.message &&
+    previous.run === next.run &&
+    previous.platform === next.platform &&
+    previous.onPreviewGeneration === next.onPreviewGeneration &&
+    previous.onUseReference === next.onUseReference &&
+    previous.onContinue === next.onContinue &&
+    previous.generations.length === next.generations.length &&
+    previous.generations.every((generation, index) => generation === next.generations[index])
   );
 }
 
@@ -75,6 +91,20 @@ function AgentUserTurn({ message }: { message: AgentUserMessage }) {
                   {attachment.label || roleLabel(attachment.role)}
                 </figcaption>
               </figure>
+            ))}
+          </div>
+        ) : null}
+        {message.files.length > 0 ? (
+          <div className="mb-2 flex flex-wrap gap-2" aria-label="附加文件">
+            {message.files.map((file) => (
+              <span
+                key={file.name}
+                className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 py-1.5 type-caption text-[var(--fg-1)]"
+              >
+                <FileText className="h-3.5 w-3.5 shrink-0 text-accent" aria-hidden />
+                <span className="truncate">{file.name}</span>
+                <span className="shrink-0 text-[var(--fg-3)]">{Math.ceil(file.size / 1024)} KB</span>
+              </span>
             ))}
           </div>
         ) : null}
@@ -176,6 +206,7 @@ function AgentOrderedOutput({
   tools: AgentToolCallContract[];
   active: boolean;
 }) {
+  const [copied, setCopied] = useState(false);
   const ordered = message.blocks.length > 0;
   if (!ordered && !message.text && tools.length === 0 && active) {
     return (
@@ -204,9 +235,15 @@ function AgentOrderedOutput({
         if (block.kind === "text") {
           return (
             <div key={`text:${block.turn}:${index}`} className="max-w-[var(--content-text)]">
-              <Markdown className="type-body text-[var(--fg-0)]">
-                {neutralizeAgentPseudoProtocol(block.text)}
-              </Markdown>
+              {active ? (
+                <p className="whitespace-pre-wrap break-words type-body text-[var(--fg-0)] [overflow-wrap:anywhere]">
+                  {neutralizeAgentPseudoProtocol(block.text)}
+                </p>
+              ) : (
+                <Markdown className="type-body text-[var(--fg-0)]">
+                  {neutralizeAgentPseudoProtocol(block.text)}
+                </Markdown>
+              )}
               {active && index === blocks.length - 1 ? (
                 <span className="ml-1 inline-block h-4 w-0.5 animate-pulse bg-accent align-text-bottom" aria-label="回复中" />
               ) : null}
@@ -220,16 +257,21 @@ function AgentOrderedOutput({
         <Button
           variant="ghost"
           size="sm"
-          onClick={() =>
+          onClick={() => {
             void navigator.clipboard?.writeText(
               neutralizeAgentPseudoProtocol(message.text),
-            )
-          }
-          aria-label="复制 Agent 回复"
+            ).then(() => {
+              setCopied(true);
+              window.setTimeout(() => setCopied(false), 1600);
+            });
+          }}
+          aria-label={copied ? "已复制 Agent 回复" : "复制 Agent 回复"}
           className="w-fit px-2 text-[var(--fg-2)]"
-          leftIcon={<Copy className="h-3.5 w-3.5" aria-hidden />}
+          leftIcon={copied
+            ? <Check className="h-3.5 w-3.5 text-success" aria-hidden />
+            : <Copy className="h-3.5 w-3.5" aria-hidden />}
         >
-          复制
+          {copied ? "已复制" : "复制"}
         </Button>
       ) : null}
     </div>

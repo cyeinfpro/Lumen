@@ -12,7 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .agent_events import AGENT_TOOL_CREATE_IMAGE
+from .agent_events import AGENT_FIRST_PARTY_TOOLS
 
 
 AGENT_CAPABILITY_AUDIENCE = "lumen-agent-tools"
@@ -37,7 +37,7 @@ class AgentCapabilityClaims(BaseModel):
     user_id: str = Field(min_length=1, max_length=64)
     agent_session_id: str = Field(min_length=1, max_length=64)
     execution_epoch: int = Field(ge=0)
-    allowed_tools: list[str] = Field(default_factory=list, max_length=4)
+    allowed_tools: list[str] = Field(default_factory=list, max_length=5)
     allowed_reference_labels: list[str] = Field(
         default_factory=list,
         max_length=AGENT_CAPABILITY_MAX_REFERENCE_LABELS,
@@ -57,7 +57,7 @@ class AgentCapabilityClaims(BaseModel):
             raise ValueError("capability lifetime exceeds the maximum")
         if len(set(self.allowed_tools)) != len(self.allowed_tools):
             raise ValueError("allowed_tools must be unique")
-        if any(tool != AGENT_TOOL_CREATE_IMAGE for tool in self.allowed_tools):
+        if any(tool not in AGENT_FIRST_PARTY_TOOLS for tool in self.allowed_tools):
             raise ValueError("capability contains an unsupported tool")
         if len(set(self.allowed_reference_labels)) != len(
             self.allowed_reference_labels

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { parseRuntimeRequest } from "../src/contracts.js";
-import { runtimeRequest } from "./fixtures.js";
+import { runtimeRequest, runtimeRequestV5 } from "./fixtures.js";
 
 describe("Runtime contracts", () => {
   it("accepts the strict Worker envelope", () => {
@@ -65,6 +65,35 @@ describe("Runtime contracts", () => {
       provider_id: "provider-history",
       tool_calls: [{ id: "tool-1" }],
     });
+  });
+
+  it("accepts v5 first-party search and virtual file tools without a host filesystem", () => {
+    const parsed = parseRuntimeRequest(runtimeRequestV5({
+      allowed_tools: ["lumen_web_search", "lumen_list_files", "lumen_read_file"],
+      workspace_files: [{
+        name: "brief.md",
+        mime_type: "text/markdown",
+        size: 7,
+        content: "# Brief",
+      }],
+      tool_policy: {
+        max_image_tool_calls: 0,
+        max_images_per_run: 4,
+        max_web_search_calls: 3,
+        max_file_tool_calls: 8,
+        max_tool_calls: 11,
+      },
+    }));
+
+    expect(parsed.version).toBe(5);
+    if (parsed.version !== 5) throw new Error("expected v5 request");
+    expect(parsed.allowed_tools).toEqual([
+      "lumen_web_search",
+      "lumen_list_files",
+      "lumen_read_file",
+    ]);
+    expect(parsed.tool_gateway_url).toBeNull();
+    expect(parsed.workspace_files[0]?.content).toBe("# Brief");
   });
 
   it("accepts legacy v1 envelopes without Pi checkpoint fields", () => {

@@ -3,6 +3,20 @@ import { Value } from "typebox/value";
 import { isIP } from "node:net";
 
 export const AGENT_TOOL_CREATE_IMAGE = "lumen_create_image";
+export const AGENT_TOOL_WEB_SEARCH = "lumen_web_search";
+export const AGENT_TOOL_LIST_FILES = "lumen_list_files";
+export const AGENT_TOOL_READ_FILE = "lumen_read_file";
+export const AGENT_TOOL_SEARCH_FILES = "lumen_search_files";
+export const AGENT_FILE_TOOLS = [
+  AGENT_TOOL_LIST_FILES,
+  AGENT_TOOL_READ_FILE,
+  AGENT_TOOL_SEARCH_FILES,
+] as const;
+export const AGENT_FIRST_PARTY_TOOLS = [
+  AGENT_TOOL_CREATE_IMAGE,
+  AGENT_TOOL_WEB_SEARCH,
+  ...AGENT_FILE_TOOLS,
+] as const;
 export const RUNTIME_HEARTBEAT_EVENT = "run.heartbeat";
 export const RUNTIME_TEXT_RESET_EVENT = "text.reset";
 
@@ -176,6 +190,24 @@ const RuntimeCompactionSchema = Type.Object(
   { additionalProperties: false },
 );
 
+const RuntimeWorkspaceFileSchema = Type.Object(
+  {
+    name: Type.String({ minLength: 1, maxLength: 128 }),
+    mime_type: Type.String({ minLength: 1, maxLength: 96 }),
+    size: Type.Integer({ minimum: 0, maximum: 256 * 1024 }),
+    content: Type.String({ maxLength: 200_000 }),
+  },
+  { additionalProperties: false },
+);
+
+const FirstPartyTool = Type.Union([
+  Type.Literal(AGENT_TOOL_CREATE_IMAGE),
+  Type.Literal(AGENT_TOOL_WEB_SEARCH),
+  Type.Literal(AGENT_TOOL_LIST_FILES),
+  Type.Literal(AGENT_TOOL_READ_FILE),
+  Type.Literal(AGENT_TOOL_SEARCH_FILES),
+]);
+
 const RuntimeRequestSharedFields = {
   run_id: Identifier,
   agent_session_id: Identifier,
@@ -228,7 +260,6 @@ const RuntimeRequestSharedFields = {
     ),
     current_prompt: Type.String({ minLength: 1, maxLength: 40_000 }),
     references: Type.Array(RuntimeReferenceSchema, { maxItems: 64 }),
-    allowed_tools: Type.Array(Type.Literal(AGENT_TOOL_CREATE_IMAGE), { maxItems: 1 }),
     image_defaults: Type.Object(
       {
         count: Type.Integer({ minimum: 1, maximum: 4 }),
@@ -286,10 +317,21 @@ const LegacyRuntimeLimitsSchema = Type.Object(
   { additionalProperties: false },
 );
 
+export const LegacyRuntimeToolPolicySchema = Type.Object(
+  {
+    max_image_tool_calls: Type.Integer({ minimum: 0, maximum: 8 }),
+    max_images_per_run: Type.Integer({ minimum: 1, maximum: 16 }),
+  },
+  { additionalProperties: false },
+);
+
 export const RuntimeToolPolicySchema = Type.Object(
   {
     max_image_tool_calls: Type.Integer({ minimum: 0, maximum: 8 }),
     max_images_per_run: Type.Integer({ minimum: 1, maximum: 16 }),
+    max_web_search_calls: Type.Integer({ minimum: 0, maximum: 8 }),
+    max_file_tool_calls: Type.Integer({ minimum: 0, maximum: 32 }),
+    max_tool_calls: Type.Integer({ minimum: 0, maximum: 48 }),
   },
   { additionalProperties: false },
 );
@@ -298,6 +340,7 @@ const RuntimeRequestV1Schema = Type.Object(
   {
     version: Type.Literal(1),
     ...RuntimeRequestSharedFields,
+    allowed_tools: Type.Array(Type.Literal(AGENT_TOOL_CREATE_IMAGE), { maxItems: 1 }),
     limits: LegacyRuntimeLimitsSchema,
   },
   { additionalProperties: false },
@@ -315,7 +358,8 @@ const RuntimeRequestV2Schema = Type.Object(
       ]),
       { minItems: 2, maxItems: 2, uniqueItems: true },
     ),
-    tool_policy: RuntimeToolPolicySchema,
+    allowed_tools: Type.Array(Type.Literal(AGENT_TOOL_CREATE_IMAGE), { maxItems: 1 }),
+    tool_policy: LegacyRuntimeToolPolicySchema,
   },
   { additionalProperties: false },
 );
@@ -332,7 +376,8 @@ const RuntimeRequestV3Schema = Type.Object(
       ]),
       { minItems: 2, maxItems: 2, uniqueItems: true },
     ),
-    tool_policy: RuntimeToolPolicySchema,
+    allowed_tools: Type.Array(Type.Literal(AGENT_TOOL_CREATE_IMAGE), { maxItems: 1 }),
+    tool_policy: LegacyRuntimeToolPolicySchema,
     operation: Type.Union([Type.Literal("prompt"), Type.Literal("continue")]),
     tool_receipt_version: Type.Optional(Type.Literal(2)),
   },
@@ -351,6 +396,31 @@ const RuntimeRequestV4Schema = Type.Object(
       ]),
       { minItems: 2, maxItems: 2, uniqueItems: true },
     ),
+    allowed_tools: Type.Array(Type.Literal(AGENT_TOOL_CREATE_IMAGE), { maxItems: 1 }),
+    tool_policy: LegacyRuntimeToolPolicySchema,
+    operation: Type.Union([Type.Literal("prompt"), Type.Literal("continue")]),
+    tool_receipt_version: Type.Optional(Type.Literal(2)),
+  },
+  { additionalProperties: false },
+);
+
+const RuntimeRequestV5Schema = Type.Object(
+  {
+    version: Type.Literal(5),
+    ...RuntimeRequestSharedFields,
+    user_message_id: Identifier,
+    event_features: Type.Array(
+      Type.Union([
+        Type.Literal("heartbeat-v1"),
+        Type.Literal("text-reset-v1"),
+      ]),
+      { minItems: 2, maxItems: 2, uniqueItems: true },
+    ),
+    allowed_tools: Type.Array(FirstPartyTool, {
+      maxItems: 5,
+      uniqueItems: true,
+    }),
+    workspace_files: Type.Array(RuntimeWorkspaceFileSchema, { maxItems: 8 }),
     tool_policy: RuntimeToolPolicySchema,
     operation: Type.Union([Type.Literal("prompt"), Type.Literal("continue")]),
     tool_receipt_version: Type.Optional(Type.Literal(2)),
@@ -363,6 +433,7 @@ export const RuntimeRequestSchema = Type.Union([
   RuntimeRequestV2Schema,
   RuntimeRequestV3Schema,
   RuntimeRequestV4Schema,
+  RuntimeRequestV5Schema,
 ]);
 
 export type RuntimeRequest = Static<typeof RuntimeRequestSchema>;
@@ -434,9 +505,13 @@ function strictRequestChecks(request: RuntimeRequest): void {
   ) {
     throw new Error("requested output limit exceeds provider capability");
   }
-  const toolsEnabled = request.allowed_tools.length === 1;
-  if (toolsEnabled !== Boolean(request.tool_gateway_url && request.tool_capability)) {
-    throw new Error("tool gateway and capability must match the tool allowlist");
+  if (new Set(request.allowed_tools).size !== request.allowed_tools.length) {
+    throw new Error("duplicate allowed tool");
+  }
+  const allowedTools = request.allowed_tools as readonly string[];
+  const imageEnabled = allowedTools.includes(AGENT_TOOL_CREATE_IMAGE);
+  if (imageEnabled !== Boolean(request.tool_gateway_url && request.tool_capability)) {
+    throw new Error("tool gateway and capability must match the image tool allowlist");
   }
   if (
     request.version !== 1 &&
@@ -445,12 +520,28 @@ function strictRequestChecks(request: RuntimeRequest): void {
   ) {
     throw new Error("Pi-native Runtime features are incomplete");
   }
-  if (
-    request.version !== 1 &&
-    toolsEnabled &&
-    request.tool_policy.max_image_tool_calls === 0
-  ) {
+  const toolPolicy = runtimeToolPolicy(request);
+  if (imageEnabled && toolPolicy.max_image_tool_calls === 0) {
     throw new Error("image tool requires a positive call allowance");
+  }
+  if (
+    allowedTools.includes(AGENT_TOOL_WEB_SEARCH) &&
+    toolPolicy.max_web_search_calls === 0
+  ) {
+    throw new Error("web search requires a positive call allowance");
+  }
+  const workspaceFiles = request.version === 5 ? request.workspace_files : [];
+  const fileToolsEnabled = request.allowed_tools.some((tool) =>
+    (AGENT_FILE_TOOLS as readonly string[]).includes(tool),
+  );
+  if (
+    fileToolsEnabled &&
+    (workspaceFiles.length === 0 || toolPolicy.max_file_tool_calls === 0)
+  ) {
+    throw new Error("file tools require workspace files and an allowance");
+  }
+  if (request.allowed_tools.length > 0 && toolPolicy.max_tool_calls === 0) {
+    throw new Error("tools require a positive aggregate allowance");
   }
   if (
     request.provider.thinking_level_map !== undefined &&
@@ -471,11 +562,14 @@ function strictRequestChecks(request: RuntimeRequest): void {
     throw new Error("invalid provider dispatch URL");
   }
   if (
-    (request.version === 3 || request.version === 4) &&
+    request.version !== 1 &&
+    request.version !== 2 &&
     request.operation === "continue" &&
-    (request.references.length > 0 || request.allowed_tools.length > 0)
+    (request.references.length > 0 ||
+      request.allowed_tools.length > 0 ||
+      workspaceFiles.length > 0)
   ) {
-    throw new Error("continuation cannot replay image or paid tool input");
+    throw new Error("continuation cannot replay tool input");
   }
   if (!validUrl(request.provider.base_url, new Set(["http:", "https:"]))) {
     throw new Error("invalid provider base URL");
@@ -520,18 +614,43 @@ function strictRequestChecks(request: RuntimeRequest): void {
   if (aggregateReferenceBytes > 8 * 1024 * 1024) {
     throw new Error("aggregate reference previews exceed the byte limit");
   }
+  const workspaceNames = workspaceFiles.map((file) => file.name.toLocaleLowerCase());
+  if (new Set(workspaceNames).size !== workspaceNames.length) {
+    throw new Error("duplicate workspace file name");
+  }
+  if (
+    workspaceFiles.reduce((total, file) => total + file.size, 0) > 1024 * 1024 ||
+    workspaceFiles.reduce((total, file) => total + file.content.length, 0) > 800_000 ||
+    workspaceFiles.some(
+      (file) =>
+        file.name === "." ||
+        file.name === ".." ||
+        file.name.includes("/") ||
+        file.name.includes("\\") ||
+        Array.from(file.name).some((char) => char.charCodeAt(0) < 32) ||
+        file.content.includes("\u0000"),
+    )
+  ) {
+    throw new Error("workspace files exceed the safety policy");
+  }
 }
 
 export function runtimeToolPolicy(request: RuntimeRequest): RuntimeToolPolicy {
-  return request.version !== 1
-    ? request.tool_policy
-    : {
-        max_image_tool_calls: Math.min(
-          request.limits.max_tool_calls,
-          request.limits.max_image_tool_calls,
-        ),
-        max_images_per_run: request.limits.max_images_per_run,
-      };
+  if (request.version === 5) return request.tool_policy;
+  const maxImageToolCalls =
+    request.version === 1
+      ? Math.min(request.limits.max_tool_calls, request.limits.max_image_tool_calls)
+      : request.tool_policy.max_image_tool_calls;
+  return {
+    max_image_tool_calls: maxImageToolCalls,
+    max_images_per_run:
+      request.version === 1
+        ? request.limits.max_images_per_run
+        : request.tool_policy.max_images_per_run,
+    max_web_search_calls: 0,
+    max_file_tool_calls: 0,
+    max_tool_calls: maxImageToolCalls,
+  };
 }
 
 export function parseRuntimeRequest(value: unknown): RuntimeRequest {

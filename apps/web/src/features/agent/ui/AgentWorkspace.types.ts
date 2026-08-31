@@ -5,6 +5,7 @@ import type {
   AgentAssistantMessage,
   AgentDraft,
   AgentDraftAttachment,
+  AgentDraftFile,
   AgentImageDefaults,
   AgentMessage,
   AgentRun,
@@ -48,7 +49,7 @@ export interface AgentWorkspaceProps {
   onLoadMoreAssets: () => void;
   onLoadMoreSessions: () => void;
   onSessionSearchChange: (query: string) => void;
-  onLoadOlderMessages: () => void;
+  onLoadOlderMessages: () => Promise<void> | void;
   onCreateSession: () => void;
   onSelectSession: (sessionId: string) => void;
   onRenameSession: (sessionId: string, title: string) => void;
@@ -66,6 +67,8 @@ export interface AgentWorkspaceProps {
   onRemoveAttachment: (imageId: string) => void;
   onMoveAttachment: (imageId: string, direction: -1 | 1) => void;
   onRoleChange: (imageId: string, role: AttachmentRole) => void;
+  onAddFile: (file: AgentDraftFile) => boolean;
+  onRemoveFile: (name: string) => void;
   onPreviewAttachment: (attachment: AgentDraftAttachment) => void;
   onPickAsset: (item: GenerationSummary) => void;
   onPreviewGeneration: (generation: Generation) => void;

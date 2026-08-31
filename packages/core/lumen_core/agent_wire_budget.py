@@ -42,6 +42,7 @@ def estimate_agent_runtime_request_bytes(
     history_structured_bytes: int,
     current_reference_count: int,
     historical_reference_count: int,
+    workspace_files_bytes: int = 0,
     maximum_bytes: int = DEFAULT_AGENT_RUNTIME_MAX_REQUEST_BYTES,
     preview_max_bytes: int = AGENT_RUNTIME_REFERENCE_PREVIEW_MAX_BYTES,
 ) -> AgentWireBudget:
@@ -61,6 +62,7 @@ def estimate_agent_runtime_request_bytes(
         text_bytes
         + max(0, int(history_structured_bytes))
         + references
+        + max(0, int(workspace_files_bytes))
         + AGENT_RUNTIME_CREDENTIAL_HEADROOM_BYTES
         + AGENT_RUNTIME_REQUEST_SAFETY_MARGIN_BYTES
     )

@@ -161,6 +161,13 @@ async def _history_tool_tokens_by_message(
                     else []
                 ),
                 error_code=tool.error_code,
+                name=tool.name,
+                result_text=(
+                    tool.result_jsonb.get("history_text")
+                    if isinstance(tool.result_jsonb, dict)
+                    and isinstance(tool.result_jsonb.get("history_text"), str)
+                    else None
+                ),
             )
             for tool in projected
         ]
@@ -312,6 +319,7 @@ async def _submission_context_estimate(
     prompt: str,
     system_prompt: str | None,
     references: tuple[SubmissionReference, ...],
+    workspace_files: tuple[dict[str, Any], ...] = (),
 ) -> _SubmissionContextEstimate:
     history_boundary, checkpoint_tokens = await _checkpoint_boundary(
         db, conversation=conversation, user_id=user_id
@@ -401,6 +409,7 @@ async def _submission_context_estimate(
         ),
         current_reference_count=len(references),
         historical_reference_count=historical_reference_count,
+        workspace_files_bytes=sum(encoded_json_bytes(item) for item in workspace_files),
         maximum_bytes=int(
             getattr(
                 settings,
@@ -458,6 +467,7 @@ async def resolve_execution_pin(
         prompt=body.text,
         system_prompt=system_prompt,
         references=references,
+        workspace_files=tuple(item.model_dump(mode="json") for item in body.files),
     )
     context_plan = "direct"
     if account_mode == "byok":

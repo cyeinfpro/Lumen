@@ -57,11 +57,14 @@ def _tool_result_text(tool: AgentToolCall) -> str:
     generation_ids = [
         value for value in result.get("generation_ids", []) if isinstance(value, str)
     ][:4]
+    history_text = result.get("history_text")
     return agent_tool_history_result_text(
         status=tool.status,
         mode=tool.mode,
         generation_ids=generation_ids,
         error_code=tool.error_code,
+        name=tool.name,
+        result_text=history_text if isinstance(history_text, str) else None,
     )
 
 
@@ -83,7 +86,7 @@ def _ordered_history_blocks(
         if isinstance((ordinal := getattr(tool, "ordinal", None)), int)
     }
     result: list[AgentRuntimeHistoryBlock] = []
-    for raw in raw_blocks[:24]:
+    for raw in raw_blocks[:32]:
         if not isinstance(raw, dict):
             continue
         turn = raw.get("turn")
@@ -160,6 +163,11 @@ def project_history_message(
             notes.append(
                 f"[Historical image attachment {index}: role {attachment_role}{suffix}; binary omitted]"
             )
+    files = content.get("files")
+    if isinstance(files, list):
+        for item in [value for value in files if isinstance(value, dict)][:8]:
+            name = _safe_text(item.get("name"), maximum=128) or "file"
+            notes.append(f"[Historical virtual file: {name}; content not replayed]")
     ordered_blocks = _ordered_history_blocks(run, list(tool_rows or []))
     if not ordered_blocks:
         tool_sources = list(tool_rows or [])

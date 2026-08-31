@@ -336,6 +336,37 @@ test("text reply submits and restores from authoritative snapshots", async ({
   await expect(page.getByText("已完成产品视觉方向。")).toBeVisible();
 });
 
+test("web search and virtual text files serialize from the Agent composer", async ({
+  page,
+}) => {
+  const fixture = await installAgentFixture(page, { mode: "text" });
+  await openAgent(page);
+  await page
+    .locator('input[type="file"][accept^=".txt"]')
+    .setInputFiles({
+      name: "brief.md",
+      mimeType: "text/markdown",
+      buffer: Buffer.from("# Brief\nUse current sources."),
+    });
+  await expect(page.getByText("brief.md", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "开启联网搜索" }).click();
+  await page
+    .getByRole("textbox", { name: "发送给 Agent" })
+    .fill("分析文件并核对最新信息");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+
+  await expect.poll(() => fixture.lastMessageBody?.allow_web_search).toBe(true);
+  expect(fixture.lastMessageBody?.allow_file_tools).toBe(true);
+  expect(fixture.lastMessageBody?.files).toEqual([
+    {
+      name: "brief.md",
+      mime_type: "text/markdown",
+      size: 28,
+      content: "# Brief\nUse current sources.",
+    },
+  ]);
+});
+
 test("ordered references and roles serialize directly from Agent state", async ({
   page,
 }) => {
@@ -463,6 +494,20 @@ test("partial image, cancellation, and stable account errors remain actionable",
   await expect(
     runtimePage.getByText("运行时暂不可用，稍后重试。").first(),
   ).toBeVisible();
+});
+
+test("active Agent keeps the next-turn draft editable while stop remains available", async ({
+  page,
+}) => {
+  const fixture = await installAgentFixture(page, { mode: "active-image" });
+  await openAgent(page);
+  const input = page.getByRole("textbox", { name: "发送给 Agent" });
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveAttribute("placeholder", "准备下一轮消息");
+  await input.fill("下一轮继续整理来源");
+  await page.getByRole("button", { name: "停止 Agent 运行" }).click();
+  await expect.poll(() => fixture.cancelCalls).toBe(1);
+  await expect(input).toHaveValue("下一轮继续整理来源");
 });
 
 test("active Agent snapshot polling stays bounded", async ({ page }) => {

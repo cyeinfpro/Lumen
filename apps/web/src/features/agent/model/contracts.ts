@@ -10,6 +10,9 @@ import type {
 } from "@/lib/api/tasks";
 
 export const AGENT_MAX_REFERENCES = 16;
+export const AGENT_MAX_FILES = 8;
+export const AGENT_MAX_FILE_BYTES = 256 * 1024;
+export const AGENT_MAX_TOTAL_FILE_BYTES = 1024 * 1024;
 export const AGENT_NEW_DRAFT_KEY = "__new_agent_session__";
 
 export type AgentRunStatus =
@@ -77,10 +80,20 @@ export interface AgentDraftAttachment {
   mime?: string;
 }
 
+export interface AgentDraftFile {
+  name: string;
+  mimeType: string;
+  size: number;
+  content: string;
+}
+
 export interface AgentDraft {
   text: string;
   attachments: AgentDraftAttachment[];
+  files: AgentDraftFile[];
   allowImage: boolean;
+  allowWebSearch: boolean;
+  allowFileTools: boolean;
   imageDefaults: AgentImageDefaults;
   reasoningEffort?: AgentReasoningEffort;
 }
@@ -92,7 +105,10 @@ export function createAgentDraft(
   return {
     text: "",
     attachments: [],
+    files: [],
     allowImage: true,
+    allowWebSearch: false,
+    allowFileTools: true,
     ...rest,
     reasoningEffort: rest.reasoningEffort ?? "auto",
     imageDefaults: {
@@ -116,7 +132,14 @@ export interface AgentToolCall {
   agent_run_id: string;
   ordinal: number;
   name: string;
-  mode: "text_to_image" | "image_to_image" | null;
+  mode:
+    | "text_to_image"
+    | "image_to_image"
+    | "web_search"
+    | "file_list"
+    | "file_read"
+    | "file_search"
+    | null;
   status: AgentToolStatus;
   generation_ids: string[];
   generation_count: number;
@@ -168,6 +191,8 @@ export interface AgentSession {
   default_system_prompt_id: string | null;
   image_defaults: AgentImageDefaults;
   allow_image: boolean;
+  allow_web_search: boolean;
+  allow_file_tools: boolean;
   runtime_version: string;
   last_activity_at: string;
   created_at: string;
@@ -188,15 +213,22 @@ export interface AgentMessageAttachment {
   weight?: number;
 }
 
+export interface AgentMessageFile {
+  name: string;
+  mime_type: string;
+  size: number;
+}
+
 export interface AgentMessageToolProjection {
   id?: string;
   name?: string;
   label?: string;
-  mode?: "text_to_image" | "image_to_image";
+  mode?: AgentToolCall["mode"];
   status?: AgentToolStatus;
   generation_ids?: string[];
   generation_count?: number;
   error_code?: string | null;
+  result_text?: string;
 }
 
 export interface AgentOutputTextBlock {
@@ -213,6 +245,7 @@ export interface AgentOutputToolBlock {
   name?: string;
   status?: AgentToolStatus;
   generation_ids?: string[];
+  result_text?: string;
 }
 
 export type AgentOutputBlock = AgentOutputTextBlock | AgentOutputToolBlock;
@@ -225,6 +258,7 @@ export interface AgentMessageContent {
   output_revision?: number;
   output_runtime_seq?: number;
   attachments?: AgentMessageAttachment[];
+  files?: AgentMessageFile[];
   tool_calls?: AgentMessageToolProjection[];
   generation_ids?: string[];
   images?: Array<Record<string, unknown>>;
@@ -249,6 +283,7 @@ export interface AgentUserMessage {
   role: "user";
   text: string;
   attachments: AgentMessageAttachment[];
+  files: AgentMessageFile[];
   createdAt: string;
   optimistic?: boolean;
 }
@@ -285,8 +320,16 @@ export interface AgentMessageCreateInput {
   idempotency_key: string;
   text: string;
   attachments: AgentReferenceInput[];
+  files: Array<{
+    name: string;
+    mime_type: string;
+    size: number;
+    content: string;
+  }>;
   image_defaults: AgentImageDefaults;
   allow_image: boolean;
+  allow_web_search: boolean;
+  allow_file_tools: boolean;
   reasoning_effort?: Exclude<AgentReasoningEffort, "auto"> | null;
 }
 
@@ -317,6 +360,8 @@ export interface AgentSessionCreateInput {
   default_system_prompt_id?: string | null;
   image_defaults?: AgentImageDefaults;
   allow_image?: boolean;
+  allow_web_search?: boolean;
+  allow_file_tools?: boolean;
 }
 
 export interface AgentSessionPatchInput {
@@ -329,6 +374,8 @@ export interface AgentSessionPatchInput {
   default_system_prompt_id?: string | null;
   image_defaults?: AgentImageDefaults;
   allow_image?: boolean;
+  allow_web_search?: boolean;
+  allow_file_tools?: boolean;
 }
 
 export interface AgentStatus {

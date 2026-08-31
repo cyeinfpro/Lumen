@@ -103,6 +103,8 @@ async def create_agent_session(
         default_params=agent_default_params(
             image_defaults=body.image_defaults,
             allow_image=body.allow_image,
+            allow_web_search=body.allow_web_search,
+            allow_file_tools=body.allow_file_tools,
         ),
     )
     db.add(conversation)
@@ -175,14 +177,37 @@ async def patch_agent_session(
     for field in ("active_scope_id", "default_system", "default_system_prompt_id"):
         if field in body.model_fields_set:
             setattr(conversation, field, getattr(body, field))
-    current_defaults, current_allow_image = conversation_agent_defaults(conversation)
-    if body.image_defaults is not None or body.allow_image is not None:
+    (
+        current_defaults,
+        current_allow_image,
+        current_allow_web_search,
+        current_allow_file_tools,
+    ) = conversation_agent_defaults(conversation)
+    if any(
+        value is not None
+        for value in (
+            body.image_defaults,
+            body.allow_image,
+            body.allow_web_search,
+            body.allow_file_tools,
+        )
+    ):
         conversation.default_params = agent_default_params(
             image_defaults=body.image_defaults or current_defaults,
             allow_image=(
                 body.allow_image
                 if body.allow_image is not None
                 else current_allow_image
+            ),
+            allow_web_search=(
+                body.allow_web_search
+                if body.allow_web_search is not None
+                else current_allow_web_search
+            ),
+            allow_file_tools=(
+                body.allow_file_tools
+                if body.allow_file_tools is not None
+                else current_allow_file_tools
             ),
             existing=conversation.default_params,
         )
