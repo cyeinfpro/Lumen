@@ -21,6 +21,7 @@ import type {
   AgentStatus,
 } from "../model/contracts";
 import {
+  branchAgentSession,
   cancelAgentRun,
   continueAgentRun,
   createAgentSession,
@@ -155,6 +156,17 @@ export function usePatchAgentSessionMutation() {
     { sessionId: string; patch: AgentSessionPatchInput }
   >({
     mutationFn: ({ sessionId, patch }) => patchAgentSession(sessionId, patch),
+    onSuccess: (session) => {
+      queryClient.setQueryData(keys.agentSession(session.id), session);
+      void queryClient.invalidateQueries({ queryKey: keys.agentSessionsAll() });
+    },
+  });
+}
+
+export function useBranchAgentSessionMutation() {
+  const { queryClient, keys } = useAgentInvalidation();
+  return useMutation<AgentSession, Error, { sessionId: string; title?: string }>({
+    mutationFn: ({ sessionId, title }) => branchAgentSession(sessionId, title),
     onSuccess: (session) => {
       queryClient.setQueryData(keys.agentSession(session.id), session);
       void queryClient.invalidateQueries({ queryKey: keys.agentSessionsAll() });

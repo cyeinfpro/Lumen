@@ -120,12 +120,16 @@ async def wallet_chat_provider_preflight(
     fixed_input_tokens: int | None = None,
     history_context_tokens: int | None = None,
     largest_history_entry_tokens: int = 0,
+    requested_model: str | None = None,
 ) -> AgentProviderPreflight:
     providers_spec = get_spec("providers")
     raw = await get_setting(db, providers_spec) if providers_spec is not None else None
     providers, errors = parse_provider_json(raw)
     model_spec = get_spec("upstream.default_model")
-    model = await get_setting(db, model_spec) if model_spec is not None else None
+    configured_model = (
+        await get_setting(db, model_spec) if model_spec is not None else None
+    )
+    model = requested_model or configured_model
     if not isinstance(model, str) or not model.strip():
         raise http_error(
             "agent_provider_unavailable",
@@ -146,9 +150,13 @@ async def wallet_chat_provider_preflight(
     ]
     if not eligible:
         raise http_error(
-            "agent_provider_unavailable",
-            "no Agent chat provider is available",
-            503,
+            "agent_model_unavailable"
+            if requested_model
+            else "agent_provider_unavailable",
+            "requested Agent model is unavailable"
+            if requested_model
+            else "no Agent chat provider is available",
+            412 if requested_model else 503,
             configuration_errors=len(errors),
         )
     context_candidates = list(eligible)

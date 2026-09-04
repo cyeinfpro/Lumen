@@ -2,12 +2,13 @@
 
 import { AlertTriangle, LogIn, RefreshCw } from "lucide-react";
 
+import { replaceWithLogin } from "@/lib/auth/navigation";
 import {
   requestRuntimeRecovery,
   type RuntimeResilienceSnapshot,
   useRuntimeResilience,
 } from "@/lib/runtimeResilience";
-import { replaceWithLogin } from "@/lib/auth/navigation";
+import { IconButton } from "@/components/ui/primitives";
 
 function runtimeStatusMessage(status: RuntimeResilienceSnapshot): string {
   if (status.session === "unauthorized") {
@@ -19,6 +20,14 @@ function runtimeStatusMessage(status: RuntimeResilienceSnapshot): string {
   return "";
 }
 
+function recoverRuntimeSession(unauthorized: boolean) {
+  if (unauthorized) {
+    replaceWithLogin();
+    return;
+  }
+  requestRuntimeRecovery();
+}
+
 export function RuntimeResilienceStatus() {
   const status = useRuntimeResilience();
   const unauthorized = status.session === "unauthorized";
@@ -28,42 +37,77 @@ export function RuntimeResilienceStatus() {
   const message = runtimeStatusMessage(status);
   const Icon = unauthorized ? LogIn : AlertTriangle;
   const ActionIcon = unauthorized ? LogIn : RefreshCw;
-
-  const recover = () => {
-    if (unauthorized) {
-      replaceWithLogin();
-      return;
-    }
-    requestRuntimeRecovery();
-  };
+  const actionLabel = unauthorized ? "登录" : "重新验证会话";
 
   return (
     <div
       role="alert"
       aria-live="assertive"
-      data-runtime-resilience-status
-      className="pointer-events-none fixed right-3 top-[calc(var(--mobile-topbar-h)+var(--top-banner-stack-height,0px)+env(safe-area-inset-top,0px)+var(--space-2))] z-[var(--z-toast)] max-w-[min(20rem,calc(100vw-1.5rem))] md:bottom-4 md:left-auto md:right-4 md:top-auto"
+      aria-atomic="true"
+      data-runtime-resilience-status="desktop"
+      className="pointer-events-none fixed bottom-4 right-4 z-[var(--z-toast)] hidden max-w-[min(20rem,calc(100vw-2rem))] md:block"
     >
       <div
-        className={
-          "pointer-events-auto flex items-center gap-2 rounded-[var(--radius-control)] border border-warning-border bg-warning-soft/95 px-2.5 py-1.5 type-caption text-[var(--warning-fg)] shadow-[var(--shadow-1)] backdrop-blur-xl"
-        }
+        className={[
+          "pointer-events-auto flex items-center gap-2 rounded-[var(--radius-control)] border px-2.5 py-1.5 type-caption shadow-[var(--shadow-1)] backdrop-blur-xl",
+          unauthorized
+            ? "border-danger-border bg-danger-soft/95 text-[var(--danger-fg)]"
+            : "border-warning-border bg-warning-soft/95 text-[var(--warning-fg)]",
+        ].join(" ")}
       >
-        <Icon
-          className="h-4 w-4 shrink-0"
-          aria-hidden
-        />
-        <span className="min-w-0 flex-1 truncate">{message}</span>
-        <button
-          type="button"
-          onClick={recover}
-          aria-label={unauthorized ? "登录" : "重新验证会话"}
-          title={unauthorized ? "登录" : "重新验证会话"}
-          className="inline-flex h-8 min-h-11 w-8 min-w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-0)] transition-colors hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-[var(--focus-outline)] md:min-h-8 md:min-w-8"
+        <Icon className="h-4 w-4 shrink-0" aria-hidden />
+        <span className="min-w-0 flex-1">{message}</span>
+        <IconButton
+          size="sm"
+          variant="ghost"
+          onClick={() => recoverRuntimeSession(unauthorized)}
+          aria-label={actionLabel}
+          title={actionLabel}
+          tooltip={actionLabel}
+          className="text-current hover:bg-[var(--bg-2)] hover:text-current"
         >
           <ActionIcon className="h-4 w-4" aria-hidden />
-        </button>
+        </IconButton>
       </div>
+    </div>
+  );
+}
+
+export function MobileRuntimeResilienceStatus() {
+  const status = useRuntimeResilience();
+  const unauthorized = status.session === "unauthorized";
+  const sessionDegraded = status.session === "degraded";
+  if (!unauthorized && !sessionDegraded) return null;
+
+  const message = runtimeStatusMessage(status);
+  const Icon = unauthorized ? LogIn : AlertTriangle;
+  const actionLabel = unauthorized ? "登录" : "重新验证会话";
+  const accessibleLabel = `${message}，${actionLabel}`;
+
+  return (
+    <div
+      role="alert"
+      aria-live="assertive"
+      aria-atomic="true"
+      data-runtime-resilience-status="mobile"
+      className="flex shrink-0"
+    >
+      <span className="sr-only">{message}</span>
+      <IconButton
+        size="md"
+        variant="ghost"
+        onClick={() => recoverRuntimeSession(unauthorized)}
+        aria-label={accessibleLabel}
+        title={accessibleLabel}
+        tooltip={accessibleLabel}
+        className={
+          unauthorized
+            ? "border border-danger-border bg-danger-soft text-[var(--danger-fg)] hover:bg-danger-soft hover:text-[var(--danger-fg)]"
+            : "border border-warning-border bg-warning-soft text-[var(--warning-fg)] hover:bg-warning-soft hover:text-[var(--warning-fg)]"
+        }
+      >
+        <Icon className="h-4 w-4" aria-hidden />
+      </IconButton>
     </div>
   );
 }

@@ -89,10 +89,23 @@ class ListApparelModelLibrary:
             appearance=normalized_appearance,
             query=query,
         )
+        item_ids = [
+            item_id
+            for item in items
+            if isinstance((item_id := item.get("id")), str) and item_id
+        ]
+        usage_counts = await self.port.usage_counts(
+            user_id=user.id,
+            item_ids=item_ids,
+        )
+        projected_items = [
+            {**item, "usage_count": usage_counts.get(str(item.get("id") or ""), 0)}
+            for item in items
+        ]
         if migrated_legacy:
             await self.port.commit()
         return ApparelModelLibraryListOut(
-            items=[self.port.item_out(item) for item in items],
+            items=[self.port.item_out(item) for item in projected_items],
             sync=self.port.sync_state_out(user),
         )
 

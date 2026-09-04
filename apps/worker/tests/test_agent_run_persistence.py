@@ -72,6 +72,31 @@ async def agent_db(
         await engine.dispose()
 
 
+def test_public_agent_output_blocks_never_include_tool_results() -> None:
+    projected = persistence._public_output_blocks(  # noqa: SLF001
+        [
+            {
+                "kind": "tool",
+                "turn": 1,
+                "tool_call_id": "tool-1",
+                "name": "lumen_web_search",
+                "status": "succeeded",
+                "result_text": '{"authorization":"Bearer private"}',
+            }
+        ]
+    )
+
+    assert projected == [
+        {
+            "kind": "tool",
+            "turn": 1,
+            "tool_call_id": "tool-1",
+            "name": "lumen_web_search",
+            "status": "succeeded",
+        }
+    ]
+
+
 async def _seed(factory: async_sessionmaker[AsyncSession]) -> None:
     async with factory() as db:
         user = User(

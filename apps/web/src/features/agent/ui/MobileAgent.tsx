@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronDown, Plus } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { LandscapeBanner } from "@/components/ui/shell/LandscapeBanner";
 import { MobileConversationDrawer } from "@/components/ui/shell/MobileConversationDrawer";
 import { MobileTabBar } from "@/components/ui/shell/MobileTabBar";
@@ -11,7 +11,10 @@ import { Pressable } from "@/components/ui/primitives/mobile/Pressable";
 import { TaskIsland } from "@/components/ui/tray/TaskIsland";
 import { useKeyboardInset } from "@/hooks/useKeyboardInset";
 import { useAgentWorkspaceScroll } from "../containers/useAgentScrollManager";
-import { AgentComposer } from "./AgentComposer";
+import {
+  AgentComposer,
+  type AgentComposerHandle,
+} from "./AgentComposer";
 import { AgentContextBar } from "./AgentContextBar";
 import { AgentConversation } from "./AgentConversation";
 import { AgentScrollToLatest } from "./AgentScrollToLatest";
@@ -22,6 +25,7 @@ import type { AgentWorkspaceProps } from "./AgentWorkspace.types";
 export function MobileAgent(props: AgentWorkspaceProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [composerHeight, setComposerHeight] = useState(120);
+  const composerRef = useRef<AgentComposerHandle | null>(null);
   const { isKeyboardOpen } = useKeyboardInset();
   const {
     scrollRef,
@@ -84,7 +88,7 @@ export function MobileAgent(props: AgentWorkspaceProps) {
               className="min-w-0 flex-1 justify-start gap-1 px-2"
             >
               <span className="min-w-0 flex-1 truncate text-left type-body font-medium text-[var(--fg-0)]">
-                {props.currentSession?.title || "新会话"}
+                会话列表
               </span>
               <ChevronDown
                 className="h-4 w-4 shrink-0 text-[var(--fg-2)]"
@@ -109,9 +113,16 @@ export function MobileAgent(props: AgentWorkspaceProps) {
                 realtimeStatus={props.realtimeStatus}
                 activeRun={props.activeRun}
                 toolGatewayConfigured={props.toolGatewayConfigured}
+                defaultModel={props.defaultModel}
+                modelOptions={props.modelOptions}
+                draft={props.draft}
                 prompts={props.prompts}
                 saving={props.sessionSaving}
+                branching={props.branching}
+                onBranch={props.onBranchSession}
                 onPatch={props.onPatchSession}
+                onDraftChange={props.onDraftChange}
+                onDefaultsChange={props.onDefaultsChange}
                 images={props.sessionImages}
                 imagesLoading={props.sessionImagesLoading}
                 removingImageId={props.sessionImageRemovingId}
@@ -140,7 +151,9 @@ export function MobileAgent(props: AgentWorkspaceProps) {
           error={props.messagesError}
           scrollToMessageId={props.scrollToMessageId}
           onRetry={props.onRetryMessages}
-          onPickSuggestion={props.onPickSuggestion}
+          onStartCapability={(action) =>
+            composerRef.current?.startCapability(action)
+          }
           onPreviewGeneration={props.onPreviewGeneration}
           onUseReference={props.onUseReference}
           onContinue={props.onContinue}
@@ -169,6 +182,7 @@ export function MobileAgent(props: AgentWorkspaceProps) {
         <TaskIsland />
       </div>
       <AgentComposer
+        ref={composerRef}
         platform="mobile"
         {...agentComposerProps(props)}
         onMetricsChange={setComposerHeight}

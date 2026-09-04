@@ -352,6 +352,7 @@ async def continue_agent_run(
     source_user_id = source.user_id
     source_session_id = source.agent_session_id
     source_user_message_id = source.user_message_id
+    source_model = source.model
     source_reasoning_effort = source.reasoning_effort
     source_system_prompt = source.system_prompt_snapshot
     await db.commit()
@@ -368,6 +369,7 @@ async def continue_agent_run(
             attachments=[],
             image_defaults=image_defaults,
             allow_image=False,
+            model=source_model,
             reasoning_effort=source_reasoning_effort,
         ),
         request=request,

@@ -37,6 +37,13 @@ class ApparelLibraryQueryPort(Protocol):
         query: str,
     ) -> list[JsonObject]: ...
 
+    async def usage_counts(
+        self,
+        *,
+        user_id: str,
+        item_ids: Sequence[str],
+    ) -> dict[str, int]: ...
+
     def item_out(self, item: JsonObject) -> ApparelModelLibraryItemOut: ...
 
     def sync_state_out(

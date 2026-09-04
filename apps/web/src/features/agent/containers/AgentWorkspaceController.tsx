@@ -20,6 +20,7 @@ import {
   type AgentImageDefaults,
   type AgentSession,
   type AgentSessionPatchInput,
+  type AgentStatus,
 } from "../model/contracts";
 import {
   getAgentActiveRun,
@@ -28,6 +29,7 @@ import {
 import {
   useAgentActiveRunQuery,
   useAgentMessagesQuery,
+  useBranchAgentSessionMutation,
   useCancelAgentRunMutation,
   useContinueAgentRunMutation,
   useCreateAgentSessionMutation,
@@ -91,11 +93,12 @@ const GENERATION_EVENT_NAMES = [
 
 export function AgentWorkspaceController({
   platform,
-  toolGatewayConfigured,
+  agentStatus,
 }: {
   platform: "desktop" | "mobile";
-  toolGatewayConfigured: boolean;
+  agentStatus: AgentStatus;
 }) {
+  const toolGatewayConfigured = agentStatus.tool_gateway_configured;
   const userScope = useUserQueryScope();
   const queryClient = useQueryClient();
   const search = useSearchParams();
@@ -158,6 +161,16 @@ export function AgentWorkspaceController({
       createAgentDraft(),
     [currentSessionId, draftsBySession],
   );
+
+  useEffect(() => {
+    if (
+      !draft.model ||
+      agentStatus.models.some((option) => option.model === draft.model)
+    ) {
+      return;
+    }
+    setDraft(currentSessionId, { model: null });
+  }, [agentStatus.models, currentSessionId, draft.model, setDraft]);
 
   useEffect(() => {
     if (!currentSession || draftsBySession[currentSession.id]) return;
@@ -304,6 +317,7 @@ export function AgentWorkspaceController({
   }, [channels.length, setRealtimeStatus, sseStatus]);
 
   const createMutation = useCreateAgentSessionMutation();
+  const branchMutation = useBranchAgentSessionMutation();
   const patchMutation = usePatchAgentSessionMutation();
   const deleteMutation = useDeleteAgentSessionMutation();
   const cancelMutation = useCancelAgentRunMutation();
@@ -314,6 +328,23 @@ export function AgentWorkspaceController({
   const assetItems = useMemo(() => flattenFeed(assetQuery.data), [assetQuery.data]);
 
   const selectSession = useCallback((sessionId: string) => selectWithRoute(sessionId), [selectWithRoute]);
+  const branchSession = useCallback(async () => {
+    const source = useAgentStore.getState().currentSessionId;
+    if (!source || branchMutation.isPending || activeRun) return;
+    try {
+      const branched = await branchMutation.mutateAsync({ sessionId: source });
+      upsertSession(branched);
+      selectWithRoute(branched.id);
+    } catch (error) {
+      setComposerError(agentErrorPresentation(error).detail);
+    }
+  }, [
+    activeRun,
+    branchMutation,
+    selectWithRoute,
+    setComposerError,
+    upsertSession,
+  ]);
   const createSession = useCallback(async () => {
     try {
       const session = await createMutation.mutateAsync({
@@ -502,6 +533,7 @@ export function AgentWorkspaceController({
     messagesLoadingMore: messagesQuery.isFetchingNextPage,
     messagesError: messagesQuery.error?.message ?? null,
     creating: createMutation.isPending,
+    branching: branchMutation.isPending,
     submitting,
     stopping: cancelMutation.isPending,
     busySessionId: busySessionId({
@@ -513,6 +545,8 @@ export function AgentWorkspaceController({
     activeRun,
     realtimeStatus,
     toolGatewayConfigured,
+    defaultModel: agentStatus.default_model,
+    modelOptions: agentStatus.models,
     prompts: (promptsQuery.data?.items ?? []).map((prompt) => ({ id: prompt.id, name: prompt.name })),
     sessionSaving: patchMutation.isPending,
     sessionImages: sessionImagesQuery.data ?? null,
@@ -532,6 +566,7 @@ export function AgentWorkspaceController({
       await messagesQuery.fetchNextPage();
     },
     onCreateSession: () => void createSession(),
+    onBranchSession: () => void branchSession(),
     onSelectSession: selectSession,
     onRenameSession: (sessionId: string, title: string) =>
       patchMutation.mutate({ sessionId, patch: { title } }, { onSuccess: upsertSession }),
@@ -558,7 +593,6 @@ export function AgentWorkspaceController({
       void messagesQuery.refetch();
       reconnect();
     },
-    onPickSuggestion: (text: string) => setDraftText(currentSessionId, text),
     onTextChange: (text: string) => setDraftText(currentSessionId, text),
     onDraftChange: (patch: Parameters<typeof setDraft>[1]) => setDraft(currentSessionId, patch),
     onDefaultsChange: updateDefaults,

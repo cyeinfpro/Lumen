@@ -42,6 +42,37 @@ test("tile hover uses preview-only candidates and cancels on leave", () => {
   );
 });
 
+test("desktop hover actions expose preview, reference, download, and authorized delete", () => {
+  const actions = tileSource.slice(
+    tileSource.indexOf("function GenerationTileDesktopActions"),
+    tileSource.indexOf("function GenerationTileActionSheet"),
+  );
+  match(actions, /label="预览"/);
+  match(actions, /label="用作参考图"/);
+  match(actions, /label="下载原图"/);
+  match(actions, /canDelete \? \(/);
+  match(actions, /label="删除图片"/);
+  match(actions, /group-focus-within:opacity-100/);
+  match(tileSource, /<Tooltip content=\{label\} side="bottom">/);
+  match(tileSource, /surface-card-v2/);
+  match(tileSource, /focus-visible:shadow-\[var\(--ring\)\]/);
+  match(tileSource, /motion-reduce:transform-none/);
+  match(tileSource, /<ConfirmDialog[\s\S]*onConfirm=\{deleteImage\}/);
+});
+
+test("mobile long-press actions include authorized confirmed deletion", () => {
+  const sheet = tileSource.slice(
+    tileSource.indexOf("function GenerationTileActionSheet"),
+    tileSource.indexOf("export const GenerationTile"),
+  );
+  for (const label of ["做参考图", "保存到相册", "复制提示词", "在对话中定位", "删除图片"]) {
+    match(sheet, new RegExp(`label: "${label}"`));
+  }
+  match(sheet, /destructive: true/);
+  match(sheet, /onSelect: onRequestDelete/);
+  match(tileSource, /canDelete=\{Boolean\(onDeleteImage\)\}/);
+});
+
 test("grid model does not assemble image.url into candidates", () => {
   const createModel = modelSource.slice(
     modelSource.indexOf("export function createGenerationTileModel"),

@@ -51,7 +51,6 @@ _AGENT_BLOCK_KEYS = frozenset(
         "name",
         "status",
         "generation_ids",
-        "result_text",
     }
 )
 _AGENT_IMAGE_KEYS = frozenset(

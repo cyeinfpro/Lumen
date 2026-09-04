@@ -7,7 +7,10 @@ import {
   Download,
   Image as ImageIcon,
   ImageDown,
+  ImagePlus,
+  Maximize2,
   RotateCcw,
+  Trash2,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import {
@@ -23,6 +26,7 @@ import {
   useState,
 } from "react";
 
+import { ConfirmDialog, Tooltip } from "@/components/ui/primitives";
 import {
   ActionSheet,
   pushMobileToast,
@@ -52,6 +56,7 @@ export interface GenerationTileProps {
   selectionMode?: boolean;
   selected?: boolean;
   onToggleSelect?: (imageId: string) => void;
+  onDeleteImage?: (imageId: string) => Promise<unknown>;
   prewarmScheduler: PrewarmScheduler;
   fetchPriority?: "high" | "low" | "auto";
   imageSizes?: string;
@@ -83,12 +88,15 @@ function GenerationTileComponent({
   selectionMode = false,
   selected = false,
   onToggleSelect,
+  onDeleteImage,
   prewarmScheduler,
   fetchPriority = "low",
   imageSizes = "(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 25vw",
 }: GenerationTileProps) {
   const [tapped, setTapped] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [imageState, setImageState] = useState<{
     sourceVersion: string;
     failedSources: Set<string>;
@@ -208,6 +216,17 @@ function GenerationTileComponent({
     [clearPress],
   );
 
+  const openPreview = useCallback(() => {
+    setTapped(true);
+    clearPreviewIntent();
+    if (tapTimer.current) clearTimeout(tapTimer.current);
+    tapTimer.current = setTimeout(() => setTapped(false), TAP_FEEDBACK_MS);
+    const element = rootRef.current;
+    if (!element) return;
+    const image = element.querySelector("img");
+    onOpen(item.id, (image ?? element).getBoundingClientRect());
+  }, [clearPreviewIntent, item.id, onOpen]);
+
   const onClick = useCallback(() => {
     if (suppressNextClick.current) {
       suppressNextClick.current = false;
@@ -221,23 +240,8 @@ function GenerationTileComponent({
       onToggleSelect?.(model.imageId);
       return;
     }
-
-    setTapped(true);
-    clearPreviewIntent();
-    if (tapTimer.current) clearTimeout(tapTimer.current);
-    tapTimer.current = setTimeout(() => setTapped(false), TAP_FEEDBACK_MS);
-    const element = rootRef.current;
-    if (!element) return;
-    const image = element.querySelector("img");
-    onOpen(item.id, (image ?? element).getBoundingClientRect());
-  }, [
-    item.id,
-    model.imageId,
-    clearPreviewIntent,
-    onOpen,
-    onToggleSelect,
-    selectionMode,
-  ]);
+    openPreview();
+  }, [model.imageId, onToggleSelect, openPreview, selectionMode]);
 
   const onKeyDown = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
@@ -333,18 +337,31 @@ function GenerationTileComponent({
     });
   }, [healthyCandidates, imageSrc, model.sourceVersion]);
   const closeSheet = useCallback(() => setSheetOpen(false), []);
+  const deleteImage = useCallback(async () => {
+    if (!onDeleteImage || deleting) return;
+    setDeleting(true);
+    try {
+      await onDeleteImage(model.imageId);
+      setDeleteDialogOpen(false);
+      pushMobileToast("已删除", "success");
+    } catch (error) {
+      pushMobileToast(
+        error instanceof Error ? error.message : "删除失败",
+        "danger",
+      );
+    } finally {
+      setDeleting(false);
+    }
+  }, [deleting, model.imageId, onDeleteImage]);
 
   return (
     <>
       <article
         className={cn(
-          "group relative block w-full overflow-hidden rounded-[var(--radius-card)]",
-          "border border-[var(--border-subtle)] bg-[var(--bg-1)]/94 text-left shadow-[var(--shadow-1)]",
-          "transition-[border-color,box-shadow,transform,background-color] duration-200 ease-[var(--ease-develop)]",
-          "hover:-translate-y-0.5 hover:border-[var(--border-strong)] hover:bg-[var(--bg-1)] hover:shadow-[var(--shadow-2)]",
+          "group surface-card-v2 relative block w-full overflow-hidden text-left",
           "active:scale-[0.995]",
           tapped && "shadow-amber",
-          selected && "border-[var(--amber-400)] shadow-amber",
+          selected && "border-accent-border shadow-amber",
         )}
       >
         <div
@@ -364,7 +381,7 @@ function GenerationTileComponent({
           onFocus={onPreviewIntent}
           onBlur={clearPreviewIntent}
           onKeyDown={onKeyDown}
-          className="block w-full cursor-pointer text-left focus-visible:outline-none"
+          className="block w-full cursor-pointer text-left focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
           aria-label={model.promptShort || "查看作品"}
           aria-pressed={selectionMode ? selected : undefined}
         >
@@ -386,12 +403,12 @@ function GenerationTileComponent({
         </div>
 
         <GenerationTileDesktopActions
-          imageFailed={imageFailed}
           selectionMode={selectionMode}
+          canDelete={Boolean(onDeleteImage)}
+          onPreview={openPreview}
           onMakeRef={onMakeRef}
-          onCopyPrompt={onCopyPrompt}
           onSave={onSave}
-          onRetry={retryImage}
+          onRequestDelete={() => setDeleteDialogOpen(true)}
         />
       </article>
 
@@ -402,7 +419,21 @@ function GenerationTileComponent({
         onSave={onSave}
         onCopyPrompt={onCopyPrompt}
         onLocate={onLocate}
+        canDelete={Boolean(onDeleteImage)}
+        onRequestDelete={() => setDeleteDialogOpen(true)}
       />
+      {onDeleteImage ? (
+        <ConfirmDialog
+          open={deleteDialogOpen}
+          onOpenChange={setDeleteDialogOpen}
+          title="删除这张图片？"
+          description="图片将从图库和关联对话中移除，且无法恢复。"
+          confirmText="删除"
+          tone="danger"
+          confirming={deleting}
+          onConfirm={deleteImage}
+        />
+      ) : null}
     </>
   );
 }
@@ -457,7 +488,7 @@ function GenerationTileMedia({
           onError={onError}
           className={cn(
             "absolute inset-0 h-full w-full object-cover transition-[transform,opacity,filter] duration-300 ease-[var(--ease-develop)]",
-            "group-hover:scale-[1.025] group-hover:brightness-[1.04]",
+            "group-hover:scale-[1.025] group-hover:brightness-[1.04] motion-reduce:transform-none",
             imageLoaded ? "opacity-100" : "opacity-0",
           )}
         />
@@ -539,12 +570,12 @@ function GenerationTileMetadata({
           </span>
         )}
         {item.aspect_ratio && (
-          <span className="shrink-0 rounded-[4px] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-1.5 py-px type-caption font-mono tabular-nums text-[var(--fg-2)]">
+          <span className="shrink-0 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-1.5 py-px type-caption font-mono tabular-nums text-[var(--fg-2)]">
             {item.aspect_ratio}
           </span>
         )}
         {item.has_ref && (
-          <span className="shrink-0 rounded-[4px] border border-[rgba(139,92,246,0.18)] bg-[rgba(139,92,246,0.12)] px-1.5 py-px type-caption font-medium text-[#a78bfa]">
+          <span className="shrink-0 rounded-[var(--radius-control)] border border-accent-border bg-accent-soft px-1.5 py-px type-caption font-medium text-accent">
             参考图
           </span>
         )}
@@ -554,41 +585,37 @@ function GenerationTileMetadata({
 }
 
 function GenerationTileDesktopActions({
-  imageFailed,
   selectionMode,
+  canDelete,
+  onPreview,
   onMakeRef,
-  onCopyPrompt,
   onSave,
-  onRetry,
+  onRequestDelete,
 }: {
-  imageFailed: boolean;
   selectionMode: boolean;
+  canDelete: boolean;
+  onPreview: () => void;
   onMakeRef: () => void;
-  onCopyPrompt: () => void;
   onSave: () => void;
-  onRetry: () => void;
+  onRequestDelete: () => void;
 }) {
+  if (selectionMode) return null;
   return (
-    <div
-      className={cn(
-        "pointer-events-none absolute right-2 top-2 hidden items-center gap-1 opacity-0 transition-opacity duration-200 group-hover:opacity-100 md:flex",
-        selectionMode && "hidden",
-      )}
-    >
-      <TileAction label="做参考图" onClick={onMakeRef}>
-        <ImageIcon className="h-3.5 w-3.5" />
+    <div className="pointer-events-none absolute right-2 top-2 hidden items-center gap-1 opacity-0 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100 md:flex">
+      <TileAction label="预览" onClick={onPreview}>
+        <Maximize2 className="h-3.5 w-3.5" />
       </TileAction>
-      <TileAction label="复制提示词" onClick={onCopyPrompt}>
-        <Copy className="h-3.5 w-3.5" />
+      <TileAction label="用作参考图" onClick={onMakeRef}>
+        <ImagePlus className="h-3.5 w-3.5" />
       </TileAction>
-      <TileAction label="保存原图" onClick={onSave}>
+      <TileAction label="下载原图" onClick={onSave}>
         <Download className="h-3.5 w-3.5" />
       </TileAction>
-      {imageFailed && (
-        <TileAction label="重试载入" onClick={onRetry}>
-          <RotateCcw className="h-3.5 w-3.5" />
+      {canDelete ? (
+        <TileAction label="删除图片" tone="danger" onClick={onRequestDelete}>
+          <Trash2 className="h-3.5 w-3.5" />
         </TileAction>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -600,6 +627,8 @@ function GenerationTileActionSheet({
   onSave,
   onCopyPrompt,
   onLocate,
+  canDelete,
+  onRequestDelete,
 }: {
   open: boolean;
   onClose: () => void;
@@ -607,6 +636,8 @@ function GenerationTileActionSheet({
   onSave: () => void;
   onCopyPrompt: () => void;
   onLocate: () => void;
+  canDelete: boolean;
+  onRequestDelete: () => void;
 }) {
   return (
     <ActionSheet
@@ -637,6 +668,17 @@ function GenerationTileActionSheet({
           icon: <Crosshair className="h-4 w-4" />,
           onSelect: onLocate,
         },
+        ...(canDelete
+          ? [
+              {
+                key: "delete",
+                label: "删除图片",
+                icon: <Trash2 className="h-4 w-4" />,
+                destructive: true,
+                onSelect: onRequestDelete,
+              },
+            ]
+          : []),
       ]}
     />
   );
@@ -648,26 +690,30 @@ function TileAction({
   label,
   onClick,
   children,
+  tone = "default",
 }: {
   label: string;
   onClick: () => void;
   children: ReactNode;
+  tone?: "default" | "danger";
 }) {
   return (
-    <button
-      type="button"
-      aria-label={label}
-      title={label}
-      onClick={(event) => {
-        event.stopPropagation();
-        onClick();
-      }}
-      className={cn(
-        // @ui-governance-allow media: quick action overlays the generated asset.
-        "pointer-events-auto inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--media-control-bg)] text-[var(--media-control-fg)] shadow-[var(--shadow-2)] backdrop-blur-md transition-[filter,transform] hover:brightness-110 active:scale-95 focus-visible:outline-none lg:h-9 lg:w-9",
-      )}
-    >
-      {children}
-    </button>
+    <Tooltip content={label} side="bottom">
+      <button
+        type="button"
+        aria-label={label}
+        onClick={(event) => {
+          event.stopPropagation();
+          onClick();
+        }}
+        className={cn(
+          // @ui-governance-allow media: quick action overlays the generated asset.
+          "pointer-events-auto inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--media-control-bg)] text-[var(--media-control-fg)] shadow-[var(--shadow-2)] backdrop-blur-md transition-[filter,transform,color] hover:brightness-110 active:scale-95 focus-visible:outline-none lg:h-9 lg:w-9",
+          tone === "danger" && "hover:text-[var(--danger)]",
+        )}
+      >
+        {children}
+      </button>
+    </Tooltip>
   );
 }

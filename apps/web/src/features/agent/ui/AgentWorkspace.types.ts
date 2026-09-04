@@ -8,6 +8,7 @@ import type {
   AgentDraftFile,
   AgentImageDefaults,
   AgentMessage,
+  AgentModelOption,
   AgentRun,
   AgentSession,
   AgentSessionImageList,
@@ -31,12 +32,15 @@ export interface AgentWorkspaceProps {
   messagesLoadingMore: boolean;
   messagesError: string | null;
   creating: boolean;
+  branching: boolean;
   submitting: boolean;
   stopping: boolean;
   busySessionId: string | null;
   activeRun: AgentRun | null;
   realtimeStatus: AgentRealtimeStatus;
   toolGatewayConfigured: boolean;
+  defaultModel: string | null;
+  modelOptions: AgentModelOption[];
   prompts: AgentPromptOption[];
   sessionSaving: boolean;
   sessionImages: AgentSessionImageList | null;
@@ -51,6 +55,7 @@ export interface AgentWorkspaceProps {
   onSessionSearchChange: (query: string) => void;
   onLoadOlderMessages: () => Promise<void> | void;
   onCreateSession: () => void;
+  onBranchSession: () => void;
   onSelectSession: (sessionId: string) => void;
   onRenameSession: (sessionId: string, title: string) => void;
   onArchiveSession: (session: AgentSession) => void;
@@ -58,7 +63,6 @@ export interface AgentWorkspaceProps {
   onPatchSession: (patch: AgentSessionPatchInput) => void;
   onEjectSessionImage: (imageId: string) => void;
   onRetryMessages: () => void;
-  onPickSuggestion: (text: string) => void;
   onTextChange: (text: string) => void;
   onDraftChange: (patch: Partial<AgentDraft>) => void;
   onDefaultsChange: (patch: Partial<AgentImageDefaults>) => void;

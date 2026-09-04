@@ -41,6 +41,7 @@ class WorkflowRunListItem:
     created_at: datetime
     updated_at: datetime
     output_count: int
+    completion_percent: int
     next_action: str
 
 
@@ -146,6 +147,7 @@ def _list_item(item: WorkflowRunListRecord) -> WorkflowRunListItem:
         created_at=item.created_at,
         updated_at=item.updated_at,
         output_count=item.output_count,
+        completion_percent=item.completion_percent,
         next_action=_next_action_for(item),
     )
 

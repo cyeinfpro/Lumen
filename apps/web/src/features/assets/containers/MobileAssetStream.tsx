@@ -20,6 +20,7 @@ import {
   flattenFeed,
   feedTotal,
   useDebouncedStreamSearch,
+  useDeleteStreamImageMutation,
   useStreamFeedQuery,
   type StreamFeedFilters,
 } from "../api/queries";
@@ -76,16 +77,6 @@ function reportShareResult(
 
 function hasActiveSelection(selectionMode: boolean, selectedCount: number): boolean {
   return selectionMode || selectedCount > 0;
-}
-
-function shouldShowOverview(
-  isLoading: boolean,
-  hasError: boolean,
-  itemCount: number,
-  hasFilters: boolean,
-  query: string,
-): boolean {
-  return !isLoading && !hasError && (itemCount > 0 || hasFilters || Boolean(query.trim()));
 }
 
 function MobileStreamFeedState({
@@ -170,6 +161,7 @@ export function MobileStream() {
   }, [applyFilters]);
 
   const query = useStreamFeedQuery(filters);
+  const { mutateAsync: deleteStreamImage } = useDeleteStreamImageMutation();
   const hasNextPage = query.hasNextPage;
   const isFetchingNextPage = query.isFetchingNextPage;
   const fetchNextPage = query.fetchNextPage;
@@ -310,14 +302,6 @@ export function MobileStream() {
     !isLoading && items.length > 0 && filteredItems.length === 0;
   const hasStructuredFilters = hasAnyFilter(filters);
   const hasActiveControls = hasStructuredFilters || Boolean(q.trim());
-  const showOverview = shouldShowOverview(
-    isLoading,
-    query.isError,
-    items.length,
-    hasActiveControls,
-    q,
-  );
-
   const onToggleSearch = useCallback(() => {
     setSearchOpen((v) => {
       const next = !v;
@@ -352,15 +336,7 @@ export function MobileStream() {
       className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col overflow-hidden bg-[var(--bg-0)]"
     >
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
-      <StreamTopBar
-        compact={compact}
-        total={total}
-        promptCount={promptCount}
-        searchActive={searchOpen}
-        filterActive={filterOpen || hasStructuredFilters}
-        onToggleSearch={onToggleSearch}
-        onToggleFilter={onToggleFilter}
-      />
+      <StreamTopBar compact={compact} />
 
       <div
         className="min-h-0 flex-1 overflow-hidden"
@@ -376,46 +352,48 @@ export function MobileStream() {
           className="h-full"
         >
           <div className="mx-auto max-w-[640px] px-1">
-            <StreamSearchBar
-              open={searchOpen}
-              value={q}
-              onChange={setQ}
-              resultCount={filteredItems.length}
-              loadedCount={items.length}
-              onClose={() => {
-                setSearchOpen(false);
-                setQ("");
-              }}
-            />
-            <FilterBar
-              open={filterOpen || hasStructuredFilters}
+            <StreamOverview
+              total={total}
+              loaded={items.length}
+              visible={filteredItems.length}
+              promptCount={promptCount}
               filters={filters}
-              onChange={(next) => applyFilters(next)}
-              onClear={clearFilters}
-            />
-
-            {showOverview && (
-              <StreamOverview
-                total={total}
-                loaded={items.length}
-                visible={filteredItems.length}
-                promptCount={promptCount}
-                filters={filters}
-                searchValue={deferredQ}
-                refreshing={query.isRefetching}
-                onRefresh={() => {
-                  void query.refetch();
+              searchValue={deferredQ}
+              refreshing={query.isRefetching}
+              searchActive={searchOpen}
+              filterActive={filterOpen || hasStructuredFilters}
+              onToggleSearch={onToggleSearch}
+              onToggleFilter={onToggleFilter}
+              onRefresh={() => {
+                void query.refetch();
+              }}
+              onClearFilters={clearAllControls}
+              onToggleReferenceFilter={onToggleReferenceFilter}
+              selectionMode={selectionActive}
+              selectedCount={selectedImageIds.length}
+              sharingSelected={createMultiShareMutation.isPending}
+              onToggleSelectionMode={toggleSelectionMode}
+              onClearSelection={clearSelection}
+              onShareSelected={shareSelectedImages}
+            >
+              <StreamSearchBar
+                open={searchOpen}
+                value={q}
+                onChange={setQ}
+                resultCount={filteredItems.length}
+                loadedCount={items.length}
+                onClose={() => {
+                  setSearchOpen(false);
+                  setQ("");
                 }}
-                onClearFilters={clearAllControls}
-                onToggleReferenceFilter={onToggleReferenceFilter}
-                selectionMode={selectionActive}
-                selectedCount={selectedImageIds.length}
-                sharingSelected={createMultiShareMutation.isPending}
-                onToggleSelectionMode={toggleSelectionMode}
-                onClearSelection={clearSelection}
-                onShareSelected={shareSelectedImages}
               />
-            )}
+              <FilterBar
+                open={filterOpen || hasStructuredFilters}
+                filters={filters}
+                onChange={(next) => applyFilters(next)}
+                onClear={clearFilters}
+              />
+            </StreamOverview>
 
             <MobileStreamFeedState
               hasError={query.isError}
@@ -436,6 +414,7 @@ export function MobileStream() {
                 selectionMode={selectionActive}
                 selectedIds={selectedIds}
                 onToggleSelect={toggleSelectedImage}
+                onDeleteImage={deleteStreamImage}
                 highlightId={highlightId}
               />
             </MobileStreamFeedState>

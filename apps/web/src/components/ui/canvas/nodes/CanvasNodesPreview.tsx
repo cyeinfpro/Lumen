@@ -345,7 +345,7 @@ function OutputPreviewMedia({
 function OutputTypeBadge({ type }: { type: CanvasOutput["type"] }) {
   if (type !== "video") return null;
   return (
-    <span className="pointer-events-none absolute bottom-1 right-1 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-1.5 py-0.5 type-mono-meta text-[var(--media-control-fg)]">
+    <span className="pointer-events-none absolute bottom-1 right-1 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-1.5 py-0.5 type-caption text-[var(--media-control-fg)]">
       视频
     </span>
   );

@@ -13,13 +13,22 @@ import { MobileTabBar } from "@/components/ui/shell/MobileTabBar";
 import { MobileTopBar } from "@/components/ui/shell/MobileTopBar";
 
 interface ProjectTopBarProps {
+  /** @deprecated Move new page actions into the page header. */
   right?: React.ReactNode;
 }
 
 export function ProjectTopBar({ right }: ProjectTopBarProps) {
   return (
-    <div className="hidden md:block">
-      <DesktopTopNav active="projects" right={right} />
+    <div className="hidden shrink-0 md:block">
+      <DesktopTopNav active="projects" />
+      {right ? (
+        <div
+          data-project-page-toolbar
+          className="toolbar-shell min-h-12 justify-end px-6"
+        >
+          {right}
+        </div>
+      ) : null}
     </div>
   );
 }

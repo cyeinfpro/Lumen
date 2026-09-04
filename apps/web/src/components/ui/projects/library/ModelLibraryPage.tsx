@@ -67,7 +67,9 @@ export function ModelLibraryPage() {
 
       <main className="page-scroll lumen-studio-bg project-mobile-scroll mb-[var(--mobile-tabbar-height)]">
         <div className="page-frame grid max-w-[1520px] gap-3">
-          <LibraryHeader current={tab} onChange={setTab} />
+          <div className="hidden md:block">
+            <LibraryHeader current={tab} onChange={setTab} />
+          </div>
 
           <Tabs
             current={tab}
@@ -115,7 +117,7 @@ function LibraryHeader({
   onChange: (next: LibraryTab) => void;
 }) {
   return (
-    <header className="page-header hidden md:grid">
+    <header className="page-header">
       <div className="page-header-copy">
         <p className="type-page-kicker">
           模特库

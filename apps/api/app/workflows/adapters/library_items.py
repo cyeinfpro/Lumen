@@ -240,6 +240,13 @@ def _model_library_item_out(raw: dict[str, Any]) -> ApparelModelLibraryItemOut:
             appearance_direction=appearance_direction,
             style_tags=style_tags,
         ),
+        usage_count=(
+            raw.get("usage_count")
+            if isinstance(raw.get("usage_count"), int)
+            and not isinstance(raw.get("usage_count"), bool)
+            and raw.get("usage_count", 0) >= 0
+            else 0
+        ),
         created_at=created_at,
         updated_at=_safe_datetime(raw.get("updated_at")),
     )

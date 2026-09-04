@@ -1,12 +1,62 @@
 import { defineConfig } from "@playwright/test";
 
 const viewports = [
-  { name: "phone-320-light", width: 320, height: 700, colorScheme: "light" },
-  { name: "phone-375-dark", width: 375, height: 812, colorScheme: "dark" },
-  { name: "phone-landscape-dark", width: 700, height: 320, colorScheme: "dark" },
-  { name: "tablet-portrait-light", width: 768, height: 1024, colorScheme: "light" },
-  { name: "tablet-landscape-dark", width: 1024, height: 768, colorScheme: "dark" },
-  { name: "desktop-light", width: 1440, height: 900, colorScheme: "light" },
+  {
+    name: "phone-320-light",
+    width: 320,
+    height: 700,
+    colorScheme: "light",
+    hasTouch: true,
+    isMobile: true,
+  },
+  {
+    name: "phone-375-dark",
+    width: 375,
+    height: 812,
+    colorScheme: "dark",
+    hasTouch: true,
+    isMobile: true,
+  },
+  {
+    name: "phone-landscape-dark",
+    width: 700,
+    height: 320,
+    colorScheme: "dark",
+    hasTouch: true,
+    isMobile: true,
+  },
+  {
+    name: "phone-375-keyboard-dark",
+    width: 375,
+    height: 812,
+    colorScheme: "dark",
+    hasTouch: false,
+    isMobile: false,
+  },
+  {
+    name: "tablet-portrait-light",
+    width: 768,
+    height: 1024,
+    colorScheme: "light",
+    hasTouch: false,
+    isMobile: false,
+  },
+  {
+    name: "tablet-landscape-dark",
+    width: 1024,
+    height: 768,
+    colorScheme: "dark",
+    hasTouch: false,
+    isMobile: false,
+  },
+  {
+    name: "desktop-light",
+    width: 1440,
+    height: 900,
+    colorScheme: "light",
+    hasTouch: false,
+    isMobile: false,
+  },
 ] as const;
 const externalBaseURL = process.env.PLAYWRIGHT_BASE_URL?.trim() || null;
 const fullStackAgentE2E = process.env.AGENT_FULL_STACK_E2E === "1";
@@ -32,6 +82,8 @@ export default defineConfig({
     use: {
       viewport: { width: viewport.width, height: viewport.height },
       colorScheme: viewport.colorScheme,
+      hasTouch: viewport.hasTouch,
+      isMobile: viewport.isMobile,
     },
   })),
   webServer: externalBaseURL

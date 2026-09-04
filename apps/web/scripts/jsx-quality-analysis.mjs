@@ -486,6 +486,78 @@ function looksLikeFixedModal(opening, sourceFile, bindings) {
   return !standaloneScrim;
 }
 
+const CJK_TEXT_RE = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/u;
+
+function unsafeCjkTypographyToken(token) {
+  const utility = token.split(":").at(-1) ?? token;
+  return (
+    utility === "font-mono" ||
+    utility === "type-mono-meta" ||
+    utility === "uppercase" ||
+    utility === "tracking-wide" ||
+    utility === "tracking-wider" ||
+    utility === "tracking-widest" ||
+    /^tracking-\[(?!0(?:px|em|rem)?\]$)[^\]]+\]$/.test(utility)
+  );
+}
+
+function jsxContainsStaticCjk(node, bindings) {
+  let found = false;
+  const visitRenderedChild = (current) => {
+    if (found) return;
+    if (ts.isJsxText(current) && CJK_TEXT_RE.test(current.text)) {
+      found = true;
+      return;
+    }
+    if (ts.isJsxExpression(current) && current.expression) {
+      const fragments = [];
+      collectStaticFragments(current.expression, bindings, fragments);
+      if (fragments.some(({ value }) => CJK_TEXT_RE.test(value))) {
+        found = true;
+      }
+      return;
+    }
+    if (ts.isJsxElement(current) || ts.isJsxFragment(current)) {
+      for (const child of current.children) visitRenderedChild(child);
+    }
+  };
+  if (ts.isJsxElement(node) || ts.isJsxFragment(node)) {
+    for (const child of node.children) visitRenderedChild(child);
+  }
+  return found;
+}
+
+export function findCjkTypographyIssues(filePath, source) {
+  const sourceFile = parseSource(filePath, source);
+  const bindings = bindingInitializers(sourceFile);
+  const issues = [];
+  const visit = (node) => {
+    const opening = openingElement(node);
+    if (opening) {
+      const unsafeTokens = classTokens(opening, sourceFile, bindings)
+        .map(({ token }) => token)
+        .filter(unsafeCjkTypographyToken);
+      if (unsafeTokens.length > 0 && jsxContainsStaticCjk(node, bindings)) {
+        issues.push({
+          rule: "cjk-typography",
+          line:
+            sourceFile.getLineAndCharacterOfPosition(
+              opening.getStart(sourceFile),
+            ).line + 1,
+          message:
+            `CJK text must use normal-tracking sans typography; remove ${[
+              ...new Set(unsafeTokens),
+            ].join(", ")}.`,
+          snippet: opening.getText(sourceFile),
+        });
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return issues;
+}
+
 export function findMobileDialogIssues(filePath, source) {
   if (isMobileDialogMediaException(filePath)) return [];
   const sourceFile = parseSource(filePath, source);

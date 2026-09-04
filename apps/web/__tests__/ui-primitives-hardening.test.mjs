@@ -374,6 +374,146 @@ test("SwipeRow exposes its actions through keyboard controls", () => {
   assert.equal(stateValues[1], false);
 });
 
+test("runtime resilience exposes compact recovery actions for mobile and desktop", () => {
+  let snapshot = { session: "degraded" };
+  let recoveries = 0;
+  let logins = 0;
+  const runtime = loadModule("src/components/RuntimeResilienceStatus.tsx", {
+    "lucide-react": {
+      AlertTriangle: "AlertTriangle",
+      LogIn: "LogIn",
+      RefreshCw: "RefreshCw",
+    },
+    "@/lib/runtimeResilience": {
+      useRuntimeResilience: () => snapshot,
+      requestRuntimeRecovery: () => {
+        recoveries += 1;
+      },
+    },
+    "@/lib/auth/navigation": {
+      replaceWithLogin: () => {
+        logins += 1;
+      },
+    },
+    "@/components/ui/primitives": { IconButton: "IconButton" },
+  });
+
+  const degraded = runtime.MobileRuntimeResilienceStatus();
+  const degradedAction = findElement(
+    degraded,
+    (node) => node.type === "IconButton",
+  );
+  assert.equal(degraded.props.role, "alert");
+  assert.equal(degraded.props["aria-live"], "assertive");
+  assert.equal(
+    degradedAction.props["aria-label"],
+    "会话验证暂不可用，重新验证会话",
+  );
+  degradedAction.props.onClick();
+  assert.equal(recoveries, 1);
+  assert.equal(logins, 0);
+
+  snapshot = { session: "unauthorized" };
+  const unauthorized = runtime.RuntimeResilienceStatus();
+  const loginAction = findElement(
+    unauthorized,
+    (node) => node.type === "IconButton",
+  );
+  assert.match(unauthorized.props.className, /\bfixed bottom-4 right-4\b/);
+  assert.match(unauthorized.props.className, /\bhidden\b/);
+  assert.match(unauthorized.props.className, /\bmd:block\b/);
+  assert.equal(loginAction.props["aria-label"], "登录");
+  loginAction.props.onClick();
+  assert.equal(recoveries, 1);
+  assert.equal(logins, 1);
+
+  snapshot = { session: "authenticated" };
+  assert.equal(runtime.MobileRuntimeResilienceStatus(), null);
+  assert.equal(runtime.RuntimeResilienceStatus(), null);
+});
+
+test("Button variants render only shared semantic materials", () => {
+  const { Button } = loadModule("src/components/ui/primitives/Button.tsx", {
+    "@/lib/utils": {
+      cn: (...values) => values.filter(Boolean).join(" "),
+    },
+    "./Spinner": { Spinner: "Spinner" },
+  });
+
+  for (const variant of ["primary", "secondary", "glass"]) {
+    const button = Button({ variant, children: "Action" });
+    assert.equal(button.props["data-lumen-button-variant"], variant);
+    assert.doesNotMatch(button.props.className, /#[0-9a-f]{3,8}/i);
+  }
+
+  const primary = Button({ variant: "primary", children: "Action" });
+  const secondary = Button({ variant: "secondary", children: "Action" });
+  const glass = Button({ variant: "glass", children: "Action" });
+  assert.match(primary.props.className, /var\(--button-primary-bg\)/);
+  assert.match(primary.props.className, /var\(--accent-on\)/);
+  assert.match(secondary.props.className, /var\(--button-secondary-bg\)/);
+  assert.match(glass.props.className, /var\(--button-glass-bg\)/);
+});
+
+test("Select preserves auth-field behavior and owns every native select", () => {
+  const { Select } = loadModule("src/components/ui/primitives/Select.tsx", {
+    "@/lib/utils": {
+      cn: (...values) => values.filter(Boolean).join(" "),
+    },
+    "lucide-react": { ChevronDown: "ChevronDown" },
+  });
+  const onChange = () => {};
+  const tree = Select({
+    id: "signup-supplier",
+    name: "supplier",
+    value: "ark",
+    onChange,
+    className: "auth-control",
+    wrapperClassName: "w-full",
+    children: jsxRuntime.jsx("option", { value: "ark", children: "Ark" }),
+  });
+  const nativeSelect = findElement(tree, (node) => node.type === "select");
+
+  assert.equal(nativeSelect.props.id, "signup-supplier");
+  assert.equal(nativeSelect.props.onChange, onChange);
+  assert.match(nativeSelect.props.className, /\bh-10\b/);
+  assert.match(nativeSelect.props.className, /\bmax-sm:min-h-11\b/);
+  assert.match(nativeSelect.props.className, /\bauth-control\b/);
+  assert.match(tree.props.className, /\bw-full\b/);
+
+  const sourceRoot = path.join(webRoot, "src");
+  const pending = [sourceRoot];
+  const nativeSelectOwners = new Set();
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(absolute);
+      } else if (
+        /\.(?:ts|tsx)$/.test(entry.name) &&
+        !/\.(?:test|spec)\.(?:ts|tsx)$/.test(entry.name)
+      ) {
+        const fileSource = fs.readFileSync(absolute, "utf8");
+        if (/<select\b/.test(fileSource)) {
+          nativeSelectOwners.add(path.relative(webRoot, absolute));
+        }
+      }
+    }
+  }
+  assert.deepEqual([...nativeSelectOwners].sort(), [
+    "src/components/ui/primitives/Select.tsx",
+  ]);
+
+  const signup = source("src/app/signup/page.tsx");
+  const globals = source("src/app/globals.css");
+  assert.match(
+    signup,
+    /<Select[\s\S]*?id="signup-supplier"[\s\S]*?className="auth-control"/,
+  );
+  assert.match(globals, /\.auth-control\s*\{[\s\S]*?min-height:\s*44px/);
+});
+
 test("mobile toast preserves ReactNode content and tone mapping", () => {
   const calls = [];
   const toast = {

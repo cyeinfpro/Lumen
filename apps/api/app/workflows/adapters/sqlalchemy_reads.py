@@ -15,6 +15,18 @@ from ..ports.run_reads import (
 
 
 _OUTPUT_STEP_KEYS = ("showcase_generation", "multi_size_generation")
+_COMPLETED_STEP_STATUSES = frozenset(
+    {"approved", "completed", "succeeded", "done", "selected"}
+)
+
+
+def _completion_percent(run: WorkflowRun, step_statuses: list[str]) -> int:
+    if run.status == "completed":
+        return 100
+    if not step_statuses:
+        return 0
+    completed = sum(1 for status in step_statuses if status in _COMPLETED_STEP_STATUSES)
+    return max(0, min(99, round(completed * 100 / len(step_statuses))))
 
 
 class SQLAlchemyWorkflowRunReadAdapter:
@@ -62,38 +74,54 @@ class SQLAlchemyWorkflowRunReadAdapter:
             .all()
         )
         page = runs[:limit]
-        output_counts = await self._load_output_counts(page)
+        output_counts, completion_percentages = await self._load_run_metrics(page)
         return WorkflowRunReadPage(
             items=tuple(
-                self._record_from_run(run, output_counts.get(run.id, 0))
+                self._record_from_run(
+                    run,
+                    output_counts.get(run.id, 0),
+                    completion_percentages.get(run.id, 0),
+                )
                 for run in page
             ),
             has_more=len(runs) > limit,
         )
 
-    async def _load_output_counts(
+    async def _load_run_metrics(
         self,
         runs: list[WorkflowRun],
-    ) -> dict[str, int]:
+    ) -> tuple[dict[str, int], dict[str, int]]:
         if not runs:
-            return {}
+            return {}, {}
         rows = (
             await self._session.execute(
-                select(WorkflowStep.workflow_run_id, WorkflowStep.image_ids).where(
-                    WorkflowStep.workflow_run_id.in_([run.id for run in runs]),
-                    WorkflowStep.step_key.in_(_OUTPUT_STEP_KEYS),
-                )
+                select(
+                    WorkflowStep.workflow_run_id,
+                    WorkflowStep.step_key,
+                    WorkflowStep.status,
+                    WorkflowStep.image_ids,
+                ).where(WorkflowStep.workflow_run_id.in_([run.id for run in runs]))
             )
         ).all()
         output_counts: dict[str, int] = {}
-        for run_id, image_ids in rows:
-            output_counts[run_id] = output_counts.get(run_id, 0) + len(image_ids or [])
-        return output_counts
+        statuses_by_run: dict[str, list[str]] = {}
+        for run_id, step_key, status, image_ids in rows:
+            statuses_by_run.setdefault(run_id, []).append(status)
+            if step_key in _OUTPUT_STEP_KEYS:
+                output_counts[run_id] = output_counts.get(run_id, 0) + len(
+                    image_ids or []
+                )
+        completion_percentages = {
+            run.id: _completion_percent(run, statuses_by_run.get(run.id, []))
+            for run in runs
+        }
+        return output_counts, completion_percentages
 
     @staticmethod
     def _record_from_run(
         run: WorkflowRun,
         output_count: int,
+        completion_percent: int,
     ) -> WorkflowRunListRecord:
         return WorkflowRunListRecord(
             id=run.id,
@@ -109,6 +137,7 @@ class SQLAlchemyWorkflowRunReadAdapter:
             created_at=run.created_at,
             updated_at=run.updated_at,
             output_count=output_count,
+            completion_percent=completion_percent,
         )
 
 

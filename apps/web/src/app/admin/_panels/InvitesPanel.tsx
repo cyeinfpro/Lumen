@@ -253,7 +253,7 @@ export function InvitesPanel() {
                   <RoleBadge role={created.role} />
                 </Field>
                 <Field label="过期时间">
-                  <span className="text-[var(--fg-1)] font-mono tabular-nums">
+                  <span className="text-[var(--fg-1)] tabular-nums">
                     {created.expires_at
                       ? formatISODate(created.expires_at)
                       : "永久"}
@@ -315,7 +315,7 @@ export function InvitesPanel() {
                   </div>
                   <div className="grid grid-cols-2 gap-2 type-caption">
                     <div>
-                      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
+                      <div className="type-overline text-[var(--fg-2)]">
                         邮箱
                       </div>
                       <div className="text-[var(--fg-1)] break-all">
@@ -323,7 +323,7 @@ export function InvitesPanel() {
                       </div>
                     </div>
                     <div>
-                      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
+                      <div className="type-overline text-[var(--fg-2)]">
                         角色
                       </div>
                       <div className="mt-0.5">
@@ -331,7 +331,7 @@ export function InvitesPanel() {
                       </div>
                     </div>
                     <div>
-                      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
+                      <div className="type-overline text-[var(--fg-2)]">
                         状态
                       </div>
                       <div className="mt-0.5">
@@ -339,18 +339,18 @@ export function InvitesPanel() {
                       </div>
                     </div>
                     <div>
-                      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
+                      <div className="type-overline text-[var(--fg-2)]">
                         过期
                       </div>
-                      <div className="type-body-sm text-[var(--fg-1)] font-mono tabular-nums break-all">
+                      <div className="type-body-sm text-[var(--fg-1)] tabular-nums break-all">
                         {row.expires_at ? formatISODate(row.expires_at) : "永久"}
                       </div>
                     </div>
                     <div className="col-span-2">
-                      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
+                      <div className="type-overline text-[var(--fg-2)]">
                         创建
                       </div>
-                      <div className="type-body-sm text-[var(--fg-1)] font-mono tabular-nums break-all">
+                      <div className="type-body-sm text-[var(--fg-1)] tabular-nums break-all">
                         {formatISODate(row.created_at)}
                       </div>
                     </div>
@@ -461,10 +461,10 @@ export function InvitesPanel() {
                       <td className="py-3 px-4">
                         <InviteStatusBadge status={st} usedBy={row.used_by_email} />
                       </td>
-                      <td className="py-3 px-4 text-[var(--fg-1)] font-mono type-caption tabular-nums">
+                      <td className="py-3 px-4 text-[var(--fg-1)] type-caption tabular-nums">
                         {row.expires_at ? formatISODate(row.expires_at) : "永久"}
                       </td>
-                      <td className="py-3 px-4 text-[var(--fg-1)] font-mono type-caption tabular-nums">
+                      <td className="py-3 px-4 text-[var(--fg-1)] type-caption tabular-nums">
                         {formatISODate(row.created_at)}
                       </td>
                       <td className="py-3 px-4 text-right">
@@ -552,7 +552,7 @@ function FormField({
     <div className="flex flex-col gap-1">
       <label
         htmlFor={id}
-        className="type-caption font-medium uppercase tracking-wider text-[var(--fg-1)]"
+        className="type-overline text-[var(--fg-1)]"
       >
         {label}
       </label>
@@ -570,7 +570,7 @@ function Field({
 }) {
   return (
     <div>
-      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
+      <div className="type-overline text-[var(--fg-2)]">
         {label}
       </div>
       <div className="mt-0.5">{children}</div>

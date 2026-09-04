@@ -3,16 +3,28 @@ import { test } from "node:test";
 
 import { loadTsModule } from "../../../../test-support/load-ts-module.mjs";
 
+const apiCalls: Array<{ path: string; init: Record<string, unknown> }> = [];
+
 const {
   buildStreamFeedQuery,
+  deleteStreamImage,
   normalizeStreamFeedFilters,
   normalizeStreamSearchQuery,
 } = loadTsModule(
   new URL("./queries.ts", import.meta.url),
   {
-    "@tanstack/react-query": { useInfiniteQuery: () => undefined },
+    "@tanstack/react-query": {
+      useInfiniteQuery: () => undefined,
+      useMutation: () => undefined,
+      useQueryClient: () => undefined,
+    },
     "react": { useEffect: () => undefined, useState: () => [null, () => undefined] },
-    "@/lib/api/http": { apiFetch: () => undefined },
+    "@/lib/api/http": {
+      apiFetch: (path: string, init: Record<string, unknown>) => {
+        apiCalls.push({ path, init });
+        return Promise.resolve({ ok: true });
+      },
+    },
   },
 ) as {
   buildStreamFeedQuery(
@@ -20,6 +32,7 @@ const {
     limit: number,
     cursor?: string,
   ): string;
+  deleteStreamImage(imageId: string): Promise<{ ok: boolean }>;
   normalizeStreamFeedFilters(
     filters: Record<string, unknown>,
   ): Record<string, unknown>;
@@ -55,4 +68,17 @@ test("feed request and query key include normalized server q", () => {
     normalizeStreamFeedFilters({ q: "page twenty" }).q,
     "page twenty",
   );
+});
+
+test("stream image deletion uses the authorized image route", async () => {
+  apiCalls.length = 0;
+  const result = await deleteStreamImage("image / one");
+
+  deepEqual(result, { ok: true });
+  deepEqual(apiCalls, [
+    {
+      path: "/images/image%20%2F%20one",
+      init: { method: "DELETE" },
+    },
+  ]);
 });

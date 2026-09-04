@@ -450,7 +450,7 @@ function ReleaseRow({
           </span>
           {release.branch && <span>分支 {release.branch}</span>}
           {alembic && (
-            <span className="font-mono" title={alembic}>
+            <span title={alembic}>
               迁移 {alembic.slice(0, 12)}
             </span>
           )}

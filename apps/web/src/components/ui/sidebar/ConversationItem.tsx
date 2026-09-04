@@ -107,10 +107,10 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
             aria-label={titleOf(conv)}
             title={titleOf(conv)}
             className={cn(
-              "flex min-h-11 w-full items-center gap-2.5 rounded-[var(--radius-control)] py-1.5 pl-2.5 pr-12 text-left type-body-sm transition-colors outline-none md:min-h-10",
+              "relative flex min-h-11 w-full items-center gap-2.5 rounded-[var(--radius-control)] py-1.5 pl-2.5 pr-12 text-left type-body-sm transition-colors outline-none md:min-h-10",
               "focus-visible:shadow-[var(--ring)]",
               active
-                ? "bg-accent-soft text-[var(--fg-0)]"
+                ? "bg-[var(--surface-selected)] text-[var(--fg-0)] before:absolute before:inset-y-2 before:left-0 before:w-[3px] before:rounded-full before:bg-[var(--accent)] before:content-['']"
                 : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
             )}
           >

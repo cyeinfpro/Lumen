@@ -7,9 +7,8 @@
 //  - footer 去厚底 bg；按钮 secondary 改 outline (hairline)
 //  - 移动端：BottomSheet 仍用 88% snap，header 同款排印
 //
-// 关键链路保持：Dialog 打开 → Browser 渲染卡片 → 点卡片 →
-//   useUiStore.openLightboxFromItems → Lightbox 打开 → 按 action →
-//   onSelectItem(item) → 这里 mutate → 成功后关闭 lightbox + dialog
+// 关键链路保持：Dialog 打开 → Browser 渲染卡片 → 卡片 CTA 或 Lightbox action →
+//   onSelectItem(item) → 这里执行一次 mutation → 成功后关闭 lightbox + dialog
 
 import { ArrowUpRight, WandSparkles, X } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -108,6 +107,7 @@ export function ModelLibraryDialog({
   // Browser 把 lightbox action 路由到这里：调 mutate(item.id) + 同步 pending
   const handleSelect = useCallback(
     (item: ApparelModelLibraryItem) => {
+      if (selectionIdentityRef.current) return;
       const lightbox = useUiStore.getState().lightbox;
       const identity = {
         userId: lightbox.ownerUserId,
@@ -165,6 +165,7 @@ export function ModelLibraryDialog({
               mode="dialog"
               defaultAgeSegment={defaultAgeSegment}
               onSelectItem={handleSelect}
+              selectActionPending={selectItem.isPending}
               showSourceSidebar
               showHeader={false}
               className="min-h-0 flex-1"
@@ -213,6 +214,7 @@ export function ModelLibraryDialog({
             mode="dialog"
             defaultAgeSegment={defaultAgeSegment}
             onSelectItem={handleSelect}
+            selectActionPending={selectItem.isPending}
             showSourceSidebar
             showHeader={false}
             className="min-h-0 flex-1"

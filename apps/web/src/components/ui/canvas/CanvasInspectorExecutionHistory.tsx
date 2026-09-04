@@ -142,7 +142,7 @@ function ExecutionTaskDetails({
         <span className="type-caption font-medium text-[var(--fg-1)]">
           {stage}
         </span>
-        <span className="type-mono-meta tabular-nums text-[var(--fg-2)]">
+        <span className="type-caption tabular-nums text-[var(--fg-2)]">
           {progress !== null
             ? `${progress}%`
             : elapsed

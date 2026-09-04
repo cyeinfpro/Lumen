@@ -330,7 +330,7 @@ function SessionRow({
               </span>
             )}
           </div>
-          <div className="mt-1 type-caption text-[var(--fg-2)] font-mono tabular-nums flex flex-wrap gap-x-4 gap-y-0.5">
+          <div className="mt-1 type-caption text-[var(--fg-2)] tabular-nums flex flex-wrap gap-x-4 gap-y-0.5">
             <span>IP {s.ip ?? "—"}</span>
             <span>创建 {created}</span>
             <span>到期 {expires}</span>

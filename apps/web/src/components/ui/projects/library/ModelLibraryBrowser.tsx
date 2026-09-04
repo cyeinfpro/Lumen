@@ -5,7 +5,8 @@
 //
 // 交互规则（统一）：
 //  - 点击卡片缩略图 = 打开 Lightbox 大图；左右键翻页
-//  - 选择模特只能通过 Lightbox 内 action（dialog 模式注入）完成；卡片本身不持有 selected 状态
+//  - dialog 模式的卡片与 Lightbox 共用 onSelectItem 和同一 pending 状态
+//  - page 模式的多选状态只用于批量管理，不与项目选模混用
 //
 // 关键约束（参考 apps/web/AGENTS.md）：
 //  - 禁止 render 阶段访问 ref / 调用 Date.now()
@@ -31,7 +32,7 @@ import {
   useSyncApparelModelLibraryPresetsMutation,
 } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import { useUiStore, type LightboxAction } from "@/store/useUiStore";
+import { useUiStore } from "@/store/useUiStore";
 
 import { formatShortDate } from "../utils";
 import { ModelLibraryBrowserOverlays } from "./ModelLibraryBrowserDialogs";
@@ -43,6 +44,11 @@ import {
   type BrowserSource,
   type ModelLibraryGender,
 } from "./modelLibraryBrowserOptions";
+import { createModelLibrarySelectionAction } from "./modelLibrarySelection";
+import {
+  collectModelLibraryStyleTags,
+  filterModelLibraryItemsByStyleTag,
+} from "./modelLibraryStyleFilters";
 
 interface UnsavedItemFilters {
   ageSegment: ModelLibraryAgeSegment;
@@ -102,6 +108,7 @@ function unsavedLibraryItem(
     billing_free: item.billing_free,
     billing_label: item.billing_label,
     billing_exempt_reason: item.billing_exempt_reason,
+    usage_count: 0,
     created_at: job.created_at,
   };
 }
@@ -145,8 +152,10 @@ export interface ModelLibraryBrowserProps {
    * 选模特回调（dialog 模式用）
    */
   onSelectItem?: (item: ApparelModelLibraryItem) => void;
-  /** dialog 模式下，由父组件控制 lightbox action 的 pending 文案 */
+  /** dialog 模式下，由父组件控制选择动作的文案。 */
   selectActionLabel?: string;
+  /** dialog 模式下，统一锁定卡片与 lightbox 的选择动作。 */
+  selectActionPending?: boolean;
   /** 是否显示左侧 sourceFilter 列；dialog 模式可能想隐藏 */
   showSourceSidebar?: boolean;
   /** 父级想显示头部信息（同步状态、上传按钮）；page 模式渲染 */
@@ -161,7 +170,8 @@ export function ModelLibraryBrowser({
   mode,
   defaultAgeSegment = "all",
   onSelectItem,
-  selectActionLabel = "设为当前模特",
+  selectActionLabel = "选入候选",
+  selectActionPending,
   showSourceSidebar = true,
   showHeader = true,
   headerExtra,
@@ -171,6 +181,7 @@ export function ModelLibraryBrowser({
   const [ageSegment, setAgeSegment] =
     useState<ModelLibraryAgeSegment>(defaultAgeSegment);
   const [appearance, setAppearance] = useState<ModelLibraryAppearance>("all");
+  const [styleTag, setStyleTag] = useState("");
   const [source, setSource] = useState<BrowserSource>("all");
   const [query, setQuery] = useState("");
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -199,7 +210,7 @@ export function ModelLibraryBrowser({
     : libraryQuery.isPending;
 
   // 把待入库 items/candidates 适配成 ApparelModelLibraryItem-like 形状
-  const items = useMemo<ApparelModelLibraryItem[]>(() => {
+  const unfilteredItems = useMemo<ApparelModelLibraryItem[]>(() => {
     if (isLoserView) {
       return unsavedLibraryItems(jobsQuery.data?.items ?? [], {
         ageSegment,
@@ -216,6 +227,14 @@ export function ModelLibraryBrowser({
     ageSegment,
     query,
   ]);
+  const styleTagOptions = useMemo(
+    () => collectModelLibraryStyleTags(unfilteredItems),
+    [unfilteredItems],
+  );
+  const items = useMemo(
+    () => filterModelLibraryItemsByStyleTag(unfilteredItems, styleTag),
+    [styleTag, unfilteredItems],
+  );
 
   const visibleLightboxItems = useMemo<LightboxItem[]>(
     () =>
@@ -247,20 +266,22 @@ export function ModelLibraryBrowser({
   const allVisibleSelected =
     deletableIds.length > 0 && deletableIds.every((id) => selectedSet.has(id));
 
-  const buildLightboxAction = useMemo<null | (() => LightboxAction)>(() => {
-    if (mode !== "dialog" || !onSelectItem) return null;
-    const itemMap = new Map<string, ApparelModelLibraryItem>(
-      items.map((item) => [item.id, item]),
+  const lightboxAction = useMemo(() => {
+    if (mode !== "dialog" || !onSelectItem || isLoserView) return null;
+    return createModelLibrarySelectionAction(
+      items,
+      selectActionLabel,
+      onSelectItem,
+      Boolean(selectActionPending),
     );
-    return () => ({
-      label: selectActionLabel,
-      pending: false,
-      onClick: (lightboxItem) => {
-        const libraryItem = itemMap.get(lightboxItem.id);
-        if (libraryItem) onSelectItem(libraryItem);
-      },
-    });
-  }, [items, mode, onSelectItem, selectActionLabel]);
+  }, [
+    isLoserView,
+    items,
+    mode,
+    onSelectItem,
+    selectActionLabel,
+    selectActionPending,
+  ]);
 
   const sync = useSyncApparelModelLibraryPresetsMutation({
     onSuccess: (result) => {
@@ -301,14 +322,15 @@ export function ModelLibraryBrowser({
       }),
   });
 
-  // 移动端筛选数：年龄、外貌、来源；非 "all" 计 1
+  // 移动端筛选数：年龄、外貌、气质、来源；非默认值计 1
   const activeFilterCount = useMemo(() => {
     let count = 0;
     if (ageSegment !== "all") count += 1;
     if (appearance !== "all") count += 1;
+    if (styleTag) count += 1;
     if (source !== "all") count += 1;
     return count;
-  }, [ageSegment, appearance, source]);
+  }, [ageSegment, appearance, source, styleTag]);
   const syncSummary = syncInfo?.last_success_at
     ? `同步 ${formatShortDate(syncInfo.last_success_at)}`
     : "预设 / 收藏 / 上传 / 生成";
@@ -322,10 +344,9 @@ export function ModelLibraryBrowser({
     return libraryQuery.refetch();
   };
   const openLightbox = (item: ApparelModelLibraryItem) => {
-    const action = buildLightboxAction?.() ?? null;
     useUiStore
       .getState()
-      .openLightboxFromItems(visibleLightboxItems, item.id, action);
+      .openLightboxFromItems(visibleLightboxItems, item.id, lightboxAction);
   };
   const toggleSelected = (id: string) => {
     setSelectedIds((previous) =>
@@ -341,6 +362,10 @@ export function ModelLibraryBrowser({
   const changeAppearance = (value: ModelLibraryAppearance) => {
     setSelectedIds([]);
     setAppearance(value);
+  };
+  const changeStyleTag = (value: string) => {
+    setSelectedIds([]);
+    setStyleTag(value);
   };
   const changeSource = (value: BrowserSource) => {
     setSelectedIds([]);
@@ -372,9 +397,12 @@ export function ModelLibraryBrowser({
         selectedDeletableIds={selectedDeletableIds}
         selectedSet={selectedSet}
         selectActionLabel={selectActionLabel}
+        selectActionPending={Boolean(selectActionPending)}
         showHeader={showHeader}
         showSourceSidebar={showSourceSidebar}
         source={source}
+        styleTag={styleTag}
+        styleTagOptions={styleTagOptions}
         syncCanRun={Boolean(syncInfo?.can_sync)}
         syncPending={sync.isPending}
         syncSummary={syncSummary}
@@ -393,6 +421,7 @@ export function ModelLibraryBrowser({
         }
         onSelectItem={onSelectItem}
         onSourceChange={changeSource}
+        onStyleTagChange={changeStyleTag}
         onSync={() => sync.mutate()}
         onToggleSelected={toggleSelected}
       />
@@ -402,6 +431,8 @@ export function ModelLibraryBrowser({
         defaultAgeSegment={defaultAgeSegment}
         mobileFilterOpen={mobileFilterOpen}
         source={source}
+        styleTag={styleTag}
+        styleTagOptions={styleTagOptions}
         uploadOpen={uploadOpen}
         onAgeChange={changeAgeSegment}
         onAppearanceChange={changeAppearance}
@@ -409,6 +440,7 @@ export function ModelLibraryBrowser({
         onCloseUpload={() => setUploadOpen(false)}
         onCreated={setLastUploadedId}
         onSourceChange={changeSource}
+        onStyleTagChange={changeStyleTag}
       />
     </div>
   );

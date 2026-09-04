@@ -6,13 +6,11 @@ import {
 
 import {
   Input,
+  Select,
   Slider,
   Switch,
   Textarea,
 } from "@/components/ui/primitives";
-
-const SELECT_CLASS =
-  "h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 type-body-sm text-[var(--fg-0)] focus:border-[var(--accent)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-soft)] max-sm:min-h-11 ";
 
 export type SelectOption = {
   value: string;
@@ -53,8 +51,7 @@ export function SelectField({
       <span className="type-caption font-medium text-[var(--fg-1)]">
         {label}
       </span>
-      <select
-        className={SELECT_CLASS}
+      <Select
         value={value}
         disabled={disabled}
         onChange={(event) => onChange(event.currentTarget.value)}
@@ -68,7 +65,7 @@ export function SelectField({
             {option.label}
           </option>
         ))}
-      </select>
+      </Select>
     </label>
   );
 }

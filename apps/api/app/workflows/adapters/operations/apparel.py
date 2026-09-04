@@ -166,6 +166,37 @@ class _SQLAlchemyApparelLibraryAdapter:
             q=query,
         )
 
+    async def usage_counts(
+        self,
+        *,
+        user_id: str,
+        item_ids: Sequence[str],
+    ) -> dict[str, int]:
+        wanted = {item_id for item_id in item_ids if item_id}
+        if not wanted:
+            return {}
+        rows = (
+            await self.db.execute(
+                select(
+                    ModelCandidate.workflow_run_id,
+                    ModelCandidate.model_brief_json,
+                )
+                .join(WorkflowRun, WorkflowRun.id == ModelCandidate.workflow_run_id)
+                .where(
+                    WorkflowRun.user_id == user_id,
+                    WorkflowRun.deleted_at.is_(None),
+                )
+            )
+        ).all()
+        runs_by_item: dict[str, set[str]] = {}
+        for run_id, raw_brief in rows:
+            brief = raw_brief if isinstance(raw_brief, dict) else {}
+            item_id = brief.get("library_item_id")
+            if not isinstance(item_id, str) or item_id not in wanted:
+                continue
+            runs_by_item.setdefault(item_id, set()).add(run_id)
+        return {item_id: len(run_ids) for item_id, run_ids in runs_by_item.items()}
+
     def item_out(self, item: dict[str, Any]) -> ApparelModelLibraryItemOut:
         return _model_library_item_out(item)
 

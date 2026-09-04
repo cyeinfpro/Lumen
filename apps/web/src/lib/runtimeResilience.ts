@@ -24,6 +24,7 @@ export type RuntimeResilienceSnapshot = {
 type RecoveryKind = "realtime" | "session";
 type RecoveryHandler = () => void;
 export type SessionInvalidationReason =
+  | "http_unauthorized"
   | "realtime_auth_invalidated"
   | "request_identity_mismatch";
 export type SessionInvalidationHandler = (

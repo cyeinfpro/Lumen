@@ -29,19 +29,23 @@ export function AgentRunStatus({
   const assertive = run.status === "failed";
   return (
     <div
-      role={assertive ? "alert" : "status"}
-      aria-live={assertive ? "assertive" : "polite"}
       className={cn(
         "mt-3 flex min-h-10 flex-wrap items-center gap-2 border-l-2 px-3 py-2 type-caption",
         runStatusTone(active, failed),
       )}
     >
-      <RunStatusIcon status={run.status} />
-      <span className="font-medium">{STATUS_TEXT[run.status]}</span>
-      {run.memory_state === "degraded" ? (
-        <span className="text-[var(--fg-1)]">本轮记忆服务降级</span>
-      ) : null}
-      {error ? <span className="text-[var(--fg-1)]">{error.detail}</span> : null}
+      <div
+        role={assertive ? "alert" : "status"}
+        aria-live={assertive ? "assertive" : "polite"}
+        className="flex min-w-0 flex-1 flex-wrap items-center gap-2"
+      >
+        <RunStatusIcon status={run.status} />
+        <span className="font-medium">{STATUS_TEXT[run.status]}</span>
+        {run.memory_state === "degraded" ? (
+          <span className="text-[var(--fg-1)]">本轮记忆服务降级</span>
+        ) : null}
+        {error ? <span className="text-[var(--fg-1)]">{error.detail}</span> : null}
+      </div>
       <RunRecoveryActions error={error} failed={failed} onContinue={onContinue} />
     </div>
   );
@@ -56,7 +60,12 @@ function runStatusTone(active: boolean, failed: boolean): string {
 
 function RunStatusIcon({ status }: { status: AgentRun["status"] }) {
   if (status === "queued" || status === "running") {
-    return <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" aria-hidden />;
+    return (
+      <Loader2
+        className="h-3.5 w-3.5 animate-spin text-accent motion-reduce:animate-none"
+        aria-hidden
+      />
+    );
   }
   if (status === "succeeded") {
     return <CheckCircle2 className="h-3.5 w-3.5 text-success" aria-hidden />;
@@ -80,15 +89,13 @@ function RunRecoveryActions({
   return (
     <>
       {hasLink ? (
-        <span role="status" className="ml-auto inline-flex">
-          <Link
-            href={error?.href ?? "/agent"}
-            className="inline-flex min-h-9 items-center gap-1 rounded-[var(--radius-control)] px-2 type-caption font-medium text-[var(--fg-0)] hover:bg-[var(--bg-2)] max-sm:min-h-11"
-          >
-            {error?.actionLabel}
-            <ArrowRight className="h-3.5 w-3.5" aria-hidden />
-          </Link>
-        </span>
+        <Link
+          href={error?.href ?? "/agent"}
+          className="ml-auto inline-flex min-h-9 items-center gap-1 rounded-[var(--radius-control)] px-2 type-caption font-medium text-[var(--fg-0)] hover:bg-[var(--bg-2)] max-sm:min-h-11"
+        >
+          {error?.actionLabel}
+          <ArrowRight className="h-3.5 w-3.5" aria-hidden />
+        </Link>
       ) : null}
       {onContinue && failed ? (
         <Button

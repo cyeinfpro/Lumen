@@ -50,9 +50,12 @@ export interface ModelLibraryBrowserLayoutProps {
   selectedDeletableIds: string[];
   selectedSet: ReadonlySet<string>;
   selectActionLabel: string;
+  selectActionPending: boolean;
   showHeader: boolean;
   showSourceSidebar: boolean;
   source: BrowserSource;
+  styleTag: string;
+  styleTagOptions: string[];
   syncCanRun: boolean;
   syncPending: boolean;
   syncSummary: string;
@@ -69,6 +72,7 @@ export interface ModelLibraryBrowserLayoutProps {
   onSelectAll: () => void;
   onSelectItem?: (item: ApparelModelLibraryItem) => void;
   onSourceChange: (value: BrowserSource) => void;
+  onStyleTagChange: (value: string) => void;
   onSync: () => void;
   onToggleSelected: (id: string) => void;
 }
@@ -171,13 +175,15 @@ function ModelLibrarySourceSidebar({
       <p className="type-caption text-[var(--fg-2)]">
         来源
       </p>
-      <div className="mt-2 grid">
+      <div className="mt-2 grid" role="radiogroup" aria-label="模特来源">
         {SOURCE_FILTERS.map(([value, label]) => {
           const active = source === value;
           return (
             <button
               key={value}
               type="button"
+              role="radio"
+              aria-checked={active}
               onClick={() => onSourceChange(value)}
               className={cn(
                 "group relative flex min-h-9 cursor-pointer items-center justify-between border-b border-[var(--border)] py-1.5 type-caption transition-colors",
@@ -218,6 +224,7 @@ function ModelLibraryMobileFilters(props: ModelLibraryBrowserLayoutProps) {
       <button
         type="button"
         onClick={props.onOpenFilter}
+        aria-label="筛选"
         className={cn(
           "inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 border px-3 type-caption transition-colors",
           filtersActive
@@ -260,6 +267,25 @@ function ModelLibraryDesktopFilters(props: ModelLibraryBrowserLayoutProps) {
           </Chip>
         ))}
       </ChipRowGroup>
+      <div className="xl:col-span-2">
+        <ChipRowGroup label="气质方向">
+          <Chip
+            active={!props.styleTag}
+            onClick={() => props.onStyleTagChange("")}
+          >
+            全部
+          </Chip>
+          {props.styleTagOptions.map((tag) => (
+            <Chip
+              key={tag}
+              active={props.styleTag === tag}
+              onClick={() => props.onStyleTagChange(tag)}
+            >
+              {tag}
+            </Chip>
+          ))}
+        </ChipRowGroup>
+      </div>
       <div className="flex min-w-0 items-center gap-3 border-b border-[var(--border)] pb-2 xl:col-span-2">
         <div className="relative w-full min-w-0 max-w-md">
           <Search className="pointer-events-none absolute left-0 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--fg-2)]" />
@@ -335,13 +361,20 @@ function ModelLibrarySelectionBar(
     | "batchDeletePending"
     | "deletableIds"
     | "isLoserView"
+    | "mode"
     | "selectedDeletableIds"
     | "onBatchDelete"
     | "onClearSelection"
     | "onSelectAll"
   >,
 ) {
-  if (props.isLoserView || props.deletableIds.length === 0) return null;
+  if (
+    props.mode !== "page" ||
+    props.isLoserView ||
+    props.deletableIds.length === 0
+  ) {
+    return null;
+  }
   const hasSelection = props.selectedDeletableIds.length > 0;
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-y border-[var(--border)] py-1.5">
@@ -399,7 +432,8 @@ function ModelLibraryGrid(props: ModelLibraryBrowserLayoutProps) {
       transition={{ duration: 0.18 }}
     >
       {props.items.map((item, index) => {
-        const selectable = !item.id.startsWith("loser:");
+        const selectable =
+          props.mode === "page" && !item.id.startsWith("loser:");
         return (
           <ModelLibraryCard
             key={item.id}
@@ -413,6 +447,7 @@ function ModelLibraryGrid(props: ModelLibraryBrowserLayoutProps) {
             onOpenLightbox={() => props.onOpenLightbox(item)}
             onDelete={() => props.onDelete(item.id)}
             deleting={props.deleting}
+            selecting={props.selectActionPending}
             onSaveLoser={props.isLoserView ? item : undefined}
             onSelect={cardOnSelect}
             selectLabel={props.selectActionLabel}
@@ -456,7 +491,11 @@ function ChipRowGroup({
       <p className="mt-1.5 w-[68px] shrink-0 type-caption text-[var(--fg-2)]">
         {label}
       </p>
-      <div className="-mx-1 flex min-w-0 flex-1 flex-wrap gap-x-2 gap-y-0.5 overflow-x-auto px-1 pb-0.5">
+      <div
+        className="-mx-1 flex min-w-0 flex-1 flex-wrap gap-x-2 gap-y-0.5 overflow-x-auto px-1 pb-0.5"
+        role="group"
+        aria-label={label}
+      >
         {children}
       </div>
     </div>
@@ -476,6 +515,7 @@ export function Chip({
     <button
       type="button"
       onClick={onClick}
+      aria-pressed={active}
       className={cn(
         "group relative inline-flex min-h-11 min-w-11 shrink-0 cursor-pointer items-center justify-center px-1 py-1 type-caption transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)] md:min-h-9 md:min-w-9",
         active

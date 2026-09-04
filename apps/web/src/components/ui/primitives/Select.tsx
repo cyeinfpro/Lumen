@@ -1,5 +1,7 @@
 "use client";
 
+import { ChevronDown } from "lucide-react";
+
 import { cn } from "@/lib/utils";
 
 export interface SelectProps
@@ -31,20 +33,11 @@ export function Select({
       >
         {children}
       </select>
-      <svg
+      <ChevronDown
         aria-hidden="true"
         className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--fg-1)]"
-        viewBox="0 0 16 16"
-        fill="none"
-      >
-        <path
-          d="m4 6 4 4 4-4"
-          stroke="currentColor"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          strokeWidth="1.5"
-        />
-      </svg>
+        strokeWidth={1.5}
+      />
     </div>
   );
 }

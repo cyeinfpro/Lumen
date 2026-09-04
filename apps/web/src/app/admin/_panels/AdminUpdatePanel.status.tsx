@@ -276,7 +276,7 @@ export function UpdateConsoleMeta({
         </span>
       )}
       {logCount > 0 && (
-        <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 font-mono text-[var(--fg-2)]">
+        <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-[var(--fg-2)]">
           日志 {logCount}
         </span>
       )}

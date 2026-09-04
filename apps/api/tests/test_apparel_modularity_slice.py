@@ -6,11 +6,14 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy.dialects import postgresql
 from lumen_core.schemas import (
+    ApparelModelLibraryItemOut,
     ApparelModelLibrarySyncOut,
     ApparelModelLibrarySyncStateOut,
 )
 
+from app.workflows.adapters.operations.apparel import _SQLAlchemyApparelLibraryAdapter
 from app.workflows.application.apparel_library import (
     DeleteApparelModelLibraryItems,
     ListApparelModelLibrary,
@@ -31,6 +34,10 @@ class _ApparelPort:
         self.items = {
             "preset:one": {"id": "preset:one", "source": "preset"},
         }
+        self.library_rows = [
+            {"id": "preset:one", "source": "preset"},
+            {"id": "user:unused", "source": "user_upload"},
+        ]
 
     async def combined_items(
         self,
@@ -38,7 +45,7 @@ class _ApparelPort:
         user_id: str,
     ) -> tuple[list[dict[str, Any]], bool]:
         self.events.append(f"combined:{user_id}")
-        return [], True
+        return self.library_rows, True
 
     def filter_items(
         self,
@@ -52,8 +59,28 @@ class _ApparelPort:
         self.events.append(f"filter:{source}:{age_segment}:{appearance}:{query}")
         return list(items)
 
+    async def usage_counts(
+        self,
+        *,
+        user_id: str,
+        item_ids: Any,
+    ) -> dict[str, int]:
+        self.events.append(f"usage:{user_id}:{','.join(item_ids)}")
+        return {"preset:one": 2}
+
     def item_out(self, item: dict[str, Any]) -> Any:
-        return item
+        return ApparelModelLibraryItemOut(
+            id=item["id"],
+            source=item["source"],
+            visibility_scope=(
+                "global_preset" if item["source"] == "preset" else "user_private"
+            ),
+            title=item["id"],
+            age_segment="young_adult",
+            image_url=f"/images/{item['id']}",
+            usage_count=item.get("usage_count", 0),
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
 
     def sync_state_out(self, user: Any) -> ApparelModelLibrarySyncStateOut:
         return ApparelModelLibrarySyncStateOut(can_sync=user.role == "admin")
@@ -125,8 +152,11 @@ async def test_apparel_library_use_cases_own_validation_and_io_order() -> None:
     assert port.events == []
 
     result = await ListApparelModelLibrary(port).execute(user=user)
-    assert result.items == []
-    assert port.events[-1] == "commit"
+    assert [item.usage_count for item in result.items] == [2, 0]
+    assert port.events[-2:] == [
+        "usage:user-1:preset:one,user:unused",
+        "commit",
+    ]
 
     port.events.clear()
     sync = await SyncApparelModelLibraryPresets(port).execute(
@@ -135,6 +165,43 @@ async def test_apparel_library_use_cases_own_validation_and_io_order() -> None:
     )
     assert sync.status == "skipped"
     assert port.events == ["resolve-proxy", "rollback", "network-sync"]
+
+
+@pytest.mark.asyncio
+async def test_apparel_usage_counts_are_user_scoped_and_distinct_per_workflow() -> None:
+    class _Result:
+        def all(self) -> list[Any]:
+            return [
+                ("run-1", {"library_item_id": "preset:one"}),
+                ("run-1", {"library_item_id": "preset:one"}),
+                ("run-2", {"library_item_id": "preset:one"}),
+                ("run-3", {"library_item_id": "other"}),
+            ]
+
+    class _Db:
+        def __init__(self) -> None:
+            self.statement: Any = None
+
+        async def execute(self, statement: Any) -> _Result:
+            self.statement = statement
+            return _Result()
+
+    db = _Db()
+    adapter = _SQLAlchemyApparelLibraryAdapter(db)  # type: ignore[arg-type]
+    counts = await adapter.usage_counts(
+        user_id="user-1",
+        item_ids=["preset:one", "unused"],
+    )
+
+    assert counts == {"preset:one": 2}
+    rendered = str(
+        db.statement.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "workflow_runs.user_id = 'user-1'" in rendered
+    assert "workflow_runs.deleted_at IS NULL" in rendered
 
 
 @pytest.mark.asyncio

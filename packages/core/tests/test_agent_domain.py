@@ -371,6 +371,16 @@ def test_agent_public_message_projection_is_allowlist_based() -> None:
             }
         ],
         "generation_ids": ["generation-1", None, 7],
+        "blocks": [
+            {
+                "kind": "tool",
+                "turn": 1,
+                "tool_call_id": "tool-1",
+                "name": AGENT_TOOL_CREATE_IMAGE,
+                "status": "succeeded",
+                "result_text": '{"api_key":"must-not-be-public"}',
+            }
+        ],
     }
     projected = public_message_content(content)
     assert projected == {
@@ -388,6 +398,15 @@ def test_agent_public_message_projection_is_allowlist_based() -> None:
         ],
         "images": [{"image_id": "image-1", "generation_id": "generation-1"}],
         "generation_ids": ["generation-1"],
+        "blocks": [
+            {
+                "kind": "tool",
+                "turn": 1,
+                "tool_call_id": "tool-1",
+                "name": AGENT_TOOL_CREATE_IMAGE,
+                "status": "succeeded",
+            }
+        ],
     }
 
 

@@ -75,6 +75,20 @@ export function getAgentSession(
   );
 }
 
+export function branchAgentSession(
+  sessionId: string,
+  title?: string,
+): Promise<AgentSession> {
+  return apiFetch<AgentSession>(
+    `/agent/sessions/${encodeURIComponent(sessionId)}/branch`,
+    {
+      method: "POST",
+      body: JSON.stringify(title ? { title } : {}),
+      validate: validateAgentSession,
+    },
+  );
+}
+
 export function patchAgentSession(
   sessionId: string,
   body: AgentSessionPatchInput,

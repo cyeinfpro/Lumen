@@ -101,6 +101,13 @@ function accountMenuItems({
   return items;
 }
 
+function getAccountProfile(user: MenuUser | undefined) {
+  const isDefaultAccount = !user?.name && !user?.email;
+  const label = user?.name || user?.email || "账户";
+  const avatar = isDefaultAccount ? undefined : label.slice(0, 1).toUpperCase();
+  return { isDefaultAccount, label, avatar };
+}
+
 export function DesktopAccountMenu() {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLDivElement | null>(null);
@@ -131,10 +138,8 @@ export function DesktopAccountMenu() {
     staleTime: 60_000,
   });
 
-  const label = meQuery.data?.name || meQuery.data?.email || "账户";
-  const avatar = label.slice(0, 1).toUpperCase();
-  const wallet = walletQuery.data;
-  const walletBalance = wallet?.balance;
+  const { isDefaultAccount, label, avatar } = getAccountProfile(meQuery.data);
+  const walletBalance = walletQuery.data?.balance;
   const showWallet = walletEntryIsVisible({
     enabled: walletEnabled,
     billingEnabled: pricingQuery.data?.billing_enabled,
@@ -165,8 +170,10 @@ export function DesktopAccountMenu() {
       >
         <Avatar
           size="sm"
-          name={label}
+          alt={label}
+          name={isDefaultAccount ? undefined : label}
           initials={avatar}
+          fallback={<CircleUserRound className="w-4 h-4 text-[var(--fg-1)]" />}
           className={cn(
             "transition-[background-color,border-color,color] duration-[var(--dur-quick)] group-hover:border-[var(--border-strong)] group-hover:bg-[var(--bg-3)]",
             active && "border-accent-border bg-accent-soft text-accent",
@@ -197,29 +204,41 @@ export function DesktopAccountMenu() {
             ) : null}
           </div>
         </div>
-        <nav className="grid gap-0.5 pt-1" aria-label="账户与设置">
-          {items.map((item) => {
-            const Icon = item.icon;
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                onClick={() => setOpen(false)}
-                className={cn(
-                  "flex min-h-10 items-center gap-3 rounded-[var(--radius-control)] px-3",
-                  "type-body-sm text-[var(--fg-1)] transition-colors duration-[var(--dur-quick)]",
-                  "hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
-                  "focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
-                )}
-              >
-                <Icon className="h-4 w-4 text-[var(--fg-2)]" aria-hidden />
-                <span className="flex-1">{item.label}</span>
-                <ChevronRight className="h-3.5 w-3.5 text-[var(--fg-3)]" aria-hidden />
-              </Link>
-            );
-          })}
-        </nav>
+        <AccountNavLinks items={items} onClose={() => setOpen(false)} />
       </DesktopPopover>
     </div>
+  );
+}
+
+function AccountNavLinks({
+  items,
+  onClose,
+}: {
+  items: Array<{ href: string; label: string; icon: React.ComponentType<{ className?: string }> }>;
+  onClose: () => void;
+}) {
+  return (
+    <nav className="grid gap-0.5 pt-1" aria-label="账户与设置">
+      {items.map((item) => {
+        const Icon = item.icon;
+        return (
+          <Link
+            key={item.href}
+            href={item.href}
+            onClick={onClose}
+            className={cn(
+              "flex min-h-10 items-center gap-3 rounded-[var(--radius-control)] px-3",
+              "type-body-sm text-[var(--fg-1)] transition-colors duration-[var(--dur-quick)]",
+              "hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
+              "focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
+            )}
+          >
+            <Icon className="h-4 w-4 text-[var(--fg-2)]" aria-hidden />
+            <span className="flex-1">{item.label}</span>
+            <ChevronRight className="h-3.5 w-3.5 text-[var(--fg-3)]" aria-hidden />
+          </Link>
+        );
+      })}
+    </nav>
   );
 }

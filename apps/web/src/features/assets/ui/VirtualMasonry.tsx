@@ -36,6 +36,7 @@ export interface GenerationMasonryProps {
   selectionMode?: boolean;
   selectedIds?: Set<string>;
   onToggleSelect?: (imageId: string) => void;
+  onDeleteImage?: (imageId: string) => Promise<unknown>;
   highlightId?: string | null;
 }
 
@@ -134,6 +135,7 @@ function GenerationMasonryComponent({
   selectionMode = false,
   selectedIds,
   onToggleSelect,
+  onDeleteImage,
   highlightId,
 }: GenerationMasonryProps) {
   const columnCount = Math.max(1, Math.floor(columns));
@@ -322,6 +324,7 @@ function GenerationMasonryComponent({
               selectionMode={selectionMode}
               selected={Boolean(selectedIds?.has(item.image.id))}
               onToggleSelect={onToggleSelect}
+              onDeleteImage={onDeleteImage}
               prewarmScheduler={scheduler}
               fetchPriority={tile.itemIndex < 12 ? "high" : "low"}
               imageSizes={imageSizes}

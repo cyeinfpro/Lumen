@@ -53,12 +53,8 @@ function loserItemIdentity(
   };
 }
 
-function modelLibraryItemIsFree(
-  item: ApparelModelLibraryItem,
-  isLoser: boolean,
-): boolean {
+function modelLibraryItemIsFree(item: ApparelModelLibraryItem): boolean {
   return (
-    isLoser ||
     item.billing_free === true ||
     item.billing_label === "free" ||
     item.is_dual_race_bonus === true
@@ -110,6 +106,7 @@ export function ModelLibraryCard({
   highlighted,
   selected,
   deleting,
+  selecting,
   onOpenLightbox,
   onDelete,
   onToggleSelected,
@@ -122,6 +119,7 @@ export function ModelLibraryCard({
   highlighted: boolean;
   selected: boolean;
   deleting: boolean;
+  selecting: boolean;
   onOpenLightbox: () => void;
   onDelete: () => void;
   onToggleSelected?: () => void;
@@ -131,7 +129,7 @@ export function ModelLibraryCard({
 }) {
   const isPreset = item.source === "preset";
   const loserIdentity = loserItemIdentity(item, onSaveLoser);
-  const isFree = modelLibraryItemIsFree(item, loserIdentity.isLoser);
+  const isFree = modelLibraryItemIsFree(item);
   const { confirming: confirmingDelete, requestDelete } =
     useDeleteConfirmation(onDelete);
   const autoTag = useAutoTagApparelModelLibraryItemMutation(item.id, {
@@ -196,6 +194,7 @@ export function ModelLibraryCard({
           autoTagPending={autoTag.isPending}
           confirmingDelete={confirmingDelete}
           deleting={deleting}
+          selecting={selecting}
           isLoser={loserIdentity.isLoser}
           isPreset={isPreset}
           item={item}
@@ -337,6 +336,12 @@ function ModelLibraryCardMetadata({
           未标记
         </p>
       )}
+      <p
+        className="type-caption tabular-nums text-[var(--fg-2)]"
+        aria-label={`已匹配生成 ${item.usage_count} 套`}
+      >
+        已匹配 {item.usage_count} 套
+      </p>
       {children}
     </div>
   );
@@ -354,6 +359,7 @@ function ModelLibraryCardActions({
   onSaveLoser,
   onSelect,
   saveLoserPending,
+  selecting,
   selectLabel,
 }: {
   autoTagPending: boolean;
@@ -367,20 +373,27 @@ function ModelLibraryCardActions({
   onSaveLoser: () => void;
   onSelect?: (item: ApparelModelLibraryItem) => void;
   saveLoserPending: boolean;
+  selecting: boolean;
   selectLabel?: string;
 }) {
-  return (
-    <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
-      {onSelect ? (
+  if (onSelect) {
+    return (
+      <div className="mt-1.5">
         <Button
           size="sm"
           variant="primary"
+          fullWidth
+          loading={selecting}
           onClick={() => onSelect(item)}
           leftIcon={<Check className="h-3 w-3" />}
         >
-          {selectLabel ?? "设为当前模特"}
+          {selecting ? "选择中" : selectLabel ?? "选入候选"}
         </Button>
-      ) : null}
+      </div>
+    );
+  }
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
       {isLoser ? (
         <Button
           size="sm"

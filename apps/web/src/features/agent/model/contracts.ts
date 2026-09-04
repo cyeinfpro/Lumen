@@ -89,6 +89,7 @@ export interface AgentDraftFile {
 
 export interface AgentDraft {
   text: string;
+  model: string | null;
   attachments: AgentDraftAttachment[];
   files: AgentDraftFile[];
   allowImage: boolean;
@@ -104,6 +105,7 @@ export function createAgentDraft(
   const { imageDefaults, ...rest } = overrides;
   return {
     text: "",
+    model: null,
     attachments: [],
     files: [],
     allowImage: true,
@@ -127,6 +129,38 @@ export interface AgentReference {
   display_label: string | null;
 }
 
+export interface AgentWebSearchToolDetails {
+  kind: "web_search";
+  query: string | null;
+  result_snippets: string[];
+}
+
+export interface AgentFileToolDetails {
+  kind: "file_list" | "file_read" | "file_search";
+  file_names: string[];
+  query: string | null;
+  line_start: number | null;
+  line_end: number | null;
+  result_snippets: string[];
+}
+
+export interface AgentImageToolDetails {
+  kind: "image";
+  prompt: string | null;
+  reference_count: number;
+  count: number | null;
+  aspect_ratio: AspectRatio | null;
+  quality: AgentQuality | null;
+  render_quality: AgentRenderQuality | null;
+  background: AgentBackground | null;
+  output_format: AgentOutputFormat | null;
+}
+
+export type AgentToolDetails =
+  | AgentWebSearchToolDetails
+  | AgentFileToolDetails
+  | AgentImageToolDetails;
+
 export interface AgentToolCall {
   id: string;
   agent_run_id: string;
@@ -143,6 +177,8 @@ export interface AgentToolCall {
   status: AgentToolStatus;
   generation_ids: string[];
   generation_count: number;
+  details: AgentToolDetails | null;
+  duration_ms: number | null;
   error_code: string | null;
   started_at: string | null;
   finished_at: string | null;
@@ -318,6 +354,7 @@ export interface AgentMessageList {
 
 export interface AgentMessageCreateInput {
   idempotency_key: string;
+  model?: string | null;
   text: string;
   attachments: AgentReferenceInput[];
   files: Array<{
@@ -378,9 +415,17 @@ export interface AgentSessionPatchInput {
   allow_file_tools?: boolean;
 }
 
+export interface AgentModelOption {
+  model: string;
+  vision_supported: boolean;
+  reasoning_supported: boolean;
+}
+
 export interface AgentStatus {
   enabled: boolean;
   tool_gateway_configured: boolean;
+  default_model: string | null;
+  models: AgentModelOption[];
 }
 
 export const AGENT_EVENT_NAMES = [

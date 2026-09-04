@@ -954,6 +954,11 @@ type AccountMenuHelpers = {
   accountMenuItems: (input: { showWallet: boolean; isAdmin: boolean }) => {
     href: string;
   }[];
+  getAccountProfile: (user?: { name?: string | null; email?: string | null }) => {
+    isDefaultAccount: boolean;
+    label: string;
+    avatar: string | undefined;
+  };
 };
 
 function loadAccountMenuHelpers(): AccountMenuHelpers {
@@ -970,7 +975,8 @@ const formatRmb = (value: string) => value;
 ${source.slice(start, end)}
 module.exports.walletEntryIsVisible = walletEntryIsVisible;
 module.exports.formatWalletText = formatWalletText;
-module.exports.accountMenuItems = accountMenuItems;`,
+module.exports.accountMenuItems = accountMenuItems;
+module.exports.getAccountProfile = getAccountProfile;`,
     {
       compilerOptions: {
         module: ts.ModuleKind.CommonJS,
@@ -985,6 +991,18 @@ module.exports.accountMenuItems = accountMenuItems;`,
   });
   return moduleRecord.exports;
 }
+
+test("default account profile uses the user icon instead of a Chinese initial", () => {
+  const helpers = loadAccountMenuHelpers();
+  const fallback = helpers.getAccountProfile();
+
+  equal(fallback.isDefaultAccount, true);
+  equal(fallback.label, "账户");
+  equal(fallback.avatar, undefined);
+  equal(helpers.getAccountProfile({ email: "lumen@example.com" }).avatar, "L");
+  match(source, /fallback=\{<CircleUserRound/);
+  doesNotMatch(source, /initials=\{label\.slice/);
+});
 
 test("wallet entry stays visible when the balance query fails, only the amount hides", () => {
   const helpers = loadAccountMenuHelpers();

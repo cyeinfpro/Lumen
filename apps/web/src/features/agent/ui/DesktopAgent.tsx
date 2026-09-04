@@ -9,7 +9,10 @@ import {
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { useUiStore } from "@/store/useUiStore";
 import { useAgentWorkspaceScroll } from "../containers/useAgentScrollManager";
-import { AgentComposer } from "./AgentComposer";
+import {
+  AgentComposer,
+  type AgentComposerHandle,
+} from "./AgentComposer";
 import { AgentContextBar } from "./AgentContextBar";
 import { AgentConversation } from "./AgentConversation";
 import { AgentScrollToLatest } from "./AgentScrollToLatest";
@@ -24,6 +27,7 @@ export function DesktopAgent(props: AgentWorkspaceProps) {
   const [composerHeight, setComposerHeight] = useState(120);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const workspaceRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<AgentComposerHandle | null>(null);
   const {
     scrollRef,
     newOutputBelow,
@@ -107,9 +111,16 @@ export function DesktopAgent(props: AgentWorkspaceProps) {
               realtimeStatus={props.realtimeStatus}
               activeRun={props.activeRun}
               toolGatewayConfigured={props.toolGatewayConfigured}
+              defaultModel={props.defaultModel}
+              modelOptions={props.modelOptions}
+              draft={props.draft}
               prompts={props.prompts}
               saving={props.sessionSaving}
+              branching={props.branching}
+              onBranch={props.onBranchSession}
               onPatch={props.onPatchSession}
+              onDraftChange={props.onDraftChange}
+              onDefaultsChange={props.onDefaultsChange}
               images={props.sessionImages}
               imagesLoading={props.sessionImagesLoading}
               removingImageId={props.sessionImageRemovingId}
@@ -134,7 +145,9 @@ export function DesktopAgent(props: AgentWorkspaceProps) {
                 error={props.messagesError}
                 scrollToMessageId={props.scrollToMessageId}
                 onRetry={props.onRetryMessages}
-                onPickSuggestion={props.onPickSuggestion}
+                onStartCapability={(action) =>
+                  composerRef.current?.startCapability(action)
+                }
                 onPreviewGeneration={props.onPreviewGeneration}
                 onUseReference={props.onUseReference}
                 onContinue={props.onContinue}
@@ -153,6 +166,7 @@ export function DesktopAgent(props: AgentWorkspaceProps) {
               style={{ bottom: `${composerHeight + 36}px` }}
             />
             <AgentComposer
+              ref={composerRef}
               platform="desktop"
               {...composerProps(props)}
               onMetricsChange={setComposerHeight}
@@ -176,6 +190,9 @@ export function DesktopAgent(props: AgentWorkspaceProps) {
 function composerProps(props: AgentWorkspaceProps) {
   return {
     draft: props.draft,
+    imageGenerationAvailable: props.toolGatewayConfigured,
+    defaultModel: props.defaultModel,
+    modelOptions: props.modelOptions,
     submitting: props.submitting || props.creating,
     runActive: Boolean(props.activeRun),
     stopping: props.stopping,

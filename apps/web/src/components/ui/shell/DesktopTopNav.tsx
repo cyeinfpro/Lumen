@@ -1,7 +1,7 @@
 "use client";
 
 // 桌面端顶部主导航：复用在 DesktopStudio / DesktopStream / DesktopMe。
-// 四 Tab 横向导航 + 左侧 Logo + 可配置右侧 slot。
+// 四 Tab 横向导航 + 左侧 Logo + 固定的全局操作区。
 // 路由契约集中在 navigation.ts，桌面顶部与移动底栏共用同一套 IA。
 
 import { motion } from "framer-motion";
@@ -10,7 +10,6 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   useMemo,
-  type ReactNode,
   type Ref,
 } from "react";
 
@@ -32,7 +31,6 @@ export type DesktopNavTab = AppNavKey;
 
 export interface DesktopTopNavProps {
   active: DesktopNavTab;
-  right?: ReactNode;
   onToggleSidebar?: () => void;
   sidebarTriggerRef?: Ref<HTMLButtonElement>;
   sidebarExpanded?: boolean;
@@ -40,7 +38,6 @@ export interface DesktopTopNavProps {
 
 export function DesktopTopNav({
   active,
-  right,
   onToggleSidebar,
   sidebarTriggerRef,
   sidebarExpanded = false,
@@ -63,9 +60,9 @@ export function DesktopTopNav({
   return (
     <header
       className={[
-        "sticky top-0 z-[var(--z-header)] grid h-[var(--appbar-h)] w-full items-center gap-2 px-3 md:px-5",
+        "sticky top-0 z-[var(--z-header)] grid h-[var(--appbar-h)] w-full shrink-0 items-center gap-2 px-3 md:px-5",
         "grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]",
-        "border-b border-[var(--border-subtle)] bg-[var(--bg-0)]/96 backdrop-blur-lg",
+        "surface-glass-v2",
       ].join(" ")}
       style={{
         top: "var(--top-banner-stack-height, 0px)",
@@ -113,11 +110,11 @@ export function DesktopTopNav({
         </ul>
       </nav>
 
-      {/* Right: slot */}
-      <div className="flex min-w-0 max-w-full items-center justify-end gap-1.5 justify-self-end text-[var(--fg-2)]">
-        {right ? (
-          <div className="flex min-w-0 items-center gap-2">{right}</div>
-        ) : null}
+      {/* Right: global commands only. Page tools stay in each page header/toolbar. */}
+      <div
+        data-testid="desktop-global-actions"
+        className="flex min-w-0 max-w-full items-center justify-end gap-1.5 justify-self-end text-[var(--fg-2)]"
+      >
         <IconButton
           size="md"
           aria-label="打开命令面板"

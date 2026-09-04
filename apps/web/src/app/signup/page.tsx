@@ -25,6 +25,7 @@ import {
   signupByok,
   verifyApiKey,
 } from "@/lib/apiClient";
+import { Select } from "@/components/ui/primitives";
 import { isValidEmailInput, normalizeEmailInput } from "@/lib/email";
 
 // review §9: 8+ BYOK 错误码 → 中文文案。signup 与绑定页共用。
@@ -273,13 +274,14 @@ function ApiKeyVerificationSection({
       />
       <label className="auth-field">
         <span className="type-label">供应商</span>
-        <select
+        <Select
           id="signup-supplier"
           name="supplier"
           value={activeSupplierId}
           disabled={controlsDisabled}
           onChange={(event) => onSupplierChange(event.target.value)}
-          className="auth-control px-3"
+          className="auth-control"
+          wrapperClassName="w-full"
         >
           {suppliers.length === 0 ? (
             <option value="">暂无可用供应商</option>
@@ -290,7 +292,7 @@ function ApiKeyVerificationSection({
               </option>
             ))
           )}
-        </select>
+        </Select>
       </label>
       <label className="auth-field">
         <span className="type-label">API 密钥</span>

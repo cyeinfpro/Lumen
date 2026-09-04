@@ -70,10 +70,10 @@ function AgentUserTurn({ message }: { message: AgentUserMessage }) {
   return (
     <article
       id={`agent-message-${message.id}`}
-      className="mx-auto w-full max-w-[var(--content-composer)] py-4"
+      className="mx-auto flex w-full max-w-[var(--content-composer)] justify-end py-3"
       data-agent-message-id={message.id}
     >
-      <div className="border-l border-[var(--border-strong)] pl-4">
+      <div className="ml-auto min-w-0 max-w-[85%] rounded-[var(--radius-card)] border border-[var(--border-strong)] bg-[var(--surface-raised)]/60 p-4 shadow-[var(--shadow-1)]">
         {message.attachments.length > 0 ? (
           <div className="mb-2 flex flex-wrap gap-2">
             {message.attachments.map((attachment, index) => (
@@ -294,6 +294,8 @@ function toolCallsForTurn(
     status: tool.status ?? "queued",
     generation_ids: tool.generation_ids ?? [],
     generation_count: tool.generation_count ?? tool.generation_ids?.length ?? 0,
+    details: null,
+    duration_ms: null,
     error_code: tool.error_code ?? null,
     started_at: null,
     finished_at: null,

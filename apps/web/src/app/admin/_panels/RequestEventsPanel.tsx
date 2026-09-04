@@ -284,7 +284,7 @@ export function RequestEventsPanel() {
                             </span>
                             <StatusBadge status={event.status} />
                           </div>
-                          <p className="mt-1 font-mono type-caption text-[var(--fg-2)] tabular-nums">
+                          <p className="mt-1 type-caption text-[var(--fg-2)] tabular-nums">
                             结束 {formatDateTime(event.finished_at)}
                           </p>
                         </div>
@@ -430,7 +430,7 @@ function LiveLaneRow({ lane }: { lane: AdminRequestEventLiveLane }) {
       title={tip}
     >
       <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", dotClass)} />
-      <span className="shrink-0 type-caption uppercase tracking-wide text-[var(--fg-2)]">
+      <span className="shrink-0 type-overline text-[var(--fg-2)]">
         {labelText}
       </span>
       <span
@@ -525,7 +525,7 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
 
       {isActiveStatus(event.status) && liveLanes(event).length > 0 && (
         <div>
-          <div className="mb-2 flex items-center gap-2 type-caption uppercase tracking-wider text-[var(--fg-2)]">
+          <div className="mb-2 flex items-center gap-2 type-overline text-[var(--fg-2)]">
             <Activity className="w-3.5 h-3.5" />
             实时供应商（任务心跳）
           </div>
@@ -539,7 +539,7 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
 
       {event.prompt && (
         <div>
-          <div className="mb-1.5 type-caption uppercase tracking-wider text-[var(--fg-2)]">
+          <div className="mb-1.5 type-overline text-[var(--fg-2)]">
             提示词
           </div>
           <p className="max-h-32 overflow-auto whitespace-pre-wrap rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-2)] p-3 type-caption leading-relaxed text-[var(--fg-1)]">
@@ -561,7 +561,7 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
 
       {event.images.length > 0 && (
         <div>
-          <div className="mb-2 flex items-center gap-2 type-caption uppercase tracking-wider text-[var(--fg-2)]">
+          <div className="mb-2 flex items-center gap-2 type-overline text-[var(--fg-2)]">
             <ImageIcon className="w-3.5 h-3.5" />
             图片文件
           </div>
@@ -585,7 +585,7 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
                 />
                 <span className="absolute inset-x-0 bottom-0 flex min-w-0 items-center justify-between gap-2 bg-[var(--media-control-bg)] px-2 py-1.5 type-caption text-[var(--media-control-fg)] backdrop-blur-sm">
                   <span className="shrink-0">{imageRoleLabel(image)}</span>
-                  <span className="truncate font-mono text-[var(--media-control-fg)] opacity-75">
+                  <span className="truncate tabular-nums text-[var(--media-control-fg)] opacity-75">
                     {image.width > 0 && image.height > 0
                       ? `${image.width}x${image.height}`
                       : "尺寸未知"}
@@ -599,7 +599,7 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
 
       {upstreamEntries.length > 0 && (
         <div>
-          <div className="mb-2 type-caption uppercase tracking-wider text-[var(--fg-2)]">
+          <div className="mb-2 type-overline text-[var(--fg-2)]">
             上游参数
           </div>
           <div className="flex flex-wrap gap-2">
@@ -713,7 +713,7 @@ function Detail({
 }) {
   return (
     <div className="min-w-0">
-      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
+      <div className="type-overline text-[var(--fg-2)]">
         {label}
       </div>
       <div
@@ -732,7 +732,7 @@ function Detail({
 function MiniField({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-2 py-1.5">
-      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
+      <div className="type-overline text-[var(--fg-2)]">
         {label}
       </div>
       <div

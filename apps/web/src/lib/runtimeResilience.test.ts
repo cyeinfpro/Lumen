@@ -219,16 +219,36 @@ test("identity policy is explicit and global fetch is never patched", () => {
   match(posterUpload, /bindConfirmedIdentityXhr\(/);
 });
 
-test("runtime recovery login uses the shared safe replace navigation", () => {
+test("runtime recovery stays actionable without covering mobile controls", () => {
   const source = readFileSync(
     new URL("../components/RuntimeResilienceStatus.tsx", import.meta.url),
     "utf8",
   );
+  const mobileTopBar = readFileSync(
+    new URL("../components/ui/shell/MobileTopBar.tsx", import.meta.url),
+    "utf8",
+  );
+  const canvasTopBar = readFileSync(
+    new URL("../components/ui/canvas/CanvasTopBar.tsx", import.meta.url),
+    "utf8",
+  );
+  const videoControls = readFileSync(
+    new URL("../app/video/video-workbench-controls.tsx", import.meta.url),
+    "utf8",
+  );
+
   match(source, /replaceWithLogin\(\)/);
-  match(source, /top-\[calc\(var\(--mobile-topbar-h\)/);
-  match(source, /md:bottom-4 md:left-auto md:right-4 md:top-auto/);
-  match(source, /aria-label=\{unauthorized \? "登录" : "重新验证会话"\}/);
-  match(source, /className="pointer-events-none fixed/);
+  match(source, /data-runtime-resilience-status="desktop"/);
+  match(source, /fixed bottom-4 right-4/);
+  match(source, /hidden[^"]*md:block/);
+  doesNotMatch(source, /top-\[calc\(var\(--mobile-topbar-h\)/);
+  match(source, /export function MobileRuntimeResilienceStatus\(\)/);
+  match(source, /data-runtime-resilience-status="mobile"/);
+  match(source, /aria-live="assertive"/);
+  match(source, /aria-label=\{accessibleLabel\}/);
+  match(mobileTopBar, /<MobileRuntimeResilienceStatus \/>/);
+  match(canvasTopBar, /<MobileRuntimeResilienceStatus \/>/);
+  match(videoControls, /<MobileRuntimeResilienceStatus \/>/);
   match(
     source,
     /if \(!unauthorized && !sessionDegraded\) return null;/,
