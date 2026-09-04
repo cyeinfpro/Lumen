@@ -21,6 +21,7 @@ import { collectArchitectureFindings } from "../scripts/check-architecture.mjs";
 import { getGitChangeScope } from "../scripts/git-change-scope.mjs";
 import {
   auditHitAreaSource,
+  findCjkTypographyIssues,
   findMobileDialogIssues,
 } from "../scripts/jsx-quality-analysis.mjs";
 import { discoverTestFiles } from "../scripts/run-tests.mjs";
@@ -63,6 +64,29 @@ test("hit-area audit cannot be bypassed by imports, role=button, or dynamic clas
     findings.map(({ tag }) => tag),
     ["button", "div"],
   );
+});
+
+test("CJK typography audit catches mono, uppercase, and arbitrary tracking", () => {
+  const issues = findCjkTypographyIssues(
+    "fixture.tsx",
+    `
+      const dynamicLabel = "动态中文";
+      export function Fixture() {
+        return (
+          <>
+            <span className="font-mono">中文时间</span>
+            <span className="uppercase tracking-wider">{dynamicLabel}</span>
+            <span className="tracking-[0.16em]">中文标签</span>
+            <span className="font-mono tabular-nums">2026-08-20</span>
+          </>
+        );
+      }
+    `,
+  );
+
+  assert.equal(issues.length, 3);
+  assert.ok(issues.every((issue) => issue.rule === "cjk-typography"));
+  assert.match(issues[0].message, /normal-tracking sans typography/);
 });
 
 test("mobile dialog panels must pair with their own shell subtree", () => {

@@ -111,7 +111,7 @@ export function StreamErrorState({
         <StateFact label="建议" value="重试后再刷新页面" />
       </div>
       {detail.diagnostic ? (
-        <p className="mt-3 truncate rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/58 px-3 py-2 text-left font-mono type-caption text-[var(--fg-2)]">
+        <p className="mt-3 truncate rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/58 px-3 py-2 text-left type-caption text-[var(--fg-2)]">
           诊断信息：{detail.diagnostic}
         </p>
       ) : null}

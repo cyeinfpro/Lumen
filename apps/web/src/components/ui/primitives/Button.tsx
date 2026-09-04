@@ -28,11 +28,12 @@ const BASE =
 
 const VARIANTS: Record<Variant, string> = {
   primary:
-    "bg-[var(--accent)] text-[var(--accent-on)] hover:bg-[var(--accent-hover)] " +
-    "shadow-[var(--shadow-1)]",
+    "[background:var(--button-primary-bg)] text-[var(--accent-on)] font-medium " +
+    "shadow-[var(--shadow-1)] hover:shadow-[var(--shadow-amber)] hover:brightness-[1.03]",
   secondary:
-    "bg-[var(--bg-2)] text-[var(--fg-0)] hover:bg-[var(--bg-3)] " +
-    "border border-[var(--border)] hover:border-[var(--border-strong)]",
+    "[background:var(--button-secondary-bg)] text-[var(--fg-0)] " +
+    "hover:[background:var(--button-secondary-bg-hover)] border border-[var(--border)] " +
+    "hover:border-[var(--border-strong)]",
   ghost:
     "bg-transparent text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] " +
     "border border-transparent",
@@ -44,8 +45,9 @@ const VARIANTS: Record<Variant, string> = {
     "hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)]",
   // glass: 浮层透明按钮（用于图片卡片浮动操作、composer 附件操作等）。
   glass:
-    "bg-[var(--bg-0)]/70 backdrop-blur-md text-[var(--fg-0)] hover:bg-[var(--bg-1)]/85 " +
-    "border border-[var(--border-strong)] hover:border-[var(--border-strong)]",
+    "[background:var(--button-glass-bg)] backdrop-blur-md text-[var(--fg-0)] " +
+    "hover:[background:var(--button-glass-bg-hover)] border border-[var(--border-subtle)] " +
+    "hover:border-[var(--border)]",
   // link: 看起来像链接的按钮（替代裸 <a> 风格按钮）。
   // 走 LINK_SIZES 而非 SIZES，避免 twMerge 让 SIZES 的 h/p 覆盖 link 的 h-auto/p-0。
   link:
@@ -91,6 +93,7 @@ export function Button({
       type={type ?? "button"}
       disabled={isDisabled}
       aria-busy={loading || undefined}
+      data-lumen-button-variant={variant}
       data-lumen-interactive={isDisabled ? undefined : "soft"}
       className={cn(
         BASE,

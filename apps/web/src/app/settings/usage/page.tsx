@@ -292,7 +292,7 @@ function UsageView({ data }: { data: UsageOut }) {
           <div className="type-metric">
             {formatBytes(data.storage_bytes)}
           </div>
-          <div className="type-caption text-[var(--fg-2)] mt-0.5 font-mono tabular-nums">
+          <div className="type-caption text-[var(--fg-2)] mt-0.5 tabular-nums">
             {formatThousands(data.storage_bytes)} 字节
           </div>
         </SecondaryCard>

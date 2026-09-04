@@ -70,6 +70,7 @@ import {
 import type { VideoPageViewModel } from "./video-page-view";
 import {
   formatDurationLabel,
+  selectDirectorViewportVideo,
 } from "./video-task-model";
 
 export default function VideoPage() {
@@ -602,6 +603,7 @@ export default function VideoPage() {
     inputImageId,
     referenceMedia.length,
   );
+  const directorViewportItem = selectDirectorViewportVideo(effectiveItems);
   const modelOptionValues = availableModels.map((item) => item.model);
   const modelOptionLabels = Object.fromEntries(
     availableModels.map((item) => [item.model, videoModelLabel(item)]),
@@ -609,6 +611,11 @@ export default function VideoPage() {
   const durationOptionValues = availableDurations.map(String);
 
   const viewModel: VideoPageViewModel = {
+    viewport: {
+      item: directorViewportItem,
+      loading: historyQ.isLoading,
+      onPreview: previewTaskVideo,
+    },
     header: {
       action: effectiveAction,
       parameterProfile,

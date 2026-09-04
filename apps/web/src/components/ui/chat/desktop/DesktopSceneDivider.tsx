@@ -34,7 +34,7 @@ export function DesktopSceneDivider({
       <span
         aria-hidden="true"
         className={cn(
-          "type-mono-meta shrink-0 leading-none",
+          "type-caption shrink-0 leading-none",
           "text-[var(--fg-2)]",
         )}
       >

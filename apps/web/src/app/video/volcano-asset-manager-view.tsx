@@ -20,6 +20,7 @@ import {
   EmptyState,
   IconButton,
   Input,
+  Select,
 } from "@/components/ui/primitives";
 import type {
   VideoAssetCapabilitiesOut,
@@ -344,7 +345,7 @@ function AssetToolbar({ assets }: { assets: AssetPanelView }) {
               assets.onTypeFilterChange(value as AssetTypeFilter)
             }
           />
-          <select
+          <Select
             aria-label="筛选素材状态"
             value={assets.statusFilter}
             onChange={(event) =>
@@ -352,13 +353,14 @@ function AssetToolbar({ assets }: { assets: AssetPanelView }) {
                 event.target.value as AssetStatusFilter,
               )
             }
-            className="min-h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 type-body-sm text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] sm:min-h-9"
+            wrapperClassName="min-w-0 sm:w-36"
+            className="sm:h-9"
           >
             <option value="all">全部状态</option>
             <option value="Active">可用</option>
             <option value="Processing">处理中</option>
             <option value="Failed">失败</option>
-          </select>
+          </Select>
           <IconButton
             aria-label="刷新火山虚拟素材"
             tooltip="刷新"

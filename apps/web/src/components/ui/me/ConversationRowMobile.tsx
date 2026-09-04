@@ -85,7 +85,7 @@ function ConversationMeta({
       {meta ? <span className="truncate">{meta}</span> : null}
       {meta && timeIso ? <span aria-hidden>·</span> : null}
       {timeIso ? (
-        <span className="font-mono tracking-wider shrink-0">
+        <span className="shrink-0 tabular-nums">
           {relativeTime(timeIso)}
         </span>
       ) : null}

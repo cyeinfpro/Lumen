@@ -56,6 +56,7 @@ export function agentMessageBody(
     allow_image: draft.allowImage && toolGatewayConfigured,
     allow_web_search: draft.allowWebSearch,
     allow_file_tools: draft.allowFileTools,
+    ...(draft.model ? { model: draft.model } : {}),
     ...(draft.reasoningEffort && draft.reasoningEffort !== "auto"
       ? { reasoning_effort: draft.reasoningEffort }
       : {}),
@@ -68,6 +69,7 @@ function optimisticRun(
   assistantMessageId: string,
   idempotencyKey: string,
   reasoningEffort: AgentDraft["reasoningEffort"],
+  model: string | null,
 ): AgentRun {
   const now = new Date().toISOString();
   return {
@@ -81,7 +83,7 @@ function optimisticRun(
     output_revision: 0,
     output_runtime_seq: 0,
     idempotency_key: idempotencyKey,
-    model: null,
+    model,
     reasoning_effort:
       reasoningEffort && reasoningEffort !== "auto" ? reasoningEffort : null,
     memory_state: null,
@@ -199,6 +201,7 @@ export function stageOptimisticSubmission(input: {
     assistantMessageId,
     input.idempotencyKey,
     input.draft.reasoningEffort,
+    input.draft.model,
   );
   const [userMessage, assistantMessage] = optimisticMessages(
     input.draft,

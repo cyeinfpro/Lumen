@@ -55,7 +55,7 @@ export function NewSupplierSection({
   return (
     <section className="surface-card space-y-4 p-5">
       <header className="flex items-center justify-between gap-3 flex-wrap">
-        <div className="flex items-center gap-2 type-caption uppercase tracking-wider text-[var(--fg-2)]">
+        <div className="flex items-center gap-2 type-overline text-[var(--fg-2)]">
           <Plus className="w-3.5 h-3.5" />
           新供应商
         </div>
@@ -147,7 +147,7 @@ export function ByokSupplierList({
   return (
     <section className="space-y-3">
       <header className="flex items-center justify-between gap-3 px-1">
-        <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
+        <div className="type-overline text-[var(--fg-2)]">
           已有供应商 · {suppliers.length}
         </div>
       </header>
@@ -470,7 +470,7 @@ function PurposesField({
 }) {
   return (
     <div className="flex flex-col gap-1">
-      <span className="type-caption uppercase tracking-wider text-[var(--fg-1)]">
+      <span className="type-overline text-[var(--fg-1)]">
         用途
       </span>
       <div className="flex gap-2 flex-wrap">

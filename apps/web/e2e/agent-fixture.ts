@@ -22,6 +22,8 @@ export interface AgentFixtureOptions {
   omitSessionFromList?: boolean;
   sessionCount?: number;
   generationCount?: number;
+  canvasEnabled?: boolean;
+  toolGatewayConfigured?: boolean;
 }
 
 function imageDefaults() {
@@ -254,6 +256,7 @@ export async function installAgentFixture(
   let cancelCalls = 0;
   let snapshotCalls = 0;
   let continuationCalls = 0;
+  let branchCalls = 0;
   let lastContinuationBody: Record<string, unknown> | null = null;
 
   if (mode === "active-image" || mode === "cancel") {
@@ -297,6 +300,7 @@ export async function installAgentFixture(
       value: encodeURIComponent(
         JSON.stringify({
           agent_enabled: true,
+          canvas_enabled: options.canvasEnabled ?? false,
           nav_visibility: {
             studio: true,
             agent: true,
@@ -342,7 +346,7 @@ export async function installAgentFixture(
         account_mode: "wallet",
         runtime_defaults: {
           fast: true,
-          canvas_enabled: false,
+          canvas_enabled: options.canvasEnabled ?? false,
           agent_enabled: true,
           nav_visibility: {
             studio: true,
@@ -355,6 +359,37 @@ export async function installAgentFixture(
       });
     }
     if (path === "/api/auth/csrf") return json(route, { csrf_token: "fixture-csrf" });
+    if (path === "/api/me/pricing") {
+      return json(route, {
+        billing_enabled: true,
+        show_estimate_in_composer: true,
+        image_size_thresholds: {
+          "1k": 1,
+          "2k": 2_000_000,
+          "4k": 6_000_000,
+        },
+        items: [
+          {
+            scope: "image_size",
+            key: "1k",
+            unit: "per_image",
+            price: { micro: 100_000, rmb: "0.10" },
+          },
+          {
+            scope: "image_size",
+            key: "2k",
+            unit: "per_image",
+            price: { micro: 200_000, rmb: "0.20" },
+          },
+          {
+            scope: "image_size",
+            key: "4k",
+            unit: "per_image",
+            price: { micro: 400_000, rmb: "0.40" },
+          },
+        ],
+      });
+    }
     if (path === "/api/conversations" && method === "GET") {
       return json(route, { items: [studioConversation()], next_cursor: null });
     }
@@ -374,7 +409,23 @@ export async function installAgentFixture(
       });
     }
     if (path === "/api/agent/status") {
-      return json(route, { enabled: true, tool_gateway_configured: true });
+      return json(route, {
+        enabled: true,
+        tool_gateway_configured: options.toolGatewayConfigured ?? true,
+        default_model: "fixture-model",
+        models: [
+          {
+            model: "fixture-model",
+            vision_supported: true,
+            reasoning_supported: true,
+          },
+          {
+            model: "fixture-fast-model",
+            vision_supported: false,
+            reasoning_supported: false,
+          },
+        ],
+      });
     }
     if (path === "/api/system-prompts") return json(route, { items: [], default_id: null });
     if (path === "/api/generations/feed") {
@@ -408,6 +459,16 @@ export async function installAgentFixture(
           sessionId,
         ),
       );
+    }
+    const branchMatch = path.match(
+      /^\/api\/agent\/sessions\/(session-\d+)\/branch$/u,
+    );
+    if (branchMatch && method === "POST") {
+      branchCalls += 1;
+      return json(route, {
+        ...session(null, false, "session-2"),
+        title: "产品视觉 分支",
+      });
     }
     if (sessionMatch && method === "PATCH") {
       const sessionId = sessionMatch[1];
@@ -523,6 +584,9 @@ export async function installAgentFixture(
     },
     get continuationCalls() {
       return continuationCalls;
+    },
+    get branchCalls() {
+      return branchCalls;
     },
     get lastContinuationBody() {
       return lastContinuationBody;

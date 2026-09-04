@@ -1,14 +1,14 @@
 "use client";
 
-import { AnimatePresence, motion } from "framer-motion";
 import { ImagePlus, X } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 
+import { Dialog, IconButton } from "@/components/ui/primitives";
 import { Button } from "@/components/ui/primitives/Button";
 import { Select } from "@/components/ui/primitives/Select";
 import { Switch } from "@/components/ui/primitives/Switch";
 import { toast } from "@/components/ui/primitives/Toast";
-import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
+import { BottomSheet } from "@/components/ui/primitives/mobile";
 import {
   MODEL_LIBRARY_APPEARANCE_LABEL,
   MODEL_LIBRARY_APPEARANCE_SELECT_OPTIONS,
@@ -80,6 +80,8 @@ export function ModelLibraryBrowserOverlays({
   defaultAgeSegment,
   mobileFilterOpen,
   source,
+  styleTag,
+  styleTagOptions,
   uploadOpen,
   onAgeChange,
   onAppearanceChange,
@@ -87,12 +89,15 @@ export function ModelLibraryBrowserOverlays({
   onCloseUpload,
   onCreated,
   onSourceChange,
+  onStyleTagChange,
 }: {
   ageSegment: ModelLibraryAgeSegment;
   appearance: ModelLibraryAppearance;
   defaultAgeSegment: ModelLibraryAgeSegment;
   mobileFilterOpen: boolean;
   source: BrowserSource;
+  styleTag: string;
+  styleTagOptions: string[];
   uploadOpen: boolean;
   onAgeChange: (value: ModelLibraryAgeSegment) => void;
   onAppearanceChange: (value: ModelLibraryAppearance) => void;
@@ -100,34 +105,32 @@ export function ModelLibraryBrowserOverlays({
   onCloseUpload: () => void;
   onCreated: (id: string) => void;
   onSourceChange: (value: BrowserSource) => void;
+  onStyleTagChange: (value: string) => void;
 }) {
   return (
     <>
-      <AnimatePresence>
-        {uploadOpen ? (
-          <UploadDialog
-            key="upload-dialog"
-            defaultAgeSegment={defaultAgeSegment}
-            onClose={onCloseUpload}
-            onCreated={onCreated}
-          />
-        ) : null}
-      </AnimatePresence>
+      {uploadOpen ? (
+        <UploadDialog
+          defaultAgeSegment={defaultAgeSegment}
+          onClose={onCloseUpload}
+          onCreated={onCreated}
+        />
+      ) : null}
 
-      <AnimatePresence>
-        {mobileFilterOpen ? (
-          <MobileFilterSheet
-            key="mobile-filter"
-            ageSegment={ageSegment}
-            appearance={appearance}
-            source={source}
-            onAgeChange={onAgeChange}
-            onAppearanceChange={onAppearanceChange}
-            onSourceChange={onSourceChange}
-            onClose={onCloseMobileFilter}
-          />
-        ) : null}
-      </AnimatePresence>
+      {mobileFilterOpen ? (
+        <MobileFilterSheet
+          ageSegment={ageSegment}
+          appearance={appearance}
+          source={source}
+          styleTag={styleTag}
+          styleTagOptions={styleTagOptions}
+          onAgeChange={onAgeChange}
+          onAppearanceChange={onAppearanceChange}
+          onSourceChange={onSourceChange}
+          onStyleTagChange={onStyleTagChange}
+          onClose={onCloseMobileFilter}
+        />
+      ) : null}
     </>
   );
 }
@@ -151,6 +154,7 @@ function UploadDialog({
   });
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [manualTags, setManualTags] = useState(false);
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const uploadImage = useUploadImageMutation();
@@ -165,17 +169,6 @@ function UploadDialog({
         description: err instanceof Error ? err.message : "稍后重试",
       }),
   });
-
-  useBodyScrollLock(true);
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
 
   const submit = async () => {
     if (!uploadFile) {
@@ -213,42 +206,34 @@ function UploadDialog({
   const submitting = uploadImage.isPending || createItem.isPending;
 
   return (
-    <div
-      className="mobile-dialog-shell mobile-perf-surface fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-[var(--surface-scrim)] md:items-center md:p-5"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
+    <Dialog
+      open
+      onClose={onClose}
+      initialFocusRef={nameInputRef}
+      aria-label="上传到模特库"
+      className="flex max-h-[92dvh] max-w-2xl flex-col"
     >
-      <motion.div
-        role="dialog"
-        aria-modal="true"
-        aria-label="上传到模特库"
-        initial={{ opacity: 0, y: 24, scale: 0.98 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        exit={{ opacity: 0, y: 16, scale: 0.98 }}
-        transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-        className="mobile-dialog-panel flex w-full flex-col overflow-hidden border border-[var(--border)] bg-[var(--bg-0)] md:max-h-[92dvh] md:max-w-2xl"
-      >
-        <header className="flex items-start justify-between gap-3 border-b border-[var(--border)] px-5 pb-4 pt-5">
+        <Dialog.Header className="flex items-start justify-between gap-3 px-5 pb-4 pt-5">
           <div>
             <p className="type-page-kicker">上传到模特库</p>
             <h3 className="type-page-title mt-2 ">
               上传到模特库
             </h3>
           </div>
-          <button
+          <IconButton
             type="button"
             onClick={onClose}
             aria-label="关闭"
-            className="inline-flex h-11 w-11 cursor-pointer items-center justify-center text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)] md:h-9 md:w-9"
+            tooltip="关闭"
           >
             <X className="h-4 w-4" />
-          </button>
-        </header>
+          </IconButton>
+        </Dialog.Header>
 
-        <div className="mobile-dialog-scroll grid min-h-0 flex-1 gap-5 overflow-y-auto overscroll-contain px-5 py-5 md:grid-cols-2">
+        <Dialog.Body className="grid min-h-0 flex-1 gap-5 overflow-y-auto overscroll-contain px-5 py-5 md:grid-cols-2">
           <UnderlineLabeled label="名称" wrapperClass="md:col-span-2">
             <input
+              ref={nameInputRef}
               value={form.title}
               onChange={(event) =>
                 setForm((prev) => ({ ...prev, title: event.target.value }))
@@ -309,7 +294,11 @@ function UploadDialog({
             label="外貌方向（可选）"
             wrapperClass="md:col-span-2"
           >
-            <div className="flex flex-wrap gap-x-4 gap-y-1 pt-1">
+            <div
+              className="flex flex-wrap gap-x-4 gap-y-1 pt-1"
+              role="group"
+              aria-label="上传模特外貌方向"
+            >
               <Chip
                 active={form.appearance_direction === ""}
                 onClick={() =>
@@ -388,9 +377,9 @@ function UploadDialog({
               </span>
             </button>
           </div>
-        </div>
+        </Dialog.Body>
 
-        <footer className="mobile-dialog-footer grid shrink-0 grid-cols-2 gap-2 border-t border-[var(--border)] px-5 py-4 md:flex md:items-center md:justify-end">
+        <Dialog.Footer className="grid shrink-0 grid-cols-2 gap-2 px-5 py-4 md:flex md:items-center md:justify-end">
           <Button
             variant="outline"
             onClick={onClose}
@@ -407,9 +396,8 @@ function UploadDialog({
           >
             加入
           </Button>
-        </footer>
-      </motion.div>
-    </div>
+        </Dialog.Footer>
+    </Dialog>
   );
 }
 
@@ -436,67 +424,56 @@ function MobileFilterSheet({
   ageSegment,
   appearance,
   source,
+  styleTag,
+  styleTagOptions,
   onAgeChange,
   onAppearanceChange,
   onSourceChange,
+  onStyleTagChange,
   onClose,
 }: {
   ageSegment: ModelLibraryAgeSegment;
   appearance: ModelLibraryAppearance;
   source: BrowserSource;
+  styleTag: string;
+  styleTagOptions: string[];
   onAgeChange: (value: ModelLibraryAgeSegment) => void;
   onAppearanceChange: (value: ModelLibraryAppearance) => void;
   onSourceChange: (value: BrowserSource) => void;
+  onStyleTagChange: (value: string) => void;
   onClose: () => void;
 }) {
-  useBodyScrollLock(true);
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
-
   return (
-    <div
-      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end bg-[var(--surface-scrim)] md:hidden"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
+    <BottomSheet
+      open
+      onClose={onClose}
+      ariaLabel="筛选"
+      snapPoints={["88%"]}
+      className="md:hidden"
     >
-      <motion.div
-        role="dialog"
-        aria-modal="true"
-        aria-label="筛选"
-        initial={{ y: "100%" }}
-        animate={{ y: 0 }}
-        exit={{ y: "100%" }}
-        transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-        className="mobile-dialog-sheet flex w-full flex-col overflow-hidden border-t border-[var(--border)] bg-[var(--bg-0)]"
-      >
         <header className="flex items-start justify-between gap-2 border-b border-[var(--border)] px-5 pb-4 pt-5">
           <div>
             <p className="type-page-kicker">筛选</p>
             <h3 className="type-page-title-sm mt-2">筛选</h3>
           </div>
-          <button
+          <IconButton
             type="button"
             onClick={onClose}
             aria-label="关闭"
-            className="inline-flex h-11 w-11 cursor-pointer items-center justify-center text-[var(--fg-2)] hover:text-[var(--fg-0)]"
           >
             <X className="h-4 w-4" />
-          </button>
+          </IconButton>
         </header>
         <div className="mobile-dialog-scroll flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto overscroll-contain px-5 py-5">
           <div className="grid gap-2">
             <p className="type-caption text-[var(--fg-2)]">
               年龄段
             </p>
-            <div className="flex flex-wrap gap-x-4 gap-y-1">
+            <div
+              className="flex flex-wrap gap-x-4 gap-y-1"
+              role="group"
+              aria-label="年龄段"
+            >
               {AGE_TABS.map(([value, label]) => (
                 <Chip
                   key={value}
@@ -512,7 +489,11 @@ function MobileFilterSheet({
             <p className="type-caption text-[var(--fg-2)]">
               外貌方向
             </p>
-            <div className="flex flex-wrap gap-x-4 gap-y-1">
+            <div
+              className="flex flex-wrap gap-x-4 gap-y-1"
+              role="group"
+              aria-label="外貌方向"
+            >
               {APPEARANCE_TABS.map(([value, label]) => (
                 <Chip
                   key={value}
@@ -526,9 +507,39 @@ function MobileFilterSheet({
           </div>
           <div className="grid gap-2">
             <p className="type-caption text-[var(--fg-2)]">
+              气质方向
+            </p>
+            <div
+              className="flex flex-wrap gap-x-4 gap-y-1"
+              role="group"
+              aria-label="气质方向"
+            >
+              <Chip
+                active={!styleTag}
+                onClick={() => onStyleTagChange("")}
+              >
+                全部
+              </Chip>
+              {styleTagOptions.map((tag) => (
+                <Chip
+                  key={tag}
+                  active={styleTag === tag}
+                  onClick={() => onStyleTagChange(tag)}
+                >
+                  {tag}
+                </Chip>
+              ))}
+            </div>
+          </div>
+          <div className="grid gap-2">
+            <p className="type-caption text-[var(--fg-2)]">
               来源
             </p>
-            <div className="flex flex-wrap gap-x-4 gap-y-1">
+            <div
+              className="flex flex-wrap gap-x-4 gap-y-1"
+              role="group"
+              aria-label="来源"
+            >
               {SOURCE_FILTERS.map(([value, label]) => (
                 <Chip
                   key={value}
@@ -547,6 +558,7 @@ function MobileFilterSheet({
             onClick={() => {
               onAgeChange("all");
               onAppearanceChange("all");
+              onStyleTagChange("");
               onSourceChange("all");
             }}
             className="w-full md:w-auto"
@@ -561,8 +573,7 @@ function MobileFilterSheet({
             完成
           </Button>
         </footer>
-      </motion.div>
-    </div>
+    </BottomSheet>
   );
 }
 

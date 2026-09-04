@@ -36,6 +36,7 @@ from app.workflows.application import (
 )
 from app.workflows.application.runtime_state import WorkflowRuntimeState
 from app.workflows.adapters.operations import (
+    apparel as apparel_operation,
     model_library,
     poster,
     projects as project,
@@ -66,6 +67,7 @@ from lumen_core.schemas import (
     ApparelModelLibraryGenerateIn,
     ApparelModelLibraryJobOut,
     ApparelModelLibraryJobsOut,
+    ApparelModelLibrarySelectIn,
     ImageOut,
     ModelCandidatesCreateIn,
     PosterMasterApproveIn,
@@ -178,10 +180,8 @@ def test_paid_workflow_marker_and_task_metadata_do_not_store_raw_client_key() ->
             db,
             run,
         )
-        task_metadata = (
-            paid_idempotency_adapter.current_paid_operation_task_metadata(  # type: ignore[arg-type]
-                db
-            )
+        task_metadata = paid_idempotency_adapter.current_paid_operation_task_metadata(  # type: ignore[arg-type]
+            db
         )
     finally:
         port.clear(request)
@@ -3338,6 +3338,92 @@ async def test_sync_showcase_canceled_generation_marks_terminal_failure() -> Non
     assert "failed_generation_ids" not in showcase_step.output_json
     assert showcase_step.output_json["error_message"] == "展示图生成失败或取消"
     assert run.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_library_selection_stops_at_candidate_review_without_starting_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = SimpleNamespace(
+        id="run-1",
+        user_id="user-1",
+        user_prompt="clean studio",
+        current_step="model_settings",
+        status="needs_review",
+    )
+    steps = {
+        "product_analysis": SimpleNamespace(status="approved", output_json={}),
+        "model_settings": SimpleNamespace(
+            status="needs_review",
+            input_json={},
+            output_json={},
+            approved_at=None,
+            approved_by=None,
+        ),
+        "model_candidates": SimpleNamespace(
+            status="waiting_input",
+            input_json={},
+            output_json={},
+            image_ids=[],
+        ),
+        "model_approval": SimpleNamespace(
+            status="waiting_input",
+            input_json={},
+        ),
+    }
+    image = SimpleNamespace(id="model-image-1")
+
+    async def fake_get_run(*_args: Any, **_kwargs: Any) -> Any:
+        return run
+
+    async def fake_sync(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def fake_step(_db: Any, _run_id: str, step_key: str) -> Any:
+        return steps[step_key]
+
+    async def fake_find(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "id": "preset:model-1",
+            "source": "preset",
+            "title": "商拍模特",
+            "age_segment": "young_adult",
+            "gender": "female",
+            "style_tags": ["清冷高级"],
+        }
+
+    async def fake_materialize(*_args: Any, **_kwargs: Any) -> Any:
+        return image
+
+    async def fake_build(_db: Any, current_run: Any) -> Any:
+        return current_run
+
+    monkeypatch.setattr(apparel_operation, "_get_run", fake_get_run)
+    monkeypatch.setattr(apparel_operation, "_sync_workflow_outputs", fake_sync)
+    monkeypatch.setattr(apparel_operation, "_step", fake_step)
+    monkeypatch.setattr(apparel_operation, "_find_library_item", fake_find)
+    monkeypatch.setattr(
+        apparel_operation,
+        "_create_user_image_from_preset",
+        fake_materialize,
+    )
+    monkeypatch.setattr(apparel_operation, "_build_run_out", fake_build)
+    db = _Db([], responses=[[]])
+
+    out = await apparel_operation.select_apparel_model_library_item(
+        "run-1",
+        ApparelModelLibrarySelectIn(library_item_id="preset:model-1"),
+        SimpleNamespace(id="user-1"),
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out.current_step == "model_candidates"
+    assert out.status == "needs_review"
+    assert steps["model_candidates"].status == "needs_review"
+    assert steps["model_approval"].status == "needs_review"
+    assert len(db.added) == 1
+    assert db.added[0].model_brief_json["library_item_id"] == "preset:model-1"
+    assert db.committed is True
 
 
 @pytest.mark.asyncio

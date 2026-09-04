@@ -12,7 +12,7 @@ import {
 import { useReducedMotion } from "framer-motion";
 import { useRouter, useSearchParams } from "next/navigation";
 import { usePathname } from "next/navigation";
-import { ArrowUp, Filter, Loader2, RefreshCw, Search } from "lucide-react";
+import { ArrowUp, Loader2 } from "lucide-react";
 
 import { DesktopTopNav } from "@/components/ui/shell";
 import { IconButton } from "@/components/ui/primitives";
@@ -20,6 +20,7 @@ import {
   flattenFeed,
   feedTotal,
   useDebouncedStreamSearch,
+  useDeleteStreamImageMutation,
   useStreamFeedQuery,
   type StreamFeedFilters,
 } from "../api/queries";
@@ -55,81 +56,6 @@ function filtersToQueryString(f: StreamFeedFilters): string {
 
 function hasAnyFilter(f: StreamFeedFilters): boolean {
   return Boolean(f.ratio || f.has_ref);
-}
-
-function shouldShowOverview(
-  isLoading: boolean,
-  hasError: boolean,
-  itemCount: number,
-  hasFilters: boolean,
-  query: string,
-): boolean {
-  return !isLoading && !hasError && (itemCount > 0 || hasFilters || Boolean(query.trim()));
-}
-
-interface ToolbarProps {
-  total: number;
-  searchActive: boolean;
-  filterActive: boolean;
-  onToggleSearch: () => void;
-  onToggleFilter: () => void;
-  onRefresh: () => void;
-  refreshing: boolean;
-}
-
-function StreamToolbar({
-  total,
-  searchActive,
-  filterActive,
-  onToggleSearch,
-  onToggleFilter,
-  onRefresh,
-  refreshing,
-}: ToolbarProps) {
-  return (
-    <div className="flex items-center gap-2">
-      <span className="mr-1 type-caption tabular-nums">
-        {total} 张
-      </span>
-      <IconButton
-        size="md"
-        aria-label="搜索"
-        aria-pressed={searchActive}
-        onClick={onToggleSearch}
-        className={cn(
-          "rounded-full",
-          searchActive
-            ? "bg-[var(--bg-3)] text-[var(--fg-0)]"
-            : "bg-[var(--bg-2)]",
-        )}
-      >
-        <Search className="w-4 h-4" />
-      </IconButton>
-      <IconButton
-        size="md"
-        aria-label="筛选"
-        aria-pressed={filterActive}
-        onClick={onToggleFilter}
-        className={cn(
-          "rounded-full",
-          filterActive
-            ? "bg-[var(--bg-3)] text-[var(--fg-0)]"
-            : "bg-[var(--bg-2)]",
-        )}
-      >
-        <Filter className="w-4 h-4" />
-      </IconButton>
-      <IconButton
-        size="md"
-        aria-label="刷新"
-        onClick={onRefresh}
-        disabled={refreshing}
-        className="rounded-full bg-[var(--bg-2)]"
-      >
-        <RefreshCw className={cn("w-4 h-4", refreshing && "animate-spin")} />
-      </IconButton>
-    </div>
-  );
 }
 
 function preferredScrollBehavior(reduceMotion: boolean | null): ScrollBehavior {
@@ -222,6 +148,7 @@ export function DesktopStream() {
   }, [applyFilters]);
 
   const query = useStreamFeedQuery(filters);
+  const { mutateAsync: deleteStreamImage } = useDeleteStreamImageMutation();
   const hasNextPage = query.hasNextPage;
   const isFetchingNextPage = query.isFetchingNextPage;
   const fetchNextPage = query.fetchNextPage;
@@ -355,14 +282,6 @@ export function DesktopStream() {
     !isLoading && items.length > 0 && filteredItems.length === 0;
   const hasStructuredFilters = hasAnyFilter(filters);
   const hasActiveControls = hasStructuredFilters || Boolean(q.trim());
-  const showOverview = shouldShowOverview(
-    isLoading,
-    query.isError,
-    items.length,
-    hasActiveControls,
-    q,
-  );
-
   const onToggleSearch = useCallback(() => {
     setSearchOpen((v) => {
       const next = !v;
@@ -388,20 +307,7 @@ export function DesktopStream() {
 
   return (
     <div className="page-shell relative h-[100dvh] min-h-0 overflow-hidden">
-      <DesktopTopNav
-        active="assets"
-        right={
-          <StreamToolbar
-            total={total}
-            searchActive={searchOpen}
-            filterActive={filterOpen || hasStructuredFilters}
-            onToggleSearch={onToggleSearch}
-            onToggleFilter={onToggleFilter}
-            onRefresh={onRefresh}
-            refreshing={query.isRefetching}
-          />
-        }
-      />
+      <DesktopTopNav active="assets" />
 
       <main
         ref={scrollRef}
@@ -417,44 +323,47 @@ export function DesktopStream() {
               </p>
             </div>
           </header>
-          <StreamSearchBar
-            open={searchOpen}
-            value={q}
-            onChange={setQ}
-            resultCount={filteredItems.length}
-            loadedCount={items.length}
-            onClose={() => {
-              setSearchOpen(false);
-              setQ("");
-            }}
-          />
-          <FilterBar
-            open={filterOpen || hasStructuredFilters}
-            filters={filters}
-            onChange={(next) => applyFilters(next)}
-            onClear={clearFilters}
-          />
 
-          {showOverview && (
-              <StreamOverview
-                total={total}
-                loaded={items.length}
-                visible={filteredItems.length}
-                promptCount={promptCount}
-                filters={filters}
-                searchValue={deferredQ}
-                refreshing={query.isRefetching}
-                onRefresh={onRefresh}
-                onClearFilters={clearAllControls}
-                onToggleReferenceFilter={onToggleReferenceFilter}
-                selectionMode={selectionActive}
-                selectedCount={selectedImageIds.length}
-                sharingSelected={createMultiShareMutation.isPending}
-                onToggleSelectionMode={toggleSelectionMode}
-                onClearSelection={clearSelection}
-                onShareSelected={shareSelectedImages}
-              />
-            )}
+          <StreamOverview
+            total={total}
+            loaded={items.length}
+            visible={filteredItems.length}
+            promptCount={promptCount}
+            filters={filters}
+            searchValue={deferredQ}
+            refreshing={query.isRefetching}
+            searchActive={searchOpen}
+            filterActive={filterOpen || hasStructuredFilters}
+            onToggleSearch={onToggleSearch}
+            onToggleFilter={onToggleFilter}
+            onRefresh={onRefresh}
+            onClearFilters={clearAllControls}
+            onToggleReferenceFilter={onToggleReferenceFilter}
+            selectionMode={selectionActive}
+            selectedCount={selectedImageIds.length}
+            sharingSelected={createMultiShareMutation.isPending}
+            onToggleSelectionMode={toggleSelectionMode}
+            onClearSelection={clearSelection}
+            onShareSelected={shareSelectedImages}
+          >
+            <StreamSearchBar
+              open={searchOpen}
+              value={q}
+              onChange={setQ}
+              resultCount={filteredItems.length}
+              loadedCount={items.length}
+              onClose={() => {
+                setSearchOpen(false);
+                setQ("");
+              }}
+            />
+            <FilterBar
+              open={filterOpen || hasStructuredFilters}
+              filters={filters}
+              onChange={(next) => applyFilters(next)}
+              onClear={clearFilters}
+            />
+          </StreamOverview>
 
           <StreamFeedState
             hasError={query.isError}
@@ -477,6 +386,7 @@ export function DesktopStream() {
               selectionMode={selectionActive}
               selectedIds={selectedIds}
               onToggleSelect={toggleSelectedImage}
+              onDeleteImage={deleteStreamImage}
               highlightId={highlightId}
             />
           </StreamFeedState>

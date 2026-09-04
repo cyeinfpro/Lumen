@@ -29,6 +29,8 @@ const mobileStreamSource = source(
 const settingsShellSource = source("./SettingsShell.tsx");
 const mobileDrawerSource = source("./MobileConversationDrawer.tsx");
 const sidebarSource = source("../Sidebar.tsx");
+const conversationItemSource = source("../sidebar/ConversationItem.tsx");
+const projectTopBarSource = source("../projects/components/ProjectTopBar.tsx");
 const mobileCanvasSource = source("../chat/mobile/MobileConversationCanvas.tsx");
 const generationTileSource = source(
   "../../../features/assets/ui/AssetTile.tsx",
@@ -198,15 +200,35 @@ test("conversation selection updates the URL without resetting or refreshing the
   doesNotMatch(conversationListSource, /loadHistoricalMessages/);
 });
 
-test("desktop primary navigation is viewport-centered and uses links", () => {
+test("desktop primary navigation is centered and reserves global actions", () => {
   match(
     desktopNavSource,
     /grid-cols-\[minmax\(0,1fr\)_auto_minmax\(0,1fr\)\]/,
   );
+  match(desktopNavSource, /h-\[var\(--appbar-h\)\][^"\n]*shrink-0/);
   match(desktopNavSource, /data-testid="desktop-primary-nav"/);
+  match(desktopNavSource, /data-testid="desktop-global-actions"/);
+  match(desktopNavSource, /surface-glass-v2/);
   match(desktopNavSource, /<Link[\s\S]*href=\{tab\.route\}/);
+  doesNotMatch(desktopNavSource, /\bright\??:\s*ReactNode|\{right\s*\?/);
+  match(projectTopBarSource, /@deprecated Move new page actions into the page header/);
+  match(projectTopBarSource, /data-project-page-toolbar/);
+  match(projectTopBarSource, /className="toolbar-shell[^\"]*justify-end/);
+  doesNotMatch(projectTopBarSource, /DesktopTopNav[^>]*right=/);
   doesNotMatch(desktopNavSource, /MoreNavigationMenu|compactOverflowItems/);
   doesNotMatch(desktopNavSource, /router\.push|justify-center overflow-hidden/);
+
+  const commandPalette = desktopNavSource.indexOf('aria-label="打开命令面板"');
+  const taskIsland = desktopNavSource.indexOf("<TaskIsland compact />");
+  const accountMenu = desktopNavSource.indexOf("<DesktopAccountMenu />");
+  ok(commandPalette >= 0);
+  ok(commandPalette < taskIsland);
+  ok(taskIsland < accountMenu);
+
+  match(sidebarSource, /variant="secondary"/);
+  doesNotMatch(sidebarSource, /hover:border-\[var\(--border-amber\)\]/);
+  match(conversationItemSource, /before:inset-y-2 before:left-0 before:w-\[3px\]/);
+  doesNotMatch(conversationItemSource, /border-l-\[3px\]/);
 });
 
 test("desktop drawer traps focus and restores the trigger", () => {
@@ -400,6 +422,60 @@ test("global focus and light text contracts remain accessible", () => {
       cssHex(lightTheme, "--surface-overlay"),
     ) >= 4.5,
   );
+});
+
+test("V2 surfaces stay semantic across explicit and system themes", () => {
+  const card = cssBlock("  .surface-card-v2 {");
+  const glass = cssBlock("  .surface-glass-v2 {");
+
+  match(card, /var\(--border-subtle\)/);
+  match(card, /var\(--bg-1\)/);
+  match(card, /var\(--fg-0\)/);
+  match(card, /var\(--shadow-1\)/);
+  doesNotMatch(card, /#[0-9a-f]{3,8}|rgba?\(/i);
+  doesNotMatch(card, /transition:\s*all/);
+
+  match(glass, /var\(--surface-glass\)/);
+  match(glass, /var\(--border-subtle\)/);
+  doesNotMatch(glass, /#[0-9a-f]{3,8}|rgba?\(/i);
+  match(cssBlock("  .dark {"), /--surface-glass:/);
+  match(cssBlock("  .theme-light {"), /--surface-glass:/);
+  match(
+    globalsSource,
+    /@media \(prefers-color-scheme: light\) \{[\s\S]*?:root:not\(\.theme-dark\):not\(\.dark\)[\s\S]*?--surface-glass:/,
+  );
+  match(
+    globalsSource,
+    /--button-secondary-bg:\s*color-mix\(in srgb, var\(--fg-0\)/,
+  );
+  doesNotMatch(globalsSource, /\.theme-light \.surface-(?:card|glass)-v2/);
+  doesNotMatch(globalsSource, /data-theme="light"[^\n]*surface-(?:card|glass)-v2/);
+  match(
+    globalsSource,
+    /@media \(hover: hover\) and \(pointer: fine\) \{[\s\S]*?\.surface-card-v2:hover/,
+  );
+  match(
+    globalsSource,
+    /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.surface-card-v2/,
+  );
+  match(
+    globalsSource,
+    /@media \(prefers-reduced-transparency: reduce\)[\s\S]*?\.surface-glass-v2/,
+  );
+});
+
+test("shared CJK label types avoid mono, uppercase, and tracking", () => {
+  for (const selector of ["  .type-page-kicker {", "  .type-overline {"]) {
+    const block = cssBlock(selector);
+    match(block, /font-family:\s*var\(--font-body\)/);
+    match(block, /letter-spacing:\s*0/);
+    match(block, /text-transform:\s*none/);
+    doesNotMatch(block, /var\(--font-mono\)|uppercase/);
+  }
+
+  const monoMeta = cssBlock("  .type-mono-meta {");
+  match(monoMeta, /var\(--font-mono\)/);
+  match(monoMeta, /var\(--text-mono-meta\)/);
 });
 
 test("shared fields merge caller descriptions with error and hint ids", () => {

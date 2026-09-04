@@ -129,7 +129,7 @@ function NodeInputOverview({ data }: { data: CanvasFlowNodeData }) {
         <span className="type-caption font-medium text-[var(--fg-1)]">
           输入状态
         </span>
-        <span className="type-mono-meta text-[var(--fg-3)]">等待运行</span>
+        <span className="type-caption text-[var(--fg-3)]">等待运行</span>
       </div>
       <div className="grid gap-1.5">
         {spec.inputs.map((port) => {
@@ -146,7 +146,7 @@ function NodeInputOverview({ data }: { data: CanvasFlowNodeData }) {
               </span>
               <span
                 className={cn(
-                  "inline-flex shrink-0 items-center gap-1 type-mono-meta tabular-nums",
+                  "inline-flex shrink-0 items-center gap-1 type-caption tabular-nums",
                   missing
                     ? "text-[var(--danger-fg)]"
                     : count > 0

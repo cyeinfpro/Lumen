@@ -78,7 +78,7 @@ function AuthorizedAgentGate({
   return (
     <AgentWorkspaceController
       platform={mobile ? "mobile" : "desktop"}
-      toolGatewayConfigured={statusQuery.data.tool_gateway_configured}
+      agentStatus={statusQuery.data}
     />
   );
 }

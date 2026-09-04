@@ -4,8 +4,7 @@
 
 import {
   ArrowRight,
-  CheckCircle2,
-  Clock3,
+  ChevronRight,
   Film,
   FolderKanban,
   Image as ImageIcon,
@@ -14,17 +13,21 @@ import {
   Shirt,
   Workflow,
 } from "lucide-react";
+import Image from "next/image";
 import Link from "next/link";
 import { useMemo } from "react";
 
+import { Button } from "@/components/ui/primitives/Button";
 import type { WorkflowRunListItem } from "@/lib/apiClient";
 import { useWorkflowsQuery } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/store/useUiStore";
 import { OnlineBanner } from "./components/OnlineBanner";
 import { ProjectMobileTabBar, ProjectMobileTopBar, ProjectTopBar } from "./components/ProjectTopBar";
-import { STATUS_LABEL } from "./types";
-import { formatRelativeTime } from "./utils";
+import { STAGES as STORYBOARD_STAGES } from "./storyboard/StoryboardDomain";
+import { STATUS_TEXT as STORYBOARD_STATUS_LABEL } from "./storyboard/StoryboardShared";
+import { POSTER_STEPS, STATUS_LABEL, STEPS } from "./types";
+import { formatRelativeTime, productThumbSrc } from "./utils";
 
 const FEATURES = [
   {
@@ -110,23 +113,15 @@ const FEATURES = [
 function getFeatureCardNavigation(
   feature: (typeof FEATURES)[number],
   recentProject?: WorkflowRunListItem,
-) {
+): { href: string; label: string } | null {
   if ("secondaryHref" in feature && feature.secondaryHref) {
     return {
       href: feature.secondaryHref,
       label: feature.secondaryLabel,
     };
   }
-  if (recentProject) {
-    return {
-      href: projectHref(recentProject),
-      label: "继续最近",
-    };
-  }
-  return {
-    href: "#recent-projects",
-    label: "查看最近",
-  };
+  const recentHref = recentProject ? projectHref(recentProject) : null;
+  return recentHref ? { href: recentHref, label: "继续最近" } : null;
 }
 
 export function ProjectFunctionHub() {
@@ -158,30 +153,25 @@ export function ProjectFunctionHub() {
     <div className="page-shell relative h-[100dvh]">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
-      <ProjectMobileTopBar title="项目" subtitle="工作流 · 最近" />
+      <ProjectMobileTopBar title="创作工作流" subtitle="商业工作流 · 最近项目" />
       <ProjectTopBar />
 
       <main className="page-scroll lumen-studio-bg project-mobile-scroll mb-[var(--mobile-tabbar-height)]">
-        <div className="page-frame grid gap-4">
-          <header className="page-header hidden md:grid">
-            <div className="page-header-copy">
-              <p className="type-page-kicker">项目工作台</p>
-              <h1 className="type-page-title">
-                继续最近项目，保持创作节奏
-              </h1>
-              <p className="type-page-subtitle max-w-2xl">
-                先回到仍在进行的工作；需要开启新任务时，再从下方模板创建。
-              </p>
-            </div>
-          </header>
-
-          <header className="page-header grid gap-2 md:hidden">
-            <p className="type-page-kicker">项目中心</p>
-            <h1 className="type-page-title">项目工作台</h1>
-            <p className="type-page-subtitle">
-              先继续最近项目，也可以从模板开启新的工作流。
-            </p>
-          </header>
+        <h1 className="sr-only md:hidden">创作工作流</h1>
+        <div className="page-frame grid gap-6 py-4">
+          <div className="hidden md:block">
+            <header className="page-header">
+              <div className="page-header-copy">
+                <p className="type-page-kicker">LUMEN WORKFLOWS</p>
+                <h1 className="type-page-title text-[var(--fg-0)]">
+                  创作工作流
+                </h1>
+                <p className="type-page-subtitle max-w-2xl text-[var(--fg-2)]">
+                  选择适合的商业创作流，或继续未完成的工作。
+                </p>
+              </div>
+            </header>
+          </div>
 
           <RecentProjects
             items={recentProjects}
@@ -190,19 +180,18 @@ export function ProjectFunctionHub() {
             onRetry={() => workflowsQuery.refetch()}
           />
 
-          <section className="grid gap-3 border-t border-[var(--border-subtle)] pt-4">
+          <section className="grid gap-3 pt-2">
             <div className="flex min-w-0 items-end justify-between gap-3">
-              <div className="min-w-0">
-                <p className="type-page-kicker">工作流模板</p>
-                <h2 className="type-section-title mt-1">选择工作流</h2>
+              <div>
+                <h2 className="type-section-title text-[var(--fg-0)]">商业功能矩阵</h2>
+                <p className="mt-0.5 type-caption text-[var(--fg-2)]">
+                  全流程针对性加速与自动化质检，选择模板立即开启
+                </p>
               </div>
-              <p className="hidden type-caption text-[var(--fg-2)] md:block">
-                每张卡片都可以直接新建，或接回对应的最近项目。
-              </p>
             </div>
-            <div className="grid gap-0">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
               {visibleFeatures.map((feature, index) => (
-                <FeatureCard
+                <FeatureMatrixCard
                   key={feature.title}
                   feature={feature}
                   index={index}
@@ -215,7 +204,6 @@ export function ProjectFunctionHub() {
               ))}
             </div>
           </section>
-
         </div>
       </main>
 
@@ -224,7 +212,7 @@ export function ProjectFunctionHub() {
   );
 }
 
-function FeatureCard({
+function FeatureMatrixCard({
   feature,
   index,
   recentProject,
@@ -236,143 +224,153 @@ function FeatureCard({
   const Icon = feature.icon;
   const num = `N°${String(index + 1).padStart(2, "0")}`;
   const steps = feature.flow.split("→").map((step) => step.trim()).filter(Boolean);
+  const metrics = [
+    ["输入", feature.input],
+    ["输出", feature.output],
+    ["耗时", feature.eta],
+  ] as const;
   const recentStatus = recentProject
     ? STATUS_LABEL[recentProject.status] ?? recentProject.status
     : null;
-  const { href: secondaryHref, label: secondaryLabel } =
-    getFeatureCardNavigation(feature, recentProject);
+  const secondaryNavigation = getFeatureCardNavigation(feature, recentProject);
 
   return (
     <article
       className={cn(
-        "group grid min-w-0 gap-4 border-t border-[var(--border)] py-4 transition-colors duration-[var(--dur-base)] md:grid-cols-[minmax(0,1.05fr)_minmax(0,1.15fr)_auto] md:items-center md:gap-6 md:py-5",
-        feature.available
-          ? "hover:bg-[var(--bg-1)]/45"
-          : "opacity-60",
+        "group surface-card-v2 relative flex min-w-0 flex-col justify-between p-5",
+        !feature.available && "pointer-events-none opacity-60",
       )}
       aria-disabled={feature.available ? undefined : "true"}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 gap-3">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-1)] transition-colors duration-[var(--dur-base)] group-hover:border-[var(--border-strong)] group-hover:text-[var(--fg-0)]">
-            <Icon className="h-5 w-5" strokeWidth={1.7} />
-          </span>
-          <div className="min-w-0">
-            <p className="type-caption text-[var(--fg-3)]">
-              {num} · {feature.en}
-            </p>
-            <h2 className="type-section-title mt-1">
-              {feature.title}
-            </h2>
+      <div>
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)] transition-colors duration-200 group-hover:border-accent-border group-hover:text-[var(--accent)]">
+              <Icon className="h-5 w-5" strokeWidth={1.8} />
+            </span>
+            <div className="min-w-0">
+              <p className="truncate type-caption tabular-nums text-[var(--fg-3)]">
+                {num} · {feature.en}
+              </p>
+              <h3 className="mt-0.5 type-card-title text-[var(--fg-0)]">
+                {feature.title}
+              </h3>
+            </div>
           </div>
+          <span
+            className={cn(
+              "shrink-0 rounded-full border px-2.5 py-0.5 type-caption font-medium",
+              feature.badge === "正式"
+                ? "border-accent-border bg-accent-soft !text-[var(--fg-0)]"
+                : feature.badge === "自由"
+                  ? "border-info-border bg-info-soft !text-[var(--fg-0)]"
+                  : "border-[var(--border-subtle)] bg-[var(--bg-2)] !text-[var(--fg-2)]",
+            )}
+          >
+            {feature.badge}
+          </span>
         </div>
-        <span className="shrink-0 type-caption text-[var(--fg-2)]">
-          {feature.badge}
-        </span>
+
+        <p
+          className={cn(
+            "mt-3.5 min-w-0 type-body-sm leading-6",
+            feature.available ? "text-[var(--fg-1)]" : "text-[var(--fg-3)]",
+          )}
+        >
+          {feature.description}
+        </p>
+
+        <div className="mt-3.5 flex flex-wrap items-center gap-1.5" aria-label="工作流步骤">
+          {steps.map((step, stepIndex) => (
+            <span key={`${step}-${stepIndex}`} className="inline-flex items-center gap-1">
+              <span className="inline-flex items-center gap-1 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 px-2 py-0.5 type-caption text-[var(--fg-2)]">
+                <span className="tabular-nums text-[var(--fg-3)]">{stepIndex + 1}</span>
+                <span>{step}</span>
+              </span>
+              {stepIndex < steps.length - 1 ? (
+                <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--fg-3)]" aria-hidden />
+              ) : null}
+            </span>
+          ))}
+        </div>
+
+        <dl className="mt-4 grid grid-cols-3 border-y border-[var(--border-subtle)] py-3">
+          {metrics.map(([label, value], metricIndex) => (
+            <div
+              key={label}
+              className={cn(
+                "min-w-0 px-2",
+                metricIndex > 0 && "border-l border-[var(--border-subtle)]",
+                metricIndex === 0 && "pl-0",
+                metricIndex === metrics.length - 1 && "pr-0",
+              )}
+            >
+              <dt className="type-caption text-[var(--fg-3)]">{label}</dt>
+              <dd className="mt-1 line-clamp-2 type-caption font-medium text-[var(--fg-1)]" title={value}>
+                {value}
+              </dd>
+            </div>
+          ))}
+        </dl>
       </div>
 
-      <p
-        className={cn(
-          "min-w-0 type-body-sm leading-6 md:line-clamp-3",
-          feature.available ? "text-[var(--fg-1)]" : "text-[var(--fg-3)]",
-        )}
-      >
-        {feature.description}
-      </p>
-
-      <div className="grid gap-3 border-y border-[var(--border-subtle)] py-3 md:border-y-0 md:border-l md:pl-5">
-        <div className="grid grid-cols-3 gap-2">
-          <FeatureDatum label="输入" value={feature.input} />
-          <FeatureDatum label="输出" value={feature.output} />
-          <FeatureDatum label="耗时" value={feature.eta} />
-        </div>
-        <WorkflowSteps steps={steps} disabled={!feature.available} />
-      </div>
-
-      <div className="min-h-8 type-caption text-[var(--fg-2)] md:hidden">
+      <div className="mt-5 border-t border-[var(--border-subtle)] pt-3.5">
         {recentProject ? (
-          <span className="flex min-w-0 items-center gap-2">
-            <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-[var(--success-fg)]" />
+          <p className="mb-2.5 flex min-w-0 items-center gap-1.5 type-caption text-[var(--fg-2)]">
+            <FolderKanban className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />
             <span className="truncate">
               最近：{recentProject.title || feature.title} · {recentStatus}
             </span>
-          </span>
-        ) : feature.available ? (
-          <span className="flex min-w-0 items-center gap-2">
-            <FolderKanban className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />
-            <span className="truncate">可直接新建，也会自动进入最近项目。</span>
-          </span>
-        ) : (
-          <span className="flex min-w-0 items-center gap-2">
-            <Clock3 className="h-3.5 w-3.5 shrink-0 text-[var(--fg-3)]" />
-            <span className="truncate">暂未开放，保留为未来视频/脚本流程入口。</span>
-          </span>
-        )}
-      </div>
+          </p>
+        ) : null}
 
-      <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2 md:min-w-[168px]">
-        {feature.available && "primaryHref" in feature ? (
-          <Link
-            href={feature.primaryHref}
-            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 type-body-sm font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[background-color,opacity] duration-[var(--dur-base)] hover:bg-[var(--accent-hover)] active:opacity-[var(--op-press)] sm:min-h-10"
-          >
-            {feature.primaryLabel}
-            <ArrowRight className="h-3.5 w-3.5" />
-          </Link>
-        ) : (
-          <span className="inline-flex min-h-10 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] px-3 type-body-sm text-[var(--fg-2)]">
-            暂未开放
-          </span>
-        )}
-        {feature.available ? (
-          <Link
-            href={secondaryHref}
-            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 type-body-sm font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] sm:min-h-10"
-          >
-            {secondaryLabel}
-          </Link>
-        ) : (
-          <span className="inline-flex min-h-10 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] px-3 type-body-sm text-[var(--fg-3)]">
-            规划中
-          </span>
-        )}
+        <FeatureCardActions
+          feature={feature}
+          secondaryNavigation={secondaryNavigation}
+        />
       </div>
     </article>
   );
 }
 
-function FeatureDatum({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="min-w-0">
-      <p className="type-caption text-[var(--fg-3)]">
-        {label}
-      </p>
-      <p className="mt-1 line-clamp-2 min-h-8 type-caption leading-4 text-[var(--fg-1)]">
-        {value}
-      </p>
-    </div>
-  );
-}
+function FeatureCardActions({
+  feature,
+  secondaryNavigation,
+}: {
+  feature: (typeof FEATURES)[number];
+  secondaryNavigation: { href: string; label: string } | null;
+}) {
+  if (!feature.available || !("primaryHref" in feature)) {
+    return (
+      <span className="inline-flex min-h-10 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] px-3 type-body-sm text-[var(--fg-3)]">
+        暂未开放
+      </span>
+    );
+  }
 
-function WorkflowSteps({ steps, disabled }: { steps: string[]; disabled: boolean }) {
   return (
-    <div className="flex min-w-0 flex-wrap gap-1.5 border-t border-[var(--border-subtle)] pt-3">
-      {steps.map((step, stepIndex) => (
-        <span
-          key={`${step}-${stepIndex}`}
-          className={cn(
-            "inline-flex min-h-7 max-w-full items-center gap-1.5 border-b px-1 type-caption",
-            disabled
-              ? "border-[var(--border-subtle)] text-[var(--fg-3)]"
-              : "border-[var(--border)] text-[var(--fg-1)]",
-          )}
+    <div
+      className={cn(
+        "grid grid-cols-1 gap-2",
+        secondaryNavigation && "min-[360px]:grid-cols-2",
+      )}
+    >
+      <Link
+        href={feature.primaryHref}
+        className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-accent-border bg-accent-soft px-3 type-body-sm font-medium text-[var(--fg-0)] shadow-[var(--shadow-1)] transition-[transform,background-color,border-color,box-shadow] hover:bg-[var(--bg-2)] hover:shadow-[var(--shadow-amber)] active:scale-[0.98]"
+      >
+        <span>{feature.primaryLabel}</span>
+        <ArrowRight className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />
+      </Link>
+
+      {secondaryNavigation ? (
+        <Link
+          href={secondaryNavigation.href}
+          className="inline-flex min-h-10 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)]/60 px-3 type-body-sm font-medium text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]"
         >
-          <span className="type-caption tabular-nums text-[var(--fg-3)]">
-            {stepIndex + 1}
-          </span>
-          <span className="truncate">{step}</span>
-        </span>
-      ))}
+          {secondaryNavigation.label}
+        </Link>
+      ) : null}
     </div>
   );
 }
@@ -389,94 +387,230 @@ function RecentProjects({
   onRetry: () => void;
 }) {
   return (
-    <section id="recent-projects" className="mt-2 border-t border-[var(--border)] pt-4">
+    <section id="recent-projects" className="grid gap-3">
       <div className="flex min-w-0 items-center justify-between gap-3">
-        <div className="min-w-0">
-          <p className="type-page-kicker">继续创作</p>
-          <h2 className="type-section-title mt-1">最近项目</h2>
-        </div>
+        <h2 className="type-section-title text-[var(--fg-0)]">最近项目</h2>
         <Link
           href="/projects/apparel-model-showcase"
-          className="hidden shrink-0 items-center gap-1.5 border border-[var(--border)] px-3 py-2 type-caption font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-1)] sm:inline-flex"
+          aria-label="查看服饰项目历史"
+          className="inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] px-3 type-caption font-medium text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-1)] hover:text-[var(--fg-0)]"
         >
           服饰历史
+          <ArrowRight className="h-3.5 w-3.5" />
         </Link>
       </div>
 
-      <div className="list-group mt-3">
-        {loading ? (
-          <div className="flex min-h-24 items-center justify-center gap-2 text-[var(--fg-2)]">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            <span className="type-caption">
-              读取中
-            </span>
-          </div>
-        ) : error ? (
-          <button
-            type="button"
-            onClick={onRetry}
-            className="flex min-h-24 w-full items-center justify-center type-body-sm text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-1)]"
-          >
+      {loading ? (
+        <div className="flex min-h-24 items-center justify-center gap-2 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/50 text-[var(--fg-2)]">
+          <Loader2 className="h-4 w-4 animate-spin text-[var(--accent)]" />
+          <span className="type-caption">加载中</span>
+        </div>
+      ) : error ? (
+        <div className="flex min-h-24 flex-col items-center justify-center gap-2 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/50 p-4 text-center">
+          <p className="type-body-sm text-[var(--fg-2)]">最近项目加载失败</p>
+          <Button type="button" variant="secondary" size="sm" onClick={onRetry}>
             重试
-          </button>
-        ) : items.length === 0 ? (
-          <div className="grid min-h-24 place-items-center px-4 text-center type-body-sm leading-[1.6] text-[var(--fg-2)]">
-            还没有项目。先从上方模板开始，生成后的海报和服饰项目都会在这里继续。
-          </div>
-        ) : (
-          <ul>
-            {items.map((item) => (
-              <RecentProjectRow key={item.id} item={item} />
-            ))}
-          </ul>
-        )}
-      </div>
+          </Button>
+        </div>
+      ) : items.length === 0 ? (
+        <div className="flex flex-col items-center justify-center rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/50 px-6 py-8 text-center backdrop-blur-sm">
+          <span className="flex h-10 w-10 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)] shadow-[var(--shadow-1)]">
+            <FolderKanban className="h-5 w-5 text-[var(--accent)]" strokeWidth={1.8} />
+          </span>
+          <p className="mt-3 type-body-sm font-medium text-[var(--fg-0)]">暂无最近项目</p>
+          <p className="mt-1 max-w-sm type-caption text-[var(--fg-2)]">
+            从下方选择一个工作流开始创作，项目会自动保存在这里。
+          </p>
+        </div>
+      ) : (
+        <div className="flex gap-3 overflow-x-auto pb-2 no-scrollbar md:grid md:grid-cols-2 md:overflow-visible lg:grid-cols-3 xl:grid-cols-4">
+          {items.map((item, index) => (
+            <RecentProjectCard key={item.id} item={item} priority={index === 0} />
+          ))}
+        </div>
+      )}
     </section>
   );
 }
 
-function RecentProjectRow({ item }: { item: WorkflowRunListItem }) {
+function RecentProjectCard({
+  item,
+  priority = false,
+}: {
+  item: WorkflowRunListItem;
+  priority?: boolean;
+}) {
   const info = workflowTypeInfo(item.type);
   const Icon = info.Icon;
-  const statusLabel = STATUS_LABEL[item.status] ?? item.status;
+  const title = item.title || info.fallbackTitle;
+  const statusLabel = workflowStatusLabel(item);
+  const stageLabel = workflowStageLabel(item);
   const updatedAt = formatRelativeTime(item.updated_at);
+  const previewSrc = productThumbSrc(item);
+  const href = projectHref(item);
+  const isCompleted = item.status === "completed";
+
   return (
-    <li className="list-row grid gap-3 px-0 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-      <div className="flex min-w-0 gap-3">
-        <div className="mt-0.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-2)]">
-          <Icon className="h-4 w-4" />
-        </div>
-        <div className="min-w-0">
-          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-            <span className="type-caption text-[var(--fg-2)]">
-              {info.label}
-            </span>
-            <span className="type-caption text-[var(--fg-3)]">
-              {statusLabel}
-            </span>
-            {item.output_count > 0 ? (
-              <span className="type-caption text-[var(--fg-3)]">
-                {item.output_count} 个产出
-              </span>
-            ) : null}
+    <article className="group surface-card-v2 relative flex min-w-[17rem] max-w-[20rem] flex-1 flex-col overflow-hidden md:min-w-0 md:max-w-none">
+      <div
+        className="relative aspect-[16/9] overflow-hidden border-b border-[var(--border-subtle)] bg-[var(--bg-2)]"
+        data-preview-state={previewSrc ? "available" : "empty"}
+      >
+        {previewSrc ? (
+          <Image
+            src={previewSrc}
+            alt={`${title}的项目素材`}
+            fill
+            priority={priority}
+            sizes="(max-width: 767px) 272px, (max-width: 1279px) 50vw, 25vw"
+            unoptimized
+            className="object-cover transition-transform duration-300 group-hover:scale-[1.02] motion-reduce:transform-none"
+          />
+        ) : (
+          <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--fg-3)]">
+            <Icon className="h-5 w-5" strokeWidth={1.6} />
+            <span className="type-caption">暂无预览</span>
           </div>
-          <h3 className="mt-1 truncate type-body font-medium text-[var(--fg-0)]">
-            {item.title || info.fallbackTitle}
+        )}
+        <span className="absolute left-2.5 top-2.5 inline-flex items-center gap-1.5 rounded-full bg-[var(--media-control-bg)] px-2 py-1 type-caption font-medium text-[var(--media-control-fg)] backdrop-blur-md">
+          <Icon className="h-3.5 w-3.5" />
+          {info.label}
+        </span>
+      </div>
+
+      <div className="flex flex-1 flex-col p-4">
+        <div className="flex items-start justify-between gap-2">
+          <h3 className="line-clamp-2 min-w-0 type-card-title text-[var(--fg-0)]">
+            {title}
           </h3>
-          <p className="mt-1 truncate type-body-sm text-[var(--fg-2)]">
-            {item.next_action} · {updatedAt}
-          </p>
+          <span
+            data-project-status={item.status}
+            className={cn(
+              "shrink-0 rounded-full border px-2 py-0.5 type-caption font-medium",
+              projectStatusTone(item.status),
+            )}
+          >
+            {statusLabel}
+          </span>
+        </div>
+
+        <div className="mt-3 flex min-w-0 items-center gap-3">
+          <ProjectProgressRing value={item.completion_percent} />
+          <div className="min-w-0">
+            <p className="type-caption text-[var(--fg-3)]">当前阶段</p>
+            <p
+              data-project-progress
+              className="truncate type-caption text-[var(--fg-1)]"
+              title={stageLabel}
+            >
+              {stageLabel}
+            </p>
+          </div>
+        </div>
+
+        <dl className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 type-caption">
+          {item.next_action ? (
+            <>
+              <dt className="text-[var(--fg-3)]">下一步</dt>
+              <dd className="truncate text-[var(--fg-1)]" title={item.next_action}>
+                {item.next_action}
+              </dd>
+            </>
+          ) : null}
+          {item.output_count > 0 ? (
+            <>
+              <dt className="text-[var(--fg-3)]">产出</dt>
+              <dd className="text-[var(--fg-1)]">{item.output_count} 个</dd>
+            </>
+          ) : null}
+        </dl>
+
+        <div className="mt-auto pt-4">
+          <time dateTime={item.updated_at} className="block type-caption text-[var(--fg-2)]">
+            更新于 {updatedAt}
+          </time>
+          {href ? (
+            <Link
+              href={href}
+              className="mt-3 inline-flex min-h-9 w-full items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)]/70 px-3 type-caption font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-3)]"
+            >
+              {isCompleted ? "查看交付" : "继续项目"}
+              <ArrowRight className="h-3.5 w-3.5" />
+            </Link>
+          ) : (
+            <span className="mt-3 inline-flex min-h-9 w-full items-center justify-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] px-3 type-caption text-[var(--fg-3)]">
+              暂不支持
+            </span>
+          )}
         </div>
       </div>
-      <Link
-        href={projectHref(item)}
-        className="inline-flex min-h-9 items-center justify-center gap-1.5 border border-[var(--border)] px-3 type-caption font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-1)]"
-      >
-        {item.status === "completed" ? "查看交付" : "继续项目"}
-        <ArrowRight className="h-3.5 w-3.5" />
-      </Link>
-    </li>
+    </article>
   );
+}
+
+function ProjectProgressRing({ value }: { value: number }) {
+  return (
+    <span
+      role="progressbar"
+      aria-label={`项目完成度 ${value}%`}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={value}
+      data-project-progress-ring
+      className="relative inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full"
+      style={{
+        background: `conic-gradient(var(--accent) ${value}%, var(--bg-3) 0)`,
+      }}
+    >
+      <span className="absolute inset-[3px] rounded-full bg-[var(--bg-1)]" aria-hidden />
+      <span className="relative type-caption font-medium tabular-nums text-[var(--fg-0)]">
+        {value}%
+      </span>
+    </span>
+  );
+}
+
+const APPAREL_STAGE_LABELS = Object.fromEntries(
+  STEPS.map((step) => [step.key, step.label]),
+) as Record<string, string>;
+const POSTER_STAGE_LABELS = Object.fromEntries(
+  POSTER_STEPS.map((step) => [step.key, step.label]),
+) as Record<string, string>;
+const STORYBOARD_STAGE_LABELS = Object.fromEntries(
+  STORYBOARD_STAGES.map((stage) => [stage.id, stage.label]),
+) as Record<string, string>;
+
+function workflowStageLabel(item: WorkflowRunListItem): string {
+  const labels =
+    item.type === "apparel_model_showcase"
+      ? APPAREL_STAGE_LABELS
+      : item.type === "poster_design"
+        ? POSTER_STAGE_LABELS
+        : item.type === "storyboard"
+          ? STORYBOARD_STAGE_LABELS
+          : undefined;
+  return (labels?.[item.current_step] ?? item.current_step) || "未提供";
+}
+
+function workflowStatusLabel(item: WorkflowRunListItem): string {
+  const labels = item.type === "storyboard" ? STORYBOARD_STATUS_LABEL : STATUS_LABEL;
+  return labels[item.status] ?? item.status;
+}
+
+function projectStatusTone(status: string): string {
+  if (status === "completed") {
+    return "border-success-border bg-success-soft !text-[var(--success-fg)]";
+  }
+  if (status === "failed") {
+    return "border-danger-border bg-danger-soft !text-[var(--danger-fg)]";
+  }
+  if (["running", "in_progress", "generating", "compositing"].includes(status)) {
+    return "border-accent-border bg-accent-soft !text-[var(--fg-0)]";
+  }
+  if (status === "needs_review" || status === "waiting_input") {
+    return "border-warning-border bg-warning-soft !text-[var(--warning-fg)]";
+  }
+  return "border-[var(--border-subtle)] bg-[var(--bg-2)] !text-[var(--fg-2)]";
 }
 
 function workflowTypeInfo(type: string): {
@@ -493,12 +627,15 @@ function workflowTypeInfo(type: string): {
   if (type === "storyboard") {
     return { label: "分镜", fallbackTitle: "分镜项目", Icon: Film };
   }
-  return { label: "项目", fallbackTitle: "项目", Icon: Palette };
+  return { label: "项目", fallbackTitle: "未命名项目", Icon: Palette };
 }
 
-function projectHref(item: WorkflowRunListItem): string {
-  if (item.type === "storyboard") {
-    return `/projects/storyboard/${item.id}`;
+function projectHref(item: WorkflowRunListItem): string | null {
+  if (item.type === "apparel_model_showcase" || item.type === "poster_design") {
+    return `/projects/${encodeURIComponent(item.id)}`;
   }
-  return `/projects/${item.id}`;
+  if (item.type === "storyboard") {
+    return `/projects/storyboard/${encodeURIComponent(item.id)}`;
+  }
+  return null;
 }

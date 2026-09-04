@@ -31,6 +31,7 @@ export function LandscapeBanner() {
 
   return (
     <div
+      data-landscape-banner
       role="status"
       className="safe-x-page sticky left-0 right-0 top-0 flex min-h-11 shrink-0 items-center gap-2 border-b border-[var(--border-subtle)] bg-[var(--bg-1)]/92 py-1.5 type-caption text-[var(--fg-1)] backdrop-blur-xl"
       style={{ zIndex: "var(--z-header, 10)" as unknown as number }}

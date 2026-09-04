@@ -501,10 +501,14 @@ export function useIdentityRevalidation({
 
   useEffect(
     () =>
-      registerSessionInvalidation(() => {
+      registerSessionInvalidation((reason) => {
+        if (reason === "http_unauthorized") {
+          invalidateIdentity();
+          return;
+        }
         beginInvalidatedSessionRevalidation();
       }),
-    [beginInvalidatedSessionRevalidation],
+    [beginInvalidatedSessionRevalidation, invalidateIdentity],
   );
 
   useEffect(() => {

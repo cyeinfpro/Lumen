@@ -12,6 +12,7 @@ from lumen_core.schema_models import (
     AgentMessageCreateOut,
     AgentMessageListOut,
     AgentRunOut,
+    AgentSessionBranchIn,
     AgentSessionCreateIn,
     AgentSessionListOut,
     AgentSessionImageListOut,
@@ -31,15 +32,20 @@ from ..services.agent.session_images import (
     list_agent_session_images,
 )
 from ..services.agent.sessions import agent_session_services
+from ..services.agent.status import agent_status_out
 
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
 
 @router.get("/status", response_model=AgentStatusOut)
-async def agent_status(_user: CurrentUser) -> AgentStatusOut:
-    return AgentStatusOut(
-        enabled=True,
+async def agent_status(
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AgentStatusOut:
+    return await agent_status_out(
+        db,
+        user=user,
         tool_gateway_configured=(
             len(settings.agent_tool_capability_secret.encode("utf-8")) >= 32
         ),
@@ -109,6 +115,28 @@ async def update_agent_session(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AgentSessionOut:
     return await agent_session_services.patch_agent_session(
+        db,
+        session_id=session_id,
+        user=user,
+        body=body,
+        request=request,
+    )
+
+
+@router.post(
+    "/sessions/{session_id}/branch",
+    response_model=AgentSessionOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def branch_agent_session_route(
+    session_id: str,
+    body: AgentSessionBranchIn,
+    request: Request,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AgentSessionOut:
+    await MESSAGES_LIMITER.check(get_redis(), f"rl:agent:session:{user.id}")
+    return await agent_session_services.branch_agent_session(
         db,
         session_id=session_id,
         user=user,

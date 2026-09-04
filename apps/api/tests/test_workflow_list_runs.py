@@ -12,6 +12,7 @@ from sqlalchemy.dialects import postgresql
 
 from app.routes.workflow_routes import projects
 from app.workflows.application.errors import InvalidWorkflowCursorError
+from app.workflows.adapters.sqlalchemy_reads import _completion_percent
 from app.workflows.application.queries import ListWorkflowRuns
 from app.workflows.ports.run_reads import (
     WorkflowRunListRecord,
@@ -57,6 +58,7 @@ def _record(
     status: str = "needs_review",
     current_step: str = "multi_size_generation",
     updated_at: datetime | None = None,
+    completion_percent: int | None = None,
 ) -> WorkflowRunListRecord:
     timestamp = updated_at or datetime(2026, 7, 11, 8, 30, tzinfo=timezone.utc)
     return WorkflowRunListRecord(
@@ -73,6 +75,13 @@ def _record(
         created_at=timestamp,
         updated_at=timestamp,
         output_count=2,
+        completion_percent=(
+            completion_percent
+            if completion_percent is not None
+            else 100
+            if status == "completed"
+            else 62
+        ),
     )
 
 
@@ -91,6 +100,15 @@ def _row(run_id: str, updated_at: datetime) -> SimpleNamespace:
         created_at=updated_at,
         updated_at=updated_at,
     )
+
+
+def test_workflow_completion_uses_persisted_step_states() -> None:
+    active = SimpleNamespace(status="needs_review")
+    completed = SimpleNamespace(status="completed")
+
+    assert _completion_percent(active, ["waiting_input", "waiting_input"]) == 0
+    assert _completion_percent(active, ["approved", "needs_review"]) == 50
+    assert _completion_percent(completed, ["approved", "needs_review"]) == 100
 
 
 @pytest.mark.asyncio
@@ -126,6 +144,7 @@ async def test_list_workflow_runs_owns_cursor_policy_and_next_action() -> None:
         "生成/确认多尺寸",
         "查看交付",
     ]
+    assert [item.completion_percent for item in first.items] == [62, 100]
     assert first.next_cursor is not None
     assert port.calls[0]["excluded_types"] == ()
 
@@ -196,7 +215,12 @@ async def test_list_workflows_route_uses_stable_sqlalchemy_page_boundary() -> No
     db = _Db(
         [
             [run_3, run_2, run_1],
-            [("run-3", ["img-3"]), ("run-2", ["img-2"])],
+            [
+                ("run-3", "copy_analysis", "approved", []),
+                ("run-3", "multi_size_generation", "needs_review", ["img-3"]),
+                ("run-2", "copy_analysis", "waiting_input", []),
+                ("run-2", "multi_size_generation", "waiting_input", ["img-2"]),
+            ],
         ]
     )
 
@@ -210,6 +234,7 @@ async def test_list_workflows_route_uses_stable_sqlalchemy_page_boundary() -> No
 
     assert [item.id for item in first_page.items] == ["run-3", "run-2"]
     assert [item.output_count for item in first_page.items] == [1, 1]
+    assert [item.completion_percent for item in first_page.items] == [50, 0]
     assert [item.next_action for item in first_page.items] == [
         "生成/确认多尺寸",
         "生成/确认多尺寸",
@@ -246,7 +271,10 @@ async def test_list_workflows_route_uses_stable_sqlalchemy_page_boundary() -> No
     boundary_db = _Db(
         [
             [run_3, run_2],
-            [("run-3", []), ("run-2", [])],
+            [
+                ("run-3", "multi_size_generation", "needs_review", []),
+                ("run-2", "multi_size_generation", "needs_review", []),
+            ],
         ]
     )
     boundary_page = await projects.list_workflows(

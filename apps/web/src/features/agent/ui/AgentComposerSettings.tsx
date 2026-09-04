@@ -6,85 +6,105 @@ import { Select, Switch } from "@/components/ui/primitives";
 import type {
   AgentDraft,
   AgentImageDefaults,
+  AgentModelOption,
   AgentReasoningEffort,
 } from "../model/contracts";
 
-export function AgentComposerSettings({
-  draft,
-  disabled,
-  onAllowImageChange,
-  onAllowWebSearchChange,
-  onAllowFileToolsChange,
-  onReasoningEffortChange,
-  onDefaultsChange,
-}: {
+export interface AgentQuickSettingsProps {
   draft: AgentDraft;
   disabled: boolean;
-  onAllowImageChange: (enabled: boolean) => void;
-  onAllowWebSearchChange: (enabled: boolean) => void;
-  onAllowFileToolsChange: (enabled: boolean) => void;
+  defaultModel: string | null;
+  modelOptions: AgentModelOption[];
+  imageGenerationAvailable: boolean;
+  onModelChange: (model: string | null) => void;
   onReasoningEffortChange: (effort: AgentReasoningEffort) => void;
   onDefaultsChange: (patch: Partial<AgentImageDefaults>) => void;
-}) {
-  const defaults = draft.imageDefaults;
-  const settingsDisabled = disabled || !draft.allowImage;
-  return (
-    <div className="grid gap-4 p-4">
-      <SettingField label="推理强度">
-        <Select
-          value={draft.reasoningEffort ?? "auto"}
-          onChange={(event) =>
-            onReasoningEffortChange(
-              event.target.value as AgentReasoningEffort,
-            )
-          }
-          disabled={disabled}
-          aria-label="Agent 推理强度"
-        >
-          <option value="auto">自动</option>
-          <option value="none">关闭</option>
-          <option value="minimal">极低</option>
-          <option value="low">低</option>
-          <option value="medium">中</option>
-          <option value="high">高</option>
-          <option value="xhigh">超高</option>
-          <option value="max">最大</option>
-        </Select>
-      </SettingField>
+}
 
-      <div className="grid divide-y divide-[var(--border-subtle)] border-y border-[var(--border-subtle)]">
-        <ToolToggle
-          icon={<Globe2 className="h-4 w-4" aria-hidden />}
-          label="联网搜索"
-          detail="查询公开网页与来源"
-          checked={draft.allowWebSearch}
-          disabled={disabled}
-          onChange={onAllowWebSearchChange}
-        />
-        <ToolToggle
-          icon={<FileText className="h-4 w-4" aria-hidden />}
-          label="文件工具"
-          detail={draft.files.length > 0 ? `已添加 ${draft.files.length} 个文件` : "读取本轮文本文件"}
-          checked={draft.allowFileTools}
-          disabled={disabled || draft.files.length > 0}
-          onChange={onAllowFileToolsChange}
-        />
-        <ToolToggle
-          icon={<ImageIcon className="h-4 w-4" aria-hidden />}
-          label="生成图片"
-          detail="允许提交异步生图任务"
-          checked={draft.allowImage}
-          disabled={disabled}
-          onChange={onAllowImageChange}
-        />
+export function AgentQuickSettings({
+  draft,
+  disabled,
+  defaultModel,
+  modelOptions,
+  imageGenerationAvailable,
+  onModelChange,
+  onReasoningEffortChange,
+  onDefaultsChange,
+}: AgentQuickSettingsProps) {
+  const defaults = draft.imageDefaults;
+  const selectedModel = draft.model ?? defaultModel;
+  const selectedOption = modelOptions.find(
+    (option) => option.model === selectedModel,
+  );
+  const reasoningDisabled =
+    disabled || selectedOption?.reasoning_supported === false;
+  const imageSettingsDisabled =
+    disabled || !draft.allowImage || !imageGenerationAvailable;
+
+  return (
+    <div className="grid gap-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <SettingField label="模型">
+          <Select
+            value={draft.model ?? ""}
+            onChange={(event) => {
+              const model = event.target.value || null;
+              onModelChange(model);
+              const option = modelOptions.find((item) => item.model === model);
+              if (option && !option.reasoning_supported) {
+                onReasoningEffortChange("none");
+              }
+            }}
+            disabled={disabled}
+            aria-label="Agent 模型"
+          >
+            <option value="">
+              自动{defaultModel ? ` · ${defaultModel}` : ""}
+            </option>
+            {modelOptions.map((option) => (
+              <option key={option.model} value={option.model}>
+                {option.model}
+              </option>
+            ))}
+          </Select>
+        </SettingField>
+        <SettingField label="推理强度">
+          <Select
+            value={reasoningDisabled ? "none" : draft.reasoningEffort ?? "auto"}
+            onChange={(event) =>
+              onReasoningEffortChange(
+                event.target.value as AgentReasoningEffort,
+              )
+            }
+            disabled={reasoningDisabled}
+            aria-label="Agent 推理强度"
+          >
+            <option value="auto">自动</option>
+            <option value="none">关闭</option>
+            <option value="minimal">极低</option>
+            <option value="low">低</option>
+            <option value="medium">中</option>
+            <option value="high">高</option>
+            <option value="xhigh">超高</option>
+            <option value="max">最大</option>
+          </Select>
+        </SettingField>
       </div>
 
-      <fieldset disabled={settingsDisabled} className="grid gap-4 disabled:opacity-50">
+      <fieldset
+        disabled={imageSettingsDisabled}
+        className="grid gap-4 disabled:opacity-50"
+      >
+        <legend className="mb-2 type-caption text-[var(--fg-2)]">
+          生图参数
+        </legend>
         <div className="grid grid-cols-2 gap-3">
           <SettingField label="数量">
             <Select
               value={defaults.count}
-              onChange={(event) => onDefaultsChange({ count: Number(event.target.value) })}
+              onChange={(event) =>
+                onDefaultsChange({ count: Number(event.target.value) })
+              }
               aria-label="默认图片数量"
             >
               {[1, 2, 3, 4].map((count) => (
@@ -96,7 +116,9 @@ export function AgentComposerSettings({
             <Select
               value={defaults.quality}
               onChange={(event) =>
-                onDefaultsChange({ quality: event.target.value as AgentImageDefaults["quality"] })
+                onDefaultsChange({
+                  quality: event.target.value as AgentImageDefaults["quality"],
+                })
               }
               aria-label="默认图片分辨率"
             >
@@ -121,7 +143,9 @@ export function AgentComposerSettings({
             <Select
               value={defaults.render_quality}
               onChange={(event) =>
-                onDefaultsChange({ render_quality: event.target.value as AgentImageDefaults["render_quality"] })
+                onDefaultsChange({
+                  render_quality: event.target.value as AgentImageDefaults["render_quality"],
+                })
               }
               aria-label="默认渲染质量"
             >
@@ -135,7 +159,9 @@ export function AgentComposerSettings({
             <Select
               value={defaults.background}
               onChange={(event) =>
-                onDefaultsChange({ background: event.target.value as AgentImageDefaults["background"] })
+                onDefaultsChange({
+                  background: event.target.value as AgentImageDefaults["background"],
+                })
               }
               aria-label="默认背景"
             >
@@ -150,7 +176,9 @@ export function AgentComposerSettings({
           <Select
             value={defaults.output_format}
             onChange={(event) =>
-              onDefaultsChange({ output_format: event.target.value as AgentImageDefaults["output_format"] })
+              onDefaultsChange({
+                output_format: event.target.value as AgentImageDefaults["output_format"],
+              })
             }
             aria-label="默认输出格式"
           >
@@ -160,6 +188,66 @@ export function AgentComposerSettings({
           </Select>
         </SettingField>
       </fieldset>
+    </div>
+  );
+}
+
+export function AgentComposerSettings({
+  draft,
+  disabled,
+  defaultModel,
+  modelOptions,
+  imageGenerationAvailable,
+  onModelChange,
+  onAllowImageChange,
+  onAllowWebSearchChange,
+  onAllowFileToolsChange,
+  onReasoningEffortChange,
+  onDefaultsChange,
+}: AgentQuickSettingsProps & {
+  onAllowImageChange: (enabled: boolean) => void;
+  onAllowWebSearchChange: (enabled: boolean) => void;
+  onAllowFileToolsChange: (enabled: boolean) => void;
+}) {
+  return (
+    <div className="grid gap-4 p-4">
+      <AgentQuickSettings
+        draft={draft}
+        disabled={disabled}
+        defaultModel={defaultModel}
+        modelOptions={modelOptions}
+        imageGenerationAvailable={imageGenerationAvailable}
+        onModelChange={onModelChange}
+        onReasoningEffortChange={onReasoningEffortChange}
+        onDefaultsChange={onDefaultsChange}
+      />
+
+      <div className="grid divide-y divide-[var(--border-subtle)] border-y border-[var(--border-subtle)]">
+        <ToolToggle
+          icon={<Globe2 className="h-4 w-4" aria-hidden />}
+          label="联网搜索"
+          detail="查询公开网页与来源"
+          checked={draft.allowWebSearch}
+          disabled={disabled}
+          onChange={onAllowWebSearchChange}
+        />
+        <ToolToggle
+          icon={<FileText className="h-4 w-4" aria-hidden />}
+          label="文件工具"
+          detail={draft.files.length > 0 ? `已添加 ${draft.files.length} 个文件` : "读取本轮文本文件"}
+          checked={draft.allowFileTools}
+          disabled={disabled}
+          onChange={onAllowFileToolsChange}
+        />
+        <ToolToggle
+          icon={<ImageIcon className="h-4 w-4" aria-hidden />}
+          label="生成图片"
+          detail={imageGenerationAvailable ? "允许提交异步生图任务" : "生图工具未就绪"}
+          checked={draft.allowImage && imageGenerationAvailable}
+          disabled={disabled || !imageGenerationAvailable}
+          onChange={onAllowImageChange}
+        />
+      </div>
     </div>
   );
 }

@@ -164,7 +164,7 @@ export function SettingsGroupNav({
         if (groupsInSection.length === 0) return null;
         return (
           <div key={section.label}>
-            <p className="mb-1.5 px-2 type-caption font-medium uppercase tracking-[0.08em] text-[var(--fg-3)]">
+            <p className="mb-1.5 px-2 type-overline text-[var(--fg-3)]">
               {section.label}
             </p>
             <div className="space-y-1">

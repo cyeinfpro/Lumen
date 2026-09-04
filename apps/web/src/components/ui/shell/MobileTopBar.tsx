@@ -4,6 +4,8 @@ import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { type ReactNode, useEffect, useRef, useState } from "react";
+
+import { MobileRuntimeResilienceStatus } from "@/components/RuntimeResilienceStatus";
 import {
   AUTH_USER_QUERY_KEY,
   userBillingQueryKeys,
@@ -74,6 +76,7 @@ export function MobileTopBar({
           {left}
         </div>
         <div className="flex shrink-0 items-center justify-end gap-1 [@media(max-width:390px)]:gap-0.5">
+          <MobileRuntimeResilienceStatus />
           {showWallet ? <MobileWalletPill /> : null}
           {right}
         </div>

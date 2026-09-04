@@ -7,6 +7,7 @@ import { X } from "lucide-react";
 import { useId, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
+import { Select } from "@/components/ui/primitives/Select";
 import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
 import { toast } from "@/components/ui/primitives/Toast";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
@@ -145,19 +146,18 @@ export function PosterStyleEditDialog({
             />
           </UnderlineLabeled>
           <UnderlineLabeled label="类目">
-            <select
+            <Select
               value={category}
               onChange={(event) =>
                 setCategory(event.target.value as PosterStyleCategory)
               }
-              className="control-shell type-body-sm h-10 w-full appearance-none px-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:min-h-11 "
             >
               {POSTER_STYLE_CATEGORY_OPTIONS.map((value) => (
                 <option key={value} value={value} className="bg-[var(--bg-0)]">
                   {POSTER_STYLE_CATEGORY_LABEL[value]}
                 </option>
               ))}
-            </select>
+            </Select>
           </UnderlineLabeled>
           <UnderlineLabeled label="情绪">
             <input

@@ -482,7 +482,13 @@ async def resolve_execution_pin(
                 "the active API key has no verified image input capability",
                 412,
             )
-        model = credential.default_chat_model
+        if body.model and body.model != credential.default_chat_model:
+            raise http_error(
+                "agent_model_unavailable",
+                "requested Agent model is unavailable for the active API key",
+                412,
+            )
+        model = body.model or credential.default_chat_model
         context_window = _capability_int(
             credential.capabilities_jsonb,
             "agent_context_window",
@@ -533,6 +539,7 @@ async def resolve_execution_pin(
             fixed_input_tokens=context.fixed_input_tokens,
             history_context_tokens=context.history_tokens,
             largest_history_entry_tokens=context.largest_history_entry_tokens,
+            requested_model=body.model,
         )
         model = provider.model
         provider_names = provider.eligible_provider_names

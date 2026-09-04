@@ -281,7 +281,7 @@ export function BackupsPanel() {
                   </div>
                   <div className="grid grid-cols-2 gap-2 type-caption">
                     <div className="rounded-[var(--radius-control)] bg-[var(--bg-2)] border border-[var(--border-subtle)] px-2 py-1.5">
-                      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)] inline-flex items-center gap-1">
+                      <div className="type-overline text-[var(--fg-2)] inline-flex items-center gap-1">
                         <Database className="w-2.5 h-2.5" /> 数据库
                       </div>
                       <div className="type-body-sm text-[var(--fg-0)] font-mono tabular-nums break-all">
@@ -289,7 +289,7 @@ export function BackupsPanel() {
                       </div>
                     </div>
                     <div className="rounded-[var(--radius-control)] bg-[var(--bg-2)] border border-[var(--border-subtle)] px-2 py-1.5">
-                      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
+                      <div className="type-overline text-[var(--fg-2)]">
                         缓存
                       </div>
                       <div className="type-body-sm text-[var(--fg-0)] font-mono tabular-nums break-all">

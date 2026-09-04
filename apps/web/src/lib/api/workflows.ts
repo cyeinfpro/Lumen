@@ -119,6 +119,7 @@ export interface WorkflowRunListItem {
   created_at: string;
   updated_at: string;
   output_count: number;
+  completion_percent: number;
   next_action: string;
 }
 
@@ -266,6 +267,7 @@ export interface ApparelModelLibraryItem {
   billing_free?: boolean;
   billing_label?: string | null;
   billing_exempt_reason?: string | null;
+  usage_count: number;
   created_at: string;
   updated_at?: string | null;
 }

@@ -246,10 +246,10 @@ export function RequestEventsHeader({
               <Clock3 className="h-3.5 w-3.5" />
               最新 {latestLabel}
             </span>
-            <span className="font-mono tabular-nums">
+            <span className="tabular-nums">
               拉取 {rowsCount} · 显示 {filteredCount}
             </span>
-            <span className="font-mono tabular-nums">
+            <span className="tabular-nums">
               平均 {averageDurationLabel}
             </span>
             {fetching && !loading && (
@@ -376,7 +376,7 @@ export function RequestEventsHeader({
               <BarChart3 className="h-3.5 w-3.5 text-[var(--accent)]" />
               路径统计
             </span>
-            <span className="font-mono tabular-nums text-[var(--fg-2)]">
+            <span className="tabular-nums text-[var(--fg-2)]">
               {hasSearch ? "基于当前显示" : "基于当前筛选"}{" "}
               {hasSearch ? filteredCount : modelStatsTotal}
             </span>

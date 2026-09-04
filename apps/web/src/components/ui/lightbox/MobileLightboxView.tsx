@@ -401,7 +401,7 @@ function LightboxTopBar({
       >
         <X className="h-5 w-5" />
       </MediaControlButton>
-      <div className="type-body-sm pointer-events-none flex items-center gap-2 rounded-full bg-[var(--media-control-bg)] px-3.5 py-2 font-mono text-[var(--media-control-fg)] tabular-nums">
+      <div className="type-body-sm pointer-events-none flex items-center gap-2 rounded-full bg-[var(--media-control-bg)] px-3.5 py-2 text-[var(--media-control-fg)] tabular-nums">
         <span>{total > 1 ? `${idx + 1} / ${total}` : sourceLabel}</span>
         {isZoomed ? (
           <>

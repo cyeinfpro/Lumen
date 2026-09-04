@@ -185,17 +185,22 @@ function SidebarPrimaryAction({
   return (
     <div className={sidebarPrimaryActionClass(showBrand)}>
       <Button
-        variant="primary"
+        variant="secondary"
         fullWidth
         loading={controller.createPending}
         onClick={controller.createConversation}
-        leftIcon={<Plus className="h-4 w-4" strokeWidth={2.5} />}
+        leftIcon={
+          <Plus
+            className="h-4 w-4 text-[var(--accent)]"
+            strokeWidth={2.5}
+          />
+        }
         className="h-10 justify-start px-3"
       >
         <span className="flex-1 text-left">新建会话</span>
         <Kbd
           aria-hidden
-          className="hidden border-transparent bg-transparent text-[var(--accent-on)] opacity-75 shadow-none sm:inline-flex"
+          className="hidden border-transparent bg-transparent text-[var(--fg-2)] opacity-75 shadow-none sm:inline-flex"
         >
           ⌘N
         </Kbd>

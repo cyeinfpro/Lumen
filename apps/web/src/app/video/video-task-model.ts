@@ -7,6 +7,12 @@ export type VideoGenerationWithVideo = VideoGenerationOut & {
 export type VideoHistoryFilter = "all" | "succeeded" | "failed";
 export const VIDEO_SETTLING_TIMEOUT_MS = 60_000;
 
+export type DirectorViewportFallback = {
+  kind: "empty" | "loading" | "source";
+  title: string;
+  description: string;
+};
+
 export type VideoSettlingPhase = "settling" | "expired";
 
 export type VideoSettlingCheckpoint = {
@@ -210,6 +216,84 @@ export function hasVideo(
   item: VideoGenerationOut,
 ): item is VideoGenerationWithVideo {
   return item.video != null;
+}
+
+function directorViewportCreatedAt(item: VideoGenerationOut): number {
+  const createdAt = Date.parse(item.created_at);
+  return Number.isFinite(createdAt) ? createdAt : Number.NEGATIVE_INFINITY;
+}
+
+function isDirectorViewportCandidate(
+  item: VideoGenerationOut,
+): item is VideoGenerationWithVideo {
+  if (item.status !== "succeeded" || !hasVideo(item)) return false;
+  return Boolean(item.video.id?.trim() || item.video.url?.trim());
+}
+
+export function selectDirectorViewportVideo(
+  items: readonly VideoGenerationOut[],
+): VideoGenerationWithVideo | null {
+  let latest: VideoGenerationWithVideo | null = null;
+  let latestCreatedAt = Number.NEGATIVE_INFINITY;
+
+  for (const item of items) {
+    if (!isDirectorViewportCandidate(item)) continue;
+    const createdAt = directorViewportCreatedAt(item);
+    if (!latest || createdAt > latestCreatedAt) {
+      latest = item;
+      latestCreatedAt = createdAt;
+    }
+  }
+
+  return latest;
+}
+
+export function directorViewportFallback(
+  action: VideoAction,
+  sourceReady: boolean,
+  prompt: string,
+  loading = false,
+): DirectorViewportFallback {
+  if (loading) {
+    return {
+      kind: "loading",
+      title: "读取最近成片",
+      description: "任务记录读取完成后，将显示可用成片。",
+    };
+  }
+  if (action === "t2v" && prompt.trim()) {
+    return {
+      kind: "source",
+      title: "镜头描述已就绪",
+      description: "完成生成后，最近成片会显示在这里。",
+    };
+  }
+  if (action === "i2v" && sourceReady) {
+    return {
+      kind: "source",
+      title: "首帧素材已就绪",
+      description: "完成生成后，最近成片会显示在这里。",
+    };
+  }
+  if (action === "reference" && sourceReady) {
+    return {
+      kind: "source",
+      title: "参考素材已就绪",
+      description: "完成生成后，最近成片会显示在这里。",
+    };
+  }
+
+  const description =
+    action === "i2v"
+      ? "添加首帧素材后，可从这里开始设计镜头。"
+      : action === "reference"
+        ? "添加参考素材后，可从这里开始设计镜头。"
+        : "填写镜头描述后，可从这里开始生成视频。";
+  return {
+    kind: "empty",
+    title: "暂无可预览成片",
+    description,
+  };
 }
 
 export function actionLabel(action: VideoAction): string {

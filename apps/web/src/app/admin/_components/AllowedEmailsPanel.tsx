@@ -245,7 +245,7 @@ export function AllowedEmailsPanel() {
                   </div>
                   <div className="grid grid-cols-2 gap-2 type-caption">
                     <div>
-                      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
+                      <div className="type-overline text-[var(--fg-2)]">
                         邀请人
                       </div>
                       <div className="break-all text-[var(--fg-1)]">
@@ -253,7 +253,7 @@ export function AllowedEmailsPanel() {
                       </div>
                     </div>
                     <div>
-                      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
+                      <div className="type-overline text-[var(--fg-2)]">
                         创建
                       </div>
                       <div className="font-mono tabular-nums text-[var(--fg-1)]">

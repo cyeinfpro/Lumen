@@ -30,6 +30,7 @@ class WorkflowRunListRecord:
     created_at: datetime
     updated_at: datetime
     output_count: int = 0
+    completion_percent: int = 0
 
 
 @dataclass(frozen=True)

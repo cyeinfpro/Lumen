@@ -386,7 +386,7 @@ function ActionIcon({
 function MiniStat({ label, value }: { label: string; value: number }) {
   return (
     <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-2)]/70 px-2 py-1.5">
-      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
+      <div className="type-overline text-[var(--fg-2)]">
         {label}
       </div>
       <div className="type-body text-[var(--fg-0)] font-mono tabular-nums">

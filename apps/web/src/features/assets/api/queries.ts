@@ -11,6 +11,8 @@
 import {
   type InfiniteData,
   useInfiniteQuery,
+  useMutation,
+  useQueryClient,
 } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { apiFetch } from "@/lib/api/http";
@@ -103,6 +105,23 @@ export function useStreamFeedQuery(
     getNextPageParam: (last) => last.next_cursor ?? undefined,
     staleTime: 20_000,
     gcTime: 5 * 60_000,
+  });
+}
+
+export function deleteStreamImage(imageId: string): Promise<{ ok: boolean }> {
+  return apiFetch<{ ok: boolean }>(
+    `/images/${encodeURIComponent(imageId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export function useDeleteStreamImageMutation() {
+  const queryClient = useQueryClient();
+  return useMutation<{ ok: boolean }, Error, string>({
+    mutationFn: deleteStreamImage,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["stream", "feed"] });
+    },
   });
 }
 

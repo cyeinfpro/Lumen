@@ -12,6 +12,7 @@ from .repository import (
     load_agent_run_out,
 )
 from .session_crud import (
+    branch_agent_session,
     create_agent_session,
     delete_agent_session,
     patch_agent_session,
@@ -20,6 +21,7 @@ from .session_crud import (
 
 @dataclass(frozen=True, slots=True)
 class AgentSessionServices:
+    branch_agent_session: Callable[..., Any]
     create_agent_session: Callable[..., Any]
     delete_agent_session: Callable[..., Any]
     get_agent_session_out: Callable[..., Any]
@@ -32,6 +34,7 @@ class AgentSessionServices:
 
 
 agent_session_services = AgentSessionServices(
+    branch_agent_session=branch_agent_session,
     create_agent_session=create_agent_session,
     delete_agent_session=delete_agent_session,
     get_agent_session_out=get_agent_session_out,

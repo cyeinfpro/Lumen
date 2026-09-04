@@ -13,7 +13,8 @@ import {
   Video as VideoIcon,
 } from "lucide-react";
 
-import { Button } from "@/components/ui/primitives";
+import { MobileRuntimeResilienceStatus } from "@/components/RuntimeResilienceStatus";
+import { Button, Select } from "@/components/ui/primitives";
 import { formatRmb } from "@/lib/money";
 import type { VideoAction } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -63,6 +64,11 @@ function formatDurationLabel(durationS: number): string {
   return durationS === SMART_VIDEO_DURATION ? "自动时长" : `${durationS}s`;
 }
 
+function formatMicroRmb(micro: number): string {
+  const amount = formatRmb(micro / 1_000_000);
+  return amount === "--" ? amount : `¥${amount}`;
+}
+
 function SelectField({
   label,
   value,
@@ -81,18 +87,167 @@ function SelectField({
       {label && (
         <span className="type-caption text-[var(--fg-2)]">{label}</span>
       )}
-      <select
+      <Select
         value={value}
+        disabled={options.length === 0}
         onChange={(event) => onChange(event.target.value)}
-        className="h-11 w-full min-w-0 truncate rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 type-body text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--accent)]/60 sm:h-10 "
+        className="h-11 w-full min-w-0 truncate sm:h-10"
       >
+        {options.length === 0 && <option value="">暂无可用选项</option>}
         {options.map((item) => (
           <option key={item || "auto"} value={item}>
             {renderOption ? renderOption(item) : item || "自动"}
           </option>
         ))}
-      </select>
+      </Select>
     </label>
+  );
+}
+
+function AspectRatioShape({ ratio }: { ratio: string }) {
+  const norm = ratio.trim().toLowerCase();
+  if (norm === "16:9") {
+    return (
+      <span className="h-3 w-5.5 rounded-[var(--radius-xs)] border border-current" />
+    );
+  }
+  if (norm === "9:16") {
+    return (
+      <span className="h-5.5 w-3 rounded-[var(--radius-xs)] border border-current" />
+    );
+  }
+  if (norm === "1:1") {
+    return (
+      <span className="h-4 w-4 rounded-[var(--radius-xs)] border border-current" />
+    );
+  }
+  if (norm === "4:3") {
+    return (
+      <span className="h-3.5 w-4.5 rounded-[var(--radius-xs)] border border-current" />
+    );
+  }
+  if (norm === "3:4") {
+    return (
+      <span className="h-4.5 w-3.5 rounded-[var(--radius-xs)] border border-current" />
+    );
+  }
+  if (norm === "21:9") {
+    return (
+      <span className="h-2.5 w-6 rounded-[var(--radius-xs)] border border-current" />
+    );
+  }
+  return (
+    <span className="h-3.5 w-4 rounded-[var(--radius-xs)] border border-dashed border-current opacity-70" />
+  );
+}
+
+function VisualAspectRatioPicker({
+  value,
+  onChange,
+  options,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  options: string[];
+}) {
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-3">
+        <span
+          id="video-aspect-ratio-label"
+          className="type-caption text-[var(--fg-2)]"
+        >
+          画面比例
+        </span>
+        <span className="shrink-0 type-caption text-[var(--fg-1)]">
+          {value || "默认"}
+        </span>
+      </div>
+      <div
+        role="group"
+        aria-labelledby="video-aspect-ratio-label"
+        className="grid grid-cols-3 gap-1.5 min-[400px]:grid-cols-4 sm:grid-cols-3"
+      >
+        {options.length === 0 && (
+          <div className="col-span-full flex min-h-14 items-center justify-center rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-0)]/60 px-3 text-center type-caption text-[var(--fg-3)]">
+            未配置
+          </div>
+        )}
+        {options.map((option) => {
+          const isSelected = option === value;
+          return (
+            <button
+              key={option || "auto"}
+              type="button"
+              aria-pressed={isSelected}
+              onClick={() => onChange(option)}
+              className={cn(
+                "flex min-h-14 min-w-0 flex-col items-center justify-center gap-1.5 rounded-[var(--radius-control)] border px-2 py-2 text-center transition-[background-color,border-color,color,box-shadow,transform] duration-150",
+                isSelected
+                  ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)] shadow-[var(--shadow-amber)]"
+                  : "border-[var(--border)] bg-[var(--bg-0)]/80 text-[var(--fg-2)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
+              )}
+            >
+              <AspectRatioShape ratio={option} />
+              <span className="max-w-full break-words type-caption font-medium leading-none">
+                {option || "自动"}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function VisualResolutionSelector({
+  value,
+  onChange,
+  options,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  options: string[];
+}) {
+  return (
+    <div className="space-y-1.5">
+      <span
+        id="video-resolution-label"
+        className="type-caption text-[var(--fg-2)]"
+      >
+        分辨率
+      </span>
+      <div
+        role="group"
+        aria-labelledby="video-resolution-label"
+        className="flex min-h-11 flex-wrap gap-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/60 p-1 sm:min-h-10"
+      >
+        {options.length === 0 && (
+          <span className="flex min-w-0 flex-1 items-center justify-center px-2 text-center type-caption text-[var(--fg-3)]">
+            未配置
+          </span>
+        )}
+        {options.map((option) => {
+          const isSelected = option === value;
+          return (
+            <button
+              key={option || "auto"}
+              type="button"
+              aria-pressed={isSelected}
+              onClick={() => onChange(option)}
+              className={cn(
+                "min-h-11 min-w-14 flex-1 rounded-[var(--radius-xs)] px-2.5 py-1.5 text-center type-caption font-medium transition-[background-color,border-color,color,box-shadow] duration-150 sm:min-h-8",
+                isSelected
+                  ? "border border-[var(--border-strong)] bg-[var(--bg-2)] font-semibold text-[var(--accent)] shadow-[var(--shadow-1)]"
+                  : "border border-transparent text-[var(--fg-2)] hover:bg-[var(--bg-2)]/50 hover:text-[var(--fg-0)]",
+              )}
+            >
+              <span className="break-words">{option || "自动"}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -108,20 +263,23 @@ function SubmitPanel({
   onSubmit: () => void;
 }) {
   return (
-    <div className="space-y-2">
+    <div className="space-y-2.5">
       <p
+        id="video-submit-status"
+        role="status"
+        aria-live="polite"
         className={cn(
-          "flex min-w-0 items-center gap-2 type-caption leading-5",
+          "flex min-w-0 items-start gap-2 type-caption leading-5",
           canSubmit ? "text-success" : "text-[var(--fg-2)]",
         )}
       >
         <span
           className={cn(
-            "h-1.5 w-1.5 shrink-0 rounded-full",
+            "mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full",
             canSubmit ? "bg-[var(--success)]" : "bg-[var(--fg-3)]",
           )}
         />
-        <span className="truncate">{reason}</span>
+        <span className="min-w-0 break-words">{reason}</span>
       </p>
       <Button
         variant="primary"
@@ -129,10 +287,11 @@ function SubmitPanel({
         fullWidth
         disabled={!canSubmit}
         loading={loading}
+        aria-describedby="video-submit-status"
         onClick={onSubmit}
         leftIcon={<Send className="h-4 w-4" />}
       >
-        生成视频
+        {loading ? "生成中" : "生成视频"}
       </Button>
     </div>
   );
@@ -219,29 +378,27 @@ export function VideoParameterPanelView({
           />
         </section>
 
-        <section className="space-y-2.5">
+        <section className="space-y-3">
           <p className="type-caption text-[var(--fg-2)]">画面与时长</p>
-          <div className="grid min-w-0 grid-cols-1 gap-2 min-[360px]:grid-cols-2">
-            <SelectField
-              label="分辨率"
+          <VisualAspectRatioPicker
+            value={aspectRatio}
+            onChange={onAspectRatioChange}
+            options={aspectRatioOptions}
+          />
+          <div className="grid min-w-0 grid-cols-1 gap-2.5 min-[360px]:grid-cols-2">
+            <VisualResolutionSelector
               value={resolution}
               onChange={onResolutionChange}
               options={resolutionOptions}
             />
             <SelectField
-              label="画面比例"
-              value={aspectRatio}
-              onChange={onAspectRatioChange}
-              options={aspectRatioOptions}
+              label="视频时长"
+              value={String(durationS)}
+              onChange={onDurationChange}
+              options={durationOptions}
+              renderOption={(value) => formatDurationLabel(Number(value))}
             />
           </div>
-          <SelectField
-            label="视频时长"
-            value={String(durationS)}
-            onChange={onDurationChange}
-            options={durationOptions}
-            renderOption={(value) => formatDurationLabel(Number(value))}
-          />
         </section>
 
         <label
@@ -296,30 +453,51 @@ export function VideoParameterPanelView({
       </div>
 
       <div className="mt-auto shrink-0 border-t border-[var(--border)] bg-[var(--bg-1)]/72 p-3 sm:p-3.5">
-        <div className="mb-3 grid grid-cols-2 gap-2 border-y border-[var(--border-subtle)] py-3">
-          <div className="min-w-0">
-            <p className="type-caption text-[var(--fg-2)]">预计预扣</p>
-            <p className="mt-1 truncate type-card-title font-semibold tabular-nums text-[var(--fg-0)]">
-              {estimate ? formatRmb(estimate.micro / 1_000_000) : "-"}
-            </p>
+        <div className="mb-3 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-3 shadow-[var(--shadow-1)]">
+          <div className="grid grid-cols-1 gap-3 min-[340px]:grid-cols-2">
+            <div className="min-w-0">
+              <span className="type-caption text-[var(--fg-2)]">预计预扣</span>
+              <p
+                className="mt-1 break-all font-mono type-body font-semibold tabular-nums text-[var(--fg-0)]"
+                title={estimate ? formatMicroRmb(estimate.micro) : undefined}
+              >
+                {estimate ? formatMicroRmb(estimate.micro) : "-"}
+              </p>
+            </div>
+            <div className="min-w-0 border-t border-[var(--border-subtle)] pt-3 min-[340px]:border-l min-[340px]:border-t-0 min-[340px]:pl-3 min-[340px]:pt-0">
+              <span className="type-caption text-[var(--fg-2)]">计费单价</span>
+              <p
+                className="mt-1 break-all font-mono type-body-sm font-semibold tabular-nums text-[var(--fg-0)]"
+                title={
+                  estimate
+                    ? formatMicroRmb(estimate.unitPriceMicro)
+                    : undefined
+                }
+              >
+                {estimate
+                  ? formatMicroRmb(estimate.unitPriceMicro)
+                  : "-"}
+              </p>
+              <span className="type-caption text-[var(--fg-3)]">
+                / 百万 Token
+              </span>
+            </div>
           </div>
-          <div className="min-w-0 border-l border-[var(--border-subtle)] pl-3">
-            <p className="type-caption text-[var(--fg-2)]">计费单价</p>
-            <p className="mt-1 truncate type-body-sm font-semibold tabular-nums text-[var(--fg-0)]">
-              {estimate
-                ? `${formatRmb(estimate.unitPriceMicro / 1_000_000)} / 百万 Token`
-                : "-"}
-            </p>
-          </div>
+          {estimate && (
+            <div className="mt-2.5 grid grid-cols-[auto_minmax(0,1fr)] gap-3 border-t border-[var(--border-subtle)] pt-2 type-caption tabular-nums text-[var(--fg-2)]">
+              <span>Token 上限</span>
+              <span className="min-w-0 break-words text-right font-medium text-[var(--fg-1)]">
+                {estimate.tokens.toLocaleString()}
+                {estimate.note ? ` · ${estimate.note}` : ""}
+              </span>
+            </div>
+          )}
         </div>
-        <p
-          className="mb-3 truncate type-caption tabular-nums text-[var(--fg-2)]"
-          title={estimate?.note ?? undefined}
-        >
-          {estimate
-            ? `Token 上限 ${estimate.tokens.toLocaleString()}${estimate.note ? ` · ${estimate.note}` : ""}`
-            : "价格与预扣由服务端配置返回"}
-        </p>
+        {!estimate && (
+          <p className="mb-3 break-words type-caption tabular-nums text-[var(--fg-2)]">
+            价格与预扣由服务端配置返回
+          </p>
+        )}
         <SubmitPanel
           canSubmit={canSubmit}
           reason={reason}
@@ -383,6 +561,9 @@ export function VideoWorkbenchHeader({
               />
               {serviceValue}
             </span>
+            <div className="md:hidden">
+              <MobileRuntimeResilienceStatus />
+            </div>
           </div>
           <p className="mt-1 truncate type-caption text-[var(--fg-2)]">
             {loading ? "视频服务读取中" : serviceSummary}

@@ -17,6 +17,7 @@ import {
 import Link from "next/link";
 import { useState } from "react";
 
+import { MobileRuntimeResilienceStatus } from "@/components/RuntimeResilienceStatus";
 import { validateCanvasNodeExecution } from "@/lib/canvas/graph";
 import { isCanvasExecutableNodeType } from "@/lib/canvas/registry";
 import type { CanvasSaveState } from "@/lib/canvas/types";
@@ -173,6 +174,7 @@ export function CanvasTopBar({
             compact
           />
         </div>
+        <MobileRuntimeResilienceStatus />
         <IconButton
           aria-label={fullscreen ? "退出全屏" : "全屏画布"}
           aria-pressed={fullscreen}

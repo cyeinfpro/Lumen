@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -122,6 +122,10 @@ class AgentSessionCreateIn(_StrictAgentIn):
     allow_file_tools: bool = True
 
 
+class AgentSessionBranchIn(_StrictAgentIn):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+
+
 class AgentSessionPatchIn(_StrictAgentIn):
     title: str | None = Field(default=None, max_length=255)
     pinned: bool | None = None
@@ -151,6 +155,7 @@ class AgentMessageCreateIn(_StrictAgentIn):
     allow_image: bool = True
     allow_web_search: bool = False
     allow_file_tools: bool = True
+    model: str | None = Field(default=None, min_length=1, max_length=128)
     reasoning_effort: (
         Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None
     ) = None
@@ -258,6 +263,43 @@ class AgentReferenceOut(BaseModel):
     display_label: str | None = None
 
 
+class _AgentToolDetailsOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class AgentWebSearchToolDetailsOut(_AgentToolDetailsOut):
+    kind: Literal["web_search"]
+    query: str | None = Field(default=None, max_length=2_000)
+    result_snippets: list[str] = Field(default_factory=list, max_length=6)
+
+
+class AgentFileToolDetailsOut(_AgentToolDetailsOut):
+    kind: Literal["file_list", "file_read", "file_search"]
+    file_names: list[str] = Field(default_factory=list, max_length=8)
+    query: str | None = Field(default=None, max_length=256)
+    line_start: int | None = Field(default=None, ge=1)
+    line_end: int | None = Field(default=None, ge=1)
+    result_snippets: list[str] = Field(default_factory=list, max_length=6)
+
+
+class AgentImageToolDetailsOut(_AgentToolDetailsOut):
+    kind: Literal["image"]
+    prompt: str | None = Field(default=None, max_length=4_000)
+    reference_count: int = Field(default=0, ge=0, le=AGENT_MAX_REFERENCE_IMAGES)
+    count: int | None = Field(default=None, ge=1, le=AGENT_MAX_IMAGES_PER_TOOL)
+    aspect_ratio: AspectRatio | None = None
+    quality: Literal["1k", "2k", "4k"] | None = None
+    render_quality: Literal["auto", "low", "medium", "high"] | None = None
+    background: Literal["auto", "opaque", "transparent"] | None = None
+    output_format: Literal["png", "jpeg", "webp"] | None = None
+
+
+AgentToolDetailsOut = Annotated[
+    AgentWebSearchToolDetailsOut | AgentFileToolDetailsOut | AgentImageToolDetailsOut,
+    Field(discriminator="kind"),
+]
+
+
 class AgentToolCallOut(BaseModel):
     id: str
     agent_run_id: str
@@ -279,6 +321,8 @@ class AgentToolCallOut(BaseModel):
     ]
     generation_ids: list[str] = Field(default_factory=list)
     generation_count: int = 0
+    details: AgentToolDetailsOut | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
     error_code: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -457,9 +501,17 @@ class AgentEventEnvelope(_StrictAgentIn):
         return self
 
 
+class AgentModelOptionOut(BaseModel):
+    model: str = Field(min_length=1, max_length=128)
+    vision_supported: bool = False
+    reasoning_supported: bool = False
+
+
 class AgentStatusOut(BaseModel):
     enabled: bool = True
     tool_gateway_configured: bool = False
+    default_model: str | None = Field(default=None, max_length=128)
+    models: list[AgentModelOptionOut] = Field(default_factory=list, max_length=128)
 
 
 def stable_reference_label(index: int) -> str:
@@ -532,12 +584,14 @@ __all__ = [
     "AgentMessageCreateIn",
     "AgentMessageCreateOut",
     "AgentMessageListOut",
+    "AgentModelOptionOut",
     "AgentReferenceIn",
     "AgentReferenceOut",
     "AgentProviderDispatchIn",
     "AgentProviderDispatchOut",
     "AgentRunOut",
     "AgentRunContinueIn",
+    "AgentSessionBranchIn",
     "AgentSessionCreateIn",
     "AgentSessionListOut",
     "AgentSessionOut",

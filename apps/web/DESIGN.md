@@ -1,7 +1,7 @@
 ---
 status: current
 owner: web
-last_reviewed: 2026-07-10
+last_reviewed: 2026-09-03
 supersedes_frontend_guidance: docs/DESIGN.md
 ---
 
@@ -10,6 +10,21 @@ supersedes_frontend_guidance: docs/DESIGN.md
 本文件是 `apps/web` 的设计语言**唯一来源**。所有颜色、排版、圆角、阴影、文案规范都在此约定。底层值在 `apps/web/src/app/globals.css`，本文档只描述「何时用、怎么用」。
 
 如果发现 UI 与本文不符，先改 UI。如果设计需要新增，先改本文件 + globals.css，再写组件。
+
+`docs/ui-ux-comprehensive-redesign-spec.md` 是审计与演进提案，不是并列的设计来源。其 W1/W2
+中已接受的材质、控件与排版规则已在本文完成语义化归并；若提案中的示例色值、尺寸或 hover
+行为与本文冲突，以本文和 `globals.css` 为准。
+
+### V2 提案归并决议
+
+| 提案项 | 决议 | 最终契约 |
+|---|---|---|
+| 卡片/玻璃的暗色 rgba、hex 示例 | 接受质感目标，拒绝局部色板 | `surface-card-v2` / `surface-glass-v2` 只消费主题 token |
+| Primary / Secondary / Glass 材质 | 接受并集中 | 只由 `Button` 和 `--button-*-bg` 定义，业务层不得复制 |
+| 中文禁用 mono / uppercase / 大 tracking | 接受 | 见 4.1；技术数据继续使用 `type-mono-meta` / `tabular-nums` |
+| 提案中的 7 档紧缩字号 | 暂不全局替换 | 保留本文件 14 档现有阶梯，避免跨页面信息层级回归；最小业务标签提升到 11px |
+| App Bar 52px | 不接受 | 保留 `--appbar-h: 56px`，同步维持滚动、抽屉和骨架占位契约 |
+| 所有卡片无条件 hover 位移 | 条件接受 | 仅精确指针 hover 提升；触控与 Reduced Motion 不位移 |
 
 ---
 
@@ -21,7 +36,7 @@ supersedes_frontend_guidance: docs/DESIGN.md
 
 | 槽 | 用途 | utility |
 |---|---|---|
-| **accent**（琥珀） | 品牌主色、CTA、选中、聚焦光晕 | `bg-accent / text-accent / border-accent-border / ring-accent` |
+| **accent**（琥珀） | 品牌主色、当前动作、选中、聚焦光晕 | `bg-accent / text-accent / border-accent-border / ring-accent` |
 | **danger**（红） | 破坏性操作（删除/撤销）、错误、超额 | `bg-danger / text-danger / border-danger-border` |
 | **success**（绿） | 成功、已启用、连接正常 | `bg-success / text-success / border-success-border` |
 | **warning**（黄） | 提醒但非错误（成本警告、即将过期） | `bg-warning / text-warning / border-warning-border` |
@@ -37,6 +52,7 @@ supersedes_frontend_guidance: docs/DESIGN.md
 | 场景 | ✅ 用 | ❌ 不用 |
 |---|---|---|
 | 删除按钮 | `bg-danger text-white` | `bg-red-500` |
+| 主操作按钮 | `<Button variant="primary">` | 页面内手写琥珀色块或渐变 |
 | 错误提示框 | `bg-danger-soft border-danger-border text-danger` | `bg-red-500/10 border-red-500/30 text-red-300` |
 | 成功 toast | `bg-success-soft text-success` | `bg-emerald-500/10 text-emerald-300` |
 | 信息提示 | `bg-info-soft text-info` | `bg-sky-500/10 text-sky-300` 或 `bg-blue-500/10 text-blue-300` |
@@ -102,16 +118,25 @@ supersedes_frontend_guidance: docs/DESIGN.md
 | `type-display-lg` | 中等大号（28px / 700） |
 | `type-page-title` | 路由页主标题（24px / 600） |
 | `type-page-title-sm` | 紧凑页主标题（22px / 600） |
-| `type-page-kicker` | 标题之上的小 mono uppercase（10px） |
+| `type-page-kicker` | 标题之上的小号 sans 标签（11px，正常字距） |
 | `type-page-subtitle` | 副标题（12px） |
 | `type-section-title` | Panel/Card 组标题（20px / 600） |
 | `type-card-title` | 卡片标题（16px / 600） |
 | `type-body` | 正文默认（15px） |
 | `type-body-sm` | 次级正文、设置项 detail（13px） |
 | `type-caption` | 标签、辅助说明（12px） |
-| `type-overline` | 分组标签（10px / uppercase / sans） |
-| `type-mono-meta` | 元数据 mono uppercase（10px） |
+| `type-overline` | 分组标签（11px / sans / 正常字距） |
+| `type-mono-meta` | 技术元数据（10px / mono；仅拉丁标识、代码与数字） |
 | `type-metric` | 数字指标（22px tabular） |
+
+### 4.1 CJK 排版边界
+
+- 中文标题、标签、Eyebrow、状态词和按钮文案使用 sans、正常字距与原始字形；禁止叠加
+  `font-mono`、`uppercase`、`tracking-widest` 或任意 `tracking-[...]`。
+- `type-page-kicker` 与 `type-overline` 已内建上述 CJK 安全规则，不要在调用点重新拼字体或字距。
+- `type-mono-meta`、`font-mono` 与 `tabular-nums` 只保留给代码、ID、时间、金额、尺寸、比例和
+  纯数字指标。中文说明与数字同时出现时，中文容器保持 sans，只给数字子节点 mono/tabular。
+- 中文长文本使用 `break-words text-pretty`；最小业务文案字号为 11px。
 
 ### 替换示例
 
@@ -184,9 +209,25 @@ supersedes_frontend_guidance: docs/DESIGN.md
 |---|---|
 | `surface-card` | 标准卡片（border + shadow-1 + 半透明 bg-1） |
 | `surface-card-hover` | 配合上面用，hover 自动提升 border + shadow |
+| `surface-card-v2` | 需要更细腻高光层次的独立内容卡片；仍只消费语义 surface/border/shadow token |
 | `surface-panel` | 浮层、Tooltip、Drawer（border + shadow-2 + blur 16） |
 | `surface-dialog` | 弹窗（border + shadow-3 + blur 20） |
+| `surface-glass-v2` | 全局 App Bar 等持续性玻璃 chrome；使用主题 surface 与底部分隔线 |
 | `control-shell` | 输入框/Segmented 的统一外壳 |
+
+`surface-card-v2` 的提升态只在 `(hover: hover) and (pointer: fine)` 生效，并为键盘
+`focus-within` 提供同等级边界反馈；Reduced Motion 下不位移。`surface-glass-v2` 在 Reduced
+Transparency 下回退到不透明 `--bg-1`。两者不得写暗色专用 rgba/hex 覆盖，因此显式亮暗主题和
+跟随系统主题走同一套语义解析。
+
+### 6.1 控件原语
+
+- `Button` 的 `primary` 使用语义化琥珀渐变与 `--shadow-amber`，`secondary` 使用弱中性表面，
+  `glass` 使用玻璃表面；业务组件不得复制或覆盖这三种材质，只可追加布局类。
+- 普通 hover 保持中性。琥珀只用于主动作、焦点和当前状态；侧栏「新建会话」使用
+  `secondary` + 琥珀加号，而不是整块强调色。
+- 下拉框统一使用 `primitives/Select`，业务代码不得直接渲染 `<select>`。认证表单继续给
+  `Select` 传 `auth-control`，保持 44px 高度、移动端 16px 字号和统一 focus 表现。
 
 普通页面分区不要默认套 `surface-card`。优先使用：
 
@@ -225,7 +266,8 @@ supersedes_frontend_guidance: docs/DESIGN.md
 
 固定顺序：**内容 > 当前任务状态 > 导航 > 设置**。
 
-- 全局 App Bar 只承载品牌、顶层导航、命令面板、任务入口和账户菜单。
+- 全局 App Bar 只承载品牌、顶层导航，以及固定顺序的命令面板、`TaskIsland` 和账户菜单。
+- 页面搜索、筛选、刷新与其他私有工具放在页面 Header/Toolbar；不得注入 App Bar 右侧。
 - 会话级 Fast、上下文、记忆、系统提示词放在 Studio Context Bar。
 - 新建会话属于侧栏主动作，不与账户和任务状态并列。
 - 琥珀色只用于当前动作、当前焦点和当前运行状态；普通边框、普通 Hover、普通图标保持中性。
@@ -258,11 +300,14 @@ Composer 必须按三层渐进披露：
 
 ### 8.4 Shell 与移动触控
 
-- Desktop App Bar 高度 56px。
+- Desktop App Bar 高度固定为 56px，并由 `--appbar-h` 驱动。V2 提案中的 52px 是未采纳的视觉
+  草案；改动会破坏现有滚动、抽屉和骨架占位契约，因此保留 56px。
 - Desktop Sidebar：宽屏固定、桌面中宽 64px 窄栏、窄屏抽屉。
 - Mobile Top Bar 第一行只处理位置、切换与新建；会话参数放第二行。
 - Mobile Tab Bar 高度 56px，标签不小于 11px。
 - 视觉按钮可以小于 44px，但移动端实际命中区必须至少 44×44px。
+- 会话验证降级/失效在移动端进入 `MobileTopBar` 的紧凑恢复动作，不得 fixed 悬浮在顶栏或其他
+  控件上；桌面端可使用右下角轻量状态条。两端都必须保留 live-region 与可访问操作名称。
 
 ---
 
@@ -286,5 +331,7 @@ Composer 必须按三层渐进披露：
 
 ## 10. 变更记录
 
+- **2026-09-03 W1/W2 规则归并**：接纳语义化 V2 卡片/玻璃材质与按钮层级，收紧 CJK 排版和
+  Select 表单契约，固定 App Bar 全局操作区，并明确保留 56px 布局几何与移动恢复状态位置。
 - **2026-07-10 Luminous Darkroom 2.0**：收拢 App Bar 与 Studio Context Bar 层级，建立四档内容宽度、三层 Composer、三态侧栏、统一任务入口和克制的强调色规则。
 - **2026-05-09 V1 设计语言统一**：建立 5 语义槽 utility（`@theme` 注册 15 个 `--color-*` 字面量），新增 4 个 `*-fg` 变量做亮色补偿，补 `.type-display / .type-display-lg / .type-overline` 三档。

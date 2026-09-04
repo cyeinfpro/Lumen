@@ -8,11 +8,14 @@ import {
   RefreshCw,
   Search,
   Share2,
+  SlidersHorizontal,
   WandSparkles,
   X,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
+import type { ReactNode } from "react";
 
+import { Button, IconButton } from "@/components/ui/primitives";
 import type { StreamFeedFilters } from "../model/contracts";
 import { cn } from "@/lib/utils";
 
@@ -27,6 +30,11 @@ export interface StreamOverviewProps {
   selectionMode?: boolean;
   selectedCount?: number;
   sharingSelected?: boolean;
+  searchActive?: boolean;
+  filterActive?: boolean;
+  onToggleSearch?: () => void;
+  onToggleFilter?: () => void;
+  children?: ReactNode;
   onRefresh: () => void;
   onClearFilters: () => void;
   onToggleReferenceFilter: () => void;
@@ -97,6 +105,116 @@ function SelectionControls({
   );
 }
 
+function StreamToolbarActions({
+  hasControls,
+  searchActive,
+  filterActive,
+  selectionMode,
+  selectedCount,
+  sharingSelected,
+  refreshing,
+  onToggleSearch,
+  onToggleFilter,
+  onToggleSelectionMode,
+  onClearSelection,
+  onShareSelected,
+  onClearFilters,
+  onRefresh,
+}: Pick<
+  StreamOverviewProps,
+  | "searchActive"
+  | "filterActive"
+  | "selectionMode"
+  | "selectedCount"
+  | "sharingSelected"
+  | "refreshing"
+  | "onToggleSearch"
+  | "onToggleFilter"
+  | "onToggleSelectionMode"
+  | "onClearSelection"
+  | "onShareSelected"
+  | "onClearFilters"
+  | "onRefresh"
+> & { hasControls: boolean }) {
+  const router = useRouter();
+  return (
+    <div className="flex min-w-0 items-center gap-2 overflow-x-auto pb-0.5 no-scrollbar min-[400px]:shrink-0 min-[400px]:pb-0">
+      {onToggleSearch ? (
+        <IconButton
+          size="sm"
+          variant="outline"
+          aria-label="搜索素材"
+          aria-pressed={searchActive}
+          tooltip="搜索素材"
+          tooltipSide="bottom"
+          onClick={onToggleSearch}
+          className={cn(
+            searchActive &&
+              "border-accent-border bg-[var(--accent-soft)] text-accent",
+          )}
+        >
+          <Search className="h-3.5 w-3.5" />
+        </IconButton>
+      ) : null}
+      {onToggleFilter ? (
+        <IconButton
+          size="sm"
+          variant="outline"
+          aria-label="筛选素材"
+          aria-pressed={filterActive}
+          tooltip="筛选素材"
+          tooltipSide="bottom"
+          onClick={onToggleFilter}
+          className={cn(
+            filterActive &&
+              "border-accent-border bg-[var(--accent-soft)] text-accent",
+          )}
+        >
+          <SlidersHorizontal className="h-3.5 w-3.5" />
+        </IconButton>
+      ) : null}
+      <SelectionControls
+        selectionMode={selectionMode}
+        selectedCount={selectedCount}
+        sharingSelected={sharingSelected}
+        onToggleSelectionMode={onToggleSelectionMode}
+        onClearSelection={onClearSelection}
+        onShareSelected={onShareSelected}
+      />
+      {hasControls ? (
+        <button
+          type="button"
+          onClick={onClearFilters}
+          className="type-control inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-2.5 text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] focus-visible:outline-none md:h-9 md:min-h-0"
+        >
+          <Eraser className="h-3 w-3" />
+          清除
+        </button>
+      ) : null}
+      <IconButton
+        size="sm"
+        variant="outline"
+        onClick={onRefresh}
+        loading={refreshing}
+        aria-label="刷新素材"
+        tooltip="刷新素材"
+        tooltipSide="bottom"
+      >
+        <RefreshCw className="h-3.5 w-3.5" />
+      </IconButton>
+      <Button
+        variant="primary"
+        size="sm"
+        onClick={() => router.push("/")}
+        className="shrink-0 md:h-9"
+        leftIcon={<WandSparkles className="h-3.5 w-3.5" />}
+      >
+        创作
+      </Button>
+    </div>
+  );
+}
+
 function FilterChips({
   filters,
   searchValue,
@@ -146,6 +264,11 @@ export function StreamOverview({
   selectionMode = false,
   selectedCount = 0,
   sharingSelected = false,
+  searchActive = false,
+  filterActive = false,
+  onToggleSearch,
+  onToggleFilter,
+  children,
   onRefresh,
   onClearFilters,
   onToggleReferenceFilter,
@@ -153,7 +276,6 @@ export function StreamOverview({
   onClearSelection,
   onShareSelected,
 }: StreamOverviewProps) {
-  const router = useRouter();
   const hasFilter = hasStreamOverviewFilters(filters);
   const hasSearch = searchValue.trim().length > 0;
   const hasControls = hasFilter || hasSearch;
@@ -161,13 +283,14 @@ export function StreamOverview({
 
   return (
     <section
-      aria-label="图库概览"
+      aria-label="图库工具栏"
+      data-asset-content-toolbar
       className="toolbar-shell sticky top-0 z-[var(--z-header)] bg-[var(--bg-0)]/96 px-3 backdrop-blur-xl md:static md:bg-transparent md:px-0 md:backdrop-blur-none"
     >
       <div className="flex flex-col gap-2 min-[400px]:flex-row min-[400px]:items-center min-[400px]:justify-between md:gap-3">
         <div className="type-caption flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
           <span className="inline-flex items-center gap-1.5 text-[var(--fg-1)]">
-            <ImageIcon className="h-3.5 w-3.5 text-[var(--amber-300)]" />
+            <ImageIcon className="h-3.5 w-3.5 text-accent" />
             <span className="tabular-nums">{visibleLabel} 张</span>
           </span>
           <span className="inline-flex items-center gap-1.5 text-[var(--fg-2)]">
@@ -181,44 +304,25 @@ export function StreamOverview({
           )}
         </div>
 
-        <div className="flex min-w-0 items-center gap-2 overflow-x-auto pb-0.5 no-scrollbar min-[400px]:shrink-0 min-[400px]:pb-0">
-          <SelectionControls
-            selectionMode={selectionMode}
-            selectedCount={selectedCount}
-            sharingSelected={sharingSelected}
-            onToggleSelectionMode={onToggleSelectionMode}
-            onClearSelection={onClearSelection}
-            onShareSelected={onShareSelected}
-          />
-          {hasControls && (
-            <button
-              type="button"
-              onClick={onClearFilters}
-              className="type-control inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-2.5 text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] focus-visible:outline-none md:h-9 md:min-h-0"
-            >
-              <Eraser className="h-3 w-3" />
-              清除
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={onRefresh}
-            disabled={refreshing}
-            aria-label="刷新"
-            className="inline-flex min-h-11 min-w-11 shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] disabled:opacity-50 focus-visible:outline-none md:h-9 md:w-9 md:min-h-0 md:min-w-0"
-          >
-            <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
-          </button>
-          <button
-            type="button"
-            onClick={() => router.push("/")}
-            className="type-control inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[transform,background-color] hover:bg-[var(--accent-hover)] active:scale-[var(--press-scale-soft)] focus-visible:outline-none md:h-9 md:min-h-0"
-          >
-            <WandSparkles className="h-3.5 w-3.5" />
-            创作
-          </button>
-        </div>
+        <StreamToolbarActions
+          hasControls={hasControls}
+          searchActive={searchActive}
+          filterActive={filterActive}
+          selectionMode={selectionMode}
+          selectedCount={selectedCount}
+          sharingSelected={sharingSelected}
+          refreshing={refreshing}
+          onToggleSearch={onToggleSearch}
+          onToggleFilter={onToggleFilter}
+          onToggleSelectionMode={onToggleSelectionMode}
+          onClearSelection={onClearSelection}
+          onShareSelected={onShareSelected}
+          onClearFilters={onClearFilters}
+          onRefresh={onRefresh}
+        />
       </div>
+
+      {children ? <div className="mt-2 grid gap-1">{children}</div> : null}
 
       {hasControls && (
         <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">

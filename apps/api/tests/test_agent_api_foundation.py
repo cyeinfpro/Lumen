@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +25,8 @@ from app.services.agent import sessions as agent_sessions_service
 from app.services.agent import tools as agent_tools_service
 from app.services.agent import common as agent_common
 from app.services.agent import message_submission as agent_message_service
+from app.services.agent import presentation as agent_presentation
+from app.services.agent import status as agent_status_service
 from app.services.agent import submission_planning as agent_submission_planning
 from app.services.agent import reference_validation as agent_reference_validation
 from app.services.agent import session_crud as agent_session_crud_service
@@ -65,10 +68,14 @@ from lumen_core.schema_models import (
     AgentMessageCreateIn,
     AgentProviderDispatchIn,
     AgentRunContinueIn,
+    AgentSessionBranchIn,
     AgentSessionCreateIn,
     AgentSessionPatchIn,
     AgentToolCreateImageIn,
 )
+
+
+REDACTION_TEST_SLACK_TOKEN = "-".join(("xoxb", "1234567890", "slackprivatevalue"))
 
 
 _TABLE_MODELS = (
@@ -115,6 +122,217 @@ def test_agent_orphan_hold_requires_persisted_no_dispatch_evidence() -> None:
     )
     assert _hold_release_proof(unknown, ref_type="agent_run") is None
     assert _hold_release_proof(authorized, ref_type="agent_run") is None
+
+
+def test_agent_tool_projection_exposes_only_redacted_typed_details() -> None:
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    finished_at = started_at + timedelta(milliseconds=1_250)
+
+    def tool(
+        *,
+        tool_id: str,
+        name: str,
+        mode: str | None,
+        arguments: dict[str, Any],
+        result: dict[str, Any],
+    ) -> AgentToolCall:
+        return AgentToolCall(
+            id=tool_id,
+            agent_run_id="run-public-details",
+            capability_id="private-capability",
+            pi_tool_call_id=f"pi-{tool_id}",
+            ordinal=0,
+            execution_epoch=1,
+            name=name,
+            mode=mode,
+            status="succeeded",
+            request_hash="a" * 64,
+            semantic_key=(tool_id[-1] if tool_id[-1].isalnum() else "b") * 64,
+            arguments_jsonb=arguments,
+            result_jsonb=result,
+            generation_count=0,
+            started_at=started_at,
+            finished_at=finished_at,
+            created_at=started_at,
+            updated_at=finished_at,
+        )
+
+    web = agent_presentation.agent_tool_call_out(
+        tool(
+            tool_id="tool-web-1",
+            name=AGENT_TOOL_WEB_SEARCH,
+            mode="web_search",
+            arguments={
+                "query": "current trends Authorization: Bearer private-web-token",
+                "callback_url": "http://internal.example/secret",
+            },
+            result={
+                "history_text": json.dumps(
+                    {
+                        "answer": "<b>Current answer</b>",
+                        "sources": [
+                            {
+                                "title": "Source",
+                                "url": "https://example.test/?token=private-url-token",
+                                "snippet": "api_key=private-snippet-key useful result",
+                            }
+                        ],
+                    }
+                ),
+                "provider_response": {"secret": "private-provider-value"},
+            },
+        )
+    )
+    file_read = agent_presentation.agent_tool_call_out(
+        tool(
+            tool_id="tool-file-2",
+            name="lumen_read_file",
+            mode="file_read",
+            arguments={"name": "/srv/private/brief.md", "host_path": "/etc/passwd"},
+            result={
+                "history_text": json.dumps(
+                    {
+                        "name": "/srv/private/brief.md",
+                        "line_start": 4,
+                        "line_end": 5,
+                        "content": (
+                            "password=hunter2\n"
+                            "Authorization: Basic dXNlcjpwYXNz\n"
+                            "AWS_SECRET_ACCESS_KEY=aws-private-value\n"
+                            "DATABASE_URL=postgresql://admin:db-private@db.test/app"
+                            "?sslmode=require&token=query-private\n"
+                            f"Slack {REDACTION_TEST_SLACK_TOKEN}\n"
+                            "credential : 'generic private value'\n"
+                            "Approved direction"
+                        ),
+                    }
+                )
+            },
+        )
+    )
+    image_tool = agent_presentation.agent_tool_call_out(
+        tool(
+            tool_id="tool-image-3",
+            name=AGENT_TOOL_CREATE_IMAGE,
+            mode="image_to_image",
+            arguments={
+                "prompt": "Product image api_key=sk-private-image-token",
+                "reference_labels": ["ref_1", "ref_2"],
+                "count": 2,
+                "aspect_ratio": "4:5",
+                "quality": "2k",
+                "render_quality": "high",
+                "background": "opaque",
+                "output_format": "webp",
+                "callback_url": "http://internal.example/tool",
+            },
+            result={"provider_response": {"authorization": "private"}},
+        )
+    )
+    unknown = agent_presentation.agent_tool_call_out(
+        tool(
+            tool_id="tool-unknown-4",
+            name="bash",
+            mode=None,
+            arguments={"command": "cat /etc/passwd"},
+            result={"history_text": '{"secret":"private-unknown"}'},
+        )
+    )
+
+    assert web.details is not None and web.details.kind == "web_search"
+    assert web.details.result_snippets == [
+        "Current answer",
+        "Source - api_key=[REDACTED] useful result",
+    ]
+    assert file_read.details is not None and file_read.details.kind == "file_read"
+    assert file_read.details.file_names == ["brief.md"]
+    assert file_read.details.result_snippets == [
+        "password=[REDACTED]",
+        "Authorization: [REDACTED]",
+        "AWS_SECRET_ACCESS_KEY=[REDACTED]",
+        "DATABASE_URL=[REDACTED]",
+        "Slack [REDACTED]",
+        "credential : [REDACTED]",
+    ]
+    assert image_tool.details is not None and image_tool.details.kind == "image"
+    assert image_tool.details.reference_count == 2
+    assert image_tool.details.aspect_ratio == "4:5"
+    assert web.duration_ms == file_read.duration_ms == image_tool.duration_ms == 1_250
+    assert unknown.details is None
+
+    rendered = json.dumps(
+        [
+            web.model_dump(mode="json"),
+            file_read.model_dump(mode="json"),
+            image_tool.model_dump(mode="json"),
+            unknown.model_dump(mode="json"),
+        ]
+    )
+    for secret in (
+        "private-web-token",
+        "private-url-token",
+        "private-snippet-key",
+        "private-provider-value",
+        "hunter2",
+        "dXNlcjpwYXNz",
+        "aws-private-value",
+        "db-private",
+        "query-private",
+        "slackprivatevalue",
+        "generic private value",
+        "sk-private-image-token",
+        "callback_url",
+        "host_path",
+        "/srv/private",
+        "/etc/passwd",
+        "private-unknown",
+    ):
+        assert secret not in rendered
+
+
+@pytest.mark.parametrize(
+    ("raw", "secret"),
+    [
+        ("Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
+        ("authorization : Bearer mixed-private-token", "mixed-private-token"),
+        ("AWS_SECRET_ACCESS_KEY = aws-private-value", "aws-private-value"),
+        (
+            "DATABASE_URL=postgresql://admin:db-private@db.test/app?token=query-private",
+            "db-private",
+        ),
+        (
+            "connect postgresql://admin:db-private@db.test/app?sslmode=require&api_key=query-private",
+            "query-private",
+        ),
+        (f"Slack {REDACTION_TEST_SLACK_TOKEN}", "slackprivatevalue"),
+        ("credential : 'generic private value'", "generic private value"),
+    ],
+)
+def test_agent_public_text_scrubs_common_credential_forms(
+    raw: str,
+    secret: str,
+) -> None:
+    projected = agent_presentation._public_text(raw, maximum=2_000)  # noqa: SLF001
+    assert projected is not None
+    assert secret not in projected
+    assert "REDACTED" in projected
+
+
+def test_agent_structured_scrubber_redacts_sensitive_keys_recursively() -> None:
+    projected = agent_presentation._scrub_public_value(  # noqa: SLF001
+        {
+            "query": "safe public query",
+            "provider_response": {
+                "api_key": "nested-private",
+                "headers": {"Authorization": "Bearer header-private"},
+            },
+        }
+    )
+    assert projected["query"] == "safe public query"
+    rendered = json.dumps(projected)
+    assert "nested-private" not in rendered
+    assert "header-private" not in rendered
+    assert rendered.count("[REDACTED]") == 2
 
 
 def _create_generation_table(connection: Any) -> None:
@@ -475,6 +693,39 @@ async def test_agent_text_reservation_uses_pi_native_model_and_tool_shape(
     assert reservation.billing_snapshot["context_window"] == 128_000
 
 
+def test_agent_status_model_catalog_dedupes_public_capabilities() -> None:
+    options = agent_status_service._wallet_model_options(  # noqa: SLF001
+        [
+            SimpleNamespace(
+                name="primary",
+                enabled=True,
+                purposes=["chat"],
+                agent_api="openai-responses",
+                responses_supported=True,
+                agent_models=["gpt-agent-test", "gpt-fast"],
+                vision_supported=True,
+                agent_reasoning_supported=False,
+            ),
+            SimpleNamespace(
+                name="reasoning",
+                enabled=True,
+                purposes=["chat"],
+                agent_api="anthropic-messages",
+                responses_supported=None,
+                agent_models=["gpt-agent-test"],
+                vision_supported=False,
+                agent_reasoning_supported=True,
+            ),
+        ],
+        "gpt-agent-test",
+    )
+
+    assert [option.model for option in options] == ["gpt-agent-test", "gpt-fast"]
+    assert options[0].vision_supported is True
+    assert options[0].reasoning_supported is True
+    assert options[1].reasoning_supported is False
+
+
 @pytest.mark.asyncio
 async def test_wallet_agent_preflight_admits_history_that_pi_can_compact(
     monkeypatch: pytest.MonkeyPatch,
@@ -526,6 +777,22 @@ async def test_wallet_agent_preflight_admits_history_that_pi_can_compact(
     assert result.eligible_provider_names == ("compact-capable",)
     assert result.context_plan == "compact_before_prompt"
     assert result.estimated_input_tokens == 115_000
+
+    selected = await agent_common.wallet_chat_provider_preflight(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        require_vision=False,
+        require_reasoning=False,
+        requested_model="gpt-agent-test",
+    )
+    assert selected.model == "gpt-agent-test"
+    with pytest.raises(HTTPException) as unavailable:
+        await agent_common.wallet_chat_provider_preflight(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            require_vision=False,
+            require_reasoning=False,
+            requested_model="unknown-model",
+        )
+    assert unavailable.value.detail["error"]["code"] == "agent_model_unavailable"
 
 
 @pytest.mark.asyncio
@@ -595,6 +862,89 @@ async def test_agent_session_crud_keeps_conversation_soft_delete_semantics(
                 session_id=created.id,
                 user_id=user.id,
             )
+
+
+@pytest.mark.asyncio
+async def test_agent_session_branch_copies_visible_history_and_defaults(
+    db_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_agent_message_dependencies(monkeypatch)
+    async with db_factory() as db:
+        user = User(
+            id="branch-user",
+            email="branch-user@example.test",
+            email_verified=True,
+            display_name="Branch",
+            role="member",
+            account_mode="wallet",
+        )
+        db.add(user)
+        await db.commit()
+        source = await agent_sessions_service.create_agent_session(
+            db,
+            user=user,
+            body=AgentSessionCreateIn(
+                title="Campaign",
+                allow_web_search=True,
+                image_defaults={"count": 3, "aspect_ratio": "4:5"},
+            ),
+            request=None,
+        )
+        source_user = Message(
+            id="branch-source-user",
+            conversation_id=source.conversation_id,
+            role="user",
+            content={"source": "agent", "text": "Plan the campaign"},
+            intent="agent",
+        )
+        source_assistant = Message(
+            id="branch-source-assistant",
+            conversation_id=source.conversation_id,
+            role="assistant",
+            content={
+                "source": "agent",
+                "agent_run_id": "source-run",
+                "text": "Campaign direction",
+            },
+            parent_message_id=source_user.id,
+            intent="agent",
+            status="succeeded",
+        )
+        db.add_all([source_user, source_assistant])
+        await db.commit()
+
+        branched = await agent_sessions_service.branch_agent_session(
+            db,
+            session_id=source.id,
+            user=user,
+            body=AgentSessionBranchIn(),
+            request=None,
+        )
+
+        assert branched.id != source.id
+        assert branched.conversation_id != source.conversation_id
+        assert branched.title == "Campaign 分支"
+        assert branched.allow_web_search is True
+        assert branched.image_defaults.count == 3
+        clones = list(
+            (
+                await db.execute(
+                    select(Message)
+                    .where(Message.conversation_id == branched.conversation_id)
+                    .order_by(Message.created_at, Message.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [message.content["text"] for message in clones] == [
+            "Plan the campaign",
+            "Campaign direction",
+        ]
+        assert clones[0].id != source_user.id
+        assert clones[1].parent_message_id == clones[0].id
+        assert "agent_run_id" not in clones[1].content
 
 
 @pytest.mark.asyncio

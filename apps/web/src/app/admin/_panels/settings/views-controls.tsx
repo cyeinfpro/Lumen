@@ -349,7 +349,7 @@ function TextSettingControl({
         }
         autoComplete="off"
         wrapperClassName="flex-1"
-        className="font-mono"
+        className=""
       />
       {meta.kind === "url" && browserOrigin && (
         <Button
@@ -548,7 +548,6 @@ function ModelChoiceControl({
             onChange({ kind: "set", value: next });
           }}
           wrapperClassName="flex-1"
-          className="font-mono"
         >
           {modelIds.map((model) => (
             <option key={model} value={model}>
@@ -687,7 +686,7 @@ export function TextSettingInput({
         }
         autoComplete="off"
         wrapperClassName="flex-1"
-        className="font-mono"
+        className=""
       />
     </>
   );

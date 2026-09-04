@@ -1,10 +1,12 @@
 export {
   buildStreamFeedQuery,
+  deleteStreamImage,
   feedTotal,
   flattenFeed,
   normalizeStreamFeedFilters,
   normalizeStreamSearchQuery,
   useDebouncedStreamSearch,
+  useDeleteStreamImageMutation,
   useStreamFeedQuery,
 } from "./api/queries";
 export type {

@@ -263,7 +263,7 @@ function SignupForm({
           </InfoLine>
         )}
         <InfoLine label="过期" icon={<Clock className="w-3 h-3" />}>
-          <span className="type-caption font-mono tabular-nums text-[var(--fg-0)]">
+          <span className="type-caption tabular-nums text-[var(--fg-0)]">
             {expiresLabel}
           </span>
         </InfoLine>

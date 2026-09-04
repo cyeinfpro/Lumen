@@ -45,6 +45,9 @@ for (const [token, value] of Object.entries(expected)) {
 if (!/h-\[var\(--appbar-h\)\]/.test(topNav)) {
   errors.push("DesktopTopNav must consume --appbar-h");
 }
+if (!/h-\[var\(--appbar-h\)\][^"\n]*shrink-0/.test(topNav)) {
+  errors.push("DesktopTopNav must not shrink below --appbar-h");
+}
 if (/h-\[52px\]/.test(topNav)) {
   errors.push("DesktopTopNav must not restore the legacy 52px height");
 }

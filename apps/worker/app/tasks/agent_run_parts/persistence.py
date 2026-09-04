@@ -28,6 +28,7 @@ from lumen_core.agent_dispatch import (
     provider_dispatch_evidence_count,
 )
 from lumen_core.constants import MessageStatus
+from lumen_core.message_content import public_message_content
 from lumen_core.model_entities import (
     AgentRun,
     AgentToolCall,
@@ -130,6 +131,12 @@ async def publish_agent_event_fast_path(redis: Any, data: dict[str, Any]) -> Non
 
 def _public_event(run: AgentRun, data: dict[str, Any]) -> dict[str, Any]:
     return {"user_id": run.user_id, **data}
+
+
+def _public_output_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    projected = public_message_content({"source": "agent", "blocks": blocks})
+    value = projected.get("blocks")
+    return value if isinstance(value, list) else []
 
 
 async def claim_agent_run(run_id: str) -> tuple[AgentClaim, dict[str, Any] | None]:
@@ -361,7 +368,7 @@ async def flush_agent_text(
                 "output_revision": output_revision,
                 "output_runtime_seq": output_runtime_seq,
             }
-            projected_blocks = list(blocks or [])
+            projected_blocks = _public_output_blocks(list(blocks or []))
             if replace:
                 replacement_fits = _replacement_event_fits(
                     run,

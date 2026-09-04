@@ -164,6 +164,7 @@ class WorkflowRunListItemOut(BaseOut):
     created_at: datetime
     updated_at: datetime
     output_count: int = 0
+    completion_percent: int = Field(default=0, ge=0, le=100)
     next_action: str
 
 
@@ -289,6 +290,7 @@ class ApparelModelLibraryItemOut(BaseModel):
     library_folder: str | None = None
     prompt_hint: str | None = None
     download_filename: str | None = None
+    usage_count: int = Field(default=0, ge=0)
     created_at: datetime
     updated_at: datetime | None = None
 

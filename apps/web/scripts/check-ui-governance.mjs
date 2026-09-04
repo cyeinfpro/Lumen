@@ -15,7 +15,10 @@ import {
   getGitChangeScope,
   repoRelativePath,
 } from "./git-change-scope.mjs";
-import { findMobileDialogIssues } from "./jsx-quality-analysis.mjs";
+import {
+  findCjkTypographyIssues,
+  findMobileDialogIssues,
+} from "./jsx-quality-analysis.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const APP_ROOT = join(dirname(__filename), "..");
@@ -146,6 +149,18 @@ function scanDarkUtilities(path, lines) {
         line,
       );
     }
+  }
+}
+
+function scanCjkTypography(path, src) {
+  for (const issue of findCjkTypographyIssues(path, src)) {
+    addFinding(
+      issue.rule,
+      path,
+      issue.line,
+      issue.message,
+      issue.snippet,
+    );
   }
 }
 
@@ -331,6 +346,7 @@ for (const full of files) {
   const path = relative(APP_ROOT, full).replaceAll("\\", "/");
   const lines = src.split(/\r?\n/);
   scanDarkUtilities(path, lines);
+  scanCjkTypography(path, src);
   scanMobileDialogs(path, src);
   scanErrorLiveRegions(path, lines);
 }

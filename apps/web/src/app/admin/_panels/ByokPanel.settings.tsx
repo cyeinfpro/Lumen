@@ -87,7 +87,7 @@ function OverviewItem({
         {icon}
       </span>
       <div className="flex flex-col">
-        <span className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
+        <span className="type-overline text-[var(--fg-2)]">
           {label}
         </span>
         <span className="type-body-sm text-[var(--fg-0)] mt-0.5">{value}</span>
@@ -156,7 +156,7 @@ function ByokModeSettings({
 }) {
   return (
     <>
-      <header className="flex items-center gap-2 type-caption uppercase tracking-wider text-[var(--fg-2)]">
+      <header className="flex items-center gap-2 type-overline text-[var(--fg-2)]">
         <ShieldCheck className="w-3.5 h-3.5" />
         BYOK 模式
       </header>
@@ -223,7 +223,7 @@ function ByokValidationSettings({
 }) {
   return (
     <div className="space-y-2">
-      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
+      <div className="type-overline text-[var(--fg-2)]">
         验证设置
       </div>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -294,7 +294,7 @@ function ByokRetentionSettings({
 }) {
   return (
     <div className="space-y-3">
-      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
+      <div className="type-overline text-[var(--fg-2)]">
         数据保留
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">

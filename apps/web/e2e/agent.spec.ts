@@ -5,6 +5,131 @@ import {
   openAgent,
 } from "./agent-fixture";
 
+const TOOL_DETAILS_NOW = "2026-08-20T08:00:00Z";
+
+function toolDetailsSnapshot() {
+  const toolBase = {
+    agent_run_id: "run-1",
+    status: "succeeded",
+    generation_ids: [] as string[],
+    error_code: null,
+    started_at: TOOL_DETAILS_NOW,
+    finished_at: TOOL_DETAILS_NOW,
+    created_at: TOOL_DETAILS_NOW,
+    updated_at: TOOL_DETAILS_NOW,
+  };
+  const run = {
+    id: "run-1",
+    agent_session_id: "session-1",
+    user_message_id: "user-1",
+    assistant_message_id: "assistant-1",
+    status: "succeeded",
+    execution_epoch: 1,
+    last_event_seq: 8,
+    idempotency_key: "tool-details-message",
+    model: "fixture-model",
+    reasoning_effort: null,
+    turn_count: 1,
+    tool_call_count: 3,
+    usage: {},
+    error_code: null,
+    error_message: null,
+    continuable: false,
+    started_at: TOOL_DETAILS_NOW,
+    finished_at: TOOL_DETAILS_NOW,
+    cancel_requested_at: null,
+    created_at: TOOL_DETAILS_NOW,
+    updated_at: TOOL_DETAILS_NOW,
+    references: [],
+    tool_calls: [
+      {
+        ...toolBase,
+        id: "tool-web",
+        ordinal: 0,
+        name: "lumen_web_search",
+        mode: "web_search",
+        generation_count: 0,
+        details: {
+          kind: "web_search",
+          query: "2026 极简美妆视觉趋势",
+          result_snippets: ["行业报告 - 极简排版与高对比产品摄影持续增长"],
+        },
+        duration_ms: 920,
+      },
+      {
+        ...toolBase,
+        id: "tool-file",
+        ordinal: 1,
+        name: "lumen_search_files",
+        mode: "file_search",
+        generation_count: 0,
+        details: {
+          kind: "file_search",
+          file_names: ["brief.md"],
+          query: "品牌色",
+          line_start: null,
+          line_end: null,
+          result_snippets: ["brief.md:4 - 品牌色使用暖金与炭黑"],
+        },
+        duration_ms: 18,
+      },
+      {
+        ...toolBase,
+        id: "tool-image",
+        ordinal: 2,
+        name: "lumen_create_image",
+        mode: "image_to_image",
+        generation_count: 2,
+        details: {
+          kind: "image",
+          prompt: "暖金与炭黑的极简美妆产品海报",
+          reference_count: 1,
+          count: 2,
+          aspect_ratio: "4:5",
+          quality: "2k",
+          render_quality: "high",
+          background: "opaque",
+          output_format: "webp",
+        },
+        duration_ms: 2_400,
+      },
+    ],
+  };
+  return {
+    items: [
+      {
+        id: "user-1",
+        conversation_id: "conversation-1",
+        role: "user",
+        content: { source: "agent", text: "调研并生成视觉方案" },
+        intent: "agent",
+        status: null,
+        parent_message_id: null,
+        created_at: TOOL_DETAILS_NOW,
+      },
+      {
+        id: "assistant-1",
+        conversation_id: "conversation-1",
+        role: "assistant",
+        content: {
+          source: "agent",
+          agent_run_id: "run-1",
+          text: "已完成调研与视觉方案。",
+        },
+        intent: "agent",
+        status: "succeeded",
+        parent_message_id: "user-1",
+        created_at: TOOL_DETAILS_NOW,
+      },
+    ],
+    runs: [run],
+    next_cursor: null,
+    generations: [],
+    completions: [],
+    images: [],
+  };
+}
+
 test("mounted Agent workspace closes its replaced EventSource", async ({
   page,
 }) => {
@@ -271,6 +396,17 @@ test("Agent shell keeps six mobile targets stable and content unobscured", async
           boxes[index - 1].right - 0.5,
         );
     }
+    const contextStatus = page.locator(
+      '[data-agent-mobile-context] [role="status"]',
+    );
+    await expect(contextStatus).toBeVisible();
+    await expect(contextStatus).not.toHaveText("");
+    if (testInfo.project.name.startsWith("phone-") &&
+        !testInfo.project.name.includes("keyboard")) {
+      expect(
+        await page.evaluate(() => matchMedia("(hover: none)").matches),
+      ).toBe(true);
+    }
   } else {
     await expect(
       page
@@ -304,6 +440,525 @@ test("Agent shell keeps six mobile targets stable and content unobscured", async
     body: await page.screenshot(),
     contentType: "image/png",
   });
+});
+
+test("short-landscape Agent keeps direct composer tools reachable", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "phone-landscape-dark",
+    "explicit short-landscape composer regression",
+  );
+  await installAgentFixture(page, { mode: "text" });
+  await openAgent(page);
+
+  const composer = page.getByTestId("agent-composer");
+  const toolbar = page.getByTestId("agent-composer-toolbar");
+  const webSearch = page.getByRole("button", { name: "开启联网搜索" });
+  const assetPicker = page.getByRole("button", {
+    name: "从素材选择参考图",
+  });
+  await expect(toolbar).toBeVisible();
+  await expect(webSearch).toBeVisible();
+  await expect(assetPicker).toBeVisible();
+  await expect(webSearch).toBeEnabled();
+  await expect(assetPicker).toBeEnabled();
+
+  const geometry = await Promise.all(
+    [composer, toolbar, webSearch, assetPicker].map((locator) =>
+      locator.evaluate((node) => node.getBoundingClientRect().toJSON()),
+    ),
+  );
+  const [composerBox, toolbarBox, webSearchBox, assetPickerBox] = geometry;
+  expect(toolbarBox.top).toBeGreaterThanOrEqual(composerBox.top - 1);
+  expect(toolbarBox.bottom).toBeLessThanOrEqual(composerBox.bottom + 1);
+  for (const target of [webSearchBox, assetPickerBox]) {
+    expect(target.width).toBeGreaterThanOrEqual(44);
+    expect(target.height).toBeGreaterThanOrEqual(44);
+  }
+  expect(
+    await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth <=
+        document.documentElement.clientWidth,
+    ),
+  ).toBe(true);
+
+  await webSearch.click();
+  await expect(
+    page.getByRole("button", { name: "关闭联网搜索" }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await assetPicker.click();
+  await expect(page.getByRole("dialog", { name: "选择参考图" })).toBeVisible();
+});
+
+test("limited Agent status stays visible and AA-readable on real touch light mode", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "phone-320-light",
+    "explicit real-touch light-mode contrast probe",
+  );
+  await installAgentFixture(page, { toolGatewayConfigured: false });
+  await openAgent(page);
+  const status = page.locator('[data-agent-mobile-context] [role="status"]');
+  await expect(status).toContainText("能力受限");
+  const contrast = await status.evaluate((node) => {
+    const parse = (value: string) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 1;
+      canvas.height = 1;
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      if (!context) return { r: 0, g: 0, b: 0, a: 0 };
+      context.clearRect(0, 0, 1, 1);
+      context.fillStyle = value;
+      context.fillRect(0, 0, 1, 1);
+      const [r, g, b, alpha] = context.getImageData(0, 0, 1, 1).data;
+      return { r, g, b, a: alpha / 255 };
+    };
+    const blend = (
+      top: { r: number; g: number; b: number; a: number },
+      bottom: { r: number; g: number; b: number; a: number },
+    ) => {
+      const alpha = top.a + bottom.a * (1 - top.a);
+      return {
+        r: (top.r * top.a + bottom.r * bottom.a * (1 - top.a)) / alpha,
+        g: (top.g * top.a + bottom.g * bottom.a * (1 - top.a)) / alpha,
+        b: (top.b * top.a + bottom.b * bottom.a * (1 - top.a)) / alpha,
+        a: alpha,
+      };
+    };
+    let background = { r: 0, g: 0, b: 0, a: 0 };
+    let current: Element | null = node;
+    while (current && background.a < 1) {
+      const candidate = parse(getComputedStyle(current).backgroundColor);
+      if (candidate.a > 0) background = blend(background, candidate);
+      current = current.parentElement;
+    }
+    const foreground = parse(getComputedStyle(node).color);
+    const luminance = (color: { r: number; g: number; b: number }) => {
+      const channels = [color.r, color.g, color.b].map((channel) => {
+        const normalized = channel / 255;
+        return normalized <= 0.04045
+          ? normalized / 12.92
+          : ((normalized + 0.055) / 1.055) ** 2.4;
+      });
+      return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+    };
+    const foregroundLuminance = luminance(foreground);
+    const backgroundLuminance = luminance(background);
+    return {
+      ratio:
+        (Math.max(foregroundLuminance, backgroundLuminance) + 0.05) /
+        (Math.min(foregroundLuminance, backgroundLuminance) + 0.05),
+      color: getComputedStyle(node).color,
+      background: getComputedStyle(node).backgroundColor,
+      effectiveBackground: background,
+    };
+  });
+  expect(
+    contrast.ratio,
+    JSON.stringify(contrast),
+  ).toBeGreaterThanOrEqual(4.5);
+});
+
+test("Agent capability starters configure real inputs before promising work", async ({
+  page,
+}) => {
+  await installAgentFixture(page, { mode: "text" });
+  await page.route("**/api/images/upload", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: "uploaded-image-1",
+        width: 4,
+        height: 4,
+        mime: "image/png",
+        url: "/api/images/uploaded-image-1/binary",
+        display_url: "/api/images/uploaded-image-1/binary",
+        preview_url: "/api/images/uploaded-image-1/binary",
+        thumb_url: "/api/images/uploaded-image-1/binary",
+        metadata_jsonb: {},
+      }),
+    }),
+  );
+  await openAgent(page);
+  const input = page.getByRole("textbox", { name: "发送给 Agent" });
+  const starters = page
+    .getByTestId("agent-empty-suggestions")
+    .getByRole("button");
+  await expect(starters).toHaveCount(3);
+  for (const starter of await starters.all()) await expect(starter).toBeVisible();
+  const starterMedia = page.getByTestId("agent-empty-suggestions").locator("img");
+  await expect(starterMedia).toHaveCount(3);
+  await expect
+    .poll(() =>
+      starterMedia.evaluateAll((images) =>
+        images.every((image) => (image as HTMLImageElement).naturalWidth > 0),
+      ),
+    )
+    .toBe(true);
+  const starterGeometry = await starters.evaluateAll((nodes) =>
+    nodes.map((node) => node.getBoundingClientRect().toJSON()),
+  );
+  const protectedGeometry = await page
+    .locator(
+      '[data-agent-mobile-context], [data-testid="agent-composer"], nav[aria-label="主导航"]',
+    )
+    .evaluateAll((nodes) =>
+      nodes
+        .filter((node) => getComputedStyle(node).display !== "none")
+        .map((node) => node.getBoundingClientRect().toJSON()),
+    );
+  for (const starter of starterGeometry) {
+    for (const protectedRect of protectedGeometry) {
+      const intersects = !(
+        starter.right <= protectedRect.left ||
+        starter.left >= protectedRect.right ||
+        starter.bottom <= protectedRect.top ||
+        starter.top >= protectedRect.bottom
+      );
+      expect(intersects).toBe(false);
+    }
+  }
+
+  await page
+    .getByRole("button", { name: "商业与竞品调研，开启联网" })
+    .click();
+  await expect(page.locator('button[aria-label="关闭联网搜索"]')).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(input).toHaveValue(/联网搜索/u);
+
+  await input.fill("");
+  const fileStarter = page.getByRole("button", {
+    name: "设计素材批量分析，选择文件",
+  });
+  const fileChooser = page.waitForEvent("filechooser");
+  await fileStarter.click();
+  const chooser = await fileChooser;
+  await expect(input).toHaveValue("");
+  await chooser.setFiles({
+    name: "brief.md",
+    mimeType: "text/markdown",
+    buffer: Buffer.from("# Brief\nUse current sources."),
+  });
+  await expect(page.getByText("brief.md", { exact: true })).toBeVisible();
+  await expect(input).toHaveValue(/读取我选择的设计素材/u);
+  await expect(page.locator('button[aria-label="文件已开启"]')).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  if ((page.viewportSize()?.height ?? 999) < 500) {
+    await page.getByRole("button", { name: "移除文件 brief.md" }).click();
+  }
+
+  await input.fill("");
+  const imageStarter = page.getByRole("button", {
+    name: "多模态视觉企划，选择图片",
+  });
+  const imageChooser = page.waitForEvent("filechooser");
+  await imageStarter.click();
+  const imageFiles = await imageChooser;
+  await expect(input).toHaveValue("");
+  await imageFiles.setFiles({
+    name: "product.png",
+    mimeType: "image/png",
+    buffer: Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAE0lEQVR4nGO8oyHHAANMcBZeDgA6ZgEqpR5TKwAAAABJRU5ErkJggg==",
+      "base64",
+    ),
+  });
+  await expect(page.getByAltText("product.png 1")).toBeVisible();
+  await expect(input).toHaveValue(/分析我选择的产品图/u);
+  await expect(page.locator('button[aria-label="生图已开启"]')).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+});
+
+test("Agent execution summary and ContextBar update submitted parameters", async ({
+  page,
+}) => {
+  const fixture = await installAgentFixture(page, { mode: "text" });
+  await openAgent(page);
+
+  const summary = page.getByTestId("agent-execution-summary");
+  const shortLandscape = (page.viewportSize()?.height ?? 999) < 500;
+  if (shortLandscape) {
+    await expect(summary).toBeHidden();
+    await page.getByRole("button", { name: "Agent 参数与会话设置" }).click();
+    await page.getByRole("combobox", { name: "默认图片数量" }).selectOption("3");
+    await page.getByRole("button", { name: "竖向 4:5" }).click();
+    await page.getByRole("combobox", { name: "默认图片分辨率" }).selectOption("4k");
+    await page.getByRole("combobox", { name: "默认渲染质量" }).selectOption("medium");
+    await page.getByRole("combobox", { name: "默认背景" }).selectOption("transparent");
+  } else {
+    await expect(summary).toBeVisible();
+    await summary.getByRole("combobox", { name: "执行图片数量" }).selectOption("3");
+    await summary.getByRole("combobox", { name: "执行图片比例" }).selectOption("4:5");
+    await summary.getByRole("combobox", { name: "执行图片分辨率" }).selectOption("4k");
+    await summary.getByRole("combobox", { name: "执行渲染质量" }).selectOption("medium");
+    await summary.getByRole("combobox", { name: "执行图片背景" }).selectOption("transparent");
+    await expect(summary.getByText("预计扣 ¥1.20", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Agent 参数与会话设置" }).click();
+  }
+  const model = page.getByRole("combobox", { name: "Agent 模型" });
+  await expect(model).toBeVisible();
+  await model.selectOption("fixture-fast-model");
+  const reasoning = page.getByRole("combobox", { name: "Agent 推理强度" });
+  await expect(reasoning).toBeDisabled();
+  await expect(reasoning).toHaveValue("none");
+  await page.keyboard.press("Escape");
+
+  await page.getByRole("textbox", { name: "发送给 Agent" }).fill("生成参数测试");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect.poll(() => fixture.lastMessageBody).not.toBeNull();
+  expect(fixture.lastMessageBody).toMatchObject({
+    model: "fixture-fast-model",
+    reasoning_effort: "none",
+    image_defaults: {
+      count: 3,
+      aspect_ratio: "4:5",
+      quality: "4k",
+      render_quality: "medium",
+      background: "transparent",
+    },
+  });
+});
+
+test("disabling file tools requires confirmation and removes attached files atomically", async ({
+  page,
+}) => {
+  await installAgentFixture(page, { mode: "text" });
+  await openAgent(page);
+  await page
+    .locator('input[type="file"][accept^=".txt"]')
+    .setInputFiles({
+      name: "brief.md",
+      mimeType: "text/markdown",
+      buffer: Buffer.from("# Brief"),
+    });
+  const shortLandscape = (page.viewportSize()?.height ?? 999) < 500;
+  const fileToggle = shortLandscape
+    ? page.getByRole("switch", { name: "文件工具" })
+    : page.getByRole("button", { name: "文件已开启" });
+  if (shortLandscape) {
+    await page.getByRole("button", { name: "Agent 设置" }).click();
+    await expect(fileToggle).toHaveAttribute("aria-checked", "true");
+  } else {
+    await expect(fileToggle).toBeEnabled();
+  }
+  await fileToggle.click();
+  const confirmation = page.getByRole("dialog", { name: "关闭文件工具？" });
+  await expect(confirmation).toBeVisible();
+  await confirmation.getByRole("button", { name: "取消" }).click();
+  await expect(page.getByText("brief.md", { exact: true })).toBeVisible();
+  await expect(fileToggle).toHaveAttribute(
+    shortLandscape ? "aria-checked" : "aria-pressed",
+    "true",
+  );
+
+  await fileToggle.click();
+  await page
+    .getByRole("dialog", { name: "关闭文件工具？" })
+    .getByRole("button", { name: "关闭并移除" })
+    .click();
+  await expect(page.getByText("brief.md", { exact: true })).toHaveCount(0);
+  if (shortLandscape) {
+    await expect(fileToggle).toHaveAttribute("aria-checked", "false");
+  } else {
+    await expect(
+      page.getByRole("button", { name: "文件待文件" }),
+    ).toHaveAttribute("aria-pressed", "false");
+  }
+});
+
+test("Agent tool calls expose an accessible sanitized accordion", async ({
+  page,
+}) => {
+  await installAgentFixture(page, { mode: "text" });
+  await page.route(
+    "**/api/agent/sessions/session-1/messages?**",
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(toolDetailsSnapshot()),
+      }),
+  );
+  await openAgent(page);
+  await expect(
+    page.locator(
+      '[data-agent-tool-call] [role="status"] :is(button, a), [data-testid="agent-conversation-scroll"] [role="alert"] :is(button, a), [data-testid="agent-composer"] [role="alert"] :is(button, a)',
+    ),
+  ).toHaveCount(0);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const disclosure = page.locator(
+    '[data-agent-tool-call="tool-web"] [data-agent-tool-disclosure]',
+  );
+  await expect
+    .poll(() =>
+      disclosure.evaluate((node) =>
+        Number.parseFloat(getComputedStyle(node).transitionDuration),
+      ),
+    )
+    .toBeLessThanOrEqual(0.001);
+
+  const web = page
+    .locator('[data-agent-tool-call="tool-web"]')
+    .getByRole("button", { name: /联网搜索/u });
+  await expect(web).toHaveAttribute("aria-expanded", "false");
+  await web.click();
+  await expect(web).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByText("2026 极简美妆视觉趋势", { exact: true })).toBeVisible();
+  await expect(page.getByText(/行业报告/u)).toBeVisible();
+  await expect(page.getByText("耗时").first()).toBeVisible();
+
+  await page.getByRole("button", { name: /文件内搜索/u }).click();
+  const fileDetails = page.getByRole("region", {
+    name: "文件内搜索执行详情",
+  });
+  await expect(fileDetails.getByText("brief.md", { exact: true })).toBeVisible();
+  await expect(fileDetails.getByText("品牌色", { exact: true })).toBeVisible();
+  await expect(
+    fileDetails.getByText("brief.md:4 - 品牌色使用暖金与炭黑", {
+      exact: true,
+    }),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: /图生图/u }).click();
+  await expect(page.getByText("暖金与炭黑的极简美妆产品海报", { exact: true })).toBeVisible();
+  await expect(page.getByText(/2 张 · 4:5 · 2K/u)).toBeVisible();
+  await expect(page.getByText(/private|api.key|callback|\/srv\//iu)).toHaveCount(0);
+});
+
+test("Agent context title, pin, and branch controls preserve focus and state", async ({
+  page,
+}) => {
+  const fixture = await installAgentFixture(page);
+  const sessionPatches: Record<string, unknown>[] = [];
+  page.on("request", (request) => {
+    if (
+      request.method() === "PATCH" &&
+      new URL(request.url()).pathname === "/api/agent/sessions/session-1"
+    ) {
+      sessionPatches.push(request.postDataJSON() as Record<string, unknown>);
+    }
+  });
+  await openAgent(page);
+
+  await page.getByRole("button", { name: "重命名会话：产品视觉" }).click();
+  const title = page.getByRole("textbox", { name: "会话名称" });
+  await title.fill("春季视觉企划");
+  await title.press("Enter");
+  await expect.poll(() => sessionPatches).toContainEqual({
+    title: "春季视觉企划",
+  });
+  const renamedTrigger = page.getByRole("button", {
+    name: "重命名会话：春季视觉企划",
+  });
+  await expect(renamedTrigger).toBeFocused();
+
+  await renamedTrigger.click();
+  const cancelledTitle = page.getByRole("textbox", { name: "会话名称" });
+  await cancelledTitle.fill("不应保存");
+  await cancelledTitle.press("Escape");
+  await expect(renamedTrigger).toBeFocused();
+  expect(sessionPatches).not.toContainEqual({ title: "不应保存" });
+
+  await renamedTrigger.click();
+  const blurredTitle = page.getByRole("textbox", { name: "会话名称" });
+  await blurredTitle.fill("春季视觉分镜");
+  await blurredTitle.evaluate((element) => (element as HTMLInputElement).blur());
+  await expect.poll(() => sessionPatches).toContainEqual({
+    title: "春季视觉分镜",
+  });
+  await expect(
+    page.getByRole("button", { name: "重命名会话：春季视觉分镜" }),
+  ).toBeFocused();
+
+  await page.getByRole("button", { name: "置顶会话" }).click();
+  await expect.poll(() => sessionPatches).toContainEqual({ pinned: true });
+
+  await page.getByRole("button", { name: "分支会话" }).click();
+  await expect.poll(() => fixture.branchCalls).toBe(1);
+  await expect(page).toHaveURL(/session=session-2/u);
+});
+
+test("Agent media drawer has stable horizontal geometry and user turns stay right aligned", async ({
+  page,
+}) => {
+  const fixture = await installAgentFixture(page, { mode: "text" });
+  await openAgent(page);
+  await page
+    .locator('input[type="file"][accept^=".txt"]')
+    .setInputFiles([
+      {
+        name: "brief.md",
+        mimeType: "text/markdown",
+        buffer: Buffer.from("# Brief"),
+      },
+      {
+        name: "notes.txt",
+        mimeType: "text/plain",
+        buffer: Buffer.from("Notes"),
+      },
+    ]);
+  const drawer = page.getByTestId("agent-media-drawer");
+  await expect(drawer).toHaveAttribute("data-open", "true");
+  await expect
+    .poll(() => drawer.evaluate((node) => node.getBoundingClientRect().height))
+    .toBeGreaterThan(112.9);
+  const initialHeight = await drawer.evaluate((node) =>
+    node.getBoundingClientRect().height,
+  );
+  await page
+    .getByRole("button", { name: "移除文件 brief.md" })
+    .click();
+  await expect(page.getByText("brief.md", { exact: true })).toHaveCount(0);
+  await expect
+    .poll(async () =>
+      Math.abs(
+        initialHeight -
+          (await drawer.evaluate((node) => node.getBoundingClientRect().height)),
+      ) <= 1,
+    )
+    .toBe(true);
+  const reducedHeight = await drawer.evaluate((node) =>
+    node.getBoundingClientRect().height,
+  );
+  expect(Math.abs(initialHeight - reducedHeight)).toBeLessThanOrEqual(1);
+  expect(
+    await drawer.evaluate((node) => {
+      const scroller = node.querySelector<HTMLElement>("[aria-label='本轮媒体']");
+      return scroller ? scroller.scrollWidth >= scroller.clientWidth : false;
+    }),
+  ).toBe(true);
+
+  await page
+    .getByRole("textbox", { name: "发送给 Agent" })
+    .fill("保持清晰的用户气泡");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect.poll(() => fixture.lastMessageBody).not.toBeNull();
+  const user = page.locator("#agent-message-user-1");
+  await expect(user).toBeVisible();
+  const alignment = await user.evaluate((node) => {
+    const article = node.getBoundingClientRect();
+    const bubble = node.firstElementChild?.getBoundingClientRect();
+    return bubble
+      ? {
+          rightGap: Math.abs(article.right - bubble.right),
+          width: bubble.width,
+          articleWidth: article.width,
+        }
+      : null;
+  });
+  expect(alignment).not.toBeNull();
+  expect(alignment?.rightGap ?? 99).toBeLessThanOrEqual(1);
+  expect(alignment?.width ?? 999).toBeLessThan(alignment?.articleWidth ?? 0);
 });
 
 test("text reply submits and restores from authoritative snapshots", async ({
@@ -376,7 +1031,11 @@ test("ordered references and roles serialize directly from Agent state", async (
   await page.getByRole("button", { name: /添加参考图：素材参考 1/ }).click();
   await page.getByRole("button", { name: /添加参考图：素材参考 2/ }).click();
   await page.getByRole("button", { name: "确认", exact: true }).click();
-  await expect(page.getByText(/本轮输入 2 张/)).toBeVisible();
+  await expect(
+    page
+      .getByTestId("agent-media-drawer")
+      .getByText("本轮输入 2 张", { exact: true }),
+  ).toBeVisible();
   await page
     .getByRole("combobox", { name: "参考图 1 角色" })
     .selectOption("product");

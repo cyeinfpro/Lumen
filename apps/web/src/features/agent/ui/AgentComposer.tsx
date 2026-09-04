@@ -13,7 +13,9 @@ import Link from "next/link";
 import {
   type ClipboardEvent,
   type KeyboardEvent,
+  useCallback,
   useEffect,
+  useImperativeHandle,
   useLayoutEffect,
   useRef,
   useState,
@@ -21,7 +23,8 @@ import {
 import type { GenerationSummary } from "@/features/assets";
 import { DesktopPopover } from "@/components/ui/composer/desktop/DesktopPopover";
 import { useComposerAttachmentDnd } from "@/components/ui/composer/shared/useComposerAttachmentDnd";
-import { Button, IconButton } from "@/components/ui/primitives";
+import { useComposerCostEstimate } from "@/components/ui/composer/shared/useComposerCostEstimate";
+import { Button, ConfirmDialog, IconButton, Select } from "@/components/ui/primitives";
 import { BottomSheet } from "@/components/ui/primitives/mobile";
 import type { AttachmentRole } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -32,12 +35,23 @@ import {
   type AgentDraftAttachment,
   type AgentDraftFile,
   type AgentImageDefaults,
+  type AgentModelOption,
 } from "../model/contracts";
-import { AgentAttachmentTray } from "./AgentAttachmentTray";
 import { AgentComposerSettings } from "./AgentComposerSettings";
-import { AgentFileTray } from "./AgentFileTray";
+import { AgentMediaDrawer } from "./AgentMediaDrawer";
 import { AgentReferencePicker } from "./AgentReferencePicker";
 import { useAgentTextFiles } from "./useAgentTextFiles";
+
+export type AgentCapabilityKind = "visual" | "web" | "file";
+
+export interface AgentCapabilityAction {
+  kind: AgentCapabilityKind;
+  prompt: string;
+}
+
+export interface AgentComposerHandle {
+  startCapability: (action: AgentCapabilityAction) => void;
+}
 
 export function AgentComposer({
   platform,
@@ -67,6 +81,10 @@ export function AgentComposer({
   onStop,
   onError,
   onMetricsChange,
+  imageGenerationAvailable,
+  defaultModel,
+  modelOptions,
+  ref,
 }: {
   platform: "desktop" | "mobile";
   draft: AgentDraft;
@@ -95,16 +113,26 @@ export function AgentComposer({
   onStop: () => void;
   onError: (message: string | null) => void;
   onMetricsChange?: (height: number) => void;
+  imageGenerationAvailable: boolean;
+  defaultModel: string | null;
+  modelOptions: AgentModelOption[];
+  ref?: React.Ref<AgentComposerHandle>;
 }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
+  const [confirmDisableFilesOpen, setConfirmDisableFilesOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const dragDepthRef = useRef(0);
   const settingsAnchorRef = useRef<HTMLDivElement | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const pendingCapabilityRef = useRef<{
+    kind: "visual" | "file";
+    prompt: string;
+    draftText: string;
+  } | null>(null);
   const disabled = submitting || stopping;
 
   const dnd = useComposerAttachmentDnd({
@@ -134,6 +162,74 @@ export function AgentComposer({
     onFallbackDrop: dnd.handleDrop,
   });
 
+  const startCapability = useCallback(
+    (action: AgentCapabilityAction) => {
+      if (action.kind === "web") {
+        onDraftChange({ allowWebSearch: true });
+        onTextChange(action.prompt);
+        textareaRef.current?.focus();
+        return;
+      }
+      if (action.kind === "file") {
+        if (draft.files.length > 0) {
+          onDraftChange({ allowFileTools: true });
+          onTextChange(action.prompt);
+          textareaRef.current?.focus();
+          return;
+        }
+        pendingCapabilityRef.current = {
+          kind: "file",
+          prompt: action.prompt,
+          draftText: draft.text,
+        };
+        onDraftChange({ allowFileTools: true });
+        textFileInputRef.current?.click();
+        return;
+      }
+      if (!imageGenerationAvailable) {
+        onError("生图工具未就绪，可先上传图片进行视觉分析。");
+      }
+      if (draft.attachments.length > 0) {
+        onDraftChange({ allowImage: imageGenerationAvailable });
+        onTextChange(action.prompt);
+        textareaRef.current?.focus();
+        return;
+      }
+      pendingCapabilityRef.current = {
+        kind: "visual",
+        prompt: action.prompt,
+        draftText: draft.text,
+      };
+      if (imageGenerationAvailable) onDraftChange({ allowImage: true });
+      dnd.openFilePicker();
+    },
+    [
+      dnd,
+      draft.attachments.length,
+      draft.files.length,
+      draft.text,
+      imageGenerationAvailable,
+      onDraftChange,
+      onError,
+      onTextChange,
+      textFileInputRef,
+    ],
+  );
+
+  useImperativeHandle(ref, () => ({ startCapability }), [startCapability]);
+
+  useEffect(() => {
+    const pending = pendingCapabilityRef.current;
+    if (!pending || draft.text !== pending.draftText) return;
+    const ready =
+      (pending.kind === "visual" && draft.attachments.length > 0) ||
+      (pending.kind === "file" && draft.files.length > 0);
+    if (!ready) return;
+    pendingCapabilityRef.current = null;
+    onTextChange(pending.prompt);
+    window.requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [draft.attachments.length, draft.files.length, draft.text, onTextChange]);
+
   useEffect(() => {
     const root = rootRef.current;
     if (!root || !onMetricsChange) return;
@@ -160,7 +256,30 @@ export function AgentComposer({
     (draft.text.trim().length > 0 ||
       draft.attachments.length > 0 ||
       draft.files.length > 0);
-  const summary = agentDraftSummary(draft);
+  const summary = agentDraftSummary(draft, imageGenerationAvailable);
+  const imageExecutionEnabled = draft.allowImage && imageGenerationAvailable;
+  const costEstimate = useComposerCostEstimate({
+    mode: imageExecutionEnabled ? "image" : "chat",
+    quality: draft.imageDefaults.quality,
+    aspect: draft.imageDefaults.aspect_ratio,
+    count: draft.imageDefaults.count,
+  });
+
+  const requestFileToolsChange = useCallback(
+    (allowFileTools: boolean) => {
+      if (allowFileTools || draft.files.length === 0) {
+        onDraftChange({ allowFileTools });
+        return;
+      }
+      setConfirmDisableFilesOpen(true);
+    },
+    [draft.files.length, onDraftChange],
+  );
+  const confirmDisableFileTools = useCallback(() => {
+    for (const file of draft.files) onRemoveFile(file.name);
+    onDraftChange({ allowFileTools: false });
+    setConfirmDisableFilesOpen(false);
+  }, [draft.files, onDraftChange, onRemoveFile]);
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (
@@ -180,13 +299,15 @@ export function AgentComposer({
     <AgentComposerSettings
       draft={draft}
       disabled={disabled}
+      imageGenerationAvailable={imageGenerationAvailable}
       onAllowImageChange={(allowImage) => onDraftChange({ allowImage })}
       onAllowWebSearchChange={(allowWebSearch) =>
         onDraftChange({ allowWebSearch })
       }
-      onAllowFileToolsChange={(allowFileTools) =>
-        onDraftChange({ allowFileTools })
-      }
+      defaultModel={defaultModel}
+      modelOptions={modelOptions}
+      onModelChange={(model) => onDraftChange({ model })}
+      onAllowFileToolsChange={requestFileToolsChange}
       onReasoningEffortChange={(reasoningEffort) =>
         onDraftChange({ reasoningEffort })
       }
@@ -214,18 +335,15 @@ export function AgentComposer({
             isDragActive && "border-accent-border shadow-[var(--shadow-amber)]",
           )}
         >
-          <AgentAttachmentTray
+          <AgentMediaDrawer
             attachments={draft.attachments}
-            disabled={disabled}
-            onPreview={onPreviewAttachment}
-            onRemove={onRemoveAttachment}
-            onMove={onMoveAttachment}
-            onRoleChange={onRoleChange}
-          />
-          <AgentFileTray
             files={draft.files}
             disabled={disabled}
-            onRemove={onRemoveFile}
+            onPreview={onPreviewAttachment}
+            onRemoveAttachment={onRemoveAttachment}
+            onMoveAttachment={onMoveAttachment}
+            onRoleChange={onRoleChange}
+            onRemoveFile={onRemoveFile}
           />
 
           <input
@@ -263,13 +381,23 @@ export function AgentComposer({
             onSubmit={onSubmit}
             onStop={onStop}
           />
+          <AgentExecutionSummary
+            draft={draft}
+            disabled={disabled}
+            imageExecutionEnabled={imageExecutionEnabled}
+            runActive={runActive}
+            summary={summary}
+            costLabel={costEstimate.label}
+            costWarning={costEstimate.warning}
+            costLoading={costEstimate.loading}
+            onDefaultsChange={onDefaultsChange}
+          />
           <AgentComposerToolbar
             draft={draft}
-            runActive={runActive}
             disabled={disabled}
             isUploading={isUploading}
             isReadingFiles={isReadingFiles}
-            summary={summary}
+            imageGenerationAvailable={imageGenerationAvailable}
             onOpenImagePicker={dnd.openFilePicker}
             onOpenAssetPicker={() => setPickerOpen(true)}
             onOpenTextFilePicker={() => {
@@ -278,6 +406,12 @@ export function AgentComposer({
             }}
             onToggleWebSearch={() =>
               onDraftChange({ allowWebSearch: !draft.allowWebSearch })
+            }
+            onToggleImage={() =>
+              onDraftChange({ allowImage: !draft.allowImage })
+            }
+            onToggleFileTools={() =>
+              requestFileToolsChange(!draft.allowFileTools)
             }
           />
           <AgentComposerError error={error} action={errorAction} />
@@ -317,6 +451,15 @@ export function AgentComposer({
         onSelect={onPickAsset}
         onClose={() => setPickerOpen(false)}
       />
+      <ConfirmDialog
+        open={confirmDisableFilesOpen}
+        onOpenChange={setConfirmDisableFilesOpen}
+        title="关闭文件工具？"
+        description={`关闭后将移除本轮已添加的 ${draft.files.length} 个文件。`}
+        confirmText="关闭并移除"
+        tone="danger"
+        onConfirm={confirmDisableFileTools}
+      />
     </>
   );
 }
@@ -327,7 +470,10 @@ function agentComposerPosition(platform: "desktop" | "mobile"): string {
     : "safe-x-page fixed inset-x-0 bottom-[var(--agent-mobile-nav-offset,var(--mobile-tabbar-height))] pb-[max(var(--space-1),env(safe-area-inset-bottom,0px))]";
 }
 
-function agentDraftSummary(draft: AgentDraft): string {
+function agentDraftSummary(
+  draft: AgentDraft,
+  imageGenerationAvailable: boolean,
+): string {
   const tools: string[] = [];
   if (draft.attachments.length > 0) {
     tools.push(`本轮输入 ${draft.attachments.length} 张`);
@@ -335,7 +481,7 @@ function agentDraftSummary(draft: AgentDraft): string {
   if (draft.allowWebSearch) tools.push("联网");
   if (draft.files.length > 0) tools.push(`文件 ${draft.files.length}`);
   tools.push(
-    draft.allowImage
+    draft.allowImage && imageGenerationAvailable
       ? `${draft.imageDefaults.count} 张 · ${draft.imageDefaults.aspect_ratio} · ${draft.imageDefaults.quality.toUpperCase()}`
       : "仅文本",
   );
@@ -430,82 +576,321 @@ function AgentComposerInputRow({
   );
 }
 
+const AGENT_SUMMARY_ASPECT_RATIOS: AgentImageDefaults["aspect_ratio"][] = [
+  "1:1",
+  "16:9",
+  "9:16",
+  "4:5",
+  "3:4",
+  "4:3",
+  "3:2",
+  "2:3",
+  "21:9",
+  "9:21",
+  "10:7",
+  "7:10",
+];
+
+function AgentExecutionSummary({
+  draft,
+  disabled,
+  imageExecutionEnabled,
+  runActive,
+  summary,
+  costLabel,
+  costWarning,
+  costLoading,
+  onDefaultsChange,
+}: {
+  draft: AgentDraft;
+  disabled: boolean;
+  imageExecutionEnabled: boolean;
+  runActive: boolean;
+  summary: string;
+  costLabel: string | null;
+  costWarning: boolean;
+  costLoading: boolean;
+  onDefaultsChange: (patch: Partial<AgentImageDefaults>) => void;
+}) {
+  const defaults = draft.imageDefaults;
+  return (
+    <div
+      data-testid="agent-execution-summary"
+      className="flex min-h-11 min-w-0 items-center gap-2 border-t border-[var(--border-subtle)] px-2 py-1"
+    >
+      <div className="scrollbar-thin flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto">
+        <span className="min-w-24 flex-1 truncate px-1 type-caption text-[var(--fg-2)]">
+          {runActive ? "下一轮 · " : ""}
+          {summary}
+        </span>
+        {imageExecutionEnabled ? (
+          <>
+            <SummarySelect
+              label="执行图片数量"
+              value={String(defaults.count)}
+              disabled={disabled}
+              width="w-[5.25rem]"
+              onChange={(value) => onDefaultsChange({ count: Number(value) })}
+              options={[1, 2, 3, 4].map((count) => ({
+                value: String(count),
+                label: `${count} 张`,
+              }))}
+            />
+            <SummarySelect
+              label="执行图片比例"
+              value={defaults.aspect_ratio}
+              disabled={disabled}
+              width="w-[5.5rem]"
+              onChange={(value) =>
+                onDefaultsChange({
+                  aspect_ratio: value as AgentImageDefaults["aspect_ratio"],
+                })
+              }
+              options={AGENT_SUMMARY_ASPECT_RATIOS.map((aspect) => ({
+                value: aspect,
+                label: aspect,
+              }))}
+            />
+            <SummarySelect
+              label="执行图片分辨率"
+              value={defaults.quality}
+              disabled={disabled}
+              width="w-[5rem]"
+              onChange={(value) =>
+                onDefaultsChange({
+                  quality: value as AgentImageDefaults["quality"],
+                })
+              }
+              options={["1k", "2k", "4k"].map((quality) => ({
+                value: quality,
+                label: quality.toUpperCase(),
+              }))}
+            />
+            <SummarySelect
+              label="执行渲染质量"
+              value={defaults.render_quality}
+              disabled={disabled}
+              width="w-[5.5rem]"
+              onChange={(value) =>
+                onDefaultsChange({
+                  render_quality: value as AgentImageDefaults["render_quality"],
+                })
+              }
+              options={[
+                { value: "auto", label: "自动" },
+                { value: "low", label: "草稿" },
+                { value: "medium", label: "标准" },
+                { value: "high", label: "精细" },
+              ]}
+            />
+            <SummarySelect
+              label="执行图片背景"
+              value={defaults.background}
+              disabled={disabled}
+              width="w-[5.75rem]"
+              onChange={(value) =>
+                onDefaultsChange({
+                  background: value as AgentImageDefaults["background"],
+                })
+              }
+              options={[
+                { value: "auto", label: "自动背景" },
+                { value: "opaque", label: "不透明" },
+                { value: "transparent", label: "透明底" },
+              ]}
+            />
+          </>
+        ) : null}
+      </div>
+      <span
+        aria-live="polite"
+        data-agent-cost-estimate
+        className={cn(
+          "min-w-28 shrink-0 text-right type-caption tabular-nums",
+          costWarning
+            ? "text-[var(--warning-fg)]"
+            : "text-[var(--fg-2)]",
+          costLoading && "opacity-70",
+        )}
+      >
+        {costLabel ?? ""}
+      </span>
+    </div>
+  );
+}
+
+function SummarySelect({
+  label,
+  value,
+  disabled,
+  width,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  disabled: boolean;
+  width: string;
+  options: Array<{ value: string; label: string }>;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <Select
+      aria-label={label}
+      value={value}
+      disabled={disabled}
+      onChange={(event) => onChange(event.target.value)}
+      wrapperClassName={cn("shrink-0", width)}
+      className="h-8 min-h-8 py-0 pl-2 pr-7 type-caption max-sm:min-h-11"
+    >
+      {options.map((option) => (
+        <option key={option.value} value={option.value}>
+          {option.label}
+        </option>
+      ))}
+    </Select>
+  );
+}
+
 function AgentComposerToolbar({
   draft,
-  runActive,
   disabled,
   isUploading,
   isReadingFiles,
-  summary,
+  imageGenerationAvailable,
   onOpenImagePicker,
   onOpenAssetPicker,
   onOpenTextFilePicker,
   onToggleWebSearch,
+  onToggleImage,
+  onToggleFileTools,
 }: {
   draft: AgentDraft;
-  runActive: boolean;
   disabled: boolean;
   isUploading: boolean;
   isReadingFiles: boolean;
-  summary: string;
+  imageGenerationAvailable: boolean;
   onOpenImagePicker: () => void;
   onOpenAssetPicker: () => void;
   onOpenTextFilePicker: () => void;
   onToggleWebSearch: () => void;
+  onToggleImage: () => void;
+  onToggleFileTools: () => void;
 }) {
-  const webSearchLabel = draft.allowWebSearch ? "关闭联网搜索" : "开启联网搜索";
   return (
-    <div className="flex min-h-10 items-center gap-1 border-t border-[var(--border-subtle)] px-2 py-1">
-      <IconButton
-        size="sm"
-        variant="ghost"
-        onClick={onOpenImagePicker}
-        disabled={disabled || isUploading}
-        loading={isUploading}
-        aria-label="上传参考图"
-        tooltip="上传参考图"
-      >
-        <Paperclip className="h-4 w-4" aria-hidden />
-      </IconButton>
-      <IconButton
-        size="sm"
-        variant="ghost"
-        onClick={onOpenAssetPicker}
-        disabled={disabled || draft.attachments.length >= AGENT_MAX_REFERENCES}
-        aria-label="从素材选择参考图"
-        tooltip="选择参考图"
-      >
-        <Images className="h-4 w-4" aria-hidden />
-      </IconButton>
-      <IconButton
-        size="sm"
-        variant={draft.files.length > 0 ? "secondary" : "ghost"}
-        onClick={onOpenTextFilePicker}
-        disabled={disabled || draft.files.length >= AGENT_MAX_FILES}
-        loading={isReadingFiles}
-        aria-label="添加文本文件"
-        tooltip="添加文本文件"
-      >
-        <FilePlus2 className="h-4 w-4" aria-hidden />
-      </IconButton>
-      <IconButton
-        size="sm"
-        variant={draft.allowWebSearch ? "secondary" : "ghost"}
-        onClick={onToggleWebSearch}
-        disabled={disabled}
-        aria-label={webSearchLabel}
-        aria-pressed={draft.allowWebSearch}
-        tooltip={draft.allowWebSearch ? "联网搜索已开启" : "联网搜索"}
-      >
-        <Globe2 className="h-4 w-4" aria-hidden />
-      </IconButton>
-      <span className="min-w-0 flex-1 truncate px-1 type-caption text-[var(--fg-2)]">
-        {runActive ? "下一轮 · " : ""}{summary}
-      </span>
-      <span className="hidden shrink-0 type-caption tabular-nums text-[var(--fg-3)] sm:inline">
-        {draft.text.length} / 10000
-      </span>
+    <div
+      data-testid="agent-composer-toolbar"
+      className="border-t border-[var(--border-subtle)] px-2 py-1.5"
+    >
+      <div className="scrollbar-thin flex min-w-0 items-center gap-1 overflow-x-auto pb-0.5">
+        <IconButton
+          size="sm"
+          variant="ghost"
+          onClick={onOpenImagePicker}
+          disabled={disabled || isUploading}
+          loading={isUploading}
+          aria-label="上传参考图"
+          tooltip="上传参考图"
+        >
+          <Paperclip className="h-4 w-4" aria-hidden />
+        </IconButton>
+        <IconButton
+          size="sm"
+          variant="ghost"
+          onClick={onOpenAssetPicker}
+          disabled={disabled || draft.attachments.length >= AGENT_MAX_REFERENCES}
+          aria-label="从素材选择参考图"
+          tooltip="选择参考图"
+        >
+          <Images className="h-4 w-4" aria-hidden />
+        </IconButton>
+        <IconButton
+          size="sm"
+          variant="ghost"
+          onClick={onOpenTextFilePicker}
+          disabled={disabled || draft.files.length >= AGENT_MAX_FILES}
+          loading={isReadingFiles}
+          aria-label="添加文本文件"
+          tooltip="添加文本文件"
+        >
+          <FilePlus2 className="h-4 w-4" aria-hidden />
+        </IconButton>
+        <span className="mx-0.5 h-5 w-px shrink-0 bg-[var(--border-subtle)]" aria-hidden />
+        <AgentToolToggle
+          icon={<Globe2 className="h-3.5 w-3.5" aria-hidden />}
+          label="联网"
+          ariaLabel={draft.allowWebSearch ? "关闭联网搜索" : "开启联网搜索"}
+          checked={draft.allowWebSearch}
+          disabled={disabled}
+          onClick={onToggleWebSearch}
+        />
+        <AgentToolToggle
+          icon={<Images className="h-3.5 w-3.5" aria-hidden />}
+          label="生图"
+          checked={draft.allowImage && imageGenerationAvailable}
+          disabled={disabled || !imageGenerationAvailable}
+          onClick={onToggleImage}
+          unavailable={!imageGenerationAvailable}
+        />
+        <AgentToolToggle
+          icon={<FilePlus2 className="h-3.5 w-3.5" aria-hidden />}
+          label="文件"
+          checked={draft.allowFileTools && draft.files.length > 0}
+          disabled={disabled}
+          unavailable={draft.files.length === 0}
+          unavailableLabel="待文件"
+          onClick={draft.files.length > 0 ? onToggleFileTools : onOpenTextFilePicker}
+        />
+        <span className="ml-auto hidden shrink-0 type-caption tabular-nums text-[var(--fg-3)] sm:inline">
+          {draft.text.length} / 10000
+        </span>
+      </div>
     </div>
+  );
+}
+
+function AgentToolToggle({
+  icon,
+  label,
+  checked,
+  disabled,
+  ariaLabel,
+  unavailable = false,
+  unavailableLabel = "不可用",
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  checked: boolean;
+  disabled: boolean;
+  ariaLabel?: string;
+  unavailable?: boolean;
+  unavailableLabel?: string;
+  onClick: () => void;
+}) {
+  const stateLabel = unavailable
+    ? unavailableLabel
+    : checked
+      ? "已开启"
+      : "已关闭";
+  return (
+    <Button
+      variant={checked ? "secondary" : "ghost"}
+      size="sm"
+      onClick={onClick}
+      disabled={disabled}
+      aria-pressed={checked}
+      aria-label={ariaLabel ?? `${label}${stateLabel}`}
+      className={cn(
+        "h-8 shrink-0 gap-1 px-2 type-caption max-sm:min-h-11",
+        checked &&
+          "border-accent-border bg-accent-soft text-accent shadow-[var(--shadow-amber)]",
+      )}
+      leftIcon={icon}
+    >
+      <span>{label}</span>
+      <span className="text-[var(--fg-3)]">{stateLabel}</span>
+    </Button>
   );
 }
 
@@ -518,11 +903,8 @@ function AgentComposerError({
 }) {
   if (!error) return null;
   return (
-    <div
-      role="alert"
-      className="flex min-h-10 items-center gap-2 border-t border-danger-border bg-danger-soft px-3 py-2 type-caption text-[var(--danger-fg)]"
-    >
-      <span className="min-w-0 flex-1">{error}</span>
+    <div className="flex min-h-10 items-center gap-2 border-t border-danger-border bg-danger-soft px-3 py-2 type-caption text-[var(--danger-fg)]">
+      <span role="alert" className="min-w-0 flex-1">{error}</span>
       {action ? (
         <Link
           href={action.href}

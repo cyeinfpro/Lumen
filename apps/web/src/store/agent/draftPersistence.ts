@@ -35,6 +35,7 @@ interface PersistedAttachment {
 
 interface PersistedDraft {
   text: string;
+  model?: string | null;
   attachments: PersistedAttachment[];
   files?: AgentDraftFile[];
   allowImage: boolean;
@@ -45,7 +46,7 @@ interface PersistedDraft {
 }
 
 interface PersistedEnvelope {
-  version: 1 | 2 | 3;
+  version: 1 | 2 | 3 | 4;
   ownerUserId: string;
   drafts: Record<string, PersistedDraft>;
 }
@@ -67,6 +68,7 @@ function attachmentPreviewUrl(imageId: string): string {
 function persistedDraft(draft: AgentDraft): PersistedDraft {
   return {
     text: draft.text,
+    model: draft.model,
     attachments: draft.attachments.map((attachment) => ({
       imageId: attachment.imageId,
       role: attachment.role,
@@ -89,7 +91,7 @@ export function serializeAgentDrafts(
     Object.entries(drafts).map(([key, draft]) => [key, persistedDraft(draft)]),
   );
   return JSON.stringify({
-    version: 3,
+    version: 4,
     ownerUserId,
     drafts: safeDrafts,
   } satisfies PersistedEnvelope);
@@ -160,6 +162,10 @@ function restoreDraft(
 ): AgentDraft {
   return createAgentDraft({
     text: typeof draft.text === "string" ? draft.text : "",
+    model:
+      typeof draft.model === "string" && draft.model.trim()
+        ? draft.model.trim().slice(0, 128)
+        : null,
     attachments: restoreAttachments(draft),
     files: restoreFiles(draft),
     allowImage: draft.allowImage !== false,
@@ -175,7 +181,10 @@ function validEnvelope(
   ownerUserId: string,
 ): parsed is PersistedEnvelope {
   return (
-    (parsed.version === 1 || parsed.version === 2 || parsed.version === 3) &&
+    (parsed.version === 1 ||
+      parsed.version === 2 ||
+      parsed.version === 3 ||
+      parsed.version === 4) &&
     parsed.ownerUserId === ownerUserId &&
     Boolean(parsed.drafts) &&
     typeof parsed.drafts === "object"
