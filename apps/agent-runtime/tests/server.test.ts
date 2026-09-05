@@ -7,7 +7,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { once } from "node:events";
-import { request as httpRequest } from "node:http";
+import { request as httpRequest, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { describe, expect, it } from "vitest";
 
@@ -309,6 +309,168 @@ describe("Runtime HTTP boundary", () => {
       await once(runtime.server, "close");
     }
   });
+
+  it.each(["draining", "not_ready"] as const)(
+    "rechecks %s after a delayed HTTP body and drains an already accepted run",
+    async (lifecycle) => {
+      const provider = await dependencies();
+      let prepareCalls = 0;
+      let releaseProvider!: () => void;
+      let providerStarted!: () => void;
+      const providerBarrier = new Promise<void>((resolve) => { releaseProvider = resolve; });
+      const started = new Promise<void>((resolve) => { providerStarted = resolve; });
+      const runtime = createRuntimeServer({
+        config: testConfig(),
+        dependencies: {
+          ...provider,
+          async prepareProvider(request, onDispatch) {
+            prepareCalls += 1;
+            providerStarted();
+            await providerBarrier;
+            return provider.prepareProvider(request, onDispatch);
+          },
+        },
+      });
+      runtime.readiness.state.ready = true;
+      runtime.readiness.state.checkedAt = new Date().toISOString();
+      runtime.server.listen(0, "127.0.0.1");
+      await once(runtime.server, "listening");
+      const address = runtime.server.address() as AddressInfo;
+      const body = Buffer.from(JSON.stringify(runtimeRequest({
+        allowed_tools: [],
+        tool_gateway_url: null,
+        tool_capability: null,
+      })), "utf8");
+      const timestamp = String(Math.floor(Date.now() / 1000));
+      const headers = (nonce: string) => ({
+        "content-type": "application/json",
+        [AUTH_TIMESTAMP_HEADER]: timestamp,
+        [AUTH_NONCE_HEADER]: nonce,
+        [AUTH_SIGNATURE_HEADER]: signRuntimeRequest(
+          TEST_SECRET, "POST", "/v1/runs", timestamp, nonce, body,
+        ),
+      });
+      const delayed = httpRequest({
+        host: "127.0.0.1",
+        port: address.port,
+        path: "/v1/runs",
+        method: "POST",
+        headers: {
+          ...headers(`delayed-body-${lifecycle}-nonce`),
+          "content-length": String(body.byteLength),
+        },
+      });
+      // Observe actual body consumption, not a timer or a mocked readBody.
+      const bodyStarted = new Promise<void>((resolve) => {
+        runtime.server.once("request", (request) => {
+          request.once("data", () => resolve());
+        });
+      });
+      const rejectedResponse = once(delayed, "response");
+      delayed.write(body.subarray(0, 1));
+      let shutdown: Promise<void> | undefined;
+      try {
+        await bodyStarted;
+        const accepted = await fetch(`http://127.0.0.1:${String(address.port)}/v1/runs`, {
+          method: "POST",
+          headers: headers(`accepted-${lifecycle}-nonce`),
+          body,
+        });
+        expect(accepted.status).toBe(200);
+        await started;
+        expect((await runtime.metrics.activeRuns.get()).values[0]?.value).toBe(1);
+
+        if (lifecycle === "draining") shutdown = runtime.shutdown();
+        else runtime.readiness.state.ready = false;
+        delayed.end(body.subarray(1));
+        const [rejected] = await rejectedResponse as [IncomingMessage];
+        const chunks: Buffer[] = [];
+        for await (const chunk of rejected as AsyncIterable<Buffer>) chunks.push(chunk);
+        expect(rejected.statusCode).toBe(503);
+        expect(JSON.parse(Buffer.concat(chunks).toString("utf8"))).toMatchObject({
+          error: { code: `agent_runtime_${lifecycle}` },
+        });
+        expect(prepareCalls).toBe(1);
+        expect((await runtime.metrics.activeRuns.get()).values[0]?.value).toBe(1);
+
+        releaseProvider();
+        const events = (await accepted.text()).trim().split("\n")
+          .map((line) => JSON.parse(line) as { type: string });
+        expect(events.at(-1)?.type).toBe("run.completed");
+        expect(events.filter((event) => /run\.(completed|failed|cancelled)/u.test(event.type)))
+          .toHaveLength(1);
+        await (shutdown ?? runtime.shutdown());
+        expect((await runtime.metrics.activeRuns.get()).values[0]?.value).toBe(0);
+        expect(prepareCalls).toBe(1);
+      } finally {
+        releaseProvider();
+        delayed.destroy();
+        await rejectedResponse.catch(() => undefined);
+        await runtime.shutdown();
+      }
+    },
+  );
+
+  it.each(["destroyed", "ended"] as const)(
+    "does not reserve a run when the response is %s at body completion",
+    async (closed) => {
+      let prepareCalls = 0;
+      const runtime = createRuntimeServer({
+        config: testConfig(),
+        dependencies: {
+          async prepareProvider() {
+            prepareCalls += 1;
+            throw new Error("closed response must not execute");
+          },
+          createGateway: () => async () => {
+            throw new Error("closed response must not call tools");
+          },
+        },
+      });
+      runtime.readiness.state.ready = true;
+      runtime.server.once("request", (request, response) => {
+        request.once("end", () => {
+          if (closed === "destroyed") response.destroy();
+          else response.end();
+        });
+      });
+      runtime.server.listen(0, "127.0.0.1");
+      await once(runtime.server, "listening");
+      const address = runtime.server.address() as AddressInfo;
+      const body = Buffer.from(JSON.stringify(runtimeRequest()));
+      const timestamp = String(Math.floor(Date.now() / 1000));
+      const nonce = `closed-response-${closed}-nonce`;
+      try {
+        const result = await new Promise<number | string>((resolve) => {
+          const request = httpRequest({
+            host: "127.0.0.1",
+            port: address.port,
+            path: "/v1/runs",
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              [AUTH_TIMESTAMP_HEADER]: timestamp,
+              [AUTH_NONCE_HEADER]: nonce,
+              [AUTH_SIGNATURE_HEADER]: signRuntimeRequest(
+                TEST_SECRET, "POST", "/v1/runs", timestamp, nonce, body,
+              ),
+            },
+          });
+          request.on("response", (response) => {
+            response.on("end", () => resolve(response.statusCode ?? 0));
+            response.resume();
+          });
+          request.on("error", (error: NodeJS.ErrnoException) => resolve(error.code ?? "unknown"));
+          request.end(body);
+        });
+        expect(result).toBe(closed === "destroyed" ? "ECONNRESET" : 200);
+        expect(prepareCalls).toBe(0);
+        expect((await runtime.metrics.activeRuns.get()).values[0]?.value).toBe(0);
+      } finally {
+        await runtime.shutdown();
+      }
+    },
+  );
 
   it("marks readiness draining and aborts a run after the shutdown grace period", async () => {
     const runtime = createRuntimeServer({

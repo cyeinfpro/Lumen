@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import {
+  ArrowDownRight,
   Check,
   ChevronDown,
   FileSearch,
@@ -26,9 +27,9 @@ const TOOL_STATUS: Record<AgentToolCallContract["status"], string> = {
   queued: "等待执行",
   running: "执行中",
   succeeded: "已完成",
-  failed: "提交失败",
+  failed: "执行失败",
   cancelled: "已取消",
-  timed_out: "提交超时",
+  timed_out: "执行超时",
 };
 
 const TOOL_ERRORS: Record<string, string> = {
@@ -148,10 +149,19 @@ function ToolStatusIndicator({
   return <X className="h-4 w-4 text-[var(--fg-2)]" aria-hidden />;
 }
 
-export function AgentToolCall({ tool }: { tool: AgentToolCallContract }) {
+function toolRowTone(failed: boolean, uncertain: boolean) {
+  // The row owns role="status"; the persistent ToolError owns role="alert".
+  if (failed) return { border: "border-danger-border", text: "text-[var(--danger-fg)]" };
+  if (uncertain) return { border: "border-warning-border", text: "text-[var(--warning-fg)]" };
+  return { border: "border-[var(--border-subtle)]", text: "text-[var(--fg-2)]" };
+}
+
+export function AgentToolCall({ tool, artifactId }: { tool: AgentToolCallContract; artifactId?: string }) {
   const [expanded, setExpanded] = useState(false);
   const active = tool.status === "queued" || tool.status === "running";
-  const failed = tool.status === "failed" || tool.status === "timed_out";
+  const uncertain = (tool.status === "failed" || tool.status === "timed_out") && tool.error_code === "agent_tool_result_unknown";
+  const failed = !uncertain && (tool.status === "failed" || tool.status === "timed_out");
+  const tone = toolRowTone(failed, uncertain);
   const presentation = toolPresentation(tool);
   const duration = formatDuration(durationMilliseconds(tool));
   const detailsId = `agent-tool-details-${tool.id}`;
@@ -161,10 +171,8 @@ export function AgentToolCall({ tool }: { tool: AgentToolCallContract }) {
     <div
       data-agent-tool-call={tool.id}
       className={cn(
-        "overflow-hidden rounded-[var(--radius-card)] border type-caption transition-[border-color,background-color] duration-[var(--dur-fast)] motion-reduce:transition-none",
-        failed
-          ? "border-danger-border bg-danger-soft"
-          : "border-[var(--border-subtle)] bg-[var(--bg-1)]/70 hover:border-[var(--border)]",
+        "min-w-0 border-b border-l-2 type-caption",
+        tone.border,
       )}
     >
       <span role="status" aria-live="polite" className="sr-only">
@@ -177,7 +185,7 @@ export function AgentToolCall({ tool }: { tool: AgentToolCallContract }) {
         aria-controls={detailsId}
         className="flex min-h-11 w-full items-center gap-2.5 px-3 py-2 text-left focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
       >
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-control)] bg-[var(--bg-2)]">
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center">
           <presentation.Icon className="h-4 w-4 text-[var(--fg-1)]" aria-hidden />
         </span>
         <span className="min-w-0 flex-1">
@@ -186,8 +194,8 @@ export function AgentToolCall({ tool }: { tool: AgentToolCallContract }) {
           </span>
           <span
             className={cn(
-              "block truncate",
-              failed ? "text-[var(--danger-fg)]" : "text-[var(--fg-2)]",
+              "block break-words [overflow-wrap:anywhere]",
+              tone.text,
             )}
           >
             {summary}
@@ -195,7 +203,7 @@ export function AgentToolCall({ tool }: { tool: AgentToolCallContract }) {
           </span>
         </span>
         <span className="flex shrink-0 items-center gap-1.5">
-          <ToolStatusIndicator status={tool.status} active={active} failed={failed} />
+          {uncertain ? <TriangleAlert className="h-4 w-4 text-[var(--warning-fg)]" aria-hidden /> : <ToolStatusIndicator status={tool.status} active={active} failed={failed} />}
           <ChevronDown
             className={cn(
               "h-4 w-4 text-[var(--fg-2)] transition-transform duration-[var(--dur-collapse)] ease-[var(--ease-develop)] motion-reduce:transition-none",
@@ -218,13 +226,23 @@ export function AgentToolCall({ tool }: { tool: AgentToolCallContract }) {
             role="region"
             aria-label={`${presentation.label}执行详情`}
             aria-hidden={!expanded}
-            className="space-y-2 border-t border-[var(--border-subtle)] bg-[var(--bg-2)]/50 px-3.5 py-3 text-[var(--fg-2)]"
+            inert={!expanded}
+            className="space-y-2 px-3.5 pb-3 text-[var(--fg-2)]"
           >
             <ToolDetails details={tool.details} duration={duration} />
-            {failed ? <ToolError tool={tool} /> : null}
           </div>
         </div>
       </div>
+      {failed ? <ToolError tool={tool} /> : null}
+      {artifactId ? (
+        <a
+          href={`#agent-generation-${artifactId}`}
+          className="mx-3 mb-2 inline-flex min-h-9 items-center gap-1 type-caption text-[var(--fg-1)] hover:text-[var(--fg-0)] max-sm:min-h-11"
+        >
+          <ArrowDownRight className="h-4 w-4" aria-hidden />
+          查看产物 · {tool.generation_ids.length}
+        </a>
+      ) : null}
     </div>
   );
 }
@@ -326,7 +344,7 @@ function DetailText({
       <p className="type-caption text-[var(--fg-2)]">{label}</p>
       <p
         className={cn(
-          "mt-1 whitespace-pre-wrap break-words rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2.5 py-2 type-caption text-[var(--fg-0)] [overflow-wrap:anywhere]",
+          "mt-1 whitespace-pre-wrap break-words type-caption text-[var(--fg-0)] [overflow-wrap:anywhere]",
           mono && "font-mono",
         )}
       >
@@ -365,7 +383,7 @@ function SnippetList({
           <li
             key={`${index}:${snippet}`}
             className={cn(
-              "break-words rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2.5 py-2 type-caption text-[var(--fg-1)] [overflow-wrap:anywhere]",
+              "break-words border-l border-[var(--border-subtle)] pl-2.5 type-caption text-[var(--fg-1)] [overflow-wrap:anywhere]",
               mono && "font-mono",
             )}
           >
@@ -381,7 +399,7 @@ function ToolError({ tool }: { tool: AgentToolCallContract }) {
   return (
     <div
       role="alert"
-      className="rounded-[var(--radius-control)] border border-danger-border bg-danger-soft p-2 text-[var(--danger-fg)]"
+      className="px-3 pb-2 text-[var(--danger-fg)]"
     >
       <span className="block type-label">错误</span>
       <span className="block break-words type-caption [overflow-wrap:anywhere]">

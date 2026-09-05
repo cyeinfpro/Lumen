@@ -87,7 +87,14 @@ export interface AgentDraftFile {
   content: string;
 }
 
+export interface AgentPendingSubmission {
+  key: string;
+  payloadFingerprint: string;
+  draftFingerprint: string;
+}
+
 export interface AgentDraft {
+  pendingSubmissions?: AgentPendingSubmission[];
   text: string;
   model: string | null;
   attachments: AgentDraftAttachment[];

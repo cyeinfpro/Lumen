@@ -96,6 +96,7 @@ test("ConfirmDialog blocks shared dialog close while confirming", () => {
     "src/components/ui/primitives/ConfirmDialog.tsx",
     {
       react: {
+        useState: (initial) => [initial, () => {}],
         useCallback: (callback) => callback,
         useEffect: (callback) => callback(),
         useId: () => "dialog-id",
@@ -129,6 +130,7 @@ test("ConfirmDialog still closes normally when it is idle", () => {
     "src/components/ui/primitives/ConfirmDialog.tsx",
     {
       react: {
+        useState: (initial) => [initial, () => {}],
         useCallback: (callback) => callback,
         useEffect: (callback) => callback(),
         useId: () => "dialog-id",
@@ -161,6 +163,7 @@ test("ConfirmDialog runs onConfirm once when the button is double-clicked", asyn
     "src/components/ui/primitives/ConfirmDialog.tsx",
     {
       react: {
+        useState: (initial) => [initial, () => {}],
         useCallback: (callback) => callback,
         useEffect: (callback) => callback(),
         useId: () => "dialog-id",

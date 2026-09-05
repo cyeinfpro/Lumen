@@ -18,6 +18,7 @@ import { AgentConversation } from "./AgentConversation";
 import { AgentScrollToLatest } from "./AgentScrollToLatest";
 import { AgentSidebar } from "./AgentSidebar";
 import type { AgentWorkspaceProps } from "./AgentWorkspace.types";
+import { currentAgentOperationLabel, hasAgentSubmissionUncertain } from "./agentPresentation";
 
 export function DesktopAgent(props: AgentWorkspaceProps) {
   const sidebarOpen = useUiStore((state) => state.sidebarOpen);
@@ -30,6 +31,7 @@ export function DesktopAgent(props: AgentWorkspaceProps) {
   const composerRef = useRef<AgentComposerHandle | null>(null);
   const {
     scrollRef,
+    contentRef,
     newOutputBelow,
     prepareForPrepend,
     scrollToLatest,
@@ -38,6 +40,7 @@ export function DesktopAgent(props: AgentWorkspaceProps) {
     runsById: props.runsById,
     generationsById: props.generationsById,
     threshold: 140,
+    scrollToMessageId: props.scrollToMessageId,
   });
 
   const toggle = useCallback(() => {
@@ -109,6 +112,7 @@ export function DesktopAgent(props: AgentWorkspaceProps) {
               platform="desktop"
               session={props.currentSession}
               realtimeStatus={props.realtimeStatus}
+              operationLabel={currentAgentOperationLabel(props)}
               activeRun={props.activeRun}
               toolGatewayConfigured={props.toolGatewayConfigured}
               defaultModel={props.defaultModel}
@@ -136,6 +140,7 @@ export function DesktopAgent(props: AgentWorkspaceProps) {
                 scrollPaddingBottom: `${composerHeight + 28}px`,
               }}
             >
+              <div ref={contentRef} data-agent-scroll-content>
               <AgentConversation
                 messages={props.messages}
                 runsById={props.runsById}
@@ -158,6 +163,7 @@ export function DesktopAgent(props: AgentWorkspaceProps) {
                   void Promise.resolve(props.onLoadOlderMessages()).finally(clearAnchor);
                 }}
               />
+              </div>
             </main>
             <AgentScrollToLatest
               visible={newOutputBelow}
@@ -195,7 +201,10 @@ function composerProps(props: AgentWorkspaceProps) {
     modelOptions: props.modelOptions,
     submitting: props.submitting || props.creating,
     runActive: Boolean(props.activeRun),
-    stopping: props.stopping,
+    stopping: props.stopping || Boolean(props.activeRun?.cancel_requested_at),
+    submissionUncertain: hasAgentSubmissionUncertain(props.messages, props.runsById),
+    checkingSubmission: props.checkingSubmission,
+    onReconcileSubmission: props.onRetryMessages,
     error: props.composerError,
     errorAction: props.composerAction,
     assetItems: props.assetItems,

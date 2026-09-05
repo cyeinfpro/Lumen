@@ -14,6 +14,7 @@ import {
   Trash2,
 } from "lucide-react";
 
+import { UnsavedSettingsGuard } from "@/components/ui/primitives/UnsavedSettingsGuard";
 import { SettingsShell } from "@/components/ui/shell/SettingsShell";
 import {
   Button,
@@ -94,8 +95,10 @@ export default function ApiKeySettingsPage() {
   const [apiKey, setApiKey] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [probeMessage, setProbeMessage] = useState<string | null>(null);
+  const [probeError, setProbeError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
-  const [revokeOpen, setRevokeOpen] = useState(false);
+  const [revokeTarget, setRevokeTarget] = useState<UserApiCredentialOut | null>(null);
+  const [revokeError, setRevokeError] = useState<string | null>(null);
 
   const selectedSupplierId = supplierId || suppliers[0]?.id || "";
   const selectedSupplier = useMemo(
@@ -109,6 +112,7 @@ export default function ApiKeySettingsPage() {
       setApiKey("");
       setSaved(true);
       setProbeMessage(null);
+      setProbeError(null);
       setError(null);
       await qc.invalidateQueries({ queryKey: ["me", "api-credentials"] });
     },
@@ -123,21 +127,22 @@ export default function ApiKeySettingsPage() {
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: ["me", "api-credentials"] });
     },
-    onError: (err) => setError(apiKeyErrorText(err)),
+    onError: () => setRevokeError("撤销结果未确认，核对密钥状态后重试。"),
   });
 
   const probeMut = useMutation({
     mutationFn: (credentialId: string) => probeMyApiCredential(credentialId),
+    onMutate: () => { setProbeError(null); setProbeMessage(null); },
     onSuccess: async (credential) => {
       setSaved(false);
-      setError(null);
+      setProbeError(null);
       setProbeMessage(credentialHealthText(credential));
       await qc.invalidateQueries({ queryKey: ["me", "api-credentials"] });
     },
     onError: (err) => {
       setSaved(false);
       setProbeMessage(null);
-      setError(apiKeyErrorText(err));
+      setProbeError(apiKeyErrorText(err));
     },
   });
 
@@ -156,13 +161,17 @@ export default function ApiKeySettingsPage() {
   // review §9 / #16: 删除当前 Key 必须二次确认 —— 撤销后任务请求会失败直至重新绑定。
   const handleRevoke = () => {
     if (!active) return;
-    setRevokeOpen(true);
+    setRevokeError(null);
+    setRevokeTarget(active);
   };
 
-  const confirmRevoke = () => {
-    if (!active) return;
-    revokeMut.mutate(active.id);
-    setRevokeOpen(false);
+  const confirmRevoke = async () => {
+    if (!revokeTarget) return;
+    setRevokeError(null);
+    try {
+      await revokeMut.mutateAsync(revokeTarget.id);
+      setRevokeTarget(null);
+    } catch { /* The mutation provides the local error. */ }
   };
 
   if (shouldShowWalletAccount(Boolean(meQ.data), isByok)) {
@@ -192,17 +201,24 @@ export default function ApiKeySettingsPage() {
         className="page-frame space-y-6 pb-4 sm:space-y-8"
         data-width="settings"
       >
-        <ApiCredentialHealthCard
+        <UnsavedSettingsGuard dirty={apiKey.length > 0} />
+        {meQ.isError || credentialsQ.isError ? (
+          <div role="alert" className="type-body-sm text-[var(--danger-fg)]">
+            密钥状态加载失败
+            <Button variant="secondary" onClick={() => { void meQ.refetch(); void credentialsQ.refetch(); }}>重试</Button>
+          </div>
+        ) : <ApiCredentialHealthCard
           active={active}
-          loading={credentialsQ.isLoading}
+          loading={meQ.isLoading || credentialsQ.isLoading}
           probeMessage={probeMessage}
+          probeError={probeError}
           probing={probeMut.isPending}
           revoking={revokeMut.isPending}
           onProbe={() => {
             if (active) probeMut.mutate(active.id);
           }}
           onRevoke={handleRevoke}
-        />
+        />}
 
         <ApiCredentialForm
           suppliers={suppliers}
@@ -217,30 +233,37 @@ export default function ApiKeySettingsPage() {
           saving={saveMut.isPending}
           onSubmit={onSave}
           onRetrySuppliers={() => void suppliersQ.refetch()}
-          onSupplierChange={setSupplierId}
-          onApiKeyChange={setApiKey}
+          onSupplierChange={(value) => { setSupplierId(value); setSaved(false); setError(null); }}
+          onApiKeyChange={(value) => { setApiKey(value); setSaved(false); setError(null); }}
         />
 
-        <ConfirmDialog
-          open={revokeOpen}
-          onOpenChange={setRevokeOpen}
-          title="撤销 API 密钥？"
-          description="撤销后任务将失败"
-          confirmText={copy.action.confirm}
-          cancelText={copy.action.cancel}
-          tone="danger"
-          confirming={revokeMut.isPending}
-          onConfirm={confirmRevoke}
-        />
+        <ApiKeyRevokeDialog target={revokeTarget} error={revokeError} pending={revokeMut.isPending}
+          onClose={() => setRevokeTarget(null)} onConfirm={confirmRevoke} />
       </div>
     </SettingsShell>
   );
+}
+
+function ApiKeyRevokeDialog({ target, error, pending, onClose, onConfirm }: {
+  target: UserApiCredentialOut | null;
+  error: string | null;
+  pending: boolean;
+  onClose: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  return <ConfirmDialog key={target?.id ?? "none"} open={target !== null}
+    onOpenChange={(open) => { if (!open) onClose(); }}
+    title={`撤销 ${target?.supplier_name ?? ""} 密钥？`}
+    description={<><p>{target?.key_hint}：撤销后，使用此密钥的新任务将无法执行，直到重新绑定。</p>{error ? <p role="alert" className="mt-2 text-[var(--danger-fg)]">{error}</p> : null}</>}
+    confirmText={copy.action.confirm} cancelText={copy.action.cancel} tone="danger"
+    confirming={pending} onConfirm={onConfirm} />;
 }
 
 function ApiCredentialHealthCard({
   active,
   loading,
   probeMessage,
+  probeError,
   probing,
   revoking,
   onProbe,
@@ -249,6 +272,7 @@ function ApiCredentialHealthCard({
   active: UserApiCredentialOut | undefined;
   loading: boolean;
   probeMessage: string | null;
+  probeError: string | null;
   probing: boolean;
   revoking: boolean;
   onProbe: () => void;
@@ -309,6 +333,7 @@ function ApiCredentialHealthCard({
           {lastError}
         </div>
       ) : null}
+      {probeError ? <p role="alert" className="type-body-sm text-[var(--danger-fg)]">{probeError}</p> : null}
       {probeMessage ? (
         <div className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 py-2 type-body-sm text-[var(--fg-1)]">
           {probeMessage}
@@ -381,7 +406,7 @@ function ApiCredentialForm({
     : "sk-...";
 
   return (
-    <form onSubmit={onSubmit} className="surface-card space-y-4 p-4 sm:p-6">
+    <form onSubmit={onSubmit} className="page-section space-y-4">
       <div className="flex items-center gap-2 type-caption text-[var(--fg-1)]">
         <RefreshCw className="w-3.5 h-3.5" />
         绑定或替换
@@ -438,18 +463,11 @@ function ApiCredentialForm({
           onChange={(event) => onApiKeyChange(event.target.value)}
           placeholder={keyPlaceholder}
           autoComplete="off"
+          disabled={saving}
+          hint="作用范围：当前账号的新任务"
+          error={error ?? undefined}
         />
       </div>
-      {error ? (
-        <div
-          role="alert"
-          aria-live="assertive"
-          className="flex items-start gap-2 rounded-[var(--radius-control)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-[var(--danger-fg)]"
-        >
-          <AlertCircle className="mt-0.5 w-4 h-4 shrink-0" />
-          {error}
-        </div>
-      ) : null}
       {saved ? (
         <div className="flex items-center gap-2 rounded-[var(--radius-control)] border border-success-border bg-success-soft px-3 py-2 type-body-sm text-success">
           <Check className="w-4 h-4" />

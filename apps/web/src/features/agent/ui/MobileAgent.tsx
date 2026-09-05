@@ -21,6 +21,7 @@ import { AgentScrollToLatest } from "./AgentScrollToLatest";
 import { AgentSidebar } from "./AgentSidebar";
 import { agentComposerProps } from "./DesktopAgent";
 import type { AgentWorkspaceProps } from "./AgentWorkspace.types";
+import { currentAgentOperationLabel } from "./agentPresentation";
 
 export function MobileAgent(props: AgentWorkspaceProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -29,6 +30,7 @@ export function MobileAgent(props: AgentWorkspaceProps) {
   const { isKeyboardOpen } = useKeyboardInset();
   const {
     scrollRef,
+    contentRef,
     newOutputBelow,
     prepareForPrepend,
     scrollToLatest,
@@ -37,6 +39,7 @@ export function MobileAgent(props: AgentWorkspaceProps) {
     runsById: props.runsById,
     generationsById: props.generationsById,
     threshold: 96,
+    scrollToMessageId: props.scrollToMessageId,
   });
 
   const sidebar = (
@@ -111,6 +114,7 @@ export function MobileAgent(props: AgentWorkspaceProps) {
                 platform="mobile"
                 session={props.currentSession}
                 realtimeStatus={props.realtimeStatus}
+                operationLabel={currentAgentOperationLabel(props)}
                 activeRun={props.activeRun}
                 toolGatewayConfigured={props.toolGatewayConfigured}
                 defaultModel={props.defaultModel}
@@ -142,6 +146,7 @@ export function MobileAgent(props: AgentWorkspaceProps) {
           scrollPaddingBottom: `calc(var(--agent-mobile-nav-offset) + ${composerHeight}px + var(--space-5))`,
         }}
       >
+        <div ref={contentRef} data-agent-scroll-content>
         <AgentConversation
           messages={props.messages}
           runsById={props.runsById}
@@ -164,6 +169,7 @@ export function MobileAgent(props: AgentWorkspaceProps) {
             void Promise.resolve(props.onLoadOlderMessages()).finally(clearAnchor);
           }}
         />
+        </div>
       </main>
       <AgentScrollToLatest
         visible={newOutputBelow}

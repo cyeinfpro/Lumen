@@ -32,6 +32,7 @@ import {
 } from "@/lib/queries";
 import { Button, IconButton } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
+import { UnsavedSettingsGuard } from "@/components/ui/primitives/UnsavedSettingsGuard";
 
 const SETTINGS_KEYS = [
   "telegram.bot_enabled",
@@ -179,6 +180,7 @@ export function TelegramPanel() {
 
   return (
     <section className="space-y-5">
+      <UnsavedSettingsGuard dirty={dirty} />
       {/* 提示条 */}
       <div className="surface-card p-4 md:p-5">
         <div className="flex items-start gap-3">

@@ -10,6 +10,8 @@ import {
 } from "@tanstack/react-query";
 import { useUserQueryScope } from "@/lib/queries/userScope";
 import { qk } from "@/lib/queries/queryKeys";
+import { isPrivateIdentitySnapshotCurrent, type PrivateIdentitySnapshot } from "@/lib/auth/privateIdentityEpoch";
+import { assertAgentRequestIdentity, continueLogicalAgentRun } from "./logicalAgentRequests";
 import type {
   AgentMessageList,
   AgentRun,
@@ -23,7 +25,6 @@ import type {
 import {
   branchAgentSession,
   cancelAgentRun,
-  continueAgentRun,
   createAgentSession,
   deleteAgentSession,
   ejectAgentSessionImage,
@@ -204,10 +205,13 @@ export function useCancelAgentRunMutation() {
 
 export function useContinueAgentRunMutation() {
   const { queryClient, keys } = useAgentInvalidation();
-  return useMutation<AgentRun, Error, { runId: string; idempotencyKey: string }>({
-    mutationFn: ({ runId, idempotencyKey }) =>
-      continueAgentRun(runId, idempotencyKey),
-    onSuccess: (run) => {
+  return useMutation<AgentRun, Error, { runId: string; sessionId: string; identity: PrivateIdentitySnapshot }>({
+    mutationFn: ({ runId, sessionId, identity }) => {
+      assertAgentRequestIdentity(identity);
+      return continueLogicalAgentRun({ runId, sessionId, userId: identity.userId! });
+    },
+    onSuccess: (run, { identity }) => {
+      if (!isPrivateIdentitySnapshotCurrent(identity)) return;
       queryClient.setQueryData(keys.agentRun(run.id), run);
       queryClient.setQueryData(keys.agentActiveRun(run.agent_session_id), run);
       void queryClient.invalidateQueries({

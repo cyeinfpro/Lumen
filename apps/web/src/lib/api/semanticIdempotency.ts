@@ -437,6 +437,23 @@ export class SemanticIdempotencyStore {
     }
   }
 
+  // Verified snapshots may confirm a lost POST reply without allocating an intent.
+  async confirmPendingKey(userId: string, key: string): Promise<void> {
+    const epoch = this.identityEpoch;
+    if (this.identityActivation) await this.identityActivation;
+    if (!this.identityIsCurrent(userId, epoch)) return;
+    let match: [string, PendingEntry] | undefined;
+    if (this.requiresDurability()) {
+      this.throwActivationError();
+      const { root, namespace } = this.reloadRootForOperation(userId, epoch);
+      const record = Object.entries(root.pending).find(([, entry]) => entry.key === key);
+      if (record) match = [record[0], pendingEntry(record[1], epoch, namespace)];
+    } else {
+      match = [...this.entries].find(([, entry]) => entry.key === key);
+    }
+    if (match) await this.confirm(semanticLease(match[0], match[1], "", "borrowed"));
+  }
+
   async markSubmitted(lease: SemanticIdempotencyLease): Promise<void> {
     if (!this.leaseIsCurrent(lease)) {
       throw new Error("semantic idempotency identity changed");

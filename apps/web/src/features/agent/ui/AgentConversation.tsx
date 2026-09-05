@@ -6,7 +6,6 @@ import {
   Globe2,
   ImageIcon,
   RefreshCw,
-  Sparkles,
 } from "lucide-react";
 import Image from "next/image";
 import { useEffect } from "react";
@@ -24,7 +23,6 @@ interface CapabilityCard extends AgentCapabilityAction {
   icon: typeof ImageIcon;
   title: string;
   actionLabel: string;
-  description: string;
   previewSrc: string;
   previewAlt: string;
 }
@@ -35,7 +33,6 @@ const CAPABILITY_CARDS: CapabilityCard[] = [
     icon: ImageIcon,
     title: "多模态视觉企划",
     actionLabel: "选择图片",
-    description: "先选择必需的产品图，再分析构图并规划系列视觉",
     prompt:
       "分析我选择的产品图，提炼色彩风格和构图比例，为同一品牌规划一套春夏上新视觉；若生图工具可用，再生成首张方案图。",
     previewSrc: "/inspiration/editorial-fashion-portrait.webp",
@@ -46,7 +43,6 @@ const CAPABILITY_CARDS: CapabilityCard[] = [
     icon: Globe2,
     title: "商业与竞品调研",
     actionLabel: "开启联网",
-    description: "开启联网搜索，核对当下视觉趋势与公开来源",
     prompt:
       "联网搜索 2026 年极简美妆品牌视觉趋势，总结 3 个关键设计语言，附上来源，并输出可直接生图的 Prompt。",
     previewSrc: "/inspiration/rainy-cinematic-street.webp",
@@ -57,7 +53,6 @@ const CAPABILITY_CARDS: CapabilityCard[] = [
     icon: FileSearch,
     title: "设计素材批量分析",
     actionLabel: "选择文件",
-    description: "先选择文本设计文件，再读取、检索与归纳内容",
     prompt:
       "读取我选择的设计素材和文本文件，归纳核心要求、冲突点与缺失信息，并整理出一组连贯的分镜设计方案。",
     previewSrc: "/inspiration/coastal-concept-architecture.webp",
@@ -153,18 +148,11 @@ export function AgentConversation({
     return (
       <div
         data-testid="agent-empty-state"
-        className="agent-empty-state mx-auto w-full max-w-[var(--content-composer)] px-3 py-3 text-center sm:flex sm:min-h-[55vh] sm:flex-col sm:items-center sm:justify-center sm:px-4 sm:py-8"
+        className="agent-empty-state mx-auto w-full max-w-[var(--content-composer)] px-3 py-3 sm:px-4 sm:py-8"
       >
-        <div className="agent-empty-state-mark inline-flex items-center gap-2 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)]/80 px-3 py-1 type-caption text-[var(--fg-2)] shadow-[var(--shadow-1)] backdrop-blur-md [@media(orientation:landscape)_and_(max-height:500px)]:hidden">
-          <Sparkles className="h-3.5 w-3.5 text-accent" aria-hidden />
-          <span>Lumen Agent</span>
-        </div>
-        <h1 className="agent-empty-state-title mt-2 type-page-title text-[var(--fg-0)] sm:mt-3 [@media(orientation:landscape)_and_(max-height:500px)]:hidden">
-          多模态商业创意智能体
+        <h1 className="agent-empty-state-title type-card-title text-[var(--fg-0)] [@media(orientation:landscape)_and_(max-height:500px)]:hidden">
+          Lumen Agent
         </h1>
-        <p className="mx-auto mt-1 max-w-md type-caption text-[var(--fg-2)] sm:mt-1.5 sm:type-body-sm [@media(orientation:landscape)_and_(max-height:500px)]:hidden">
-          图像理解、联网检索与文件分析协同工作
-        </p>
         <div
           data-testid="agent-empty-suggestions"
           className="agent-empty-state-suggestions mt-3 grid w-full grid-cols-1 gap-2 sm:mt-6 sm:max-w-3xl sm:grid-cols-3 sm:gap-3 [@media(orientation:landscape)_and_(max-height:500px)]:mt-0 [@media(orientation:landscape)_and_(max-height:500px)]:gap-2"
@@ -196,14 +184,11 @@ export function AgentConversation({
                   <span className="block type-card-title text-[var(--fg-0)]">
                     {card.title}
                   </span>
-                  <span className="mt-0.5 hidden whitespace-normal type-caption text-[var(--fg-2)] sm:block [@media(orientation:landscape)_and_(max-height:500px)]:hidden">
-                    {card.description}
-                  </span>
                   <span className="mt-0.5 block type-caption text-accent sm:mt-3 [@media(orientation:landscape)_and_(max-height:500px)]:hidden">
                     {card.actionLabel}
                   </span>
                 </span>
-                <ArrowRight className="h-4 w-4 shrink-0 text-[var(--fg-2)] transition-transform duration-[var(--dur-fast)] group-hover:translate-x-0.5 motion-reduce:transition-none sm:self-end [@media(orientation:landscape)_and_(max-height:500px)]:self-auto" aria-hidden />
+                <ArrowRight className="h-4 w-4 shrink-0 text-[var(--fg-2)] transition-transform duration-[var(--dur-fast)] group-hover:translate-x-0.5 motion-reduce:transform-none motion-reduce:transition-none sm:self-end [@media(orientation:landscape)_and_(max-height:500px)]:self-auto" aria-hidden />
               </Button>
             );
           })}

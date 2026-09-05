@@ -9,7 +9,6 @@ import {
   Settings2,
   Square,
 } from "lucide-react";
-import Link from "next/link";
 import {
   type ClipboardEvent,
   type KeyboardEvent,
@@ -39,9 +38,11 @@ import {
 } from "../model/contracts";
 import { AgentExecutionSummary } from "./AgentComposerControls";
 import { AgentComposerSettings } from "./AgentComposerSettings";
+import { AgentComposerFeedback } from "./AgentComposerFeedback";
 import { AgentMediaDrawer } from "./AgentMediaDrawer";
 import { AgentReferencePicker } from "./AgentReferencePicker";
 import { useAgentTextFiles } from "./useAgentTextFiles";
+import { agentDraftSummary, agentEstimateLabel } from "./agentPresentation";
 
 export type AgentCapabilityKind = "visual" | "web" | "file";
 
@@ -60,6 +61,9 @@ export function AgentComposer({
   submitting,
   runActive,
   stopping,
+  submissionUncertain = false,
+  checkingSubmission = false,
+  onReconcileSubmission,
   error,
   errorAction,
   assetItems,
@@ -92,6 +96,9 @@ export function AgentComposer({
   submitting: boolean;
   runActive: boolean;
   stopping: boolean;
+  submissionUncertain?: boolean;
+  checkingSubmission?: boolean;
+  onReconcileSubmission?: () => void;
   error: string | null;
   errorAction: { href: string; label: string } | null;
   assetItems: GenerationSummary[];
@@ -286,7 +293,9 @@ export function AgentComposer({
     if (
       event.key === "Enter" &&
       !event.shiftKey &&
-      !event.nativeEvent.isComposing
+      !event.nativeEvent.isComposing &&
+      event.nativeEvent.keyCode !== 229 &&
+      !event.repeat
     ) {
       event.preventDefault();
       if (canSubmit) onSubmit();
@@ -332,7 +341,7 @@ export function AgentComposer({
           onDragLeave={dnd.handleDragLeave}
           onDrop={handleComposerDrop}
           className={cn(
-            "surface-panel pointer-events-auto mx-auto w-full max-w-[var(--content-composer)] overflow-hidden bg-[var(--surface-glass)]",
+            "pointer-events-auto mx-auto w-full max-w-[var(--content-composer)] overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]",
             isDragActive && "border-accent-border shadow-[var(--shadow-amber)]",
           )}
         >
@@ -383,15 +392,13 @@ export function AgentComposer({
             onStop={onStop}
           />
           <AgentExecutionSummary
-            draft={draft}
-            disabled={disabled}
-            imageExecutionEnabled={imageExecutionEnabled}
             runActive={runActive}
             summary={summary}
-            costLabel={costEstimate.label}
+            costLabel={agentEstimateLabel(costEstimate.label)}
             costWarning={costEstimate.warning}
             costLoading={costEstimate.loading}
-            onDefaultsChange={onDefaultsChange}
+            settingsOpen={settingsOpen}
+            onOpenSettings={() => setSettingsOpen(true)}
           />
           <AgentComposerToolbar
             draft={draft}
@@ -415,7 +422,15 @@ export function AgentComposer({
               requestFileToolsChange(!draft.allowFileTools)
             }
           />
-          <AgentComposerError error={error} action={errorAction} />
+          <AgentComposerFeedback
+            submitting={submitting}
+            stopping={stopping}
+            submissionUncertain={submissionUncertain}
+            checkingSubmission={checkingSubmission}
+            onReconcileSubmission={onReconcileSubmission}
+            error={error}
+            action={errorAction}
+          />
         </div>
       </div>
 
@@ -469,24 +484,6 @@ function agentComposerPosition(platform: "desktop" | "mobile"): string {
   return platform === "desktop"
     ? "absolute inset-x-0 bottom-0 px-3 pb-[max(var(--space-4),env(safe-area-inset-bottom,0px))]"
     : "safe-x-page fixed inset-x-0 bottom-[var(--agent-mobile-nav-offset,var(--mobile-tabbar-height))] pb-[max(var(--space-1),env(safe-area-inset-bottom,0px))]";
-}
-
-function agentDraftSummary(
-  draft: AgentDraft,
-  imageGenerationAvailable: boolean,
-): string {
-  const tools: string[] = [];
-  if (draft.attachments.length > 0) {
-    tools.push(`本轮输入 ${draft.attachments.length} 张`);
-  }
-  if (draft.allowWebSearch) tools.push("联网");
-  if (draft.files.length > 0) tools.push(`文件 ${draft.files.length}`);
-  tools.push(
-    draft.allowImage && imageGenerationAvailable
-      ? `${draft.imageDefaults.count} 张 · ${draft.imageDefaults.aspect_ratio} · ${draft.imageDefaults.quality.toUpperCase()}`
-      : "仅文本",
-  );
-  return tools.join(" · ");
 }
 
 function AgentComposerInputRow({
@@ -549,13 +546,14 @@ function AgentComposerInputRow({
           <Settings2 className="h-4 w-4" aria-hidden />
         </IconButton>
       </div>
-      {runActive ? (
+      {runActive && !submitting ? (
         <Button
           variant="danger"
           size="md"
           onClick={onStop}
           loading={stopping}
-          aria-label="停止 Agent 运行"
+          disabled={stopping}
+          aria-label={stopping ? "停止请求中" : "停止 Agent 运行"}
           className="h-11 w-11 px-0"
         >
           <Square className="h-4 w-4" fill="currentColor" aria-hidden />
@@ -567,8 +565,8 @@ function AgentComposerInputRow({
           onClick={onSubmit}
           disabled={!canSubmit}
           loading={submitting}
-          aria-label="发送"
-          className="h-11 w-11 px-0"
+          aria-label={submitting ? "提交中" : "发送"}
+          className="h-11 w-11 shrink-0 px-0"
         >
           <Send className="h-4 w-4" aria-hidden />
         </Button>
@@ -709,35 +707,12 @@ function AgentToolToggle({
       className={cn(
         "h-8 shrink-0 gap-1 px-2 type-caption max-sm:min-h-11",
         checked &&
-          "border-accent-border bg-accent-soft text-accent shadow-[var(--shadow-amber)]",
+          "border-accent-border text-[var(--fg-0)]",
       )}
       leftIcon={icon}
     >
       <span>{label}</span>
       <span className="text-[var(--fg-3)]">{stateLabel}</span>
     </Button>
-  );
-}
-
-function AgentComposerError({
-  error,
-  action,
-}: {
-  error: string | null;
-  action: { href: string; label: string } | null;
-}) {
-  if (!error) return null;
-  return (
-    <div className="flex min-h-10 items-center gap-2 border-t border-danger-border bg-danger-soft px-3 py-2 type-caption text-[var(--danger-fg)]">
-      <span role="alert" className="min-w-0 flex-1">{error}</span>
-      {action ? (
-        <Link
-          href={action.href}
-          className="shrink-0 rounded-[var(--radius-control)] px-2 py-1 font-medium text-[var(--fg-0)] hover:bg-[var(--bg-2)]"
-        >
-          {action.label}
-        </Link>
-      ) : null}
-    </div>
   );
 }

@@ -307,6 +307,7 @@ async def generation_out(
         progress_stage=row.progress_stage,
         progress_pct=row.progress_pct,
         submission_epoch=int(getattr(row, "submission_epoch", 0) or 0),
+        cancel_requested_at=getattr(row, "cancel_requested_at", None),
         provider_name=row.provider_name,
         provider_kind=row.provider_kind,
         est_token_upper=row.est_token_upper,

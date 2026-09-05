@@ -15,15 +15,15 @@ export const queryClient = {
       requestClass: "query",
     }) as Promise<T>;
   },
-  head<T = unknown>(
+  head(
     path: string,
-    options: QueryOptions<T> = {},
-  ): Promise<T | undefined> {
-    return apiTransport.request<T>(path, {
+    options: QueryOptions = {},
+  ): Promise<undefined> {
+    return apiTransport.request(path, {
       ...options,
       method: "HEAD",
       requestClass: "query",
       expectNoContent: true,
-    });
+    }).then(() => undefined);
   },
 };

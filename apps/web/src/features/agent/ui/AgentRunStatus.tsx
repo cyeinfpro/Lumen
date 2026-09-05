@@ -6,15 +6,7 @@ import { Button } from "@/components/ui/primitives";
 import { cn } from "@/lib/utils";
 import type { AgentRun } from "../model/contracts";
 import { agentRunErrorPresentation } from "../model/errors";
-
-const STATUS_TEXT: Record<AgentRun["status"], string> = {
-  queued: "等待运行",
-  running: "Agent 运行中",
-  succeeded: "运行完成",
-  partial: "部分完成",
-  failed: "运行失败",
-  cancelled: "已取消",
-};
+import { agentRunPresentation } from "./agentPresentation";
 
 export function AgentRunStatus({
   run,
@@ -23,15 +15,18 @@ export function AgentRunStatus({
   run: AgentRun;
   onContinue?: () => void;
 }) {
+  const presentation = agentRunPresentation(run);
+  const uncertain = presentation.kind === "uncertain";
   const active = run.status === "queued" || run.status === "running";
-  const failed = run.status === "failed" || run.status === "partial";
+  const failed = !uncertain && (run.status === "failed" || run.status === "partial");
   const error = failed ? agentRunErrorPresentation(run.error_code) : null;
-  const assertive = run.status === "failed";
+  const assertive = failed && run.status === "failed";
   return (
     <div
+      data-agent-run-state={presentation.kind}
       className={cn(
         "mt-3 flex min-h-10 flex-wrap items-center gap-2 border-l-2 px-3 py-2 type-caption",
-        runStatusTone(active, failed),
+        uncertain ? "border-warning-border text-[var(--warning-fg)]" : runStatusTone(active, failed),
       )}
     >
       <div
@@ -39,8 +34,8 @@ export function AgentRunStatus({
         aria-live={assertive ? "assertive" : "polite"}
         className="flex min-w-0 flex-1 flex-wrap items-center gap-2"
       >
-        <RunStatusIcon status={run.status} />
-        <span className="font-medium">{STATUS_TEXT[run.status]}</span>
+        {uncertain ? <AlertCircle className="h-3.5 w-3.5 shrink-0" aria-hidden /> : <RunStatusIcon status={run.status} />}
+        <span className="font-medium">{presentation.label}</span>
         {run.memory_state === "degraded" ? (
           <span className="text-[var(--fg-1)]">本轮记忆服务降级</span>
         ) : null}

@@ -139,6 +139,122 @@ class MemoryStorage {
   }
 }
 
+const { createAgentDraft } = await import("../../features/agent/model/contracts.ts");
+const { agentMessagePayload } = await import("../../features/agent/containers/agentSubmission.ts");
+
+async function loadAgentRequests(storage: MemoryStorage, request: (path: string, init?: RequestInit) => Promise<unknown>) {
+  const semantic = loadSemanticModule();
+  const Store = semantic.SemanticIdempotencyStore as typeof import("./semanticIdempotency.ts").SemanticIdempotencyStore;
+  const store = new Store({ storage, lockRequest: null });
+  semantic.semanticPostIdempotency = store;
+  const identity = await import("../auth/privateIdentityEpoch.ts");
+  const errors = await import("./errors.ts");
+  const validators = await import("../../features/agent/api/validators.ts");
+  const api = compile("../../features/agent/api/agentApi.ts", {
+    "@/lib/api/http": { apiFetch: request }, "@/lib/api/semanticIdempotency": semantic,
+    "./validators": validators,
+  });
+  const logical = compile("../../features/agent/api/logicalAgentRequests.ts", {
+    "@/lib/api/errors": errors, "@/lib/api/semanticIdempotency": semantic,
+    "@/lib/auth/privateIdentityEpoch": identity, "./agentApi": api,
+  }) as unknown as typeof import("../../features/agent/api/logicalAgentRequests.ts");
+  return { logical, store, identity, errors };
+}
+
+test("Agent 504 retries survive reload and tabs, isolate payload/session/source-run, and advance only after confirmation", async () => {
+  const storage = new MemoryStorage();
+  const harness = responseLossHarness(() => ({ id: "accepted-run" }), () => ({ status: 504 }));
+  const first = await loadAgentRequests(storage, harness.request);
+  first.identity.transitionPrivateIdentity("agent-owner");
+  await first.store.activateIdentity("agent-owner");
+  const attempts: string[] = [];
+  const input = {
+    userId: "agent-owner", sessionId: "session-1",
+    payload: agentMessagePayload({ ...createAgentDraft(), text: "same text" }, true),
+    onAttempt: (key: string) => attempts.push(key),
+  };
+  await assert.rejects(first.logical.submitLogicalAgentMessage(input));
+  assert.equal(harness.calls.length, 1, "504 is uncertain but not an immediate transport retry");
+  const tab = await loadAgentRequests(storage, harness.request);
+  await tab.store.activateIdentity("agent-owner");
+  await tab.logical.submitLogicalAgentMessage(input);
+  assertReplayPair(harness.calls, 0, { bodyKey: true });
+  assert.equal(attempts[0], attempts[1]);
+  await assert.rejects(first.logical.submitLogicalAgentMessage(input));
+  assert.notEqual(harness.calls[2].key, harness.calls[0].key, "explicit repeat after confirmation is new intent");
+  await assert.rejects(first.logical.submitLogicalAgentMessage({ ...input, sessionId: "session-2" }));
+  await assert.rejects(first.logical.submitLogicalAgentMessage({ ...input, payload: { ...input.payload, text: "edited draft" } }));
+  assert.equal(new Set(harness.calls.slice(2).map((call) => call.key)).size, 3);
+
+  const continuation = { userId: "agent-owner", sessionId: "session-1", runId: "source-run" };
+  await assert.rejects(first.logical.continueLogicalAgentRun(continuation));
+  await tab.logical.continueLogicalAgentRun(continuation);
+  assertReplayPair(harness.calls, 5, { bodyKey: true });
+  await assert.rejects(tab.logical.continueLogicalAgentRun({ ...continuation, runId: "other-source" }));
+  assert.notEqual(harness.calls[7].key, harness.calls[5].key);
+  assert.equal(harness.accepted.size, 6);
+});
+
+test("Agent immediate network retries share a key, definitive rejections retire it, and stale replies cannot retry under another identity", async () => {
+  const storage = new MemoryStorage();
+  const keys: string[] = [];
+  let mode: "network" | "reject" | "stale" = "network";
+  let call = 0;
+  const agent = await loadAgentRequests(storage, async (_path, init) => {
+    keys.push(new Headers(init?.headers).get("Idempotency-Key")!);
+    if (mode === "stale") {
+      agent.identity.transitionPrivateIdentity("other-owner");
+      await agent.store.activateIdentity("other-owner");
+      throw new agent.errors.ApiError({ status: 0, code: "network_error", message: "lost" });
+    }
+    if (mode === "reject") throw new agent.errors.ApiError({ status: 422, code: "invalid", message: "rejected" });
+    if (++call === 1) throw new agent.errors.ApiError({ status: 0, code: "network_error", message: "lost" });
+    return { id: "accepted" };
+  });
+  agent.identity.transitionPrivateIdentity("agent-owner");
+  await agent.store.activateIdentity("agent-owner");
+  const input = { userId: "agent-owner", sessionId: "session", payload: agentMessagePayload({ ...createAgentDraft(), text: "same" }, true), onAttempt: () => {} };
+  await agent.logical.submitLogicalAgentMessage(input);
+  assert.equal(keys.length, 2);
+  assert.equal(keys[0], keys[1]);
+  mode = "reject";
+  await assert.rejects(agent.logical.submitLogicalAgentMessage(input), { status: 422 });
+  await assert.rejects(agent.logical.submitLogicalAgentMessage(input), { status: 422 });
+  assert.notEqual(keys[2], keys[3]);
+  mode = "stale";
+  await assert.rejects(agent.logical.submitLogicalAgentMessage(input), { code: "identity_changed" });
+  assert.equal(keys.length, 5, "stale identity cannot trigger the immediate second POST");
+  agent.identity.transitionPrivateIdentity("agent-owner");
+  await agent.store.activateIdentity("agent-owner");
+  mode = "network";
+  await agent.logical.submitLogicalAgentMessage(input);
+  assert.equal(keys[5], keys[4], "uncertain operation survives relogin without new identity pollution");
+});
+
+test("only a matching verified Agent snapshot retires a lost submission, including after reload", async () => {
+  const storage = new MemoryStorage();
+  const harness = responseLossHarness(() => ({}), () => ({ status: 504 }));
+  const agent = await loadAgentRequests(storage, harness.request);
+  const identity = agent.identity.transitionPrivateIdentity("snapshot-owner");
+  await agent.store.activateIdentity("snapshot-owner");
+  const input = { userId: "snapshot-owner", sessionId: "snapshot-session", payload: agentMessagePayload({ ...createAgentDraft(), text: "lost" }, true), onAttempt: () => {} };
+  await assert.rejects(agent.logical.submitLogicalAgentMessage(input));
+  const key = harness.calls[0].key;
+  const reloaded = await loadAgentRequests(storage, harness.request);
+  await reloaded.store.activateIdentity("snapshot-owner");
+  const run = { id: "verified-run", agent_session_id: input.sessionId, idempotency_key: key } as import("../../features/agent/model/contracts.ts").AgentRun;
+  await reloaded.logical.confirmObservedAgentRuns(identity, "other-session", [run]);
+  await reloaded.logical.confirmObservedAgentRuns(identity, input.sessionId, [{ ...run, id: "optimistic:local" }]);
+  const scope = { operation: "agent.message.create", userId: input.userId, sessionId: input.sessionId };
+  assert.equal((await reloaded.store.acquire(scope, input.payload)).key, key);
+  await reloaded.logical.confirmObservedAgentRuns(identity, input.sessionId, [run]);
+  const next = await reloaded.store.acquire(scope, input.payload);
+  assert.notEqual(next.key, key);
+  agent.identity.transitionPrivateIdentity("another-owner");
+  await assert.rejects(reloaded.logical.confirmObservedAgentRuns(identity, input.sessionId, [{ ...run, idempotency_key: next.key }]), { code: "identity_changed" });
+  assert.equal((await reloaded.store.acquire(scope, input.payload)).key, next.key);
+});
+
 function assertReplayPair(
   calls: RecordedCall[],
   start: number,

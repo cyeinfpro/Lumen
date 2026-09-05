@@ -26,6 +26,31 @@ def _prod_kwargs() -> dict[str, Any]:
     }
 
 
+@pytest.mark.parametrize("app_env", ["dev", "test", "prod"])
+@pytest.mark.parametrize("secret", ["\u00e9" * 32, "\u4e2d" + "s" * 32, "\u00a0" + "s" * 32])
+def test_bot_secret_requires_ascii_at_startup(app_env: str, secret: str) -> None:
+    kwargs = _prod_kwargs() if app_env == "prod" else {"app_env": app_env}
+    with pytest.raises(ValidationError, match="TELEGRAM_BOT_SHARED_SECRET.*ASCII"):
+        Settings(**kwargs, telegram_bot_shared_secret=secret, _env_file=None)
+
+
+@pytest.mark.parametrize("secret", ["", " ", "s" * 32, "  " + "s" * 32 + "  "])
+def test_production_bot_secret_preserves_disabled_and_valid_config(secret: str) -> None:
+    settings = Settings(**_prod_kwargs(), telegram_bot_shared_secret=secret, _env_file=None)
+    assert settings.telegram_bot_shared_secret == secret
+
+
+@pytest.mark.parametrize("secret", ["s", "s" * 31, "  " + "s" * 31 + "  "])
+def test_production_bot_secret_still_requires_32_characters(secret: str) -> None:
+    with pytest.raises(ValidationError, match="TELEGRAM_BOT_SHARED_SECRET.*32"):
+        Settings(**_prod_kwargs(), telegram_bot_shared_secret=secret, _env_file=None)
+
+
+def test_development_bot_secret_preserves_short_ascii_compatibility() -> None:
+    settings = Settings(app_env="dev", telegram_bot_shared_secret="short", _env_file=None)
+    assert settings.telegram_bot_shared_secret == "short"
+
+
 def test_non_dev_requires_explicit_session_secret(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

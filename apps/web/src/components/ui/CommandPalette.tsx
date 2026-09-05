@@ -172,8 +172,10 @@ export function CommandPalette() {
   const descriptionId = useId();
   const listboxId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
+  const restoreTargetRef = useRef<{ target: HTMLElement | null } | null>(null);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -226,6 +228,7 @@ export function CommandPalette() {
       ? 0
       : Math.min(selectedIndex, filteredCommands.length - 1);
   const selectedCommand = filteredCommands[effectiveSelectedIndex];
+  const resultsKey = JSON.stringify([query, filteredCommands.map((item) => item.id)]);
   const activeNavKey = getActiveNavKey(pathname, navVisibility);
   const optionId = useCallback(
     (id: string) => `${listboxId}-${id}`,
@@ -242,8 +245,12 @@ export function CommandPalette() {
   }, []);
 
   const openPalette = useCallback(() => {
-    previousFocusRef.current =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    restoreTargetRef.current = null;
+    const active = document.activeElement;
+    const palette = inputRef.current?.closest('[role="dialog"]');
+    if (!palette?.contains(active)) {
+      previousFocusRef.current = active instanceof HTMLElement ? active : null;
+    }
     setOpen(true);
   }, []);
 
@@ -253,14 +260,25 @@ export function CommandPalette() {
     setSelectedIndex(0);
   }, []);
 
+  const restorePaletteFocus = useCallback(() => {
+    const request = restoreTargetRef.current;
+    // AnimatePresence finishes before passive layer cleanup releases inert/focus trapping.
+    window.setTimeout(() => {
+      if (!request || restoreTargetRef.current !== request) return;
+      restoreTargetRef.current = null;
+      const target = request.target;
+      if (target?.isConnected && !target.closest('[inert], [aria-hidden="true"]')) {
+        target.focus({ preventScroll: true });
+      }
+    }, 0);
+  }, []);
+
   const closePalette = useCallback((restoreFocus = true) => {
     resetPalette();
-    if (restoreFocus) {
-      window.setTimeout(() => {
-        previousFocusRef.current?.focus({ preventScroll: true });
-      }, 0);
-    }
-  }, [resetPalette]);
+    if (!restoreFocus) return;
+    restoreTargetRef.current = { target: previousFocusRef.current };
+    if (isDesktop) restorePaletteFocus();
+  }, [isDesktop, resetPalette, restorePaletteFocus]);
   const runCommand = useCallback(
     (item: Command) => {
       resetPalette();
@@ -277,11 +295,11 @@ export function CommandPalette() {
 
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.isComposing || event.repeat || event.defaultPrevented) return;
       const isCommandK =
         event.key.toLocaleLowerCase() === "k" && (event.metaKey || event.ctrlKey);
 
       if (!isCommandK) return;
-      if (event.defaultPrevented) return;
       event.preventDefault();
       if (open) {
         closePalette();
@@ -310,7 +328,29 @@ export function CommandPalette() {
       inputRef.current?.select();
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [open]);
+  }, [open, isDesktop]);
+
+  useEffect(() => {
+    if (!open || !selectedCommand) return;
+    const list = listRef.current;
+    const item = document.getElementById(optionId(selectedCommand.id));
+    if (!list || !item || !list.contains(item)) return;
+    const reveal = () => {
+      const viewport = list.getBoundingClientRect();
+      const bounds = item.getBoundingClientRect();
+      // Dialog entry transforms scale client geometry, but scrollTop uses CSS pixels.
+      const scale = list.offsetHeight > 0 ? viewport.height / list.offsetHeight : 1;
+      if (scale <= 0) return;
+      const top = viewport.top + (list.clientTop + 8) * scale;
+      const bottom = viewport.top + (list.clientTop + list.clientHeight - 8) * scale;
+      if (bounds.top < top) list.scrollTop -= (top - bounds.top) / scale;
+      else if (bounds.bottom > bottom) list.scrollTop += (bounds.bottom - bottom) / scale;
+    };
+    reveal();
+    const observer = new ResizeObserver(reveal);
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, [open, selectedCommand, resultsKey, isDesktop, optionId]);
 
   const handleQueryChange = (value: string) => {
     setQuery(value);
@@ -318,13 +358,12 @@ export function CommandPalette() {
   };
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.nativeEvent.isComposing || (event.repeat && event.key === "Escape")) return;
     if (event.key === "Escape") {
       event.preventDefault();
       closePalette();
       return;
     }
-
-    if (event.nativeEvent.isComposing) return;
 
     if (event.key === "ArrowDown") {
       event.preventDefault();
@@ -350,6 +389,7 @@ export function CommandPalette() {
 
     if (event.key === "Enter" && selectedCommand) {
       event.preventDefault();
+      restoreTargetRef.current = null;
       runCommand(selectedCommand);
     }
   };
@@ -368,6 +408,7 @@ export function CommandPalette() {
         <input
           ref={inputRef}
           role="combobox"
+          aria-label="搜索命令或页面"
           aria-expanded="true"
           aria-controls={listboxId}
           aria-activedescendant={
@@ -395,6 +436,7 @@ export function CommandPalette() {
         variant="ghost"
         size="md"
         aria-label="关闭命令面板"
+        tooltip="关闭命令面板"
         onClick={() => closePalette()}
       >
         <X className="h-4 w-4" aria-hidden />
@@ -404,6 +446,7 @@ export function CommandPalette() {
 
   const list = (
     <div
+      ref={listRef}
       id={listboxId}
       role="listbox"
       aria-label="命令"
@@ -431,9 +474,13 @@ export function CommandPalette() {
               role="option"
               aria-selected={selected}
               tabIndex={-1}
+              onMouseDown={(event) => event.preventDefault()}
               onMouseEnter={() => setSelectedIndex(index)}
               onFocus={() => setSelectedIndex(index)}
-              onClick={() => runCommand(item)}
+              onClick={() => {
+                restoreTargetRef.current = null;
+                runCommand(item);
+              }}
               className={cn(
                 "flex min-h-14 w-full items-center gap-3 rounded-[var(--radius-control)] px-3 py-2.5 text-left",
                 "transition-colors focus-visible:outline-none",
@@ -469,7 +516,7 @@ export function CommandPalette() {
                     当前
                   </Badge>
                 )}
-                <span className="hidden type-caption text-[var(--fg-3)] sm:inline">
+                <span className="hidden type-caption text-[var(--fg-muted-aa)] sm:inline">
                   {item.group}
                 </span>
                 <ArrowRight
@@ -531,6 +578,7 @@ export function CommandPalette() {
         ariaLabel="命令面板"
         snapPoints={["75%"]}
         restoreFocus={false}
+        onExitComplete={restorePaletteFocus}
       >
         <div
           className="flex h-full min-h-0 flex-1 flex-col overflow-hidden"

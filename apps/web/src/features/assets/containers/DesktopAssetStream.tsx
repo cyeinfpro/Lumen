@@ -64,7 +64,8 @@ function preferredScrollBehavior(reduceMotion: boolean | null): ScrollBehavior {
 
 function StreamFeedState({
   hasError,
-  errorMessage,
+  error,
+  hasLoadedItems,
   onRetry,
   isLoading,
   columns,
@@ -76,7 +77,8 @@ function StreamFeedState({
   children,
 }: {
   hasError: boolean;
-  errorMessage?: string;
+  error?: unknown;
+  hasLoadedItems: boolean;
   onRetry: () => void;
   isLoading: boolean;
   columns: number;
@@ -89,9 +91,10 @@ function StreamFeedState({
 }) {
   if (hasError) {
     return (
-      <div role="alert">
-        <StreamErrorState message={errorMessage} onRetry={onRetry} />
-      </div>
+      <>
+        <StreamErrorState error={error} onRetry={onRetry} compact={hasLoadedItems} />
+        {hasLoadedItems ? children : null}
+      </>
     );
   }
   if (isLoading) return <StreamLoadingState columns={columns} />;
@@ -148,6 +151,7 @@ export function DesktopStream() {
   }, [applyFilters]);
 
   const query = useStreamFeedQuery(filters);
+  const feedError = query.error ?? (query.fetchStatus === "paused" ? { status: 0 } : undefined);
   const { mutateAsync: deleteStreamImage } = useDeleteStreamImageMutation();
   const hasNextPage = query.hasNextPage;
   const isFetchingNextPage = query.isFetchingNextPage;
@@ -366,8 +370,9 @@ export function DesktopStream() {
           </StreamOverview>
 
           <StreamFeedState
-            hasError={query.isError}
-            errorMessage={query.error?.message}
+            hasError={query.isError || query.fetchStatus === "paused"}
+            error={feedError}
+            hasLoadedItems={items.length > 0}
             onRetry={() => {
               void query.refetch();
             }}

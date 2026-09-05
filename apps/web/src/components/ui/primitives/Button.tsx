@@ -29,7 +29,7 @@ const BASE =
 const VARIANTS: Record<Variant, string> = {
   primary:
     "[background:var(--button-primary-bg)] text-[var(--accent-on)] font-medium " +
-    "shadow-[var(--shadow-1)] hover:shadow-[var(--shadow-amber)] hover:brightness-[1.03]",
+    "hover:[background:var(--button-primary-bg-hover)]",
   secondary:
     "[background:var(--button-secondary-bg)] text-[var(--fg-0)] " +
     "hover:[background:var(--button-secondary-bg-hover)] border border-[var(--border)] " +
@@ -51,8 +51,8 @@ const VARIANTS: Record<Variant, string> = {
   // link: 看起来像链接的按钮（替代裸 <a> 风格按钮）。
   // 走 LINK_SIZES 而非 SIZES，避免 twMerge 让 SIZES 的 h/p 覆盖 link 的 h-auto/p-0。
   link:
-    "bg-transparent text-[var(--info)] underline underline-offset-2 " +
-    "hover:opacity-80 border-0 p-0 h-auto",
+    "bg-transparent text-[var(--link-fg)] underline underline-offset-2 " +
+    "hover:decoration-2 border-0 p-0 h-auto",
 };
 
 // 尺寸策略：桌面保持紧凑视觉；移动端 (max-sm) 通过 min-h-11 / 更宽的横向 padding

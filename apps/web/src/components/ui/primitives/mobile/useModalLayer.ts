@@ -18,7 +18,7 @@ const FOCUSABLE_SELECTOR = [
   "select:not([disabled])",
   "summary",
   "[contenteditable='true']",
-  "[tabindex]:not([tabindex='-1'])",
+  "[tabindex]",
 ].join(",");
 
 type ModalLayer = {
@@ -122,12 +122,17 @@ function isElementVisible(element: HTMLElement): boolean {
   ) {
     return false;
   }
-  return element.getClientRects().length > 0;
+  const visibility = window.getComputedStyle(element).visibility;
+  return visibility !== "hidden" && visibility !== "collapse" &&
+    element.getClientRects().length > 0;
 }
 
 function focusableElements(root: HTMLElement): HTMLElement[] {
   return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
-    (element) => isElementVisible(element),
+    (element) =>
+      isElementVisible(element) &&
+      !element.matches(":disabled") &&
+      (!element.hasAttribute("tabindex") || element.tabIndex >= 0),
   );
 }
 
@@ -138,6 +143,7 @@ function initialFocusTarget(
   if (
     preferred?.isConnected &&
     root.contains(preferred) &&
+    !preferred.matches(":disabled") &&
     isElementVisible(preferred)
   ) {
     return preferred;

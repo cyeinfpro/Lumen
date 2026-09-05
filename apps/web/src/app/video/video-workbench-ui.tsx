@@ -15,7 +15,7 @@ import {
   XCircle,
 } from "lucide-react";
 
-import { Button, IconButton, toast } from "@/components/ui/primitives";
+import { Button, ConfirmDialog, IconButton, toast } from "@/components/ui/primitives";
 import { videoBinaryUrl } from "@/lib/apiClient";
 import type { VideoReferenceMediaIn } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -173,16 +173,32 @@ function referenceDisplayToken(
   return `@${referenceKindNoun(item.kind)}${index}`;
 }
 
-export function VideoParameterPanel({
-  ...props
-}: VideoParameterPanelProps) {
+export function VideoParameterPanel(props: VideoParameterPanelProps) {
+  const [pendingModel, setPendingModel] = useState<{ from: string; to: string } | null>(null);
+  const modelChangeOpen = pendingModel != null && pendingModel.from === props.selectedModel && props.modelOptions.includes(pendingModel.to);
   return (
-    <VideoParameterPanelView
-      {...props}
-      id="video-generation-settings"
-    >
-      视频生成参数
-    </VideoParameterPanelView>
+    <>
+      <VideoParameterPanelView
+        {...props}
+        id="video-generation-settings"
+        onModelChange={(value) => {
+          if (value !== props.selectedModel) setPendingModel({ from: props.selectedModel, to: value });
+        }}
+      >
+        视频生成参数
+      </VideoParameterPanelView>
+      <ConfirmDialog
+        open={modelChangeOpen}
+        onOpenChange={(open) => { if (!open) setPendingModel(null); }}
+        title="切换视频模型？"
+        description={`切换至 ${pendingModel ? props.modelOptionLabels[pendingModel.to] || pendingModel.to : ""}。不支持的尺寸、比例、时长和音频将调整为可用值；已提交任务不变。`}
+        confirmText="确认切换"
+        onConfirm={() => {
+          if (modelChangeOpen && pendingModel) props.onModelChange(pendingModel.to);
+          setPendingModel(null);
+        }}
+      />
+    </>
   );
 }
 

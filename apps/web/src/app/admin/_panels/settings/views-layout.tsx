@@ -19,7 +19,7 @@ import type { SystemSettingItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/primitives";
 import { SettingDetails } from "../../_components/SettingDetails";
-import { SettingControl } from "./views-controls";
+import { SettingControl, SettingFieldAccessibility } from "./views-controls";
 import {
   DependencyNotice,
   OverviewMetric,
@@ -58,7 +58,7 @@ export function SettingsOverviewCard({
   visibleCount: number;
 }) {
   return (
-    <div className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/70 p-4 shadow-[var(--shadow-2)] backdrop-blur-sm md:p-5">
+    <div className="page-section">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="flex min-w-0 items-start gap-3">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-accent-border bg-accent-soft">
@@ -67,7 +67,7 @@ export function SettingsOverviewCard({
           <div className="min-w-0">
             <h2 className="type-card-title">系统配置概览</h2>
             <p className="mt-1 max-w-3xl type-body-sm text-[var(--fg-2)]">
-              常用开关在这里先给出结果，下面再按任务分区编辑。数据库设置优先生效，保存后通常几秒内同步到 API 和 Worker。
+              作用范围：全局。保存后同步到 API 和 Worker；数据库设置优先于环境默认值。
             </p>
           </div>
         </div>
@@ -342,8 +342,8 @@ export function SettingCard({
                 hasAnyValue={item.has_value}
               />
             </div>
-            <p className="mt-1 type-body-sm text-[var(--fg-2)]">
-              {meta.summary}
+            <p id={`setting-${item.key}-help`} className="mt-1 type-body-sm text-[var(--fg-2)]">
+              {meta.summary} · 全局设置
             </p>
           </div>
         </div>
@@ -365,6 +365,10 @@ export function SettingCard({
       </div>
 
       <div className="mt-3">
+        <SettingFieldAccessibility.Provider value={{
+          "aria-describedby": [`setting-${item.key}-help`, fieldError ? `setting-${item.key}-error` : null].filter(Boolean).join(" "),
+          "aria-invalid": !!fieldError || undefined,
+        }}>
         <SettingControl
           item={item}
           meta={meta}
@@ -374,6 +378,7 @@ export function SettingCard({
           updateProxyOptions={updateProxyOptions}
           onChange={onChange}
         />
+        </SettingFieldAccessibility.Provider>
       </div>
 
       <SettingCardAnnotations
@@ -431,7 +436,7 @@ function SettingCardAnnotations({
         summary={meta.summary}
       />
       {fieldError && (
-        <p className="mt-3 flex items-center gap-1.5 type-caption text-danger">
+        <p id={`setting-${item.key}-error`} role="alert" className="mt-3 flex items-center gap-1.5 type-caption text-[var(--danger-fg)]">
           <AlertCircle className="h-3.5 w-3.5" /> {fieldError}
         </p>
       )}

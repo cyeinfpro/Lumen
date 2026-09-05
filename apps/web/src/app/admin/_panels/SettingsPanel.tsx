@@ -27,6 +27,7 @@ import { ApiError, getAdminContextHealth } from "@/lib/apiClient";
 import type { SystemSettingItem } from "@/lib/types";
 import { Button } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
+import { UnsavedSettingsGuard } from "@/components/ui/primitives/UnsavedSettingsGuard";
 import { ErrorBlock } from "../_components/AdminFeedback";
 import {
   ContextHealthBlock,
@@ -283,6 +284,7 @@ export function SettingsPanel() {
 
   return (
     <section className="space-y-6 pb-24">
+      <UnsavedSettingsGuard dirty={dirtyCount > 0} />
       <SettingsOverviewCard
         overview={overview}
         dirtyCount={dirtyCount}
@@ -330,7 +332,7 @@ export function SettingsPanel() {
       <SettingsSectionHeader
         icon={SlidersHorizontal}
         title="配置项"
-        description="按业务场景分组编辑。左侧选分类，右侧只显示相关设置。"
+        description="作用范围：全局，新任务使用保存后的配置。"
         badge={`${visibleCount} 项显示`}
       />
 
@@ -352,6 +354,7 @@ export function SettingsPanel() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="搜索设置或技术名"
+                aria-label="搜索设置或技术名"
                 className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 pl-9 pr-3 type-body-sm text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-2)] focus:border-accent-border focus:ring-2 focus:ring-accent/20"
               />
             </label>

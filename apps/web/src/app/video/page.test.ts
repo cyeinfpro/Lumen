@@ -275,7 +275,7 @@ test("video mobile surfaces preserve safe-area, scroll, and touch contracts", ()
   );
   match(
     videoPageViewSource,
-    /pb-\[calc\(var\(--mobile-tabbar-height\)\+1rem\)\]/,
+    /max-md:pb-\[calc\(var\(--mobile-tabbar-height\)\+2rem\)\]/,
   );
   match(taskUiSource, /mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto/);
   match(taskUiSource, /min-h-11 rounded-\[var\(--radius-control\)\]/);
@@ -922,21 +922,25 @@ test("video task drawer owns its scroll surface instead of shrinking the canvas"
   match(videoPageViewSource, /historyItems=\{model\.tasks\.historyItems\}/);
 });
 
-test("video prompt and parameter panel use one discoverable workspace scroll", () => {
+test("video parameters use the same controlled panel in a desktop inspector or mobile sheet", () => {
   match(source, /const resizePromptEditor = useCallback\(\(\) =>/);
   match(source, /target\.style\.height = "0px"/);
   match(source, /target\.style\.height = `\$\{target\.scrollHeight\}px`/);
   match(source, /resize-none overflow-y-hidden/);
   match(
     source,
-    /className="scroll-mt-20 pb-\[calc\(var\(--mobile-tabbar-height\)\+1rem\)\] min-\[1120px\]:sticky min-\[1120px\]:top-\[76px\] min-\[1120px\]:pb-0"/,
+    /className="scroll-mt-20 min-\[1120px\]:sticky min-\[1120px\]:top-\[76px\]"/,
   );
   match(source, /id="video-generation-settings"/);
   match(pageSource, /onOpenParameters: scrollParametersIntoView/);
   match(
     videoPageViewSource,
-    /onOpenParameters=\{model\.header\.onOpenParameters\}/,
+    /onOpenParameters=\{openParameters\}/,
   );
+  match(videoPageViewSource, /if \(wide\) model\.header\.onOpenParameters\(\)/);
+  match(videoPageViewSource, /<BottomSheet open=\{parametersOpen\}/);
+  match(videoPageViewSource, /\{wide \? parameterPanel : null\}/);
+  match(videoPageViewSource, /\.\.\.model\.parameters/);
   match(source, />\s*视频生成参数\s*</);
 });
 
@@ -976,7 +980,7 @@ test("video prompt enhancement candidates do not trap editor scrolling", () => {
   );
   match(source, /focus\(\{ preventScroll: true \}\)/);
   match(source, /回到编辑/);
-  match(source, /pb-\[calc\(var\(--mobile-tabbar-height\)\+1rem\)\]/);
+  match(source, /max-md:pb-\[calc\(var\(--mobile-tabbar-height\)\+2rem\)\]/);
   match(
     source,
     /scroll-padding-bottom:calc\(var\(--mobile-tabbar-height\)\+6rem\)/,
@@ -1343,7 +1347,9 @@ test("video upload state blocks submit and Enter shortcuts", () => {
   match(pageSource, /pending: referenceUploadPending/);
   match(videoPageViewSource, /!model\.pending/);
   match(pageSource, /onSubmit: submitVideo/);
-  match(videoPageViewSource, /onSubmit=\{model\.parameters\.onSubmit\}/);
+  match(videoPageViewSource, /model\.parameters\.onSubmit\(\)/);
+  match(videoPageViewSource, /disabled=\{!model\.parameters\.canSubmit\}/);
+  match(videoPageViewSource, /onClick=\{model\.parameters\.onSubmit\}/);
 });
 
 test("video task rows and preview show elapsed runtime", () => {

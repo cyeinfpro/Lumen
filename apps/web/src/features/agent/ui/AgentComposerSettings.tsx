@@ -1,8 +1,9 @@
 "use client";
 
 import { FileText, Globe2, ImageIcon } from "lucide-react";
+import { useState } from "react";
 import { AspectRatioPicker } from "@/components/ui/composer/shared/AspectRatioPicker";
-import { Select, Switch } from "@/components/ui/primitives";
+import { Button, Select, Switch } from "@/components/ui/primitives";
 import type {
   AgentDraft,
   AgentImageDefaults,
@@ -31,6 +32,7 @@ export function AgentQuickSettings({
   onReasoningEffortChange,
   onDefaultsChange,
 }: AgentQuickSettingsProps) {
+  const [pendingModel, setPendingModel] = useState<{ model: string | null } | null>(null);
   const defaults = draft.imageDefaults;
   const selectedModel = draft.model ?? defaultModel;
   const selectedOption = modelOptions.find(
@@ -43,17 +45,23 @@ export function AgentQuickSettings({
 
   return (
     <div className="grid gap-4">
+      <div className="border-b border-[var(--border-subtle)] pb-3">
+        <h2 className="type-card-title text-[var(--fg-0)]">执行参数</h2>
+        <p className="mt-1 type-caption text-[var(--fg-2)]">用于下一次提交，不改变已开始的任务。</p>
+      </div>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <SettingField label="模型">
           <Select
             value={draft.model ?? ""}
             onChange={(event) => {
               const model = event.target.value || null;
-              onModelChange(model);
-              const option = modelOptions.find((item) => item.model === model);
-              if (option && !option.reasoning_supported) {
-                onReasoningEffortChange("none");
+              setPendingModel(null);
+              const option = modelOptions.find((item) => item.model === (model ?? defaultModel));
+              if (option?.reasoning_supported === false && draft.reasoningEffort !== "none") {
+                setPendingModel({ model });
+                return;
               }
+              onModelChange(model);
             }}
             disabled={disabled}
             aria-label="Agent 模型"
@@ -70,7 +78,7 @@ export function AgentQuickSettings({
         </SettingField>
         <SettingField label="推理强度">
           <Select
-            value={reasoningDisabled ? "none" : draft.reasoningEffort ?? "auto"}
+            value={draft.reasoningEffort ?? "auto"}
             onChange={(event) =>
               onReasoningEffortChange(
                 event.target.value as AgentReasoningEffort,
@@ -91,6 +99,22 @@ export function AgentQuickSettings({
         </SettingField>
       </div>
 
+      <ReasoningCapabilityNotice supported={selectedOption?.reasoning_supported} effort={draft.reasoningEffort} />
+      {pendingModel ? (
+        <div role="group" aria-label="确认模型变更" className="grid gap-2 border-l-2 border-warning-border pl-3">
+          <p role="status" className="break-words type-caption text-[var(--warning-fg)]">
+            {pendingModel.model ?? defaultModel ?? "默认模型"} 不支持推理，确认后推理强度将关闭。
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" size="sm" onClick={() => setPendingModel(null)}>取消</Button>
+            <Button variant="secondary" size="sm" disabled={disabled} onClick={() => {
+              onModelChange(pendingModel.model);
+              onReasoningEffortChange("none");
+              setPendingModel(null);
+            }}>确认切换</Button>
+          </div>
+        </div>
+      ) : null}
       <fieldset
         disabled={imageSettingsDisabled}
         className="grid gap-4 disabled:opacity-50"
@@ -192,6 +216,18 @@ export function AgentQuickSettings({
   );
 }
 
+function ReasoningCapabilityNotice({ supported, effort }: {
+  supported: boolean | undefined;
+  effort: AgentDraft["reasoningEffort"];
+}) {
+  if (supported !== false) return null;
+  return (
+    <p role="status" className="type-caption text-[var(--warning-fg)]">
+      当前模型不支持推理{effort !== "none" && effort !== "auto" ? "，所选强度不可用" : ""}。
+    </p>
+  );
+}
+
 export function AgentComposerSettings({
   draft,
   disabled,
@@ -210,7 +246,7 @@ export function AgentComposerSettings({
   onAllowFileToolsChange: (enabled: boolean) => void;
 }) {
   return (
-    <div className="grid gap-4 p-4">
+    <div className="mobile-dialog-scroll grid min-h-0 gap-4 overflow-y-auto p-4">
       <AgentQuickSettings
         draft={draft}
         disabled={disabled}
@@ -269,7 +305,7 @@ function ToolToggle({
 }) {
   return (
     <div className="flex min-h-14 items-center gap-3 py-2.5">
-      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] bg-[var(--bg-2)] text-accent">
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] bg-[var(--bg-2)] text-[var(--fg-1)]">
         {icon}
       </span>
       <span className="min-w-0 flex-1">
@@ -288,9 +324,9 @@ function ToolToggle({
 
 function SettingField({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <label className="grid min-w-0 gap-1.5 type-caption text-[var(--fg-2)]">
-      <span>{label}</span>
+    <fieldset className="grid min-w-0 gap-1.5 type-caption text-[var(--fg-2)]">
+      <legend className="mb-1.5">{label}</legend>
       {children}
-    </label>
+    </fieldset>
   );
 }

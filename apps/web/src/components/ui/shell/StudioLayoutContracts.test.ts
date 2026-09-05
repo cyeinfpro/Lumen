@@ -435,9 +435,15 @@ test("V2 surfaces stay semantic across explicit and system themes", () => {
   doesNotMatch(card, /#[0-9a-f]{3,8}|rgba?\(/i);
   doesNotMatch(card, /transition:\s*all/);
 
-  match(glass, /var\(--surface-glass\)/);
+  match(glass, /background:\s*var\(--surface-chrome\)/);
   match(glass, /var\(--border-subtle\)/);
   doesNotMatch(glass, /#[0-9a-f]{3,8}|rgba?\(/i);
+  doesNotMatch(glass, /backdrop-filter|color-mix/);
+  for (const selector of ["  .surface-card-hover:hover {", "  .surface-card-v2:hover {"]) {
+    const hover = cssBlock(selector);
+    match(hover, /var\(--border-strong\)/);
+    doesNotMatch(hover, /transform:|box-shadow:/);
+  }
   match(cssBlock("  .dark {"), /--surface-glass:/);
   match(cssBlock("  .theme-light {"), /--surface-glass:/);
   match(

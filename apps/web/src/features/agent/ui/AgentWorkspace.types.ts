@@ -28,6 +28,7 @@ export interface AgentWorkspaceProps {
   sessionsLoadingMore: boolean;
   sessionSearch: string;
   messagesLoading: boolean;
+  checkingSubmission: boolean;
   messagesHaveMore: boolean;
   messagesLoadingMore: boolean;
   messagesError: string | null;

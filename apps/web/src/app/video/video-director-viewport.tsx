@@ -35,6 +35,8 @@ function directorVideoPoster(
 export function VideoDirectorViewport({
   item,
   loading,
+  error,
+  onRetry,
   action,
   prompt,
   sourceReady,
@@ -42,6 +44,8 @@ export function VideoDirectorViewport({
 }: {
   item: VideoGenerationWithVideo | null;
   loading: boolean;
+  error?: string | null;
+  onRetry: () => void;
   action: VideoAction;
   prompt: string;
   sourceReady: boolean;
@@ -58,7 +62,7 @@ export function VideoDirectorViewport({
   );
   const summary = item
     ? `${actionLabel(item.action)} · ${item.resolution} · ${item.aspect_ratio} · ${formatDurationLabel(item.duration_s)}`
-    : "固定 16:9 监看画布";
+    : "最近成片";
 
   const retryVideo = () => {
     if (!item) return;
@@ -148,7 +152,7 @@ export function VideoDirectorViewport({
                 DIRECTOR_STAGE_TEXT,
               )}
             >
-              {fallback.title}
+              {error ? "任务记录加载失败" : fallback.title}
             </p>
             <p
               className={cn(
@@ -156,8 +160,9 @@ export function VideoDirectorViewport({
                 DIRECTOR_STAGE_TEXT_MUTED,
               )}
             >
-              {fallback.description}
+              {error ?? fallback.description}
             </p>
+            {error && <Button variant="glass" size="sm" onClick={onRetry} leftIcon={<RefreshCw className="h-3.5 w-3.5" />}>重试</Button>}
           </div>
         )}
 

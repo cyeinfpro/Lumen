@@ -1,17 +1,22 @@
 "use client";
 
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import {
   ChevronDown,
   ImageIcon,
   Layers3,
   RefreshCw,
+  Send,
+  Settings2,
   Tags,
   Upload,
   Video as VideoIcon,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/primitives";
+import { BottomSheet } from "@/components/ui/primitives/mobile";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
+import { formatMicroRmb } from "./video-workbench-controls";
 import { DesktopTopNav, MobileTabBar } from "@/components/ui/shell";
 import type {
   VideoAction,
@@ -63,6 +68,8 @@ export type VideoPageViewModel = {
   viewport: {
     item: VideoGenerationWithVideo | null;
     loading: boolean;
+    error?: string | null;
+    onRetry: () => void;
     onPreview: (item: VideoGenerationWithVideo) => void;
   };
   header: {
@@ -155,6 +162,8 @@ export type VideoPageViewModel = {
     historyFilter: VideoHistoryFilter;
     historyCounts: Record<VideoHistoryFilter, number>;
     historyLoading: boolean;
+    historyError?: string | null;
+    cancelPendingId?: string;
     historyHasNextPage: boolean;
     historyFetchingNextPage: boolean;
     retryDisabled: boolean;
@@ -534,6 +543,8 @@ function VideoPageOverlays({
         historyFilter={model.tasks.historyFilter}
         historyCounts={model.tasks.historyCounts}
         historyLoading={model.tasks.historyLoading}
+        historyError={model.tasks.historyError}
+        cancelPendingId={model.tasks.cancelPendingId}
         historyHasNextPage={model.tasks.historyHasNextPage}
         historyFetchingNextPage={model.tasks.historyFetchingNextPage}
         retryDisabled={model.tasks.retryDisabled}
@@ -570,6 +581,22 @@ function VideoPageOverlays({
 }
 
 export function VideoPageView({ model }: { model: VideoPageViewModel }) {
+  const wide = useMediaQuery("(min-width: 1120px)");
+  const [parametersOpen, setParametersOpen] = useState(false);
+  const openParameters = () => {
+    if (wide) model.header.onOpenParameters();
+    else setParametersOpen(true);
+  };
+  const parameterPanel = (
+    <VideoParameterPanel
+      {...model.parameters}
+      className="scroll-mt-20 min-[1120px]:sticky min-[1120px]:top-[76px]"
+      onSubmit={() => {
+        setParametersOpen(false);
+        model.parameters.onSubmit();
+      }}
+    />
+  );
   return (
     <div className="page-shell h-[100dvh] overflow-hidden">
       <div className="hidden md:block">
@@ -586,7 +613,7 @@ export function VideoPageView({ model }: { model: VideoPageViewModel }) {
           historyCount={model.header.historyCount}
           serviceSummary={model.header.serviceSummary}
           submitState={model.header.submitDisabledReason}
-          onOpenParameters={model.header.onOpenParameters}
+          onOpenParameters={openParameters}
           onOpenTasks={model.header.onOpenTasks}
         />
         <div className="grid gap-4 min-[1120px]:grid-cols-[minmax(0,1fr)_340px] min-[1120px]:items-start 2xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -594,6 +621,8 @@ export function VideoPageView({ model }: { model: VideoPageViewModel }) {
             <VideoDirectorViewport
               item={model.viewport.item}
               loading={model.viewport.loading}
+              error={model.viewport.error}
+              onRetry={model.viewport.onRetry}
               action={model.composer.action}
               prompt={model.composer.prompt.value}
               sourceReady={model.parameters.sourceReady}
@@ -612,38 +641,26 @@ export function VideoPageView({ model }: { model: VideoPageViewModel }) {
                   references={model.composer.references}
                 />
                 <VideoPromptEditor model={model.composer.prompt} />
+                {!wide && (
+                  <div className="space-y-2 border-t border-[var(--border-subtle)] pt-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2 type-caption text-[var(--fg-2)]">
+                      <span>{model.header.parameterProfile}</span>
+                      <span>{model.parameters.estimate ? `预计预扣 ${formatMicroRmb(model.parameters.estimate.micro)}` : "费用暂不可估算"}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button variant="outline" onClick={openParameters} aria-haspopup="dialog" leftIcon={<Settings2 className="h-4 w-4" />}>参数</Button>
+                      <Button className="min-w-0 flex-1" disabled={!model.parameters.canSubmit} loading={model.parameters.loading} onClick={model.parameters.onSubmit} leftIcon={<Send className="h-4 w-4" />}>{model.parameters.loading ? "提交中" : "生成视频"}</Button>
+                    </div>
+                    {model.parameters.reason && <p role="status" className="break-words type-caption text-[var(--fg-2)]">{model.parameters.reason}</p>}
+                  </div>
+                )}
               </div>
             </div>
           </section>
-          <VideoParameterPanel
-            className="scroll-mt-20 pb-[calc(var(--mobile-tabbar-height)+1rem)] min-[1120px]:sticky min-[1120px]:top-[76px] min-[1120px]:pb-0"
-            selectedModel={model.parameters.selectedModel}
-            modelOptions={model.parameters.modelOptions}
-            modelOptionLabels={model.parameters.modelOptionLabels}
-            durationS={model.parameters.durationS}
-            durationOptions={model.parameters.durationOptions}
-            resolution={model.parameters.resolution}
-            resolutionOptions={model.parameters.resolutionOptions}
-            aspectRatio={model.parameters.aspectRatio}
-            aspectRatioOptions={model.parameters.aspectRatioOptions}
-            seed={model.parameters.seed}
-            generateAudio={model.parameters.generateAudio}
-            audioSupported={model.parameters.audioSupported}
-            estimate={model.parameters.estimate}
-            canSubmit={model.parameters.canSubmit}
-            reason={model.parameters.reason}
-            loading={model.parameters.loading}
-            sourceReady={model.parameters.sourceReady}
-            onSubmit={model.parameters.onSubmit}
-            onModelChange={model.parameters.onModelChange}
-            onDurationChange={model.parameters.onDurationChange}
-            onResolutionChange={model.parameters.onResolutionChange}
-            onAspectRatioChange={model.parameters.onAspectRatioChange}
-            onSeedChange={model.parameters.onSeedChange}
-            onGenerateAudioChange={model.parameters.onGenerateAudioChange}
-          />
+          {wide ? parameterPanel : null}
         </div>
       </main>
+      {!wide && <BottomSheet open={parametersOpen} onClose={() => setParametersOpen(false)} ariaLabel="视频生成参数">{parameterPanel}</BottomSheet>}
       <VideoPageOverlays model={model} />
       <div className="md:hidden">
         <MobileTabBar />

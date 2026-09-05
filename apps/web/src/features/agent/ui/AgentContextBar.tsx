@@ -43,6 +43,7 @@ export function AgentContextBar({
   platform,
   session,
   realtimeStatus,
+  operationLabel = null,
   activeRun,
   toolGatewayConfigured,
   defaultModel,
@@ -63,6 +64,7 @@ export function AgentContextBar({
   platform: "desktop" | "mobile";
   session: AgentSession | null;
   realtimeStatus: AgentRealtimeStatus;
+  operationLabel?: string | null;
   activeRun: AgentRun | null;
   toolGatewayConfigured: boolean;
   defaultModel: string | null;
@@ -125,7 +127,7 @@ export function AgentContextBar({
           saving={saving}
           onPatch={onPatch}
         />
-        <AgentContextIndicator status={status} />
+        <AgentContextIndicator status={operationLabel ? { label: operationLabel, detail: operationLabel, tone: "limited" } : status} />
         <AgentPinButton
           session={session}
           saving={saving}
@@ -228,7 +230,7 @@ function AgentSessionTitle({
           onChange={(event) => setTitle(event.target.value)}
           onBlur={() => finishRename(true)}
           onKeyDown={(event) => {
-            if (event.key !== "Escape") return;
+            if (event.key !== "Escape" || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
             event.preventDefault();
             finishRename(false);
           }}
@@ -342,8 +344,9 @@ function AgentPinButton({
 }
 
 function agentRunPhaseLabel(run: AgentRun): string {
+  if (run.cancel_requested_at) return "停止待确认";
+  if (run.id.startsWith("optimistic:")) return "提交中";
   if (run.status === "queued") return "排队中";
-  if (run.cancel_requested_at) return "停止中";
   const activeTool = run.tool_calls.find(
     (tool) => tool.status === "queued" || tool.status === "running",
   );
@@ -490,7 +493,7 @@ function AgentContextSettings({
         </div>
         {imagesLoading ? (
           <div className="flex min-h-10 items-center gap-2 type-caption text-[var(--fg-2)]">
-            <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+            <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden />
             正在载入
           </div>
         ) : null}

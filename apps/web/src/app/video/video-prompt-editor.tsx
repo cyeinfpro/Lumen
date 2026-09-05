@@ -91,7 +91,7 @@ export function VideoPromptEditor({
           maxLength={10000}
           placeholder="写清主体、动作轨迹、镜头运动、首尾时间推进；点击参考素材插入 @图片1 / @视频1 来指定素材。"
           className={cn(
-            "min-h-[200px] w-full resize-none overflow-y-hidden bg-transparent px-3.5 py-3.5 type-body leading-7 text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] sm:min-h-[320px] sm:px-4 sm:py-4 lg:min-h-[360px] landscape:max-md:min-h-[150px]",
+            "min-h-[120px] w-full resize-none overflow-y-hidden bg-transparent px-3.5 py-3.5 type-body leading-7 text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] sm:min-h-[160px] sm:px-4 sm:py-4 lg:min-h-[160px] landscape:max-md:min-h-[150px]",
             model.enhancing && "cursor-wait",
           )}
         />

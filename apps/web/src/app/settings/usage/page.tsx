@@ -40,6 +40,7 @@ import { SettingsShell } from "@/components/ui/shell/SettingsShell";
 import { Button } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
 import { DURATION, EASE } from "@/lib/motion";
+import { formatRmb } from "@/lib/money";
 
 const PRIMARY_SKELETON_KEYS = [
   "messages",
@@ -85,7 +86,9 @@ export default function UsagePage() {
           />
         </header>
 
-        {q.isPending ? (
+        {meQ.isError ? (
+          <div role="alert"><ErrorBox message="账号状态加载失败" onRetry={() => void meQ.refetch()} /></div>
+        ) : q.isPending ? (
           <SkeletonGrid />
         ) : q.isError ? (
           <ErrorBox
@@ -99,7 +102,12 @@ export default function UsagePage() {
               accountMode={meQ.data?.account_mode ?? "wallet"}
               snapshot={billingQ.data ?? null}
               recentTransactions={txQ.data?.items ?? []}
-              loading={billingQ.isLoading || txQ.isLoading}
+              snapshotLoading={billingQ.isLoading}
+              transactionsLoading={txQ.isLoading}
+              snapshotError={billingQ.isError}
+              transactionsError={txQ.isError}
+              onRetrySnapshot={() => void billingQ.refetch()}
+              onRetryTransactions={() => void txQ.refetch()}
             />
           </div>
         ) : null}
@@ -184,6 +192,7 @@ function UsageRangePicker({
             type="button"
             onClick={() => onChange(period.value)}
             disabled={pending && active}
+            aria-pressed={active}
             className={
               "min-h-11 min-w-0 rounded-[var(--radius-control)] px-1.5 type-caption transition-colors sm:px-2.5 " +
               (active
@@ -305,26 +314,30 @@ function BillingTransparency({
   accountMode,
   snapshot,
   recentTransactions,
-  loading,
+  snapshotLoading,
+  transactionsLoading,
+  snapshotError,
+  transactionsError,
+  onRetrySnapshot,
+  onRetryTransactions,
 }: {
   accountMode: "wallet" | "byok";
   snapshot: BillingSnapshotOut | null;
   recentTransactions: WalletTransactionOut[];
-  loading: boolean;
+  snapshotLoading: boolean;
+  transactionsLoading: boolean;
+  snapshotError: boolean;
+  transactionsError: boolean;
+  onRetrySnapshot: () => void;
+  onRetryTransactions: () => void;
 }) {
-  const imageCost = snapshot ? microToRmbText(snapshot.by_kind_30d.image) : "—";
-  const outputCost = snapshot ? microToRmbText(snapshot.by_kind_30d.output) : "—";
-  const agentTextCost = snapshot
-    ? microToRmbText(snapshot.by_kind_30d.agent_text ?? 0)
-    : "—";
-  const agentTextToImageCost = snapshot
-    ? microToRmbText(snapshot.by_kind_30d.agent_text_to_image ?? 0)
-    : "—";
-  const agentImageToImageCost = snapshot
-    ? microToRmbText(snapshot.by_kind_30d.agent_image_to_image ?? 0)
-    : "—";
+  const imageCost = snapshotCost(snapshot, "image");
+  const outputCost = snapshotCost(snapshot, "output");
+  const agentTextCost = snapshotCost(snapshot, "agent_text");
+  const agentTextToImageCost = snapshotCost(snapshot, "agent_text_to_image");
+  const agentImageToImageCost = snapshotCost(snapshot, "agent_image_to_image");
   return (
-    <section className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-5">
+    <section className="page-section">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="flex items-center gap-2 type-card-title">
@@ -356,58 +369,64 @@ function BillingTransparency({
           description="用于确认预算，价格表或参数变化会让下一次预估变化。"
         />
         <BillingStep
-          label="实际扣费"
-          value={accountMode === "wallet" ? "完成后结算" : "由上游 Key 结算"}
-          description="失败、取消、未产生结果的部分会释放预扣或不计入平台扣费。"
+          label="预留金额"
+          value={accountMode === "wallet" ? "任务执行期间" : "不使用平台钱包"}
+          description="预授权用于预留预算，不代表最终结算。"
         />
         <BillingStep
-          label="结果详情"
-          value="看流水 ref_id"
-          description="钱包流水里的 ref_type/ref_id 可定位到 generation 或 completion。"
+          label="最终结算"
+          value={accountMode === "wallet" ? "以结算流水为准" : "由上游供应商结算"}
+          description="实际费用以任务结算结果为准，未结算的预留不能视为已扣费。"
         />
       </div>
 
       <div className="mt-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-        <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-4">
+        <div className="min-w-0 border-t border-[var(--border-subtle)] py-4">
           <div className="flex items-center gap-2 text-[var(--fg-2)]">
             <ReceiptText className="w-4 h-4" />
             <span className="type-caption">近 30 天费用构成</span>
           </div>
-          <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
+          {accountMode === "byok" ? <p className="mt-3 type-body-sm">费用以供应商账单为准。</p> : snapshotError ? (
+            <ErrorBox message="费用构成加载失败" onRetry={onRetrySnapshot} />
+          ) : snapshotLoading ? <p role="status" className="mt-3 type-body-sm">费用加载中</p> : <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
             <MiniMoney label="图片实际" value={imageCost} />
             <MiniMoney label="对话输出" value={outputCost} />
             <MiniMoney label="Agent 对话" value={agentTextCost} />
             <MiniMoney label="Agent 文生图" value={agentTextToImageCost} />
             <MiniMoney label="Agent 图生图" value={agentImageToImageCost} />
-          </div>
+          </div>}
         </div>
-        <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-4">
+        <div className="min-w-0 border-t border-[var(--border-subtle)] py-4">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-[var(--fg-2)]">
               <CreditCard className="w-4 h-4" />
               <span className="type-caption">最近实际结算</span>
             </div>
-            {loading && <RefreshCw className="w-3.5 h-3.5 animate-spin text-[var(--fg-2)]" />}
+            {transactionsLoading && <RefreshCw className="w-3.5 h-3.5 animate-spin text-[var(--fg-2)]" />}
           </div>
           {accountMode === "byok" ? (
             <p className="mt-3 type-body-sm text-[var(--fg-2)]">
               BYOK 账号不走平台钱包扣费；实际费用以你的上游供应商账单为准。
             </p>
-          ) : recentTransactions.length > 0 ? (
-            <div className="mt-3 divide-y divide-[var(--border-subtle)]">
-              {recentTransactions.map((tx) => (
-                <div key={tx.id} className="py-2 first:pt-0 last:pb-0">
-                  <div className="flex items-center justify-between gap-3 type-body-sm">
-                    <span className="truncate type-body-sm text-[var(--fg-0)]">{txLabel(tx)}</span>
-                    <span className="shrink-0 font-mono tabular-nums text-[var(--fg-0)]">
-                      {txAmount(tx)}
-                    </span>
-                  </div>
-                  <p className="mt-0.5 truncate type-caption text-[var(--fg-2)]">
-                    {tx.ref_type ?? "tx"}:{tx.ref_id ?? tx.id}
-                  </p>
-                </div>
-              ))}
+          ) : transactionsError ? (
+            <ErrorBox message="结算流水加载失败" onRetry={onRetryTransactions} />
+          ) : transactionsLoading ? <p role="status" className="mt-3 type-body-sm">结算流水加载中</p> : recentTransactions.length > 0 ? (
+            <div className="mt-3 overflow-x-auto">
+              <table className="w-full text-left type-body-sm">
+                <caption className="sr-only">最近实际结算</caption>
+                <thead className="text-[var(--fg-2)]"><tr><th scope="col" className="py-2 pr-3 font-medium">任务</th><th scope="col" className="py-2 text-right font-medium">已结算</th></tr></thead>
+                <tbody className="divide-y divide-[var(--border-subtle)]">
+                  {recentTransactions.map((tx) => (
+                    <tr key={tx.id}>
+                      <th scope="row" className="break-words py-2 pr-3 font-normal text-[var(--fg-0)]">
+                        {txLabel(tx)}
+                        <span className="mt-0.5 block break-all type-caption text-[var(--fg-2)]">{tx.ref_type ?? "tx"}:{tx.ref_id ?? tx.id}</span>
+                      </th>
+                      <td className="whitespace-nowrap py-2 text-right font-mono tabular-nums text-[var(--fg-0)]">{txAmount(tx)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           ) : (
             <p className="mt-3 type-body-sm text-[var(--fg-2)]">
@@ -418,6 +437,12 @@ function BillingTransparency({
       </div>
     </section>
   );
+}
+
+function snapshotCost(snapshot: BillingSnapshotOut | null, kind: keyof BillingSnapshotOut["by_kind_30d"]): string {
+  if (!snapshot) return "—";
+  if (kind === "image" || kind === "output") return microToRmbText(snapshot.by_kind_30d[kind]);
+  return microToRmbText(snapshot.by_kind_30d[kind] ?? 0);
 }
 
 function LinkButton({
@@ -651,7 +676,7 @@ function formatBytes(bytes: number): string {
 }
 
 function microToRmbText(micro: number): string {
-  return `¥${(micro / 1_000_000).toFixed(2)}`;
+  return `¥${formatRmb(micro / 1_000_000)}`;
 }
 
 function txAmount(tx: WalletTransactionOut): string {
@@ -663,7 +688,7 @@ function txLabel(tx: WalletTransactionOut): string {
   const actual = typeof meta.actual_micro === "number" ? meta.actual_micro : null;
   const preauth = typeof meta.preauth_micro === "number" ? meta.preauth_micro : null;
   if (actual != null && preauth != null) {
-    return `实际 ${microToRmbText(actual)} / 预估 ${microToRmbText(preauth)}`;
+    return `结算 ${microToRmbText(actual)} / 预授权 ${microToRmbText(preauth)}`;
   }
   if (tx.ref_type === "agent_run") return "Agent 对话实际扣费";
   if (meta.source === "agent" && meta.agent_image_mode === "image_to_image") {

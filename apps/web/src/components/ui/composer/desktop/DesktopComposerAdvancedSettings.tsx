@@ -94,9 +94,10 @@ export function AdvancedComposerSettings({
   return (
     <div className="flex min-h-0 flex-col">
       <div className="flex items-center justify-between border-b border-[var(--border-subtle)] px-4 py-3">
-        <p className="type-label text-[var(--fg-0)]">
-          执行设置
-        </p>
+        <div>
+          <p className="type-label text-[var(--fg-0)]">执行设置</p>
+          <p className="mt-1 type-caption text-[var(--fg-2)]">仅用于下一次提交</p>
+        </div>
         {/* @hit-area-ok: desktop-only popover; mobile uses MobileAdvancedSettings. */}
         <IconButton
           size="sm"

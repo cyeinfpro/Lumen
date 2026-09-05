@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, type MutableRefObject } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type MutableRefObject,
+} from "react";
 
 import { ApiError } from "@/lib/apiClient";
 import { onOnlineRestore, startConnectivity } from "@/lib/connectivity";
@@ -14,6 +20,7 @@ import { decideCanvasRemoteSync } from "@/lib/canvas/documentMerge";
 import { blurActiveCanvasEditor } from "@/lib/canvas/interaction";
 import {
   canvasDraftKey,
+  canvasEmergencyStorageAvailable,
   canvasSaveBatchMatchesPending,
   deleteCanvasDraft,
   deleteCanvasEmergencyDraft,
@@ -28,6 +35,7 @@ import {
   putCanvasDraft,
   SerialCanvasDraftWriter,
   type CanvasDraft,
+  type CanvasDraftSnapshot,
   type PersistedCanvasSaveBatch,
 } from "@/lib/canvas/persistence";
 import type { CanvasEditorStore } from "@/lib/canvas/store";
@@ -99,6 +107,10 @@ export function useCanvasDraftPersistence({
   store: CanvasEditorStore;
 }) {
   const initialDocumentRef = useRef(document);
+  const [acknowledgedDraft, setAcknowledgedDraft] =
+    useState<CanvasDraftSnapshot | null>(null);
+  const retryRef = useRef<() => void>(() => undefined);
+  const retryPersistence = useCallback(() => retryRef.current(), []);
   useEffect(() => {
     let canceled = false;
     let ready = false;
@@ -122,7 +134,25 @@ export function useCanvasDraftPersistence({
             : deleteCanvasDraft(canvasId, clientId);
         await action;
         deleteCanvasEmergencyDraft(canvasId, clientId);
-        onDurabilityWarning(null);
+        const emergencyAvailable = canvasEmergencyStorageAvailable();
+        if (!canceled) {
+          // ACK the captured snapshot, never edits made while the transaction was pending.
+          setAcknowledgedDraft(
+            emergencyAvailable
+              ? {
+                  graph: state.graph,
+                  revision: state.revision,
+                  pendingOperations: state.pendingOperations,
+                  pendingOperationGroupSizes: state.pendingOperationGroupSizes,
+                }
+              : null,
+          );
+          onDurabilityWarning(
+            emergencyAvailable
+              ? null
+              : "浏览器本地恢复存储不可用；保持页面打开或导出当前副本。",
+          );
+        }
         if (migratedDraftClientId && migratedDraftClientId !== clientId) {
           await deleteCanvasDraft(canvasId, migratedDraftClientId).catch(
             () => undefined,
@@ -132,6 +162,8 @@ export function useCanvasDraftPersistence({
         }
       },
       () => {
+        if (canceled) return;
+        setAcknowledgedDraft(null);
         onDurabilityWarning(
           "浏览器本地恢复存储不可用；保持页面打开，系统仍会尝试云端保存。",
         );
@@ -226,9 +258,22 @@ export function useCanvasDraftPersistence({
       "visibilitychange",
       persistOnVisibilityChange,
     );
-    void setup();
+    let loading = false;
+    const retry = () => {
+      if (ready) {
+        persist();
+      } else if (!loading) {
+        loading = true;
+        void setup().finally(() => {
+          loading = false;
+        });
+      }
+    };
+    retryRef.current = retry;
+    retry();
     return () => {
       canceled = true;
+      if (retryRef.current === retry) retryRef.current = () => undefined;
       unsubscribe?.();
       if (timer !== undefined) window.clearTimeout(timer);
       window.removeEventListener("pagehide", persistOnPageHide);
@@ -242,6 +287,7 @@ export function useCanvasDraftPersistence({
       }
     };
   }, [canvasId, clientId, onDurabilityWarning, recoveredSaveBatchRef, store]);
+  return { acknowledgedDraft, retryPersistence };
 }
 
 interface LoadedCanvasDraftRecovery {

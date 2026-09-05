@@ -61,7 +61,7 @@ export function DesktopTopNav({
     <header
       className={[
         "sticky top-0 z-[var(--z-header)] grid h-[var(--appbar-h)] w-full shrink-0 items-center gap-2 px-3 md:px-5",
-        "grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]",
+        "grid-cols-[auto_minmax(0,1fr)_auto] min-[1120px]:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]",
         "surface-glass-v2",
       ].join(" ")}
       style={{
@@ -99,9 +99,9 @@ export function DesktopTopNav({
       <nav
         aria-label="主导航"
         data-testid="desktop-primary-nav"
-        className="justify-self-center"
+        className="min-w-0 max-w-full overflow-x-auto overscroll-x-contain justify-self-center"
       >
-        <ul className="flex items-center gap-1">
+        <ul className="flex w-max items-center gap-1">
           {navItems.map((tab) => (
             <li key={tab.key} className="relative">
               <DesktopNavLink tab={tab} active={tab.key === currentActive} />

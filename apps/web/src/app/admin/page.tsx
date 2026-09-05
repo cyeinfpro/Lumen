@@ -1,5 +1,7 @@
 "use client";
 
+import { requestSettingsNavigation } from "@/components/ui/primitives/UnsavedSettingsGuard";
+
 // Lumen V1 管理面板。
 // - 权限守卫：非 admin 显示占位 + replace("/")，避免内容闪烁
 // - Tab：白名单 / 用户 / 邀请 / 系统设置（motion layoutId 丝滑指示器）
@@ -393,6 +395,9 @@ function AdminAccessError({
 
 function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
   const [tab, setTab] = useState<Tab>("health");
+  const navigateTab = (next: Tab) => {
+    if (next !== tab) requestSettingsNavigation(() => setTab(next));
+  };
   const activeTab = TABS.find((item) => item.key === tab) ?? TABS[0];
   const reduceMotion = useReducedMotion();
 
@@ -434,7 +439,7 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
             </div>
           </header>
 
-          <TabNav tab={tab} onChange={setTab} />
+          <TabNav tab={tab} onChange={navigateTab} />
           <PanelIntro tab={activeTab} />
 
           <div className="mt-5">
@@ -446,7 +451,7 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
                 exit={{ opacity: 0 }}
                 transition={reduceMotion ? { duration: 0 } : { duration: 0.18, ease: "easeOut" }}
               >
-                <AdminPanelContent tab={tab} onOpenTab={setTab} />
+                <AdminPanelContent tab={tab} onOpenTab={navigateTab} />
               </motion.div>
             </AnimatePresence>
           </div>

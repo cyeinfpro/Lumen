@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useSyncExternalStore } from "react";
+import { createContext, useContext, useMemo, useState, useSyncExternalStore } from "react";
 import {
   Check,
   ChevronRight,
@@ -34,6 +34,11 @@ import {
   normalizeImageEngine,
   subscribeStatic,
 } from "./model";
+
+export const SettingFieldAccessibility = createContext<{
+  "aria-describedby"?: string;
+  "aria-invalid"?: boolean;
+}>({});
 
 type SettingControlProps = {
   item: SystemSettingItem;
@@ -146,6 +151,7 @@ function EnumSettingControl({
   controlValue: string;
   showDefaultAction: boolean;
 }) {
+  const fieldAccessibility = useContext(SettingFieldAccessibility);
   const [showAdvancedEngine, setShowAdvancedEngine] = useState(
     normalizeImageEngine(controlValue) === "dual_race",
   );
@@ -165,6 +171,7 @@ function EnumSettingControl({
           className="grid gap-2 md:grid-cols-3"
           role="radiogroup"
           aria-label={meta.title}
+          {...fieldAccessibility}
         >
           {choices.map((option) => {
             const selected = normalizedValue === option.value;
@@ -233,10 +240,12 @@ function ToggleSettingControl({
   controlValue: string;
   showDefaultAction: boolean;
 }) {
+    const fieldAccessibility = useContext(SettingFieldAccessibility);
     const checked = controlValue === "1";
     return (
       <div className="flex flex-wrap items-center gap-3">
         <Switch
+          {...fieldAccessibility}
           checked={checked}
           aria-label={`${meta.title} ${checked ? "关闭" : "开启"}`}
           onCheckedChange={(nextChecked) =>
@@ -269,6 +278,7 @@ function NumericSettingControl({
   inputValue: string;
   showDefaultAction: boolean;
 }) {
+    const fieldAccessibility = useContext(SettingFieldAccessibility);
     return (
       <div className="flex flex-col gap-2 md:flex-row md:items-center">
         <label htmlFor={`setting-${item.key}`} className="sr-only">
@@ -276,6 +286,7 @@ function NumericSettingControl({
         </label>
         <div className="relative flex-1">
           <Input
+            {...fieldAccessibility}
             id={`setting-${item.key}`}
             type="number"
             value={inputValue}
@@ -283,8 +294,7 @@ function NumericSettingControl({
             max={meta.max}
             step={meta.step ?? (meta.kind === "integer" ? 1 : "any")}
             onChange={(e) => {
-              const value = e.target.value;
-              onChange(value === "" ? undefined : { kind: "set", value });
+              onChange({ kind: "set", value: e.target.value });
             }}
             placeholder={
               meta.defaultValue
@@ -322,6 +332,7 @@ function TextSettingControl({
   inputValue: string;
   showDefaultAction: boolean;
 }) {
+  const fieldAccessibility = useContext(SettingFieldAccessibility);
   const browserOrigin = useSyncExternalStore(
     subscribeStatic,
     getBrowserOrigin,
@@ -333,12 +344,12 @@ function TextSettingControl({
         {meta.title}
       </label>
       <Input
+        {...fieldAccessibility}
         id={`setting-${item.key}`}
         type={meta.kind === "url" ? "url" : "text"}
         value={inputValue}
         onChange={(e) => {
-          const value = e.target.value;
-          onChange(value === "" ? undefined : { kind: "set", value });
+          onChange({ kind: "set", value: e.target.value });
         }}
         placeholder={
           meta.kind === "url"
@@ -527,6 +538,7 @@ function ModelChoiceControl({
   showDefaultAction: boolean;
   onChange: (op: Op | undefined) => void;
 }) {
+  const fieldAccessibility = useContext(SettingFieldAccessibility);
   return (
     <div className="flex flex-col gap-2 md:flex-row md:items-center">
       {customMode ? (
@@ -538,6 +550,8 @@ function ModelChoiceControl({
         />
       ) : (
         <Select
+          {...fieldAccessibility}
+          aria-label={meta.title}
           value={modelIds.includes(effective) ? effective : "__custom__"}
           onChange={(event) => {
             const next = event.target.value;
@@ -596,6 +610,7 @@ export function UpdateProxySelectControl({
   proxies: UpdateProxyOption[];
   onChange: (op: Op | undefined) => void;
 }) {
+  const fieldAccessibility = useContext(SettingFieldAccessibility);
   const value =
     op?.kind === "clear" ? "" : op?.kind === "set" ? op.value : item.value ?? "";
   const enabledProxies = proxies.filter((proxy) => proxy.enabled);
@@ -609,6 +624,8 @@ export function UpdateProxySelectControl({
     <div className="space-y-2">
       <div className="flex flex-col gap-2 md:flex-row md:items-center">
         <Select
+          {...fieldAccessibility}
+          aria-label="同步代理"
           value={selectedExists ? value : "__custom__"}
           onChange={(event) => {
             const next = event.target.value;
@@ -664,18 +681,19 @@ export function TextSettingInput({
   value: string;
   onChange: (op: Op | undefined) => void;
 }) {
+  const fieldAccessibility = useContext(SettingFieldAccessibility);
   return (
     <>
       <label htmlFor={`setting-${item.key}`} className="sr-only">
         {meta.title}
       </label>
       <Input
+        {...fieldAccessibility}
         id={`setting-${item.key}`}
         type={meta.kind === "url" ? "url" : "text"}
         value={value}
         onChange={(e) => {
-          const next = e.target.value;
-          onChange(next === "" ? undefined : { kind: "set", value: next });
+          onChange({ kind: "set", value: e.target.value });
         }}
         placeholder={
           meta.kind === "url"

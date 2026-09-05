@@ -356,6 +356,7 @@ export interface VideoGenerationOut {
   progress_stage: VideoStage;
   progress_pct: number;
   submission_epoch?: number;
+  cancel_requested_at?: string | null;
   provider_name?: string | null;
   provider_kind?: string | null;
   est_token_upper: number;

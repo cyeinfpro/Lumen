@@ -102,17 +102,22 @@ function mergeProjectionItems<T>(
   ];
 }
 
-function compareDocumentProjection(
+// Projection inputs are normalized to finite numbers or negative infinity.
+function compareProjectionNumber(left: number, right: number): number {
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
+}
+
+export function compareDocumentProjection(
   left: CanvasDocument,
   right: CanvasDocument,
 ): number {
   const leftVersion = documentProjectionVersion(left);
   const rightVersion = documentProjectionVersion(right);
-  const timestampDifference =
-    leftVersion.timestamp - rightVersion.timestamp;
-  return timestampDifference !== 0
-    ? timestampDifference
-    : leftVersion.sequence - rightVersion.sequence;
+  return (
+    compareProjectionNumber(leftVersion.timestamp, rightVersion.timestamp) ||
+    compareProjectionNumber(leftVersion.sequence, rightVersion.sequence)
+  );
 }
 
 function documentProjectionVersion(document: CanvasDocument): {
@@ -141,19 +146,23 @@ function documentProjectionVersion(document: CanvasDocument): {
   };
 }
 
-function compareSelectionProjection(
+export function compareSelectionProjection(
   left: CanvasNodeSelection,
   right: CanvasNodeSelection,
 ): number {
-  return projectionRevision(left.revision) - projectionRevision(right.revision);
+  return compareProjectionNumber(
+    projectionRevision(left.revision),
+    projectionRevision(right.revision),
+  );
 }
 
-function compareExecutionProjection(
+export function compareExecutionProjection(
   left: CanvasNodeExecution,
   right: CanvasNodeExecution,
 ): number {
-  return (
-    executionProjectionTimestamp(left) - executionProjectionTimestamp(right)
+  return compareProjectionNumber(
+    executionProjectionTimestamp(left),
+    executionProjectionTimestamp(right),
   );
 }
 
@@ -176,14 +185,15 @@ function executionProjectionTimestamp(execution: CanvasNodeExecution): number {
   );
 }
 
-function compareRunProjection(left: CanvasRun, right: CanvasRun): number {
-  const sequenceDifference =
-    projectionRevision(left.last_event_seq) -
-    projectionRevision(right.last_event_seq);
-  if (sequenceDifference !== 0) return sequenceDifference;
+export function compareRunProjection(left: CanvasRun, right: CanvasRun): number {
   return (
-    projectionTimestamp(left.updated_at, left.created_at) -
-    projectionTimestamp(right.updated_at, right.created_at)
+    compareProjectionNumber(
+      projectionRevision(left.last_event_seq),
+      projectionRevision(right.last_event_seq),
+    ) || compareProjectionNumber(
+      projectionTimestamp(left.updated_at, left.created_at),
+      projectionTimestamp(right.updated_at, right.created_at),
+    )
   );
 }
 

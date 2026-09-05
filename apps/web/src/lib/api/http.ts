@@ -71,9 +71,13 @@ export function resumeSessionClientState(userId: string): Promise<void> {
   return activatePrivateClientState(userId);
 }
 
-export async function apiFetch(
+export async function apiFetch<T = unknown>(
   path: string,
-  init: ApiFetchInit<NoContent> & { expectNoContent: true },
+  init: ApiFetchInit<T> & { method: "HEAD" | "head" },
+): Promise<NoContent>;
+export async function apiFetch<T = unknown>(
+  path: string,
+  init: ApiFetchInit<T> & { expectNoContent: true },
 ): Promise<NoContent>;
 export async function apiFetch<T = unknown>(
   path: string,
@@ -90,7 +94,10 @@ export async function apiFetch<T = unknown>(
   } = init;
   const method = (requestInit.method ?? "GET").toUpperCase();
   const budget = compatibilityBudget(timeoutMs);
-  if (method === "GET" || method === "HEAD") {
+  if (method === "HEAD") {
+    return queryClient.head(path, { ...requestInit, budget });
+  }
+  if (method === "GET") {
     return queryClient.get<T>(path, { ...requestInit, budget });
   }
   if (isUploadBody(requestInit.body)) {

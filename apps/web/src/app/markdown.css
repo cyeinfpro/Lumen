@@ -60,7 +60,7 @@
 .lumen-md h4 { font-size: 1rem; }
 
 .lumen-md a {
-  color: var(--accent);
+  color: var(--link-fg);
   text-decoration: underline;
   text-decoration-color: var(--markdown-link-decoration);
   text-decoration-thickness: 1px;
@@ -69,7 +69,7 @@
 }
 
 .lumen-md a:hover {
-  text-decoration-color: var(--accent);
+  text-decoration-color: var(--link-fg);
 }
 
 .lumen-md ul,

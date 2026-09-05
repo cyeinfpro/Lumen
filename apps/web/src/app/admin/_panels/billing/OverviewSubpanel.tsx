@@ -165,23 +165,23 @@ function RecentAuditCard({
       <div className="border-b border-[var(--border-subtle)] px-4 py-3">
         <p className="type-card-title">最近审计</p>
       </div>
-      <div className="divide-y divide-[var(--border-subtle)] md:max-h-[360px] md:overflow-auto">
-        {events.map((event) => (
-          <div
-            key={event.id}
-            className="flex flex-wrap gap-x-4 gap-y-1 px-4 py-3 type-body-sm"
-          >
-            <span className="shrink-0 text-[var(--fg-2)]">
-              {new Date(event.created_at).toLocaleString()}
-            </span>
-            <span className="max-w-full truncate font-mono type-caption text-[var(--fg-0)] md:max-w-[260px]">
-              {event.event_type}
-            </span>
-            <span className="truncate text-[var(--fg-2)]">
-              {event.target_user_id ?? event.user_id ?? "-"}
-            </span>
-          </div>
-        ))}
+      <div className="overflow-auto md:max-h-[360px]">
+        <table className="w-full text-left type-body-sm">
+          <caption className="sr-only">最近计费审计事件</caption>
+          <thead className="bg-[var(--bg-2)] text-[var(--fg-1)]"><tr>
+            <th scope="col" className="px-4 py-2">时间</th>
+            <th scope="col" className="px-4 py-2">事件</th>
+            <th scope="col" className="px-4 py-2">用户</th>
+          </tr></thead>
+          <tbody className="divide-y divide-[var(--border-subtle)]">
+            {events.map((event) => <tr key={event.id}>
+              <td className="whitespace-nowrap px-4 py-3 text-[var(--fg-2)]"><time dateTime={event.created_at}>{new Date(event.created_at).toLocaleString()}</time></td>
+              <td className="px-4 py-3 font-mono type-caption text-[var(--fg-0)]">{event.event_type}</td>
+              <td className="break-all px-4 py-3 text-[var(--fg-2)]">{event.target_user_id ?? event.user_id ?? "-"}</td>
+            </tr>)}
+          </tbody>
+        </table>
+        {loading ? <p role="status" className="px-4 py-3 type-body-sm">审计事件加载中</p> : null}
         {!loading && events.length === 0 && (
           <div className="px-4 py-8 text-center type-body-sm text-[var(--fg-2)]">
             暂无审计事件
@@ -224,13 +224,14 @@ function OrphanHoldRow({
   onRecover: (
     txId: string,
     action: Exclude<AdminOrphanHoldOut["recovery_action"], "manual_review">,
-  ) => void;
+  ) => Promise<unknown>;
 }) {
   const reference = `${item.tx.ref_type}:${item.tx.ref_id}`;
   const holdRmb = Math.abs(item.tx.amount.micro) / 1_000_000;
   const settleDefault = item.recovery_action === "settle_default";
   const manualReview = item.recovery_action === "manual_review";
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
   return (
     <>
       <div className="grid gap-3 px-4 py-3 type-body-sm md:grid-cols-[1fr_auto]">
@@ -251,7 +252,7 @@ function OrphanHoldRow({
           size="sm"
           disabled={manualReview}
           onClick={() => {
-            if (!manualReview) setConfirmOpen(true);
+            if (!manualReview) { setRecoveryError(null); setConfirmOpen(true); }
           }}
           loading={recoveryPending}
         >
@@ -265,20 +266,26 @@ function OrphanHoldRow({
       <ConfirmDialog
         open={confirmOpen}
         onOpenChange={setConfirmOpen}
+        key={item.tx.id}
         title={settleDefault ? "按预授权结算" : "强制释放预扣"}
-        description={
-          settleDefault
+        confirming={recoveryPending}
+        description={<>
+          <p className="break-all">用户 {item.user_id} · {reference}</p>
+          <p>{settleDefault
             ? "该请求可能已产生上游费用，将结算同一请求引用下的全部未结算预扣。"
-            : "将释放同一任务引用下的全部未结算预扣，不只当前显示的这一笔。"
-        }
+            : "将释放同一任务引用下的全部未结算预扣，不只当前显示的这一笔。"}</p>
+          {recoveryError ? <p role="alert" className="mt-2 text-[var(--danger-fg)]">{recoveryError}</p> : null}
+        </>}
         confirmText={settleDefault ? "结算" : "释放"}
         tone={settleDefault ? "default" : "danger"}
-        onConfirm={() => {
-          setConfirmOpen(false);
-          onRecover(
-            item.tx.id,
-            settleDefault ? "settle_default" : "release",
-          );
+        onConfirm={async () => {
+          setRecoveryError(null);
+          try {
+            await onRecover(item.tx.id, settleDefault ? "settle_default" : "release");
+            setConfirmOpen(false);
+          } catch {
+            setRecoveryError("恢复结果未确认，核对流水后重试。");
+          }
         }}
       />
     </>
@@ -291,6 +298,8 @@ function ReconciliationCard({
   orphanHolds,
   orphanHoldsLoading,
   recoverHoldPending,
+  orphanHoldsError,
+  onRetry,
   onAudit,
   onRecover,
 }: {
@@ -299,11 +308,13 @@ function ReconciliationCard({
   orphanHolds: AdminOrphanHoldOut[];
   orphanHoldsLoading: boolean;
   recoverHoldPending: boolean;
+  orphanHoldsError: boolean;
+  onRetry: () => void;
   onAudit: () => void;
   onRecover: (
     txId: string,
     action: Exclude<AdminOrphanHoldOut["recovery_action"], "manual_review">,
-  ) => void;
+  ) => Promise<unknown>;
 }) {
   return (
     <Card variant="subtle" padding="lg" className="space-y-4">
@@ -326,7 +337,7 @@ function ReconciliationCard({
       </div>
       <AuditResultBanner result={auditResult} />
       <div className="divide-y divide-[var(--border-subtle)] rounded-[var(--radius-card)] border border-[var(--border-subtle)]">
-        {orphanHolds.map((item) => (
+        {orphanHoldsError ? <div role="alert" className="p-4 type-body-sm text-[var(--danger-fg)]">预授权列表加载失败 <Button variant="secondary" onClick={onRetry}>重试</Button></div> : orphanHoldsLoading ? <p role="status" className="p-4 type-body-sm">预授权加载中</p> : orphanHolds.map((item) => (
           <OrphanHoldRow
             key={item.tx.id}
             item={item}
@@ -334,7 +345,7 @@ function ReconciliationCard({
             onRecover={onRecover}
           />
         ))}
-        {!orphanHoldsLoading && orphanHolds.length === 0 && (
+        {!orphanHoldsError && !orphanHoldsLoading && orphanHolds.length === 0 && (
           <div className="px-4 py-6 text-center type-body-sm text-[var(--fg-2)]">
             暂无孤儿 hold
           </div>
@@ -350,6 +361,8 @@ export function OverviewSubpanel({
   onGoPricing: () => void;
 }) {
   const state = useBillingOverview();
+  if (state.overviewError) return <div role="alert" className="type-body-sm text-[var(--danger-fg)]">计费概览加载失败 <Button variant="secondary" onClick={() => void state.refreshOverview()}>重试</Button></div>;
+  if (state.overviewLoading) return <p role="status" className="type-body-sm">计费概览加载中</p>;
   return (
     <div className="space-y-5">
       <HealthCard
@@ -375,6 +388,8 @@ export function OverviewSubpanel({
         orphanHolds={state.orphanHolds}
         orphanHoldsLoading={state.orphanHoldsLoading}
         recoverHoldPending={state.recoverHoldPending}
+        orphanHoldsError={state.orphanHoldsError}
+        onRetry={() => void state.refreshOrphanHolds()}
         onAudit={state.audit}
         onRecover={state.recoverHold}
       />

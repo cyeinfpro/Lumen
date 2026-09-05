@@ -423,11 +423,11 @@ function RecentProjects({
           </p>
         </div>
       ) : (
-        <div className="flex gap-3 overflow-x-auto pb-2 no-scrollbar md:grid md:grid-cols-2 md:overflow-visible lg:grid-cols-3 xl:grid-cols-4">
+        <ul aria-label="最近项目" className="divide-y divide-[var(--border-subtle)] border-y border-[var(--border-subtle)]">
           {items.map((item, index) => (
             <RecentProjectCard key={item.id} item={item} priority={index === 0} />
           ))}
-        </div>
+        </ul>
       )}
     </section>
   );
@@ -451,9 +451,9 @@ function RecentProjectCard({
   const isCompleted = item.status === "completed";
 
   return (
-    <article className="group surface-card-v2 relative flex min-w-[17rem] max-w-[20rem] flex-1 flex-col overflow-hidden md:min-w-0 md:max-w-none">
+    <li className="group relative flex min-w-0 items-start gap-3 py-3">
       <div
-        className="relative aspect-[16/9] overflow-hidden border-b border-[var(--border-subtle)] bg-[var(--bg-2)]"
+        className="relative h-16 w-16 shrink-0 overflow-hidden rounded-[var(--radius-control)] bg-[var(--bg-2)]"
         data-preview-state={previewSrc ? "available" : "empty"}
       >
         {previewSrc ? (
@@ -462,7 +462,7 @@ function RecentProjectCard({
             alt={`${title}的项目素材`}
             fill
             priority={priority}
-            sizes="(max-width: 767px) 272px, (max-width: 1279px) 50vw, 25vw"
+            sizes="64px"
             unoptimized
             className="object-cover transition-transform duration-300 group-hover:scale-[1.02] motion-reduce:transform-none"
           />
@@ -472,16 +472,16 @@ function RecentProjectCard({
             <span className="type-caption">暂无预览</span>
           </div>
         )}
-        <span className="absolute left-2.5 top-2.5 inline-flex items-center gap-1.5 rounded-full bg-[var(--media-control-bg)] px-2 py-1 type-caption font-medium text-[var(--media-control-fg)] backdrop-blur-md">
+        <span className="sr-only">
           <Icon className="h-3.5 w-3.5" />
           {info.label}
         </span>
       </div>
 
-      <div className="flex flex-1 flex-col p-4">
-        <div className="flex items-start justify-between gap-2">
+      <div className="grid min-w-0 flex-1 gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-center">
+        <div className="flex min-w-0 flex-wrap items-start gap-2">
           <h3 className="line-clamp-2 min-w-0 type-card-title text-[var(--fg-0)]">
-            {title}
+            {href ? <Link href={href}>{title}</Link> : title}
           </h3>
           <span
             data-project-status={item.status}
@@ -494,7 +494,7 @@ function RecentProjectCard({
           </span>
         </div>
 
-        <div className="mt-3 flex min-w-0 items-center gap-3">
+        <div className="flex min-w-0 items-center gap-3">
           <ProjectProgressRing value={item.completion_percent} />
           <div className="min-w-0">
             <p className="type-caption text-[var(--fg-3)]">当前阶段</p>
@@ -508,7 +508,7 @@ function RecentProjectCard({
           </div>
         </div>
 
-        <dl className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 type-caption">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 type-caption md:col-start-1 md:row-start-2">
           {item.next_action ? (
             <>
               <dt className="text-[var(--fg-3)]">下一步</dt>
@@ -525,7 +525,7 @@ function RecentProjectCard({
           ) : null}
         </dl>
 
-        <div className="mt-auto pt-4">
+        <div className="min-w-0 md:col-start-3 md:row-span-2 md:row-start-1">
           <time dateTime={item.updated_at} className="block type-caption text-[var(--fg-2)]">
             更新于 {updatedAt}
           </time>
@@ -544,7 +544,7 @@ function RecentProjectCard({
           )}
         </div>
       </div>
-    </article>
+    </li>
   );
 }
 

@@ -153,18 +153,20 @@ function AgentAssistantTurn({
             message={message}
             tools={tools}
             active={active}
+            generations={generations}
           />
 
           {generations.length > 0 ? (
             <div className="mt-3 grid gap-4 sm:grid-cols-2">
               {generations.map((generation) => (
-                <AgentGeneration
-                  key={generation.id}
-                  generation={generation}
-                  platform={platform}
-                  onPreview={() => onPreviewGeneration(generation)}
-                  onUseReference={() => onUseReference(generation)}
-                />
+                <div key={generation.id} id={`agent-generation-${generation.id}`} className="min-w-0 scroll-mt-4">
+                  <AgentGeneration
+                    generation={generation}
+                    platform={platform}
+                    onPreview={() => onPreviewGeneration(generation)}
+                    onUseReference={() => onUseReference(generation)}
+                  />
+                </div>
               ))}
             </div>
           ) : null}
@@ -201,17 +203,19 @@ function AgentOrderedOutput({
   message,
   tools,
   active,
+  generations,
 }: {
   message: AgentAssistantMessage;
   tools: AgentToolCallContract[];
   active: boolean;
+  generations: Generation[];
 }) {
   const [copied, setCopied] = useState(false);
   const ordered = message.blocks.length > 0;
   if (!ordered && !message.text && tools.length === 0 && active) {
     return (
       <div role="status" className="flex min-h-10 items-center gap-2 type-body-sm text-[var(--fg-2)]">
-        <Loader2 className="h-4 w-4 animate-spin text-accent" aria-hidden />
+        <Loader2 className="h-4 w-4 animate-spin text-accent motion-reduce:animate-none" aria-hidden />
         Agent 运行中
       </div>
     );
@@ -245,13 +249,19 @@ function AgentOrderedOutput({
                 </Markdown>
               )}
               {active && index === blocks.length - 1 ? (
-                <span className="ml-1 inline-block h-4 w-0.5 animate-pulse bg-accent align-text-bottom" aria-label="回复中" />
+                <span className="ml-1 inline-block h-4 w-0.5 animate-pulse bg-accent align-text-bottom motion-reduce:animate-none" aria-label="回复中" />
               ) : null}
             </div>
           );
         }
         const tool = toolForBlock(block, tools);
-        return tool ? <AgentToolCall key={`tool:${tool.id}`} tool={tool} /> : null;
+        return tool ? (
+          <AgentToolCall
+            key={`tool:${tool.id}`}
+            tool={tool}
+            artifactId={tool.generation_ids.find((id) => generations.some((generation) => generation.id === id))}
+          />
+        ) : null;
       })}
       {message.text ? (
         <Button
@@ -347,7 +357,7 @@ function AgentGeneration({
         </>
       ) : (
         <>
-          <Loader2 className="h-5 w-5 animate-spin text-accent" aria-hidden />
+          <Loader2 className="h-5 w-5 animate-spin text-accent motion-reduce:animate-none" aria-hidden />
           <span className="type-caption">{generation.status === "queued" ? "图片排队中" : "图片生成中"}</span>
         </>
       )}

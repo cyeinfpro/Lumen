@@ -47,6 +47,7 @@ type LifecycleSnapshot = {
   progress?: number;
   errorCode?: string | null;
   errorMessage?: string | null;
+  cancelRequestedAt?: string | null;
   retryTransition: boolean;
 };
 
@@ -101,6 +102,7 @@ function lifecycleOf(
     progress: progressOf(raw.progress_pct),
     errorCode: nullableString(raw.error_code),
     errorMessage: nullableString(raw.error_message),
+    cancelRequestedAt: nullableString(raw.cancel_requested_at),
     retryTransition: raw.retry_transition === true,
   };
 }
@@ -185,6 +187,10 @@ function applyLifecycle(
   incoming: LifecycleSnapshot,
 ): VideoGenerationOut {
   const next = { ...base, submission_epoch: incoming.epoch };
+  // Cancellation intent is monotonic within a submission, never across retries.
+  next.cancel_requested_at = incoming.epoch === (current.submission_epoch ?? 0)
+    ? current.cancel_requested_at ?? incoming.cancelRequestedAt ?? null
+    : incoming.cancelRequestedAt ?? null;
   if (incoming.status) next.status = incoming.status;
   if (incoming.stage) next.progress_stage = incoming.stage;
   if (incoming.progress !== undefined) {

@@ -81,6 +81,8 @@ export interface BottomSheetProps {
   defaultSnapIndex?: number;
   /** 关闭后是否恢复触发元素焦点，默认 true。 */
   restoreFocus?: boolean;
+  /** Called by the existing exit lifecycle; focus owners should wait for layer cleanup. */
+  onExitComplete?: () => void;
 }
 
 // SPRING.sheet 已在 @/lib/motion 统一定义，此处直接引用
@@ -109,6 +111,7 @@ export function BottomSheet({
   snapPoints = DEFAULT_SNAP_POINTS,
   defaultSnapIndex = 0,
   restoreFocus = true,
+  onExitComplete,
 }: BottomSheetProps) {
   const portalReady = usePortalReady();
   if (!portalReady) return null;
@@ -126,6 +129,7 @@ export function BottomSheet({
           snapPoints={snapPoints}
           defaultSnapIndex={defaultSnapIndex}
           restoreFocus={restoreFocus}
+          onExitComplete={onExitComplete}
         >
           {children}
         </BottomSheetLayer>
@@ -145,6 +149,7 @@ interface BottomSheetLayerProps {
   snapPoints: SnapPoint[];
   defaultSnapIndex: number;
   restoreFocus: boolean;
+  onExitComplete?: () => void;
 }
 
 function readVisualViewport() {
@@ -165,6 +170,7 @@ function BottomSheetLayer({
   snapPoints,
   defaultSnapIndex,
   restoreFocus,
+  onExitComplete,
 }: BottomSheetLayerProps) {
   const sheetRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -236,6 +242,12 @@ function BottomSheetLayer({
     onClose: requestClose,
     restoreFocus,
   });
+  const afterExitRef = useRef(onExitComplete);
+  useEffect(() => { afterExitRef.current = onExitComplete; }, [onExitComplete]);
+  useEffect(() => () => {
+    // This cleanup follows useModalLayer cleanup after AnimatePresence removes the layer.
+    if (closingRef.current) afterExitRef.current?.();
+  }, []);
 
   useEffect(() => {
     const visualViewport = window.visualViewport;

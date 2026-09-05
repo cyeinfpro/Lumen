@@ -118,6 +118,9 @@ export function useBillingOverview() {
     orphanHolds: orphanHoldsQuery.data ?? [],
     overview,
     overviewLoading: overviewQuery.isLoading,
+    overviewError: overviewQuery.isError,
+    orphanHoldsError: orphanHoldsQuery.isError,
+    refreshOrphanHolds: () => orphanHoldsQuery.refetch(),
     orphanHoldsLoading: orphanHoldsQuery.isLoading,
     bootstrapPending: bootstrapMutation.isPending,
     auditPending: auditMutation.isPending,
@@ -133,7 +136,7 @@ export function useBillingOverview() {
         AdminOrphanHoldOut["recovery_action"],
         "manual_review"
       >,
-    ) => recoverHoldMutation.mutate({ txId, action }),
+    ) => recoverHoldMutation.mutateAsync({ txId, action }),
   };
 }
 

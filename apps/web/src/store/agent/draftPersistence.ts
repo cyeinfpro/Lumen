@@ -11,6 +11,8 @@ import {
   createAgentDraft,
 } from "@/features/agent/model/contracts";
 
+import { restoreAgentPendingSubmissions } from "./submissionReceipts";
+
 const STORAGE_KEY = "lumen.agent.drafts.v1";
 const REASONING_EFFORTS = new Set([
   "auto",
@@ -34,6 +36,7 @@ interface PersistedAttachment {
 }
 
 interface PersistedDraft {
+  pendingSubmissions?: AgentDraft["pendingSubmissions"];
   text: string;
   model?: string | null;
   attachments: PersistedAttachment[];
@@ -67,6 +70,7 @@ function attachmentPreviewUrl(imageId: string): string {
 
 function persistedDraft(draft: AgentDraft): PersistedDraft {
   return {
+    pendingSubmissions: draft.pendingSubmissions,
     text: draft.text,
     model: draft.model,
     attachments: draft.attachments.map((attachment) => ({
@@ -161,6 +165,7 @@ function restoreDraft(
   version: PersistedEnvelope["version"],
 ): AgentDraft {
   return createAgentDraft({
+    pendingSubmissions: restoreAgentPendingSubmissions(draft.pendingSubmissions),
     text: typeof draft.text === "string" ? draft.text : "",
     model:
       typeof draft.model === "string" && draft.model.trim()

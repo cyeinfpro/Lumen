@@ -103,7 +103,7 @@ export function MobileAdvancedSettings({
           执行设置
         </h3>
         <p className="mt-1 type-caption text-[var(--fg-2)]">
-          摘要保留在输入区，完整参数在这里调整。
+          仅用于下一次提交
         </p>
       </div>
 

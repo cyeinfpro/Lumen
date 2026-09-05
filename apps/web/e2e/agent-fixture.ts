@@ -503,7 +503,7 @@ export async function installAgentFixture(
       }
       return json(route, {
         items: messages,
-        runs: messages.length ? [currentRun ?? run(mode === "partial-image" ? "partial" : "succeeded", generations.length > 0)] : [],
+        runs: messages.length ? [currentRun ?? { ...run(mode === "partial-image" ? "partial" : "succeeded", generations.length > 0), idempotency_key: String(lastMessageBody?.idempotency_key ?? "fixture-message-1") }] : [],
         next_cursor: null,
         generations,
         completions: [],
@@ -514,9 +514,12 @@ export async function installAgentFixture(
       lastMessageBody = request.postDataJSON() as Record<string, unknown>;
       if (mode === "error") {
         const code = options.errorCode ?? "INSUFFICIENT_BALANCE";
-        return json(route, { error: { code, message: code } }, code === "INSUFFICIENT_BALANCE" ? 402 : 503);
+        const status = code === "INSUFFICIENT_BALANCE" ? 402
+          : code === "NO_ACTIVE_API_KEY" || code === "agent_vision_model_unavailable" ? 412
+          : 503;
+        return json(route, { error: { code, message: code } }, status);
       }
-      const queuedRun = run("queued", false);
+      const queuedRun = { ...run("queued", false), idempotency_key: String(lastMessageBody.idempotency_key) };
       const queuedMessages = messagePair("", "queued", false);
       if (mode === "image") {
         messages = messagePair("图片任务已提交。", "succeeded", true);

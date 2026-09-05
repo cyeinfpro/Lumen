@@ -18,7 +18,8 @@ import {
   SystemPromptEditorHeader,
 } from "./SystemPromptManagerPresentation";
 import { copy } from "@/lib/copy";
-import { Button, IconButton } from "./primitives";
+import { Button, ConfirmDialog, IconButton } from "./primitives";
+import { useUnsavedSettingsGuard } from "@/components/ui/primitives/UnsavedSettingsGuard";
 import { Dialog } from "./primitives/Dialog";
 import {
   getConversation,
@@ -316,6 +317,13 @@ function SystemPromptDialog({
   const [name, setName] = useState("新提示词");
   const [content, setContent] = useState(EMPTY_PROMPT);
   const [localError, setLocalError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<{ name?: string; content?: string }>({});
+  const [deleteTarget, setDeleteTarget] = useState<SystemPrompt | null>(null);
+  const [savedDraft, setSavedDraft] = useState({ name: "新提示词", content: EMPTY_PROMPT });
+  const { requestNavigation, dialog: navigationDialog } = useUnsavedSettingsGuard(
+    name !== savedDraft.name || content !== savedDraft.content,
+  );
+  const closeEditor = () => requestNavigation(onClose);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const nameInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -326,6 +334,8 @@ function SystemPromptDialog({
       setSelectedId(prompt.id);
       setName(prompt.name);
       setContent(prompt.content);
+      setSavedDraft({ name: prompt.name, content: prompt.content });
+      setFieldErrors({});
       setLocalError(null);
     },
   });
@@ -333,6 +343,8 @@ function SystemPromptDialog({
     onSuccess: (prompt) => {
       setName(prompt.name);
       setContent(prompt.content);
+      setSavedDraft({ name: prompt.name, content: prompt.content });
+      setFieldErrors({});
       setLocalError(null);
     },
   });
@@ -341,6 +353,9 @@ function SystemPromptDialog({
       setSelectedId("new");
       setName("新提示词");
       setContent(EMPTY_PROMPT);
+      setSavedDraft({ name: "新提示词", content: EMPTY_PROMPT });
+      setFieldErrors({});
+      setDeleteTarget(null);
       setLocalError(null);
     },
   });
@@ -356,18 +371,17 @@ function SystemPromptDialog({
   );
 
   const validate = () => {
-    if (!name.trim()) return "名称必填";
-    if (!content.trim()) return "内容必填";
-    if (content.length > 10000) return "超过 10000 字";
-    return null;
+    const errors = {
+      name: name.trim() ? undefined : "名称必填",
+      content: !content.trim() ? "内容必填" : content.length > 10000 ? "超过 10000 字" : undefined,
+    };
+    setFieldErrors(errors);
+    return Boolean(errors.name || errors.content);
   };
 
   const savePrompt = (makeDefault = false) => {
-    const validationError = validate();
-    if (validationError) {
-      setLocalError(validationError);
-      return;
-    }
+    setLocalError(null);
+    if (validate()) return;
     if (selectedPrompt) {
       patchMutation.mutate({
         id: selectedPrompt.id,
@@ -427,10 +441,15 @@ function SystemPromptDialog({
     savePrompt(true);
   };
   const selectPrompt = (prompt: SystemPrompt) => {
-    setSelectedId(prompt.id);
-    setName(prompt.name);
-    setContent(prompt.content);
-    setLocalError(null);
+    if (selectedId === prompt.id) return;
+    requestNavigation(() => {
+      setSelectedId(prompt.id);
+      setName(prompt.name);
+      setContent(prompt.content);
+      setSavedDraft({ name: prompt.name, content: prompt.content });
+      setFieldErrors({});
+      setLocalError(null);
+    });
   };
 
   const isDefault = selectedPromptIsDefault(selectedPrompt, defaultId);
@@ -442,16 +461,27 @@ function SystemPromptDialog({
     localError,
     createMutation.error?.message,
     patchMutation.error?.message,
-    deleteMutation.error?.message,
     setDefaultMutation.error?.message,
     patchConversationMutation.error?.message,
   );
 
   return (
+    <>
+    {navigationDialog}
+    <ConfirmDialog
+      key={deleteTarget?.id ?? "none"}
+      open={deleteTarget !== null}
+      onOpenChange={(next) => { if (!next) setDeleteTarget(null); }}
+      title={`删除“${deleteTarget?.name ?? ""}”？`}
+      description="该提示词将从提示词库移除，并解除账号及关联会话的默认提示词设置。未保存的修改也将丢失。"
+      confirmText="删除"
+      tone="danger"
+      onConfirm={async () => { if (deleteTarget) await deleteMutation.mutateAsync(deleteTarget.id); }}
+    />
     <SystemPromptDialogLayout
       embedded={embedded}
       initialFocusRef={nameInputRef}
-      onClose={onClose}
+      onClose={closeEditor}
       sidebar={
         <SystemPromptSidebar
           embedded={embedded}
@@ -463,13 +493,15 @@ function SystemPromptDialog({
           currentPromptId={
             currentConversation?.default_system_prompt_id ?? null
           }
-          onClose={onClose}
-          onCreateNew={() => {
+          onClose={closeEditor}
+          onCreateNew={() => requestNavigation(() => {
             setSelectedId("new");
             setName("新提示词");
             setContent(EMPTY_PROMPT);
+            setSavedDraft({ name: "新提示词", content: EMPTY_PROMPT });
+            setFieldErrors({});
             setLocalError(null);
-          }}
+          })}
           onSelect={selectPrompt}
         />
       }
@@ -481,18 +513,19 @@ function SystemPromptDialog({
           name={name}
           content={content}
           errorMessage={errorMessage}
+          fieldErrors={fieldErrors}
           busy={busy}
           isDefault={isDefault}
           isAppliedToCurrent={Boolean(isAppliedToCurrent)}
           settingDefault={setDefaultMutation.isPending}
           nameInputRef={nameInputRef}
           fileInputRef={fileInputRef}
-          onClose={onClose}
+          onClose={closeEditor}
           onNameChange={setName}
           onContentChange={setContent}
           onImport={importMarkdown}
           onDelete={() => {
-            if (selectedPrompt) deleteMutation.mutate(selectedPrompt.id);
+            if (selectedPrompt) setDeleteTarget(selectedPrompt);
           }}
           onApply={applyToCurrentConversation}
           onSetDefault={setSelectedAsDefault}
@@ -500,6 +533,7 @@ function SystemPromptDialog({
         />
       }
     />
+    </>
   );
 }
 
@@ -641,6 +675,7 @@ function SystemPromptEditorPanel({
   name,
   content,
   errorMessage,
+  fieldErrors,
   busy,
   isDefault,
   isAppliedToCurrent,
@@ -662,6 +697,7 @@ function SystemPromptEditorPanel({
   name: string;
   content: string;
   errorMessage: string | null;
+  fieldErrors: { name?: string; content?: string };
   busy: boolean;
   isDefault: boolean;
   isAppliedToCurrent: boolean;
@@ -688,6 +724,7 @@ function SystemPromptEditorPanel({
         name={name}
         content={content}
         errorMessage={errorMessage}
+        fieldErrors={fieldErrors}
         nameInputRef={nameInputRef}
         fileInputRef={fileInputRef}
         onNameChange={onNameChange}

@@ -13,7 +13,11 @@ import {
   validateCanvasNodeExecution,
 } from "@/lib/canvas/graph";
 import { blurActiveCanvasEditor } from "@/lib/canvas/interaction";
-import { type PersistedCanvasSaveBatch } from "@/lib/canvas/persistence";
+import {
+  canvasDraftSnapshotMatches,
+  type PersistedCanvasSaveBatch,
+} from "@/lib/canvas/persistence";
+import { downloadCanvasRecoveryCopy } from "@/lib/canvas/recoveryCopy";
 import { isCanvasVideoNodeType } from "@/lib/canvas/registry";
 import type { CanvasDocument, CanvasGraph } from "@/lib/canvas/types";
 import {
@@ -46,6 +50,7 @@ import {
   useCanvasStoreApi,
 } from "./CanvasStoreProvider";
 import { CanvasTopBar } from "./CanvasTopBar";
+import { CanvasSaveStatus, canvasCanRetrySave } from "./CanvasSaveStatus";
 import type { CanvasViewportApi } from "./CanvasViewport";
 import { CanvasMobileToolbar } from "./mobile/CanvasMobileToolbar";
 import {
@@ -166,6 +171,7 @@ function CanvasWorkspaceInner({
   const [durabilityWarning, setDurabilityWarning] = useState<string | null>(
     null,
   );
+  const [saveBatchWarning, setSaveBatchWarning] = useState<string | null>(null);
   const { fullscreen, toggleFullscreen, exitFullscreen } =
     useCanvasFullscreen();
   const [tabId] = useState(randomId);
@@ -202,7 +208,7 @@ function CanvasWorkspaceInner({
   );
 
   useRemoteDocumentSync(document, store, inFlightOperationCount);
-  useCanvasDraftPersistence({
+  const { acknowledgedDraft, retryPersistence } = useCanvasDraftPersistence({
     canvasId,
     clientId,
     document,
@@ -238,9 +244,35 @@ function CanvasWorkspaceInner({
     saveState,
     store,
     notifySaved,
-    onDurabilityWarning: setDurabilityWarning,
+    onDurabilityWarning: setSaveBatchWarning,
     onSaved: handleSaved,
   });
+  useEffect(() => {
+    if (saveState === "conflict") {
+      void queryClient.invalidateQueries({
+        queryKey: canvasQueryKeys.detail(canvasId),
+      });
+    }
+  }, [canvasId, queryClient, saveState]);
+  const exportCurrentCopy = useCallback(() => {
+    blurActiveCanvasEditor();
+    const state = store.getState();
+    try {
+      downloadCanvasRecoveryCopy({
+        canvas_id: canvasId,
+        client_id: clientId,
+        title,
+        description: document.description,
+        base_revision: state.revision,
+        graph: state.graph,
+        operations: state.pendingOperations,
+        operation_group_sizes: state.pendingOperationGroupSizes,
+        updated_at: Date.now(),
+      });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "副本导出失败");
+    }
+  }, [canvasId, clientId, document.description, store, title]);
   useEffect(() => {
     if (
       !viewportApi ||
@@ -422,55 +454,75 @@ function CanvasWorkspaceInner({
     >
       <CanvasTopBar
         title={title}
-        saveState={saveState}
-        saveMessage={saveMessage}
         onRename={renameCanvas}
         onFitView={() => viewportApi?.fitView()}
         onOpenInspector={() => setInspectorOpen(true)}
         onOpenCommandMenu={() => tools.openCommandMenu(null)}
         onOpenShortcuts={tools.openShortcuts}
         onToggleFullscreen={() => void toggleFullscreen()}
-        onRetrySave={
-          saveState === "error" && retryPrefixOperationCount === 0
-            ? undefined
-            : () => void autosaveRef.current?.flush()
-        }
         fullscreen={fullscreen}
       />
+      <CanvasSaveStatus
+        state={saveState}
+        revision={revision}
+        pendingCount={pendingCount}
+        message={saveMessage}
+        locallyDurable={canvasDraftSnapshotMatches(
+          acknowledgedDraft,
+          store.getState(),
+        )}
+        durabilityWarning={durabilityWarning}
+        onRetry={
+          canvasCanRetrySave(saveState, retryPrefixOperationCount, durabilityWarning)
+            ? () => {
+                retryPersistence();
+                if (saveState === "conflict") void onRefetch();
+                else void autosaveRef.current?.flush();
+              }
+            : undefined
+        }
+        onExport={exportCurrentCopy}
+      />
 
-      {saveState === "conflict" ? (
-        <ConflictBanner
-          onAdoptRemote={async () => {
-            blurActiveCanvasEditor();
-            await onRefetch();
-            const fresh = await import("@/lib/api/canvases").then((module) =>
-              module.getCanvas(canvasId),
-            );
-            store.getState().replaceFromRemote(fresh.graph, fresh.revision);
-            confirmedTitleRef.current = fresh.title;
-            titleMutationIdRef.current += 1;
-            setTitle(fresh.title);
-          }}
-          onKeepCopy={async () => {
-            try {
+      <div className="max-h-[25dvh] shrink-0 overflow-y-auto">
+        <CanvasSaveMessage state={saveState} message={saveMessage} />
+        {saveState === "conflict" ? (
+          <ConflictBanner
+            remoteRevision={document.revision > revision ? document.revision : null}
+            baselineRevision={revision}
+            pendingCount={pendingCount}
+            onAdoptRemote={async () => {
               blurActiveCanvasEditor();
-              const copy = await createCanvas({
-                title: `${title} 冲突副本`,
-                description: document.description ?? "",
-                graph: store.getState().graph,
-              });
-              router.push(`/projects/canvas/${copy.id}`);
-            } catch (error) {
-              toast.error(
-                error instanceof Error ? error.message : "副本创建失败",
+              await onRefetch();
+              const fresh = await import("@/lib/api/canvases").then((module) =>
+                module.getCanvas(canvasId),
               );
-            }
-          }}
-        />
-      ) : null}
-      {durabilityWarning && pendingCount > 0 ? (
-        <DurabilityBanner message={durabilityWarning} />
-      ) : null}
+              store.getState().replaceFromRemote(fresh.graph, fresh.revision);
+              confirmedTitleRef.current = fresh.title;
+              titleMutationIdRef.current += 1;
+              setTitle(fresh.title);
+            }}
+            onKeepCopy={async () => {
+              try {
+                blurActiveCanvasEditor();
+                const copy = await createCanvas({
+                  title: `${title} 冲突副本`,
+                  description: document.description ?? "",
+                  graph: store.getState().graph,
+                });
+                router.push(`/projects/canvas/${copy.id}`);
+              } catch (error) {
+                toast.error(
+                  error instanceof Error ? error.message : "副本创建失败",
+                );
+              }
+            }}
+          />
+        ) : null}
+        {(durabilityWarning || saveBatchWarning) && pendingCount > 0 ? (
+          <DurabilityBanner message={durabilityWarning ?? saveBatchWarning!} />
+        ) : null}
+      </div>
 
       <div
         className={cn(
@@ -658,9 +710,15 @@ function resolveRunningNodeId(
 }
 
 function ConflictBanner({
+  remoteRevision,
+  baselineRevision,
+  pendingCount,
   onAdoptRemote,
   onKeepCopy,
 }: {
+  remoteRevision: number | null;
+  baselineRevision: number;
+  pendingCount: number;
   onAdoptRemote: () => Promise<void>;
   onKeepCopy: () => Promise<void>;
 }) {
@@ -670,9 +728,23 @@ function ConflictBanner({
       role="alert"
       className="flex shrink-0 flex-wrap items-center gap-2 border-b border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-[var(--danger-fg)]"
     >
-      <span className="min-w-[220px] flex-1">
-        版本冲突：远端画布已更新。本地修改仍保留，自动保存已暂停。
-      </span>
+      <dl
+        aria-label="冲突版本"
+        className="flex min-w-0 flex-1 flex-wrap gap-x-4 gap-y-1 type-caption"
+      >
+        <div>
+          <dt>远端版本</dt>
+          <dd className="tabular-nums">{remoteRevision ?? "待确认"}</dd>
+        </div>
+        <div>
+          <dt>本地基线</dt>
+          <dd className="tabular-nums">{baselineRevision}</dd>
+        </div>
+        <div>
+          <dt>待保存修改</dt>
+          <dd className="tabular-nums">{pendingCount}</dd>
+        </div>
+      </dl>
       <Button
         size="sm"
         variant="secondary"
@@ -711,6 +783,17 @@ function ConflictBanner({
       </Button>
     </div>
   );
+}
+
+function CanvasSaveMessage({
+  state,
+  message,
+}: {
+  state: string;
+  message: string | null;
+}) {
+  if ((state !== "conflict" && state !== "error") || !message) return null;
+  return <DurabilityBanner message={message} />;
 }
 
 function DurabilityBanner({ message }: { message: string }) {
