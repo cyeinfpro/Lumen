@@ -23,6 +23,7 @@ const nodesSource = [
 ].join("\n");
 const imageAssetDropSource = source("./nodes/CanvasImageAssetDropZone.tsx");
 const inspectorSource = source("./CanvasInspector.tsx");
+const inspectorSurfacesSource = source("./CanvasInspectorSurfaces.tsx");
 const staleUploadCleanupSource = source(
   "../../../lib/canvas/staleUploadCleanup.ts",
 );
@@ -146,12 +147,13 @@ test("canvas text and titles edit directly inside deliberate drag handles", () =
 });
 
 test("canvas keeps inspector explicit across mobile, tablet, and desktop", () => {
+  match(workspaceSource, /<CanvasInspectorSurfaces/);
   match(
-    workspaceSource,
+    inspectorSurfacesSource,
     /const showTabletInspector = !isMobile && isCompact && open/,
   );
-  match(workspaceSource, /<BottomSheet\s+open=\{open\}/);
-  match(workspaceSource, /\{hasSelection \? \(/);
+  match(inspectorSurfacesSource, /<BottomSheet\s+open=\{open\}/);
+  match(inspectorSurfacesSource, /\{hasSelection \? \(/);
   doesNotMatch(workspaceSource, /inspectorOpen \|\| Boolean\(selectedNodeId\)/);
   match(mobileToolbarSource, /label="重做"/);
 });

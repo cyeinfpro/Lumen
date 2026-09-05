@@ -248,6 +248,42 @@ export async function createSessionForSubmission(input: {
   return session.id;
 }
 
+export async function createAgentSessionFromDraft(input: {
+  draft: AgentDraft;
+  toolGatewayConfigured: boolean;
+  create: (body: {
+    image_defaults: AgentImageDefaults;
+    allow_image: boolean;
+    allow_web_search: boolean;
+    allow_file_tools: boolean;
+  }) => Promise<AgentSession>;
+  upsert: (session: AgentSession) => void;
+  migrateDraft: (from: string | null, to: string) => void;
+  navigate: (sessionId: string) => void;
+  setError: (message: string) => void;
+  setAction: (action: { href: string; label: string } | null) => void;
+}): Promise<void> {
+  try {
+    const session = await input.create({
+      image_defaults: input.draft.imageDefaults,
+      allow_image: input.draft.allowImage && input.toolGatewayConfigured,
+      allow_web_search: input.draft.allowWebSearch,
+      allow_file_tools: input.draft.allowFileTools,
+    });
+    input.upsert(session);
+    input.migrateDraft(null, session.id);
+    input.navigate(session.id);
+  } catch (error) {
+    const presentation = agentErrorPresentation(error);
+    input.setError(presentation.detail);
+    input.setAction(
+      presentation.href && presentation.actionLabel
+        ? { href: presentation.href, label: presentation.actionLabel }
+        : null,
+    );
+  }
+}
+
 export function stageOptimisticSubmission(input: {
   sessionId: string;
   draft: AgentDraft;
