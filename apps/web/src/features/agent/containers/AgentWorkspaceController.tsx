@@ -55,9 +55,11 @@ import {
 } from "./agentRealtime";
 import { mergeAgentImageDefaults } from "./agentImageDefaults";
 import { useAgentSnapshotPolling } from "./useAgentSnapshotPolling";
+import { useAgentSubmissionReconciliation } from "./useAgentSubmissionReconciliation";
 import { useAgentMediaActions } from "./useAgentMediaActions";
 import {
   createSessionForSubmission,
+  createAgentSessionFromDraft,
   agentMessagePayload,
   rememberAgentSubmission,
   retainedAgentSubmissionKey,
@@ -90,8 +92,6 @@ export function AgentWorkspaceController({
   const queryClient = useQueryClient();
   const search = useSearchParams();
   const [submitting, setSubmitting] = useState(false);
-  const [checkingSubmission, setCheckingSubmission] = useState(false);
-  const checkingRef = useRef(false);
   const [composerAction, setComposerAction] = useState<{ href: string; label: string } | null>(null);
   const submissionRef = useRef(false);
   const refreshCoordinator = useMemo(() => new AgentRefreshCoordinator(), []);
@@ -302,6 +302,8 @@ export function AgentWorkspaceController({
       return { syncedAt: Date.now() };
     },
   });
+  const { checkingSubmission, retryMessages } =
+    useAgentSubmissionReconciliation(messagesQuery.refetch, reconnect);
   useEffect(() => {
     const status = channels.length ? sseStatus : "idle";
     sseTransportStatusRef.current = status;
@@ -337,39 +339,20 @@ export function AgentWorkspaceController({
     setComposerError,
     upsertSession,
   ]);
-  const createSession = useCallback(async () => {
-    try {
-      const session = await createMutation.mutateAsync({
-        image_defaults: draft.imageDefaults,
-        allow_image: draft.allowImage && toolGatewayConfigured,
-        allow_web_search: draft.allowWebSearch,
-        allow_file_tools: draft.allowFileTools,
-      });
-      upsertSession(session);
-      migrateDraft(null, session.id);
-      selectWithRoute(session.id);
-    } catch (error) {
-      const presentation = agentErrorPresentation(error);
-      setComposerError(presentation.detail);
-      setComposerAction(
-        presentation.href && presentation.actionLabel
-          ? { href: presentation.href, label: presentation.actionLabel }
-          : null,
-      );
-    }
-  }, [
-    createMutation,
-    draft.allowFileTools,
-    draft.allowImage,
-    draft.allowWebSearch,
-    draft.imageDefaults,
-    migrateDraft,
-    selectWithRoute,
-    setComposerError,
-    toolGatewayConfigured,
-    upsertSession,
-  ]);
-
+  const createSession = useCallback(
+    () =>
+      createAgentSessionFromDraft({
+        draft,
+        toolGatewayConfigured,
+        create: createMutation.mutateAsync,
+        upsert: upsertSession,
+        migrateDraft,
+        navigate: selectWithRoute,
+        setError: setComposerError,
+        setAction: setComposerAction,
+      }),
+    [createMutation, draft, migrateDraft, selectWithRoute, setComposerError, toolGatewayConfigured, upsertSession],
+  );
   const patchSession = useCallback((patch: AgentSessionPatchInput) => {
     const sessionId = useAgentStore.getState().currentSessionId;
     if (!sessionId) return;
@@ -587,16 +570,7 @@ export function AgentWorkspaceController({
         },
       );
     },
-    onRetryMessages: () => {
-      if (checkingRef.current) return;
-      checkingRef.current = true;
-      setCheckingSubmission(true);
-      void messagesQuery.refetch({ cancelRefetch: false }).finally(() => {
-        checkingRef.current = false;
-        setCheckingSubmission(false);
-      });
-      reconnect();
-    },
+    onRetryMessages: retryMessages,
     onTextChange: (text: string) => setDraftText(currentSessionId, text),
     onDraftChange: (patch: Parameters<typeof setDraft>[1]) => setDraft(currentSessionId, patch),
     onDefaultsChange: updateDefaults,
