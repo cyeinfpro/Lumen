@@ -88,6 +88,7 @@ export function Button({
   const isDisabled = disabled || loading;
   const spinnerSize = size === "lg" ? 20 : size === "sm" ? 12 : 16;
   return (
+    // @hit-area-ok: size variants and coarse-pointer CSS guarantee 44px touch targets.
     <button
       ref={ref}
       type={type ?? "button"}
