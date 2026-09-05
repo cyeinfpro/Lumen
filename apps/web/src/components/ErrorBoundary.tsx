@@ -14,7 +14,8 @@ import { Home } from "lucide-react";
 
 interface Props {
   children: ReactNode;
-  fallback?: ReactNode;
+  fallback?: ReactNode | ((reset: () => void) => ReactNode);
+  resetKeys?: readonly unknown[];
 }
 
 interface State {
@@ -35,6 +36,15 @@ export class ErrorBoundary extends Component<Props, State> {
     }
   }
 
+  componentDidUpdate(previous: Props): void {
+    const before = previous.resetKeys ?? [];
+    const after = this.props.resetKeys ?? [];
+    if (this.state.hasError && (before.length !== after.length ||
+      before.some((key, index) => !Object.is(key, after[index])))) {
+      this.handleReset();
+    }
+  }
+
   private handleReload = (): void => {
     if (typeof window !== "undefined") {
       window.location.reload();
@@ -50,7 +60,9 @@ export class ErrorBoundary extends Component<Props, State> {
       return this.props.children;
     }
     if (this.props.fallback !== undefined) {
-      return this.props.fallback;
+      return typeof this.props.fallback === "function"
+        ? this.props.fallback(this.handleReset)
+        : this.props.fallback;
     }
     const message =
       this.state.error instanceof Error ? this.state.error.message : "未知错误";

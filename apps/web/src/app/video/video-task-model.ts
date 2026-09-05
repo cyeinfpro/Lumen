@@ -125,6 +125,18 @@ const STAGE_COPY: Record<
     label: "提交中",
     detail: "提交中。",
   },
+  submit_unknown: {
+    label: "状态待确认",
+    detail: "提交结果未知，等待服务端核对。",
+  },
+  storing: {
+    label: "保存中",
+    detail: "视频文件保存中。",
+  },
+  billing: {
+    label: "结算中",
+    detail: "生成费用结算中。",
+  },
   submitted: {
     label: "已提交",
     detail: "等待处理。",
@@ -142,8 +154,8 @@ const STAGE_COPY: Record<
     detail: "文件取回中。",
   },
   finished: {
-    label: "已完成",
-    detail: "已保存。",
+    label: "整理中",
+    detail: "等待确认任务结果。",
   },
   succeeded: {
     label: "已完成",
@@ -303,12 +315,22 @@ export function actionLabel(action: VideoAction): string {
 export function stageCopy(
   item: VideoGenerationOut,
 ): { label: string; detail: string } {
+  if (isTerminalVideo(item) && item.status !== "succeeded") {
+    return STAGE_COPY[item.status];
+  }
   if (isVideoMaterializationPending(item)) {
     return {
       label: "整理中",
       detail: "任务已完成，等待视频文件保存。",
     };
   }
+  if (item.status === "succeeded") {
+    return { label: "可下载", detail: "视频已保存。" };
+  }
+  if (item.cancel_requested_at) {
+    return { label: "已请求取消", detail: "等待服务端确认，任务仍可能完成并计费。" };
+  }
+  if (item.status === "submit_unknown") return STAGE_COPY.submit_unknown;
   return (
     STAGE_COPY[item.progress_stage] ??
     STAGE_COPY[item.status] ?? {
@@ -316,14 +338,6 @@ export function stageCopy(
       detail: item.progress_stage,
     }
   );
-}
-
-export function progressForItem(item: VideoGenerationOut): number {
-  if (item.status === "succeeded") return 100;
-  if (["failed", "canceled", "expired"].includes(item.status)) {
-    return Math.max(0, Math.min(100, item.progress_pct || 0));
-  }
-  return Math.max(4, Math.min(98, item.progress_pct || 0));
 }
 
 function videoHistoryFilterLabel(filter: VideoHistoryFilter): string {
@@ -393,6 +407,16 @@ export function activeVideoTaskSummary(
   return activeCount > 0
     ? `${activeCount} 个任务处理中`
     : `${historyCount} 条历史记录`;
+}
+
+export function videoHistoryLoadError(error: unknown, paused: boolean): string | null {
+  if (paused) return "网络离线，记录未能更新。";
+  if (!error) return null;
+  const status = typeof error === "object" && "status" in error ? error.status : undefined;
+  if (status === 403) return "当前账户没有访问权限。";
+  if (status === 401) return "登录已失效。";
+  if (status === 0) return "网络连接异常，已加载记录仍保留。";
+  return "服务暂不可用，已加载记录仍保留。";
 }
 
 export function videoHistoryCountText({

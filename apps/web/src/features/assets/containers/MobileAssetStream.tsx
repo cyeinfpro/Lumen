@@ -81,7 +81,8 @@ function hasActiveSelection(selectionMode: boolean, selectedCount: number): bool
 
 function MobileStreamFeedState({
   hasError,
-  errorMessage,
+  error,
+  hasLoadedItems,
   onRetry,
   isLoading,
   isEmptyAll,
@@ -92,7 +93,8 @@ function MobileStreamFeedState({
   children,
 }: {
   hasError: boolean;
-  errorMessage?: string;
+  error?: unknown;
+  hasLoadedItems: boolean;
   onRetry: () => void;
   isLoading: boolean;
   isEmptyAll: boolean;
@@ -104,9 +106,10 @@ function MobileStreamFeedState({
 }) {
   if (hasError) {
     return (
-      <div role="alert" aria-live="assertive">
-        <StreamErrorState message={errorMessage} onRetry={onRetry} />
-      </div>
+      <>
+        <StreamErrorState error={error} onRetry={onRetry} compact={hasLoadedItems} />
+        {hasLoadedItems ? children : null}
+      </>
     );
   }
   if (isLoading) return <StreamLoadingState />;
@@ -161,6 +164,7 @@ export function MobileStream() {
   }, [applyFilters]);
 
   const query = useStreamFeedQuery(filters);
+  const feedError = query.error ?? (query.fetchStatus === "paused" ? { status: 0 } : undefined);
   const { mutateAsync: deleteStreamImage } = useDeleteStreamImageMutation();
   const hasNextPage = query.hasNextPage;
   const isFetchingNextPage = query.isFetchingNextPage;
@@ -396,8 +400,9 @@ export function MobileStream() {
             </StreamOverview>
 
             <MobileStreamFeedState
-              hasError={query.isError}
-              errorMessage={query.error?.message}
+              hasError={query.isError || query.fetchStatus === "paused"}
+              error={feedError}
+              hasLoadedItems={items.length > 0}
               onRetry={() => {
                 void query.refetch();
               }}

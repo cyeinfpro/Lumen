@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { AgentMessage, AgentRun } from "../model/contracts";
 import type { Generation } from "@/lib/types";
+import { agentContentScrollAction, observeAgentContentResize, preferredAgentScrollBehavior } from "./agentScrollBehavior";
 
 interface PrependAnchor {
   scrollHeight: number;
@@ -14,11 +15,13 @@ export function useAgentWorkspaceScroll({
   runsById,
   generationsById,
   threshold,
+  scrollToMessageId = null,
 }: {
   messages: AgentMessage[];
   runsById: Record<string, AgentRun>;
   generationsById: Record<string, Generation>;
   threshold: number;
+  scrollToMessageId?: string | null;
 }) {
   const latestMessage = messages.at(-1);
   const latestRun =
@@ -30,7 +33,8 @@ export function useAgentWorkspaceScroll({
   return useAgentScrollManager({
     contentVersion: `${messages.length}:${latestMessage?.id ?? ""}:${outputSequence}:${latestRun?.updated_at ?? ""}:${Object.keys(generationsById).length}`,
     hasContent: messages.length > 0,
-    localSubmission: latestMessage?.optimistic === true,
+    localSubmissionId: latestMessage?.optimistic ? latestMessage.id : null,
+    scrollTargetId: messages.some((message) => message.id === scrollToMessageId) ? scrollToMessageId : null,
     threshold,
   });
 }
@@ -38,15 +42,20 @@ export function useAgentWorkspaceScroll({
 function useAgentScrollManager({
   contentVersion,
   hasContent,
-  localSubmission,
+  localSubmissionId,
+  scrollTargetId,
   threshold,
 }: {
   contentVersion: string;
   hasContent: boolean;
-  localSubmission: boolean;
+  localSubmissionId: string | null;
+  scrollTargetId: string | null;
   threshold: number;
 }) {
   const scrollRef = useRef<HTMLElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const previousSubmissionRef = useRef<string | null>(null);
+  const previousTargetRef = useRef<string | null>(null);
   const pinnedRef = useRef(true);
   const prependAnchorRef = useRef<PrependAnchor | null>(null);
   const [newOutputBelow, setNewOutputBelow] = useState(false);
@@ -55,6 +64,7 @@ function useAgentScrollManager({
     const root = scrollRef.current;
     if (!root) return;
     const update = () => {
+      if (prependAnchorRef.current) return;
       const distance = root.scrollHeight - root.scrollTop - root.clientHeight;
       pinnedRef.current = distance <= threshold;
       if (pinnedRef.current) setNewOutputBelow(false);
@@ -68,23 +78,41 @@ function useAgentScrollManager({
     const root = scrollRef.current;
     if (!root) return;
     const anchor = prependAnchorRef.current;
-    if (anchor) {
+    if (scrollTargetId && scrollTargetId !== previousTargetRef.current) pinnedRef.current = false;
+    previousTargetRef.current = scrollTargetId;
+    const newLocalSubmission = localSubmissionId !== null && localSubmissionId !== previousSubmissionRef.current;
+    previousSubmissionRef.current = localSubmissionId;
+    const action = agentContentScrollAction({
+      hasContent, hasPrependAnchor: Boolean(anchor), pinned: pinnedRef.current, newLocalSubmission,
+    });
+    if (action === "prepend" && anchor) {
       prependAnchorRef.current = null;
       root.scrollTop = anchor.scrollTop + (root.scrollHeight - anchor.scrollHeight);
       return;
     }
-    if (!hasContent) return;
-    if (localSubmission || pinnedRef.current) {
+    if (action === "none") return;
+    if (action === "latest") {
       root.scrollTo({
         top: root.scrollHeight,
-        behavior: localSubmission ? "smooth" : "auto",
+        behavior: preferredAgentScrollBehavior(newLocalSubmission),
       });
       pinnedRef.current = true;
       setNewOutputBelow(false);
     } else {
       setNewOutputBelow(true);
     }
-  }, [contentVersion, hasContent, localSubmission]);
+  }, [contentVersion, hasContent, localSubmissionId, scrollTargetId]);
+
+  useEffect(() => {
+    const root = scrollRef.current;
+    const content = contentRef.current;
+    if (!root || !content) return;
+    return observeAgentContentResize({
+      root,
+      content,
+      canFollow: () => hasContent && pinnedRef.current && !prependAnchorRef.current,
+    });
+  }, [hasContent]);
 
   const prepareForPrepend = useCallback((): (() => void) => {
     const root = scrollRef.current;
@@ -94,6 +122,7 @@ function useAgentScrollManager({
       scrollTop: root.scrollTop,
     };
     prependAnchorRef.current = anchor;
+    pinnedRef.current = false;
     return () => {
       if (prependAnchorRef.current === anchor) prependAnchorRef.current = null;
     };
@@ -104,11 +133,12 @@ function useAgentScrollManager({
     if (!root) return;
     pinnedRef.current = true;
     setNewOutputBelow(false);
-    root.scrollTo({ top: root.scrollHeight, behavior: "smooth" });
+    root.scrollTo({ top: root.scrollHeight, behavior: preferredAgentScrollBehavior(true) });
   }, []);
 
   return {
     scrollRef,
+    contentRef,
     newOutputBelow,
     prepareForPrepend,
     scrollToLatest,

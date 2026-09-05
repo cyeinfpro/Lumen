@@ -689,25 +689,31 @@ test("Agent execution summary and ContextBar update submitted parameters", async
   const shortLandscape = (page.viewportSize()?.height ?? 999) < 500;
   if (shortLandscape) {
     await expect(summary).toBeHidden();
-    await page.getByRole("button", { name: "Agent 参数与会话设置" }).click();
-    await page.getByRole("combobox", { name: "默认图片数量" }).selectOption("3");
-    await page.getByRole("button", { name: "竖向 4:5" }).click();
-    await page.getByRole("combobox", { name: "默认图片分辨率" }).selectOption("4k");
-    await page.getByRole("combobox", { name: "默认渲染质量" }).selectOption("medium");
-    await page.getByRole("combobox", { name: "默认背景" }).selectOption("transparent");
+    await page.getByRole("button", { name: "Agent 设置", exact: true }).click();
   } else {
     await expect(summary).toBeVisible();
-    await summary.getByRole("combobox", { name: "执行图片数量" }).selectOption("3");
-    await summary.getByRole("combobox", { name: "执行图片比例" }).selectOption("4:5");
-    await summary.getByRole("combobox", { name: "执行图片分辨率" }).selectOption("4k");
-    await summary.getByRole("combobox", { name: "执行渲染质量" }).selectOption("medium");
-    await summary.getByRole("combobox", { name: "执行图片背景" }).selectOption("transparent");
-    await expect(summary.getByText("预计扣 ¥1.20", { exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "Agent 参数与会话设置" }).click();
+    await expect(summary.getByRole("combobox")).toHaveCount(0);
+    await summary.getByRole("button", { name: /调整执行参数/u }).click();
   }
+  await page.getByRole("combobox", { name: "默认图片数量" }).selectOption("3");
+  await page.getByRole("button", { name: "竖向 4:5" }).click();
+  await page.getByRole("combobox", { name: "默认图片分辨率" }).selectOption("4k");
+  await page.getByRole("combobox", { name: "默认渲染质量" }).selectOption("medium");
+  await page.getByRole("combobox", { name: "默认背景" }).selectOption("transparent");
+  // Leave the native select before exercising the containing popover's Escape handler.
+  await page.getByRole("combobox", { name: "默认背景" }).press("Tab");
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "Agent 设置", exact: true })).toHaveCount(0);
+  if (!shortLandscape) {
+    await expect(summary.getByText("预计 ¥1.20", { exact: true })).toBeVisible();
+    await expect(summary).toContainText("3 张 · 4:5 · 4K");
+  }
+  await page.getByRole("button", { name: "Agent 参数与会话设置" }).click();
   const model = page.getByRole("combobox", { name: "Agent 模型" });
   await expect(model).toBeVisible();
   await model.selectOption("fixture-fast-model");
+  await expect(model).toHaveValue("");
+  await page.getByRole("button", { name: "确认切换", exact: true }).click();
   const reasoning = page.getByRole("combobox", { name: "Agent 推理强度" });
   await expect(reasoning).toBeDisabled();
   await expect(reasoning).toHaveValue("none");
@@ -977,7 +983,7 @@ test("text reply submits and restores from authoritative snapshots", async ({
   const composerBox = await page
     .getByRole("textbox", { name: "发送给 Agent" })
     .evaluate((node) =>
-      node.closest(".surface-panel")?.getBoundingClientRect().toJSON(),
+      node.closest('[data-testid="agent-composer"]')?.getBoundingClientRect().toJSON(),
     );
   expect(assistantBox).not.toBeNull();
   expect(composerBox).toBeTruthy();
@@ -1150,9 +1156,11 @@ test("partial image, cancellation, and stable account errors remain actionable",
     .getByRole("textbox", { name: "发送给 Agent" })
     .fill("运行 Agent");
   await runtimePage.getByRole("button", { name: "发送", exact: true }).click();
-  await expect(
-    runtimePage.getByText("运行时暂不可用，稍后重试。").first(),
-  ).toBeVisible();
+  await expect(runtimePage.locator('[data-agent-run-state="uncertain"]')).toContainText("提交待确认");
+  await expect(runtimePage.getByTestId("agent-composer").getByRole("status")).toContainText("提交待确认");
+  await expect(runtimePage.getByTestId("agent-composer").getByRole("alert")).toHaveCount(0);
+  await expect(runtimePage.getByRole("textbox", { name: "发送给 Agent" })).toHaveValue("运行 Agent");
+  await expect(runtimePage.getByRole("button", { name: "核对任务", exact: true })).toBeVisible();
 });
 
 test("active Agent keeps the next-turn draft editable while stop remains available", async ({
@@ -1184,12 +1192,15 @@ test("partial Agent run continues without replaying browser inputs", async ({
   const fixture = await installAgentFixture(page, { mode: "partial-image" });
   await openAgent(page);
 
+  const requestReceived = page.waitForRequest((request) =>
+    request.method() === "POST" && request.url().endsWith("/api/agent/runs/run-1/continue"));
   await page.getByRole("button", { name: "继续", exact: true }).click();
-
+  const request = await requestReceived;
   await expect.poll(() => fixture.continuationCalls).toBe(1);
   expect(fixture.lastContinuationBody).toEqual({
-    idempotency_key: expect.stringMatching(/^agent-continue/u),
+    idempotency_key: expect.stringMatching(/^[0-9a-f]{64}$/u),
   });
+  expect(request.headers()["idempotency-key"]).toBe(fixture.lastContinuationBody?.idempotency_key);
 });
 
 test("task tray locates the owning Agent assistant message", async ({

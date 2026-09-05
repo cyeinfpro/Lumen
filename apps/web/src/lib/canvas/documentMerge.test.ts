@@ -4,6 +4,10 @@ import test from "node:test";
 import type { CanvasDocument } from "./types";
 
 const {
+  compareDocumentProjection,
+  compareSelectionProjection,
+  compareExecutionProjection,
+  compareRunProjection,
   decideCanvasRemoteSync,
   mergeCanvasDocumentByRevision,
   mergeCanvasPatchResult,
@@ -209,6 +213,88 @@ test("equal document revisions still accept newer projection records", () => {
 
   const merged = mergeCanvasDocumentByRevision(current, incoming);
   assert.equal(merged.active_runs[0], incoming.active_runs[0]);
+});
+
+test("selection-only stale snapshots retain missing current items using sequence fallback", () => {
+  const current = document(4);
+  current.selections = [
+    { node_id: "a", execution_id: "new", output_index: 0, revision: 5 },
+    { node_id: "b", execution_id: "kept", output_index: 0, revision: 3 },
+  ];
+  const incoming = document(4);
+  incoming.selections = [{ ...current.selections[0]!, revision: 4 }];
+  assert.deepEqual(mergeCanvasDocumentByRevision(current, incoming).selections, current.selections);
+  assert.deepEqual(mergeCanvasDocumentByRevision(current, document(4)).selections, current.selections);
+  assert.deepEqual(mergeCanvasDocumentByRevision(current, current), current);
+  assert.deepEqual(mergeCanvasDocumentByRevision(document(4), document(4)), document(4));
+});
+
+test("runs with missing event sequences fall back to timestamps", () => {
+  const current = document(4);
+  current.active_runs = [{ id: "a", status: "running", updated_at: "2026-07-13T00:00:09Z" }];
+  const incoming = document(4);
+  incoming.active_runs = [{ id: "a", status: "queued", updated_at: "2026-07-13T00:00:08Z" }];
+  assert.equal(mergeCanvasDocumentByRevision(current, incoming).active_runs[0], current.active_runs[0]);
+});
+
+function assertProjectionOrder<T>(compare: (left: T, right: T) => number, ordered: T[]) {
+  for (const [leftIndex, left] of ordered.entries()) {
+    assert.equal(compare(left, left), 0);
+    for (const [rightIndex, right] of ordered.entries()) {
+      const result = compare(left, right);
+      assert.equal(Number.isNaN(result), false);
+      assert.equal(Math.sign(result), Math.sign(leftIndex - rightIndex));
+      assert.equal(result + compare(right, left), 0);
+    }
+  }
+}
+
+test("all projection comparators are reflexive and ordered with missing, equal, and finite versions", () => {
+  const selection = { node_id: "a", execution_id: "e", output_index: 0 };
+  assertProjectionOrder(compareSelectionProjection, [
+    selection,
+    { ...selection, revision: 0 },
+    { ...selection, revision: 5 },
+  ]);
+  assert.equal(compareSelectionProjection(selection, { ...selection, revision: Number.NaN }), 0);
+  const execution = { id: "e", node_id: "a", node_type: "image_generate" as const, status: "running" as const, outputs: [] };
+  assertProjectionOrder(compareExecutionProjection, [
+    execution,
+    { ...execution, updated_at: "2026-07-13T00:00:01Z" },
+    { ...execution, updated_at: "2026-07-13T00:00:02Z" },
+  ]);
+  assert.equal(compareExecutionProjection(execution, { ...execution, updated_at: "invalid" }), 0);
+  const run = { id: "r", status: "running" as const };
+  assertProjectionOrder(compareRunProjection, [
+    run,
+    { ...run, updated_at: "2026-07-13T00:00:01Z" },
+    { ...run, last_event_seq: 1 },
+    { ...run, last_event_seq: 1, updated_at: "2026-07-13T00:00:01Z" },
+    { ...run, last_event_seq: 2 },
+  ]);
+  const empty = document(4);
+  const sequenceOnly = { ...empty, selections: [{ ...selection, revision: 5 }] };
+  const timestamped = { ...empty, active_runs: [{ ...run, updated_at: "2026-07-13T00:00:01Z" }] };
+  assertProjectionOrder(compareDocumentProjection, [
+    empty, sequenceOnly, timestamped,
+    { ...timestamped, selections: [{ ...selection, revision: 5 }] },
+  ]);
+  assert.equal(compareDocumentProjection(empty, { ...empty }), 0);
+  assert.equal(compareRunProjection(run, { ...run, last_event_seq: Number.POSITIVE_INFINITY }), 0);
+});
+
+test("equal timestamps use sequence ordering to preserve missing executions and runs", () => {
+  const current = document(4);
+  current.selections = [{ node_id: "a", execution_id: "e", output_index: 0, revision: 5 }];
+  current.recent_executions = [{ id: "e", node_id: "a", node_type: "image_generate", status: "running", outputs: [] }];
+  current.active_runs = [{ id: "r", status: "running" }];
+  const incoming = document(4);
+  incoming.selections = [{ ...current.selections[0]!, revision: 4 }];
+  const merged = mergeCanvasDocumentByRevision(current, incoming);
+  assert.deepEqual(merged.recent_executions, current.recent_executions);
+  assert.deepEqual(merged.active_runs, current.active_runs);
+  assert.deepEqual(mergeCanvasDocumentByRevision(merged, incoming), merged);
+  assert.equal(mergeCanvasDocumentByRevision(current, document(5)).revision, 5);
 });
 
 test("stale metadata patch responses preserve graph revision while applying input", () => {

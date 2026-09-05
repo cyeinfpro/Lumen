@@ -24,7 +24,6 @@ import {
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { Button } from "@/components/ui/primitives/Button";
 import { Spinner } from "@/components/ui/primitives/Spinner";
 import { toast } from "@/components/ui/primitives/Toast";
 import {
@@ -35,6 +34,7 @@ import {
 import type { WorkflowRun } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
 import { OnlineBanner } from "./components/OnlineBanner";
+import { ProjectDeleteDialog } from "./components/ProjectDeleteDialog";
 import {
   ProjectMobileTabBar,
   ProjectMobileTopBar,
@@ -114,6 +114,7 @@ function PosterConsole({
 
       <section className="page-scroll project-mobile-scroll min-h-0 min-w-0 px-3 pt-3 min-[390px]:px-4 md:px-6 md:pb-8 md:pt-3 xl:px-6">
         <PosterDetailHeader
+          key={workflow.id}
           workflow={workflow}
           refreshing={refreshing}
           onOpenDrawer={() => setDrawerOpen(true)}
@@ -357,30 +358,6 @@ function PosterDetailHeader({
               role="menu"
               className="absolute right-0 top-12 z-[var(--z-tray)] w-[min(18rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] p-1.5 shadow-[var(--shadow-2)]"
             >
-              {confirmDelete ? (
-                <div className="grid gap-2 p-2">
-                  <p className="type-body font-semibold tracking-tight text-[var(--fg-0)]">
-                    确认删除这个项目？
-                  </p>
-                  <p className="type-caption leading-5 text-[var(--fg-2)]">
-                    项目会从列表移除，关联对话不会被删除。
-                  </p>
-                  <div className="mt-1 flex justify-end gap-2">
-                    <Button type="button" variant="ghost" size="sm" onClick={() => setConfirmDelete(false)}>
-                      取消
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="danger"
-                      size="sm"
-                      loading={remove.isPending}
-                      onClick={() => remove.mutate(workflow.id)}
-                    >
-                      删除
-                    </Button>
-                  </div>
-                </div>
-              ) : (
                 <div className="grid gap-0.5">
                   <button
                     type="button"
@@ -397,7 +374,7 @@ function PosterDetailHeader({
                   </button>
                   <button
                     type="button"
-                    onClick={() => setConfirmDelete(true)}
+                    onClick={() => { setMenuOpen(false); setConfirmDelete(true); }}
                     role="menuitem"
                     className="flex min-h-11 cursor-pointer items-center gap-2.5 px-2 text-left type-body-sm text-[var(--danger)] transition-colors hover:bg-[var(--danger-soft)] md:min-h-9"
                   >
@@ -405,11 +382,12 @@ function PosterDetailHeader({
                     删除
                   </button>
                 </div>
-              )}
             </div>
           ) : null}
         </div>
       </div>
+      <ProjectDeleteDialog key={workflow.id} open={confirmDelete} onOpenChange={setConfirmDelete}
+        title={workflowTitle} pending={remove.isPending} onConfirm={() => remove.mutateAsync(workflow.id)} />
     </header>
   );
 }

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import secrets
 import time
 
@@ -28,6 +29,13 @@ _ph = PasswordHasher()
 # values that would otherwise make `exp <= int(time.time())` perpetually false
 # (i.e. cookies that never expire).
 _MAX_SESSION_TIMESTAMP = 2**31 - 1
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def _signature_matches(provided: str, expected: str) -> bool:
+    if _SHA256_HEX.fullmatch(provided) is None:
+        return False
+    return hmac.compare_digest(provided, expected)
 
 
 # ---------- password ----------
@@ -96,7 +104,7 @@ def parse_session_cookie(raw: str | None) -> str | None:
     if exp <= int(time.time()):
         return None
     expected = _hmac(payload, label="session-cookie")
-    if not hmac.compare_digest(sig, expected):
+    if not _signature_matches(sig, expected):
         return None
     return sid
 
@@ -119,7 +127,7 @@ def verify_csrf_token(session_id: str, token: str | None) -> bool:
     if not nonce or len(nonce) < 20 or not sig:
         return False
     expected = _hmac(f"{session_id}:{nonce}", label="csrf-token")
-    return hmac.compare_digest(sig, expected)
+    return _signature_matches(sig, expected)
 
 
 def generate_csrf_token(session_id: str) -> str:

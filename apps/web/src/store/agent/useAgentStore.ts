@@ -29,6 +29,12 @@ import { mergeAgentGeneration } from "@/features/agent/containers/agentRealtime"
 import type { Generation } from "@/lib/types";
 import type { PrivateIdentitySnapshot } from "@/lib/auth/privateIdentityEpoch";
 import { loadAgentDrafts, saveAgentDrafts } from "./draftPersistence";
+import { acknowledgeAgentDraft } from "./submissionReceipts";
+import {
+  ensureAgentOptimisticAttempt,
+  type AgentAttemptHandle,
+  type AgentOptimisticInput,
+} from "@/features/agent/model/optimisticSubmission";
 
 export type AgentRealtimeStatus =
   | "idle"
@@ -56,12 +62,7 @@ interface AgentStoreState {
   removeSession: (sessionId: string) => void;
   applySnapshot: (sessionId: string, snapshot: AgentMessageList) => void;
   applyRunSnapshot: (run: AgentRun) => void;
-  appendOptimistic: (input: {
-    sessionId: string;
-    userMessage: AgentMessage;
-    assistantMessage: AgentMessage;
-    run: AgentRun;
-  }) => void;
+  appendOptimistic: (input: AgentOptimisticInput) => AgentAttemptHandle;
   reconcileSubmission: (input: {
     sessionId: string;
     optimisticUserId: string;
@@ -150,6 +151,16 @@ function initialState(identity: PrivateIdentitySnapshot): Pick<
   };
 }
 
+function acknowledgeSessionDraft(state: AgentStoreState, sessionId: string, runs: AgentRun[]) {
+  const draft = state.draftsBySession[sessionId];
+  if (!draft) return state.draftsBySession;
+  const next = acknowledgeAgentDraft(draft, runs.filter((run) => run.agent_session_id === sessionId));
+  if (next === draft) return state.draftsBySession;
+  const drafts = { ...state.draftsBySession, [sessionId]: next };
+  persist(state, drafts);
+  return drafts;
+}
+
 function createAgentStore() {
   return create<AgentStoreState>((set, get) => ({
     ...initialState({ userId: null, epoch: 0 }),
@@ -224,7 +235,9 @@ function createAgentStore() {
           );
           generationSessionIds[generationId] = sessionId;
         }
+        const draftsBySession = acknowledgeSessionDraft(state, sessionId, snapshot.runs);
         return {
+          draftsBySession,
           messagesBySession: {
             ...state.messagesBySession,
             [sessionId]: reconciled.messages,
@@ -241,17 +254,15 @@ function createAgentStore() {
           [run.id]: mergeAgentRun(state.runsById[run.id], run),
         },
       })),
-    appendOptimistic: ({ sessionId, userMessage, assistantMessage, run }) =>
-      set((state) => ({
-        messagesBySession: {
-          ...state.messagesBySession,
-          [sessionId]: mergeAgentMessageLists(
-            state.messagesBySession[sessionId] ?? [],
-            [userMessage, assistantMessage],
-          ),
-        },
-        runsById: { ...state.runsById, [run.id]: run },
-      })),
+    appendOptimistic: (input) => {
+      let handle!: AgentAttemptHandle;
+      set((state) => {
+        const attempt = ensureAgentOptimisticAttempt(state, input);
+        handle = attempt.handle;
+        return attempt.state;
+      });
+      return handle;
+    },
     reconcileSubmission: ({
       sessionId,
       optimisticUserId,
@@ -259,22 +270,31 @@ function createAgentStore() {
       result,
     }) =>
       set((state) => {
+        const attempts = Object.values(state.runsById).filter(
+          (run) => run.id.startsWith("optimistic:") &&
+            run.agent_session_id === sessionId &&
+            run.idempotency_key === result.agent_run.idempotency_key,
+        );
+        const temporaryIds = new Set([
+          optimisticUserId, optimisticAssistantId,
+          ...attempts.flatMap((run) => [run.user_message_id, run.assistant_message_id]),
+        ]);
         const remaining = (state.messagesBySession[sessionId] ?? []).filter(
-          (message) =>
-            message.id !== optimisticUserId &&
-            message.id !== optimisticAssistantId,
+          (message) => !message.optimistic || !temporaryIds.has(message.id),
         );
         const incoming = adaptAgentMessages(
           [result.user_message, result.assistant_message],
           [result.agent_run],
         );
         const runsById = { ...state.runsById };
-        delete runsById[`optimistic:${optimisticAssistantId}`];
+        for (const attempt of attempts) delete runsById[attempt.id];
         runsById[result.agent_run.id] = mergeAgentRun(
           runsById[result.agent_run.id],
           result.agent_run,
         );
+        const draftsBySession = acknowledgeSessionDraft(state, sessionId, [result.agent_run]);
         return {
+          draftsBySession,
           messagesBySession: {
             ...state.messagesBySession,
             [sessionId]: mergeAgentMessageLists(remaining, incoming),
@@ -292,6 +312,7 @@ function createAgentStore() {
       set((state) => {
         const run = state.runsById[runId];
         const messages = state.messagesBySession[sessionId] ?? [];
+        if (!run?.id.startsWith("optimistic:") || run.agent_session_id !== sessionId) return state;
         return {
           runsById: run
             ? {
@@ -301,7 +322,7 @@ function createAgentStore() {
                   status: "failed",
                   error_code: errorCode,
                   error_message: errorMessage,
-                  finished_at: new Date().toISOString(),
+                  finished_at: null,
                   updated_at: new Date().toISOString(),
                 },
               }
@@ -319,10 +340,17 @@ function createAgentStore() {
     discardOptimistic: ({ sessionId, runId }) =>
       set((state) => {
         const run = state.runsById[runId];
-        if (!run) return state;
+        if (!run?.id.startsWith("optimistic:") || run.agent_session_id !== sessionId) return state;
         const runsById = { ...state.runsById };
         delete runsById[runId];
+        const draft = state.draftsBySession[sessionId];
+        const draftsBySession = draft ? { ...state.draftsBySession, [sessionId]: {
+          ...draft,
+          pendingSubmissions: draft.pendingSubmissions?.filter((receipt) => receipt.key !== run.idempotency_key),
+        } } : state.draftsBySession;
+        persist(state, draftsBySession);
         return {
+          draftsBySession,
           runsById,
           messagesBySession: {
             ...state.messagesBySession,

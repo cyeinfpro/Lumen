@@ -24,7 +24,7 @@ import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } f
 
 import { Button } from "@/components/ui/primitives/Button";
 import { EmptyState } from "@/components/ui/primitives/EmptyState";
-import { MediaControlButton } from "@/components/ui/primitives/MediaControlButton";
+import { IconButton, Input } from "@/components/ui/primitives";
 import { toast } from "@/components/ui/primitives/Toast";
 import { BottomSheet } from "@/components/ui/primitives/mobile/BottomSheet";
 import { useIsMobile } from "@/hooks/useMediaQuery";
@@ -35,10 +35,11 @@ import {
   usePatchWorkflowMutation,
   useWorkflowsQuery,
 } from "@/lib/queries";
-import type { ApparelModelLibraryItem, WorkflowRunListItem } from "@/lib/apiClient";
+import { ApiError, type ApparelModelLibraryItem, type WorkflowRunListItem } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
 import { ProjectMobileTabBar, ProjectMobileTopBar, ProjectTopBar } from "./components/ProjectTopBar";
 import { OnlineBanner } from "./components/OnlineBanner";
+import { ProjectDeleteDialog } from "./components/ProjectDeleteDialog";
 import { STATUS_LABEL } from "./types";
 import { formatRelativeTime, productThumbSrc } from "./utils";
 
@@ -146,7 +147,7 @@ export function ProjectsIndex() {
           {query.isLoading ? (
             <SkeletonGrid />
           ) : query.isError ? (
-            <ErrorPanel onRetry={() => query.refetch()} />
+            <ErrorPanel forbidden={query.error instanceof ApiError && query.error.status === 403} onRetry={() => query.refetch()} />
           ) : items.length === 0 ? (
             <EmptyHero />
           ) : filtered.length === 0 ? (
@@ -263,9 +264,9 @@ function ModelLibraryEntry() {
               模特库
             </h2>
             <p className="type-page-subtitle mt-0.5 hidden max-w-md truncate sm:block">
-              {hasItems
+              {libraryQuery.isError ? "模特库摘要加载失败" : libraryQuery.isLoading ? "模特库加载中" : hasItems
                 ? "浏览预设、收藏与生成的模特"
-                : "进入并新建你的第一个模特"}
+                : "暂无模特"}
             </p>
           </div>
         </div>
@@ -275,7 +276,7 @@ function ModelLibraryEntry() {
               模特
             </p>
             <p className="type-metric ">
-              {String(total).padStart(2, "0")}
+              {libraryQuery.isLoading || libraryQuery.isError ? "--" : String(total).padStart(2, "0")}
             </p>
           </div>
           <span
@@ -372,6 +373,7 @@ function Toolbar({
               key={option.key}
               type="button"
               onClick={() => onFilterChange(option.key)}
+              aria-pressed={active}
               className={cn(
                 "group relative inline-flex min-h-9 shrink-0 cursor-pointer items-baseline gap-1.5 px-2.5 py-1.5 type-body-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]",
                 active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
@@ -420,11 +422,11 @@ function Toolbar({
 
 function ProjectsGrid({ items }: { items: WorkflowRunListItem[] }) {
   return (
-    <section className="grid grid-cols-1 gap-x-4 gap-y-7 min-[390px]:grid-cols-2 md:gap-x-5 md:gap-y-9 lg:grid-cols-3 xl:grid-cols-4">
+    <ul aria-label="项目列表" className="divide-y divide-[var(--border-subtle)] border-y border-[var(--border-subtle)]">
       {items.map((item, index) => (
         <ProjectCard key={item.id} item={item} order={index} />
       ))}
-    </section>
+    </ul>
   );
 }
 
@@ -450,13 +452,13 @@ function ProjectCardMedia({
   running: boolean;
 }) {
   return (
-    <div className="relative aspect-[3/4] overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)]">
+    <div className="relative h-16 w-12 shrink-0 overflow-hidden rounded-[var(--radius-control)] bg-[var(--bg-2)]">
       {thumb ? (
         <Image
           src={thumb}
           alt={item.title || "商品图"}
           fill
-          sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 25vw"
+          sizes="48px"
           unoptimized
           className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
         />
@@ -469,11 +471,11 @@ function ProjectCardMedia({
         aria-hidden
         className="pointer-events-none absolute inset-0 bg-gradient-to-t from-[var(--media-control-bg)] via-transparent to-transparent opacity-0 transition-opacity duration-[var(--dur-base)] group-hover:opacity-100"
       />
-      <span className="type-caption absolute left-3 top-3 inline-flex max-w-[calc(100%-5rem)] items-center gap-2 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-2 py-1 text-[var(--media-control-fg)]">
+      <span className="sr-only">
         N°{String(order + 1).padStart(2, "0")}
       </span>
       {running ? (
-        <span className="type-caption absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-2 py-1 text-accent">
+        <span className="sr-only">
           <span className="relative flex h-1.5 w-1.5">
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-60" />
             <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-accent" />
@@ -485,8 +487,9 @@ function ProjectCardMedia({
   );
 }
 
-// Portrait 杂志卡：大图 + 下方元数据 + hover micro scale
+// Compact project rows keep the primary link separate from resource actions.
 function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number }) {
+  const itemTitle = item.title || "服饰模特图";
   const running = item.status === "running";
   const thumb = productThumbSrc(item);
   const reduceMotion = useReducedMotion();
@@ -494,7 +497,8 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const [title, setTitle] = useState(item.title || "服饰模特图");
+  const [title, setTitle] = useState(itemTitle);
+  const [renameError, setRenameError] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const actionButtonRef = useRef<HTMLButtonElement | null>(null);
   const closeMenu = useCallback(() => {
@@ -503,27 +507,26 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
     setRenaming(false);
   }, []);
   const cancelRename = useCallback(() => {
-    setTitle(item.title || "服饰模特图");
+    setTitle(itemTitle);
     setRenaming(false);
-  }, [item.title]);
+  }, [itemTitle]);
   const patch = usePatchWorkflowMutation({
     onSuccess: () => {
       toast.success("项目已重命名");
       closeMenu();
     },
-    onError: (error) => toast.error(error.message || "重命名失败"),
+    onError: () => setRenameError("名称保存失败"),
   });
   const remove = useDeleteWorkflowMutation({
     onSuccess: () => {
       toast.success("项目已删除");
       closeMenu();
     },
-    onError: (error) => toast.error(error.message || "删除失败"),
   });
   const saveTitle = () => {
     const next = title.trim();
     if (!next) {
-      toast.error("项目名称不能为空");
+      setRenameError("项目名称不能为空");
       return;
     }
     if (next === item.title) {
@@ -558,14 +561,15 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
     setMenuOpen((open) => !open);
     setConfirmingDelete(false);
     setRenaming(false);
-    setTitle(item.title || "服饰模特图");
+    setTitle(itemTitle);
+    setRenameError(null);
   };
 
   const dotTone = projectStatusDotTone(item.status);
 
   return (
-    <motion.div
-      className="group relative"
+    <motion.li
+      className="group relative flex min-w-0 items-center gap-3 py-3"
       layout={!reduceMotion}
       initial={reduceMotion ? false : { opacity: 0, y: 12 }}
       animate={reduceMotion ? undefined : { opacity: 1, y: 0 }}
@@ -580,9 +584,9 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
       }
     >
       <Link
-        href={`/projects/${item.id}`}
-        className="block focus-visible:outline-none"
-        aria-label={item.title || "服饰模特图"}
+        href={`/projects/${encodeURIComponent(item.id)}`}
+        className="flex min-w-0 flex-1 items-center gap-3 rounded-[var(--radius-control)]"
+        aria-label={itemTitle}
       >
         <ProjectCardMedia
           item={item}
@@ -591,16 +595,16 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
           running={running}
         />
 
-        <div className="mt-3 flex items-start justify-between gap-3">
+        <div className="flex min-w-0 flex-1 items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <p className="line-clamp-2 type-body font-medium leading-[1.35] text-[var(--fg-0)] transition-colors duration-[var(--dur-base)]">
-              {item.title || "服饰模特图"}
+              {itemTitle}
             </p>
             <p className="mt-1.5 flex items-center gap-2 type-caption text-[var(--fg-2)]">
               <span aria-hidden className={cn("inline-block h-1.5 w-1.5 rounded-full", dotTone)} />
               <span className="truncate">{STATUS_LABEL[item.status] ?? item.status}</span>
               <span aria-hidden className="text-[var(--fg-3)]">·</span>
-              <span className="truncate">{formatRelativeTime(item.updated_at)}</span>
+              <time dateTime={item.updated_at} className="truncate">更新于 {formatRelativeTime(item.updated_at)}</time>
             </p>
             {item.next_action ? (
               <p className="mt-1.5 line-clamp-1 type-caption text-accent">
@@ -611,17 +615,17 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
         </div>
       </Link>
 
-      <MediaControlButton
+      <IconButton
         ref={actionButtonRef}
         size="sm"
-        aria-label="项目操作"
+        tooltip="项目操作"
+        aria-label={`${itemTitle}的项目操作`}
         aria-haspopup="menu"
         aria-expanded={menuOpen}
         onClick={openMenu}
-        className="absolute right-1 top-1 opacity-100 md:opacity-0 md:group-hover:opacity-100"
       >
         <MoreHorizontal className="h-4 w-4" />
-      </MediaControlButton>
+      </IconButton>
 
       {menuOpen && isMobile === false ? (
         <div
@@ -637,9 +641,12 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
                 saveTitle();
               }}
             >
-              <input
+              <Input
+                label="项目名称"
+                error={renameError ?? undefined}
+                disabled={patch.isPending}
                 value={title}
-                onChange={(event) => setTitle(event.target.value)}
+                onChange={(event) => { setTitle(event.target.value); setRenameError(null); }}
                 maxLength={120}
                 autoFocus
                 className="control-shell h-10 px-3 type-body-sm text-[var(--fg-0)] outline-none focus:border-accent-border focus:shadow-[var(--ring)]"
@@ -653,27 +660,6 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
                 </Button>
               </div>
             </form>
-          ) : confirmingDelete ? (
-            <div className="grid gap-2 p-1.5">
-              <p className="type-body-sm text-[var(--fg-0)]">确认删除这个项目？</p>
-              <p className="type-caption leading-5 text-[var(--fg-2)]">
-                项目会从列表移除，关联对话不会被删除。
-              </p>
-              <div className="flex justify-end gap-2">
-                <Button type="button" variant="ghost" size="sm" onClick={() => setConfirmingDelete(false)}>
-                  取消
-                </Button>
-                <Button
-                  type="button"
-                  variant="danger"
-                  size="sm"
-                  disabled={remove.isPending}
-                  onClick={() => remove.mutate(item.id)}
-                >
-                  删除
-                </Button>
-              </div>
-            </div>
           ) : (
             <div className="grid gap-0.5">
               <button
@@ -687,7 +673,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
               </button>
               <button
                 type="button"
-                onClick={() => setConfirmingDelete(true)}
+                onClick={() => { setMenuOpen(false); setConfirmingDelete(true); }}
                 role="menuitem"
                 className="flex min-h-9 cursor-pointer items-center gap-2.5 px-2 text-left type-body-sm text-[var(--danger)] transition-colors hover:bg-[var(--danger-soft)]"
               >
@@ -710,20 +696,25 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
             title={title}
             itemTitle={item.title}
             renaming={renaming}
-            confirmingDelete={confirmingDelete}
-            onTitleChange={setTitle}
+            error={renameError}
+            onTitleChange={(value) => { setTitle(value); setRenameError(null); }}
             onStartRename={() => setRenaming(true)}
             onCancelRename={cancelRename}
             onSaveRename={saveTitle}
-            onStartDelete={() => setConfirmingDelete(true)}
-            onCancelDelete={() => setConfirmingDelete(false)}
-            onConfirmDelete={() => remove.mutate(item.id)}
+            onStartDelete={() => { setMenuOpen(false); setConfirmingDelete(true); }}
             onClose={closeMenu}
             patchPending={patch.isPending}
-            removePending={remove.isPending}
           />
         </BottomSheet>
       ) : null}
-    </motion.div>
+      <ProjectDeleteDialog
+        key={item.id}
+        open={confirmingDelete}
+        onOpenChange={setConfirmingDelete}
+        title={itemTitle}
+        pending={remove.isPending}
+        onConfirm={() => remove.mutateAsync(item.id)}
+      />
+    </motion.li>
   );
 }

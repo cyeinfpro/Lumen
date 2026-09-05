@@ -1,6 +1,6 @@
 "use client";
 
-import type React from "react";
+import { useId, type RefObject } from "react";
 import {
   CheckCircle2,
   FileText,
@@ -53,6 +53,7 @@ export function SystemPromptEditorFields({
   name,
   content,
   errorMessage,
+  fieldErrors,
   nameInputRef,
   fileInputRef,
   onNameChange,
@@ -62,19 +63,24 @@ export function SystemPromptEditorFields({
   name: string;
   content: string;
   errorMessage: string | null;
-  nameInputRef: React.RefObject<HTMLInputElement | null>;
+  fieldErrors: { name?: string; content?: string };
+  nameInputRef: RefObject<HTMLInputElement | null>;
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   onNameChange: (value: string) => void;
   onContentChange: (value: string) => void;
   onImport: (file: File | undefined) => Promise<void>;
 }) {
+  const id = useId();
   return (
     <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto p-4 sm:p-5 scrollbar-thin">
-      <label className="block type-caption font-medium text-[var(--fg-1)]">
+      <label htmlFor={`${id}-name`} className="block type-caption font-medium text-[var(--fg-1)]">
         名称
       </label>
       <input
         ref={nameInputRef}
+        id={`${id}-name`}
+        aria-invalid={Boolean(fieldErrors.name)}
+        aria-describedby={fieldErrors.name ? `${id}-name-error` : undefined}
         value={name}
         onChange={(event) => onNameChange(event.target.value)}
         maxLength={120}
@@ -82,13 +88,17 @@ export function SystemPromptEditorFields({
         placeholder="例如：图片导演"
       />
 
+      {fieldErrors.name ? <p id={`${id}-name-error`} role="alert" className="mt-1 type-caption text-[var(--danger-fg)]">{fieldErrors.name}</p> : null}
       <div className="mt-4 flex items-center justify-between gap-3">
-        <label className="type-caption font-medium text-[var(--fg-1)]">内容</label>
+        <label htmlFor={`${id}-content`} className="type-caption font-medium text-[var(--fg-1)]">内容</label>
         <div className="type-caption tabular-nums text-[var(--fg-2)]">
           {content.length}/10000
         </div>
       </div>
       <textarea
+        id={`${id}-content`}
+        aria-invalid={Boolean(fieldErrors.content)}
+        aria-describedby={fieldErrors.content ? `${id}-content-error` : undefined}
         value={content}
         onChange={(event) => onContentChange(event.target.value)}
         rows={14}
@@ -96,6 +106,7 @@ export function SystemPromptEditorFields({
         placeholder="写入这个会话要遵守的角色、风格、限制和输出格式…"
       />
 
+      {fieldErrors.content ? <p id={`${id}-content-error`} role="alert" className="mt-1 type-caption text-[var(--danger-fg)]">{fieldErrors.content}</p> : null}
       {errorMessage ? (
         <p
           role="alert"

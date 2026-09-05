@@ -47,6 +47,12 @@ function tierForPixels(
   return tier;
 }
 
+function validUnitPrice(value: unknown): number | null {
+  if (value == null || String(value).trim() === "") return null;
+  const price = Number(value);
+  return Number.isFinite(price) && price >= 0 ? price : null;
+}
+
 export function useComposerCostEstimate(input: {
   mode: ComposerMode;
   quality: Quality;
@@ -111,10 +117,14 @@ export function useComposerCostEstimate(input: {
         tier,
       };
     }
+    const unitPrice = validUnitPrice(rule.price.rmb);
+    if (unitPrice === null) {
+      return { label: "费用暂不可用", warning: true, loading: false, tier };
+    }
     const count = Math.max(1, Math.min(16, input.count || 1));
-    const amountRmb = Number(rule.price.rmb ?? 0) * count;
+    const amountRmb = unitPrice * count;
     return {
-      label: `预计扣 ¥${amountRmb.toFixed(2)}`,
+      label: `预计 ¥${amountRmb.toFixed(2)}`,
       warning: false,
       loading: false,
       amountRmb,

@@ -1,10 +1,10 @@
-@import "tailwindcss";
+@import "tailwindcss" source(none);
 @import "./markdown.css";
 
 /* 显式声明 content scan 范围，避免 Tailwind 扫到 eslint.config.mjs 等配置文件
    中的 message 字符串（包含 utility 名）误生成不存在的 class，污染 CSS 输出与 build log。
    仅扫描 src/ 下的源代码文件。 */
-@source "./src/**/*.{ts,tsx,js,jsx,mdx,html}";
+@source "../";
 
 @theme {
   /* === 语义色 utility（V1 设计语言统一, 2026-05-09） ===
@@ -41,6 +41,23 @@
 }
 
 @layer base {
+  /* Resolve shared roles at each theme boundary; only palette values vary below. */
+  :root, .theme-dark, .dark, .theme-light {
+    --fg-muted: var(--fg-muted-aa);
+    --fg-disabled: var(--fg-3);
+    --surface-canvas: var(--bg-0);
+    --surface-chrome: var(--bg-1);
+    --surface-panel: var(--bg-2);
+    --surface-raised: var(--bg-3);
+    --button-primary-bg: var(--accent);
+    --button-primary-bg-hover: var(--accent-hover);
+    --button-secondary-bg: color-mix(in srgb, var(--fg-0) 5%, transparent);
+    --button-secondary-bg-hover: color-mix(in srgb, var(--fg-0) 8%, transparent);
+    --button-glass-bg: color-mix(in srgb, var(--surface-glass) 88%, transparent);
+    --button-glass-bg-hover: var(--surface-glass);
+    --markdown-link-decoration: color-mix(in srgb, var(--link-fg) 60%, transparent);
+  }
+
   :root {
     /* === Darkroom 令牌（V1 Mobile Redesign, 2026-04-24） ===
        默认按暗色兜底；无 cookie 时下面的 prefers-color-scheme 会接管系统亮色。
@@ -59,14 +76,8 @@
     --fg-2: #8A8378;
     --fg-3: #5E5951;
     --fg-muted-aa: #918A7F;
-    --fg-muted: var(--fg-muted-aa);
-    --fg-disabled: var(--fg-3);
 
     /* Luminous Darkroom 2.0 surface roles */
-    --surface-canvas: var(--bg-0);
-    --surface-chrome: var(--bg-1);
-    --surface-panel: var(--bg-2);
-    --surface-raised: var(--bg-3);
     --surface-overlay: #202229;
     --surface-media: #050506;
     --surface-selected: rgba(245, 242, 235, 0.075);
@@ -97,6 +108,7 @@
     --success-fg: #30A46C;
     --warning-fg: #F2A93A;
     --info-fg:    #3E9EFF;
+    --link-fg:    #8BC5FF;
     --accent-on:  #08080A;
     --danger-on:  #08080A;
     --success-on: #08080A;
@@ -120,11 +132,6 @@
     --accent-soft:   rgba(242, 169, 58, 0.12);
     --accent-border: var(--border-amber);
     --surface-glass: rgba(18, 19, 24, 0.94);
-    --button-primary-bg: linear-gradient(180deg, var(--amber-300), var(--amber-500));
-    --button-secondary-bg: color-mix(in srgb, var(--fg-0) 5%, transparent);
-    --button-secondary-bg-hover: color-mix(in srgb, var(--fg-0) 8%, transparent);
-    --button-glass-bg: color-mix(in srgb, var(--surface-glass) 88%, transparent);
-    --button-glass-bg-hover: var(--surface-glass);
 
     /* Stable application geometry */
     --appbar-h: 56px;
@@ -151,7 +158,6 @@
     --media-control-bg: rgba(0, 0, 0, 0.70);
     --media-control-fg: #FFFFFF;
     --selection-bg: rgba(242, 169, 58, 0.30);
-    --markdown-link-decoration: rgba(242, 169, 58, 0.50);
     --markdown-accent-border: rgba(242, 169, 58, 0.30);
     --markdown-inline-code-bg: rgba(255, 255, 255, 0.07);
     --markdown-code-bg: rgba(0, 0, 0, 0.35);
@@ -299,11 +305,7 @@
     --fg-2: #8A8378;
     --fg-3: #5E5951;
     --fg-muted-aa: #918A7F;
-    --fg-disabled: var(--fg-3);
-    --surface-canvas: var(--bg-0);
-    --surface-chrome: var(--bg-1);
-    --surface-panel: var(--bg-2);
-    --surface-raised: var(--bg-3);
+    --link-fg: #8BC5FF;
     --surface-overlay: #202229;
     --surface-media: #050506;
     --surface-selected: rgba(245, 242, 235, 0.075);
@@ -330,11 +332,7 @@
     --fg-2: #676E7A;
     --fg-3: #A7ADB7;
     --fg-muted-aa: #5D646E;
-    --fg-disabled: #A7ADB7;
-    --surface-canvas: var(--bg-0);
-    --surface-chrome: var(--bg-1);
-    --surface-panel: var(--bg-2);
-    --surface-raised: var(--bg-3);
+    --link-fg: #075DA8;
     --surface-overlay: #E1E4E8;
     --surface-media: #0B0C0E;
     --surface-selected: rgba(23, 25, 28, 0.07);
@@ -349,7 +347,6 @@
     --surface-scrim: rgba(15, 17, 20, 0.32);
     --surface-glass: rgba(255, 255, 255, 0.78);
     --selection-bg: rgba(184, 117, 29, 0.24);
-    --markdown-link-decoration: rgba(159, 87, 0, 0.46);
     --markdown-accent-border: rgba(159, 87, 0, 0.30);
     --markdown-inline-code-bg: rgba(23, 25, 28, 0.06);
     --markdown-code-bg: rgba(23, 25, 28, 0.92);
@@ -384,11 +381,7 @@
       --fg-2: #676E7A;
       --fg-3: #A7ADB7;
       --fg-muted-aa: #5D646E;
-      --fg-disabled: #A7ADB7;
-      --surface-canvas: var(--bg-0);
-      --surface-chrome: var(--bg-1);
-      --surface-panel: var(--bg-2);
-      --surface-raised: var(--bg-3);
+      --link-fg: #075DA8;
       --surface-overlay: #E1E4E8;
       --surface-media: #0B0C0E;
       --surface-selected: rgba(23, 25, 28, 0.07);
@@ -403,7 +396,6 @@
       --surface-scrim: rgba(15, 17, 20, 0.32);
       --surface-glass: rgba(255, 255, 255, 0.78);
       --selection-bg: rgba(184, 117, 29, 0.24);
-      --markdown-link-decoration: rgba(159, 87, 0, 0.46);
       --markdown-accent-border: rgba(159, 87, 0, 0.30);
       --markdown-inline-code-bg: rgba(23, 25, 28, 0.06);
       --markdown-code-bg: rgba(23, 25, 28, 0.92);
@@ -569,28 +561,24 @@
   .surface-card {
     border-radius: var(--radius-card);
     border: 1px solid var(--border);
-    background: color-mix(in srgb, var(--bg-1) 92%, transparent);
+    background: var(--bg-1);
     box-shadow: var(--shadow-1);
     isolation: isolate;
   }
   .surface-card-hover {
     transition:
-      transform var(--dur-fast) var(--ease-shutter),
       border-color var(--dur-base) var(--ease-develop),
       background-color var(--dur-base) var(--ease-develop);
   }
   @media (hover: hover) and (pointer: fine) {
     .surface-card-hover:hover {
-      transform: translateY(-2px);
       border-color: var(--border-strong);
       background: var(--bg-2);
-      box-shadow: var(--shadow-2);
     }
   }
   [data-lumen-card="true"]:focus-within,
   .surface-card-hover:focus-within {
     border-color: var(--border-strong);
-    box-shadow: var(--shadow-2);
   }
   .surface-panel {
     border-radius: var(--radius-panel);
@@ -622,30 +610,22 @@
       ),
       var(--bg-1);
     box-shadow: var(--shadow-1);
-    transition:
-      transform var(--dur-fast) var(--ease-shutter),
-      border-color var(--dur-base) var(--ease-develop),
-      box-shadow var(--dur-base) var(--ease-develop);
+    transition: border-color var(--dur-base) var(--ease-develop);
   }
   @media (hover: hover) and (pointer: fine) {
     .surface-card-v2:hover {
       border-color: var(--border-strong);
-      box-shadow: var(--shadow-2);
-      transform: translateY(-1px);
     }
   }
   .surface-card-v2:focus-within {
     border-color: var(--border-strong);
-    box-shadow: var(--shadow-2);
   }
 
-  /* Persistent glass chrome, including the desktop application bar. */
+  /* Compatibility name: persistent chrome is opaque; glass is for overlays. */
   .surface-glass-v2 {
     isolation: isolate;
     border-bottom: 1px solid var(--border-subtle);
-    background: color-mix(in srgb, var(--surface-glass) 82%, transparent);
-    -webkit-backdrop-filter: blur(16px) saturate(180%);
-    backdrop-filter: blur(16px) saturate(180%);
+    background: var(--surface-chrome);
   }
   .control-shell {
     border-radius: var(--radius-control);

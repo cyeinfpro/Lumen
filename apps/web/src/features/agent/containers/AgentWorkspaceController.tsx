@@ -36,7 +36,8 @@ import { useSSE, type SSEHandlers } from "@/features/realtime";
 import { useSystemPromptsQuery } from "@/lib/queries";
 import { qk } from "@/lib/queries/queryKeys";
 import { useUserQueryScope } from "@/lib/queries/userScope";
-import { getPrivateIdentitySnapshot } from "@/lib/auth/privateIdentityEpoch";
+import { getPrivateIdentitySnapshot, isPrivateIdentitySnapshotCurrent } from "@/lib/auth/privateIdentityEpoch";
+import { confirmObservedAgentRuns, submitLogicalAgentMessage } from "../api/logicalAgentRequests";
 import {
   selectAgentDraft,
   useAgentStore,
@@ -57,13 +58,17 @@ import { useAgentSnapshotPolling } from "./useAgentSnapshotPolling";
 import { useAgentMediaActions } from "./useAgentMediaActions";
 import {
   createSessionForSubmission,
-  agentMessageBody,
+  agentMessagePayload,
+  rememberAgentSubmission,
+  retainedAgentSubmissionKey,
+  agentDraftHasContent,
+  clearConfirmedAgentDraft,
+  agentSubmissionErrorPresentation,
+  applyAgentSubmissionFeedback,
   acquireAgentSubmissionFence,
-  postAgentMessageWithTransportRetry,
   releaseAgentSubmissionFence,
   reconcileFailedAgentSubmission,
   stageOptimisticSubmission,
-  uniqueAgentId,
 } from "./agentSubmission";
 import {
   AgentWorkspaceView,
@@ -85,6 +90,8 @@ export function AgentWorkspaceController({
   const queryClient = useQueryClient();
   const search = useSearchParams();
   const [submitting, setSubmitting] = useState(false);
+  const [checkingSubmission, setCheckingSubmission] = useState(false);
+  const checkingRef = useRef(false);
   const [composerAction, setComposerAction] = useState<{ href: string; label: string } | null>(null);
   const submissionRef = useRef(false);
   const refreshCoordinator = useMemo(() => new AgentRefreshCoordinator(), []);
@@ -114,7 +121,6 @@ export function AgentWorkspaceController({
   const setDraftAttachmentRole = useAgentStore((state) => state.setDraftAttachmentRole);
   const addDraftFile = useAgentStore((state) => state.addDraftFile);
   const removeDraftFile = useAgentStore((state) => state.removeDraftFile);
-  const clearDraftContent = useAgentStore((state) => state.clearDraftContent);
   const migrateDraft = useAgentStore((state) => state.migrateDraft);
   const setComposerError = useAgentStore((state) => state.setComposerError);
   const setRealtimeStatus = useAgentStore((state) => state.setRealtimeStatus);
@@ -168,12 +174,15 @@ export function AgentWorkspaceController({
   const activeRunQuery = useAgentActiveRunQuery(currentSessionId);
   const sessionImagesQuery = useAgentSessionImagesQuery(currentSessionId);
   useEffect(() => {
+    const identity = getPrivateIdentitySnapshot();
+    if (identity.userId !== userScope.userId) return;
     if (currentSessionId && messagesQuery.data) {
       for (const page of messagesQuery.data.pages) {
         applySnapshot(currentSessionId, page);
+        void confirmObservedAgentRuns(identity, currentSessionId, page.runs).catch(() => undefined);
       }
     }
-  }, [applySnapshot, currentSessionId, messagesQuery.data]);
+  }, [applySnapshot, currentSessionId, messagesQuery.data, userScope.userId]);
   useEffect(() => {
     if (activeRunQuery.data) applyRunSnapshot(activeRunQuery.data);
   }, [activeRunQuery.data, applyRunSnapshot]);
@@ -212,6 +221,7 @@ export function AgentWorkspaceController({
       ) return;
       applySnapshot(sessionId, snapshot);
       if (run) applyRunSnapshot(run);
+      await confirmObservedAgentRuns(identity, sessionId, snapshot.runs);
     },
     [applyRunSnapshot, applySnapshot],
   );
@@ -375,16 +385,14 @@ export function AgentWorkspaceController({
     let sessionId = useAgentStore.getState().currentSessionId;
     let sendDraft = selectAgentDraft(useAgentStore.getState(), sessionId);
     let optimistic: ReturnType<typeof stageOptimisticSubmission> | null = null;
-    if (
-      !sendDraft.text.trim() &&
-      sendDraft.attachments.length === 0 &&
-      sendDraft.files.length === 0
-    ) return;
+    if (!agentDraftHasContent(sendDraft)) return;
     if (!acquireAgentSubmissionFence(submissionRef)) return;
     setSubmitting(true);
+    const identity = getPrivateIdentitySnapshot();
     try {
       if (!sessionId) {
         sessionId = await createSessionForSubmission({
+          identity,
           draft: sendDraft,
           toolGatewayConfigured,
           create: createMutation.mutateAsync,
@@ -395,26 +403,33 @@ export function AgentWorkspaceController({
         });
         sendDraft = selectAgentDraft(useAgentStore.getState(), sessionId);
       }
-      const idempotencyKey = uniqueAgentId("agent-message").slice(0, 96);
-      optimistic = stageOptimisticSubmission({
+      const targetSessionId = sessionId;
+      const result = await submitLogicalAgentMessage({
+        userId: identity.userId!,
         sessionId,
-        draft: sendDraft,
-        append: appendOptimistic,
-        idempotencyKey,
+        payload: agentMessagePayload(sendDraft, toolGatewayConfigured),
+        retryKey: retainedAgentSubmissionKey(sendDraft, toolGatewayConfigured),
+        onAttempt: (idempotencyKey) => {
+          rememberAgentSubmission(targetSessionId, sendDraft, toolGatewayConfigured, idempotencyKey);
+          optimistic = stageOptimisticSubmission({
+            sessionId: targetSessionId,
+            draft: sendDraft,
+            append: appendOptimistic,
+            idempotencyKey,
+          });
+        },
       });
-      const body = agentMessageBody(
-        sendDraft,
-        toolGatewayConfigured,
-        idempotencyKey,
-      );
-      const result = await postAgentMessageWithTransportRetry(sessionId, body);
+      if (!isPrivateIdentitySnapshotCurrent(identity)) return;
+      // A snapshot may have replaced the staged handle before this reply.
+      const attempt = optimistic as ReturnType<typeof stageOptimisticSubmission> | null;
+      if (!attempt) return;
       reconcileSubmission({
         sessionId,
-        optimisticUserId: optimistic.userMessageId,
-        optimisticAssistantId: optimistic.assistantMessageId,
+        optimisticUserId: attempt.userMessageId,
+        optimisticAssistantId: attempt.assistantMessageId,
         result,
       });
-      clearDraftContent(sessionId);
+      clearConfirmedAgentDraft(sessionId, sendDraft);
       const existingSession = useAgentStore.getState().sessions[sessionId];
       if (existingSession) {
         upsertSession({
@@ -428,6 +443,7 @@ export function AgentWorkspaceController({
       void queryClient.invalidateQueries({ queryKey: qk.user(userScope.userId).agentAll() });
       requestRefresh();
     } catch (error) {
+      if (!isPrivateIdentitySnapshotCurrent(identity)) return;
       reconcileFailedAgentSubmission({
         sessionId,
         optimistic,
@@ -435,19 +451,19 @@ export function AgentWorkspaceController({
         discard: discardOptimistic,
         fail: failOptimistic,
       });
-      const presentation = agentErrorPresentation(error);
-      setComposerError(presentation.detail);
-      setComposerAction(
-        presentation.href && presentation.actionLabel
-          ? { href: presentation.href, label: presentation.actionLabel }
-          : null,
-      );
+      applyAgentSubmissionFeedback({
+        sessionId,
+        attempt: optimistic,
+        error,
+        setError: setComposerError,
+        setAction: setComposerAction,
+      });
       requestRefresh();
     } finally {
       releaseAgentSubmissionFence(submissionRef);
       setSubmitting(false);
     }
-  }, [activeRun, appendOptimistic, clearDraftContent, createMutation, discardOptimistic, failOptimistic, migrateDraft, queryClient, reconcileSubmission, requestRefresh, selectWithRoute, setComposerError, setCurrentSession, submitting, toolGatewayConfigured, upsertSession, userScope.userId]);
+  }, [activeRun, appendOptimistic, createMutation, discardOptimistic, failOptimistic, migrateDraft, queryClient, reconcileSubmission, requestRefresh, selectWithRoute, setComposerError, setCurrentSession, submitting, toolGatewayConfigured, upsertSession, userScope.userId]);
 
   const deleteSession = useCallback(async (sessionId: string) => {
     await deleteMutation.mutateAsync(sessionId);
@@ -476,18 +492,23 @@ export function AgentWorkspaceController({
     if (!assistant.agentRunId) return;
     const source = useAgentStore.getState().runsById[assistant.agentRunId];
     if (!source?.continuable || continueMutation.isPending) return;
+    const identity = getPrivateIdentitySnapshot();
     continueMutation.mutate(
       {
         runId: source.id,
-        idempotencyKey: uniqueAgentId("agent-continue").slice(0, 96),
+        sessionId: source.agent_session_id,
+        identity,
       },
       {
         onSuccess: (run) => {
+          if (!isPrivateIdentitySnapshotCurrent(identity)) return;
           applyRunSnapshot(run);
           requestRefresh();
         },
         onError: (error) => {
-          setComposerError(agentErrorPresentation(error).detail);
+          if (!isPrivateIdentitySnapshotCurrent(identity)) return;
+          setComposerError(agentSubmissionErrorPresentation(error).detail);
+          requestRefresh();
         },
       },
     );
@@ -502,6 +523,7 @@ export function AgentWorkspaceController({
     draft,
     sessionsLoading: sessionsQuery.isLoading,
     messagesLoading: messagesQuery.isLoading,
+    checkingSubmission,
     sessionsHaveMore: Boolean(sessionsQuery.hasNextPage),
     sessionsLoadingMore: sessionsQuery.isFetchingNextPage,
     sessionSearch,
@@ -566,7 +588,13 @@ export function AgentWorkspaceController({
       );
     },
     onRetryMessages: () => {
-      void messagesQuery.refetch();
+      if (checkingRef.current) return;
+      checkingRef.current = true;
+      setCheckingSubmission(true);
+      void messagesQuery.refetch({ cancelRefetch: false }).finally(() => {
+        checkingRef.current = false;
+        setCheckingSubmission(false);
+      });
       reconnect();
     },
     onTextChange: (text: string) => setDraftText(currentSessionId, text),

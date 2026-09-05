@@ -1,7 +1,7 @@
 ---
 status: current
 owner: web
-last_reviewed: 2026-09-03
+last_reviewed: 2026-09-05
 supersedes_frontend_guidance: docs/DESIGN.md
 ---
 
@@ -24,7 +24,7 @@ supersedes_frontend_guidance: docs/DESIGN.md
 | 中文禁用 mono / uppercase / 大 tracking | 接受 | 见 4.1；技术数据继续使用 `type-mono-meta` / `tabular-nums` |
 | 提案中的 7 档紧缩字号 | 暂不全局替换 | 保留本文件 14 档现有阶梯，避免跨页面信息层级回归；最小业务标签提升到 11px |
 | App Bar 52px | 不接受 | 保留 `--appbar-h: 56px`，同步维持滚动、抽屉和骨架占位契约 |
-| 所有卡片无条件 hover 位移 | 条件接受 | 仅精确指针 hover 提升；触控与 Reduced Motion 不位移 |
+| 所有卡片无条件 hover 位移 | 不接受 | 精确指针 hover 只反馈中性边界或背景；卡片不位移、不追加阴影 |
 
 ---
 
@@ -57,11 +57,17 @@ supersedes_frontend_guidance: docs/DESIGN.md
 | 成功 toast | `bg-success-soft text-success` | `bg-emerald-500/10 text-emerald-300` |
 | 信息提示 | `bg-info-soft text-info` | `bg-sky-500/10 text-sky-300` 或 `bg-blue-500/10 text-blue-300` |
 | 即将到期警告 | `bg-warning-soft text-warning` | `bg-amber-500/15 text-amber-200` |
-| 装饰性光晕（保留） | `var(--amber-glow)` / `var(--shadow-amber)` | — |
+| 瞬时品牌强调、媒体显影 | `var(--amber-glow)` / `var(--shadow-amber)` | 普通按钮 hover、常驻工作区光晕 |
 
 ### 1.3 亮色对比度补偿
 
 `bg-danger` 等 utility 是字面量，亮色模式可读性可能不足。密集正文场景用 `text-[var(--danger-fg)]`：暗模式回落到 `--danger`，亮模式由 `.theme-light` 覆盖到 Radix step 11 的加深色（AA ≥ 4.5:1）。
+
+正文链接和 `Button variant="link"` 使用独立 `--link-fg`，不要复用填充色 `--info`、
+`--accent`，也不要直接把已有 `--info-fg` 当作全背景合格的链接色。`--link-fg` 在显式暗色、
+显式亮色和系统主题下，对 `--bg-0` 到 `--bg-3` 及 `--surface-overlay` 均须达到 AA 4.5:1。
+Hover 使用下划线反馈，不降低文字 opacity。可读的辅助文案使用 `--fg-muted-aa`；
+`--fg-3` / `--fg-disabled` 只用于失能内容，不用于仍需阅读的分组说明。
 
 ### 1.4 中性灰
 
@@ -71,7 +77,11 @@ supersedes_frontend_guidance: docs/DESIGN.md
 - **前景**：`text-[var(--fg-0)]`（最强对比）→ `fg-1` → `fg-2` → `fg-3`（最弱，失能态）
 - **描边**：`border-[var(--border-subtle)]` → `border` → `border-strong`
 
-**禁止** `text-neutral-*` `bg-neutral-*` `border-white/N`（已有 `.theme-light` 兼容覆盖，但新代码不要写）。
+**禁止** `text-neutral-*` `bg-neutral-*` `border-white/N`；没有全局亮色兼容覆盖，需在调用点使用语义 token。
+
+主题边界共用现有 surface、button、muted 与 Markdown 别名，只覆盖必要的深浅色值。
+不新增 `--wb-*` 色板、第二个主题控制器或永久 v1/v2 业务分支。显式亮色与系统亮色的
+色值声明保持同步测试，避免为消除少量声明而改变浏览器支持范围。
 
 ---
 
@@ -97,9 +107,9 @@ supersedes_frontend_guidance: docs/DESIGN.md
 | token | 用途 |
 |---|---|
 | `--shadow-1` | 静态卡片、Input |
-| `--shadow-2` | 浮起 / hover 提一档、Drawer、Tooltip |
+| `--shadow-2` | 浮层、Drawer、Tooltip；不是普通 hover 反馈 |
 | `--shadow-3` | 弹窗、Toast |
-| `--shadow-amber` | 品牌强调光晕 |
+| `--shadow-amber` | 瞬时品牌强调或媒体状态；不用于普通 primary / hover |
 | `--shadow-shutter` | 显影动画特例 |
 
 写法：`shadow-[var(--shadow-1)]`。
@@ -207,23 +217,28 @@ supersedes_frontend_guidance: docs/DESIGN.md
 
 | class | 用途 |
 |---|---|
-| `surface-card` | 标准卡片（border + shadow-1 + 半透明 bg-1） |
-| `surface-card-hover` | 配合上面用，hover 自动提升 border + shadow |
+| `surface-card` | 独立内容卡片（border + shadow-1 + 不透明 bg-1） |
+| `surface-card-hover` | 配合上面用，hover 反馈中性 border + background，不位移、不提升阴影 |
 | `surface-card-v2` | 需要更细腻高光层次的独立内容卡片；仍只消费语义 surface/border/shadow token |
 | `surface-panel` | 浮层、Tooltip、Drawer（border + shadow-2 + blur 16） |
 | `surface-dialog` | 弹窗（border + shadow-3 + blur 20） |
-| `surface-glass-v2` | 全局 App Bar 等持续性玻璃 chrome；使用主题 surface 与底部分隔线 |
+| `surface-glass-v2` | 保留兼容名称；全局 App Bar 等常驻 chrome 使用不透明 `--surface-chrome` 与底部分隔线，无 blur |
 | `control-shell` | 输入框/Segmented 的统一外壳 |
 
-`surface-card-v2` 的提升态只在 `(hover: hover) and (pointer: fine)` 生效，并为键盘
-`focus-within` 提供同等级边界反馈；Reduced Motion 下不位移。`surface-glass-v2` 在 Reduced
-Transparency 下回退到不透明 `--bg-1`。两者不得写暗色专用 rgba/hex 覆盖，因此显式亮暗主题和
-跟随系统主题走同一套语义解析。
+`surface-card-v2` 的 hover 边界反馈只在 `(hover: hover) and (pointer: fine)` 生效，并为键盘
+`focus-within` 提供同等级边界反馈；任何主题下都不做 hover 位移或阴影提升。独立媒体卡片
+保留轻微语义高光，普通页面分区仍保持无卡片结构。`surface-panel` / `surface-dialog` 的浮层
+玻璃材质与 `glass` 按钮仍可保留，但在 Reduced Transparency 下回退到不透明 `--bg-1`。
+不要把浮层玻璃材质用于常驻工作区，也不要写暗色专用 rgba/hex 覆盖。
+Reduced Motion 继续停用共享 CSS 动画、滚动和按压变形；JavaScript 动画使用已有 reduced-motion 能力。
 
 ### 6.1 控件原语
 
-- `Button` 的 `primary` 使用语义化琥珀渐变与 `--shadow-amber`，`secondary` 使用弱中性表面，
-  `glass` 使用玻璃表面；业务组件不得复制或覆盖这三种材质，只可追加布局类。
+- `Button` 的 `primary` 使用 `--button-primary-bg` → `--accent` 纯色，hover 使用
+  `--button-primary-bg-hover` → `--accent-hover`，不叠加 glow、渐变或阴影；`secondary` 使用弱中性表面。
+  `glass` 仅用于需要与媒体或浮层内容分离的操作；业务组件不得复制材质，只可追加布局类。
+- 交互控件继承全局 `--focus-outline` 语义焦点轮廓；主动作文字使用 `--accent-on`，
+  不以发光替代可见焦点。现有 44×44 触控区域、safe-area 与 viewport 几何保持不变。
 - 普通 hover 保持中性。琥珀只用于主动作、焦点和当前状态；侧栏「新建会话」使用
   `secondary` + 琥珀加号，而不是整块强调色。
 - 下拉框统一使用 `primitives/Select`，业务代码不得直接渲染 `<select>`。认证表单继续给
@@ -330,6 +345,13 @@ Composer 必须按三层渐进披露：
 ---
 
 ## 10. 变更记录
+
+- **2026-09-05 审计修复 B11 / B12 / UI-01**：链接文字独立 AA token；primary 纯色，
+  常驻 chrome 不透明，卡片 hover 无位移或阴影提升；共用现有主题别名，不新增工作台色板。
+  Tailwind v4 使用 `source(none)` 与相对样式表的 `@source "../"`，仅扫描 `src`。
+  当前 `packages` 无 class 来源，`src/shared` 仅含 realtime 逻辑；未来跨包 UI 必须显式登记来源。
+  动态 class 使用完整字面量映射，不拼接 utility 片段；第三方样式继续显式 CSS import。
+  编译测试覆盖真实 app / features / components、四个 src 根目录样例，以及根目录 / app cwd 一致性。
 
 - **2026-09-03 W1/W2 规则归并**：接纳语义化 V2 卡片/玻璃材质与按钮层级，收紧 CJK 排版和
   Select 表单契约，固定 App Bar 全局操作区，并明确保留 56px 布局几何与移动恢复状态位置。

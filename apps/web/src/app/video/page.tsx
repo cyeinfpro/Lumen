@@ -71,6 +71,7 @@ import type { VideoPageViewModel } from "./video-page-view";
 import {
   formatDurationLabel,
   selectDirectorViewportVideo,
+  videoHistoryLoadError,
 } from "./video-task-model";
 
 export default function VideoPage() {
@@ -614,6 +615,8 @@ export default function VideoPage() {
     viewport: {
       item: directorViewportItem,
       loading: historyQ.isLoading,
+      error: videoHistoryLoadError(historyQ.error, historyQ.fetchStatus === "paused"),
+      onRetry: () => void historyQ.refetch(),
       onPreview: previewTaskVideo,
     },
     header: {
@@ -727,6 +730,8 @@ export default function VideoPage() {
         failed: failedHistoryItems.length,
       },
       historyLoading: historyQ.isLoading,
+      historyError: videoHistoryLoadError(historyQ.error, historyQ.fetchStatus === "paused"),
+      cancelPendingId: cancelMut.isPending ? cancelMut.variables : undefined,
       historyHasNextPage: Boolean(historyQ.hasNextPage),
       historyFetchingNextPage: historyQ.isFetchingNextPage,
       retryDisabled: retryMut.isPending,
@@ -735,7 +740,9 @@ export default function VideoPage() {
       onHistoryFilterChange: setHistoryFilter,
       onRefresh: () => void historyQ.refetch(),
       onLoadMore: () => void historyQ.fetchNextPage(),
-      onCancel: (item) => cancelMut.mutate(item.id),
+      onCancel: (item) => {
+        if (!cancelMut.isPending && !item.cancel_requested_at) cancelMut.mutate(item.id);
+      },
       onRetry: (item) => requestVideoRetry(item.id),
       onCopy: copyVideoPrompt,
       onUseDraft: useTaskAsDraft,

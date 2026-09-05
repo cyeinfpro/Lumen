@@ -289,8 +289,14 @@ async def require_bot_token(request: Request) -> None:
     use `BotUser` instead — it includes this check.
     """
     expected = settings.telegram_bot_shared_secret.strip()
-    provided = (request.headers.get(BOT_TOKEN_HEADER) or "").strip()
-    if not expected or not provided or not hmac.compare_digest(expected, provided):
+    provided = request.headers.get(BOT_TOKEN_HEADER) or ""
+    if (
+        not expected
+        or not provided
+        or not expected.isascii()
+        or not provided.isascii()
+        or not hmac.compare_digest(expected, provided.strip())
+    ):
         await _record_bot_auth_failure(request)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

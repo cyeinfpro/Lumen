@@ -5,6 +5,8 @@ import "../../store/chat/moduleResolution.test-helper.mjs";
 const {
   activatePrivateCanvasPersistence,
   canvasSaveBatchMatchesPending,
+  canvasDraftSnapshotMatches,
+  canvasEmergencyStorageAvailable,
   clearPrivateCanvasPersistence,
   deleteCanvasEmergencyDraft,
   getCanvasDraft,
@@ -710,6 +712,87 @@ test("emergency draft helpers stay bounded and never throw on storage faults", (
     } else {
       delete (globalThis as { localStorage?: Storage }).localStorage;
     }
+  }
+});
+
+test("local recovery availability requires the current owner fence and a successful storage round trip", async () => {
+  const storage = new MemoryStorage();
+  const restore = installLocalStorage(storage);
+  try {
+    storage.setItem("unrelated", "keep");
+    await activatePrivateCanvasPersistence("recovery-owner");
+    assert.equal(canvasEmergencyStorageAvailable(), true);
+    assert.equal(storage.length, 2);
+    storage.removeItem("lumen:canvas-owner:v1");
+    assert.equal(canvasEmergencyStorageAvailable(), false);
+    storage.setItem("lumen:canvas-owner:v1", "different-owner");
+    assert.equal(canvasEmergencyStorageAvailable(), false);
+    storage.setItem("lumen:canvas-owner:v1", "recovery-owner");
+    storage.failWrites = true;
+    assert.equal(canvasEmergencyStorageAvailable(), false);
+    assert.equal(storage.getItem("unrelated"), "keep");
+  } finally {
+    restore();
+  }
+});
+
+test("draft durability follows transaction completion and never acknowledges newer edits", async () => {
+  resumePrivateCanvasPersistence();
+  const indexedDb = installDelayedOpenIndexedDb();
+  const draft = {
+    ...emergencyDraft(),
+    operations: [{
+      op: "update_document_settings" as const,
+      operation_schema_version: 1 as const,
+      settings: { snap_to_grid: true, grid_size: 32 },
+    }],
+    operation_group_sizes: [1],
+  };
+  draft.graph.settings = draft.operations[0]!.settings;
+  const snapshot = {
+    graph: draft.graph, revision: draft.base_revision,
+    pendingOperations: draft.operations, pendingOperationGroupSizes: [1],
+  };
+  let acknowledged: typeof snapshot | null = null;
+  let transaction: IDBTransaction | undefined;
+  const writes: unknown[] = [];
+  let failures = 0;
+  const writer = new SerialCanvasDraftWriter(async () => {
+    await putCanvasDraft(draft);
+    acknowledged = snapshot;
+  }, () => { failures += 1; });
+  const database = {
+    close() {},
+    transaction() {
+      transaction = { objectStore: () => ({ put: (value: unknown) => writes.push(value) }) } as unknown as IDBTransaction;
+      return transaction;
+    },
+  } as unknown as IDBDatabase;
+  try {
+    const first = writer.request();
+    indexedDb.resolve(0, database);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(writes.length, 1);
+    assert.equal(canvasDraftSnapshotMatches(acknowledged, snapshot), false);
+    assert.ok(transaction);
+    transaction.oncomplete?.(new Event("complete"));
+    await first;
+    assert.equal(canvasDraftSnapshotMatches(acknowledged, snapshot), true);
+    assert.equal(canvasDraftSnapshotMatches(acknowledged, { ...snapshot, revision: 5 }), false);
+    assert.equal(canvasDraftSnapshotMatches(acknowledged, { ...snapshot, graph: structuredClone(snapshot.graph) }), false);
+    assert.equal(canvasDraftSnapshotMatches(acknowledged, { ...snapshot, pendingOperations: [] }), false);
+    assert.equal(canvasDraftSnapshotMatches(acknowledged, { ...snapshot, pendingOperationGroupSizes: [] }), false);
+
+    acknowledged = null;
+    const second = writer.request();
+    indexedDb.resolve(1, database);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    transaction.onabort?.(new Event("abort"));
+    await second;
+    assert.equal(failures, 1);
+    assert.equal(canvasDraftSnapshotMatches(acknowledged, snapshot), false);
+  } finally {
+    indexedDb.restore();
   }
 });
 

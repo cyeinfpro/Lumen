@@ -132,8 +132,11 @@ test("recent cards render honest API-backed preview and state fields", () => {
   doesNotMatch(source, /progress_pct|Math\.round/);
 });
 
-test("workflow and recent-project cards share the motion-safe V2 surface", () => {
-  equal((source.match(/surface-card-v2/g) ?? []).length, 2);
+test("workflow cards retain V2 surfaces while recent projects use compact semantic rows", () => {
+  equal((source.match(/surface-card-v2/g) ?? []).length, 1);
+  match(source, /<ul aria-label="最近项目"/);
+  match(source, /<li className="group relative flex min-w-0/);
+  match(source, /sizes="64px"/);
   doesNotMatch(source, /hover:-translate-y/);
   match(source, /group-hover:scale-\[1\.02\] motion-reduce:transform-none/);
 });

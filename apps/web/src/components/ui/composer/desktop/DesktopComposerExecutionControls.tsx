@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, Layers2 } from "lucide-react";
+import { ChevronDown, Layers2, SlidersHorizontal } from "lucide-react";
 import { useRef, useState } from "react";
 
 import { Button, Select } from "@/components/ui/primitives";
@@ -84,6 +84,7 @@ export function ComposerExecutionControls({
         attachmentCount={attachmentCount}
         costLabel={costLabel}
         costWarning={costWarning}
+        onAdjust={onAdjust}
       />
     );
   }
@@ -106,6 +107,7 @@ function ImageQuickSettingsBar({
   attachmentCount,
   costLabel,
   costWarning,
+  onAdjust,
 }: {
   summary: ComposerExecutionSummary;
   count: number;
@@ -121,6 +123,7 @@ function ImageQuickSettingsBar({
   attachmentCount: number;
   costLabel?: string | null;
   costWarning?: boolean;
+  onAdjust: () => void;
 }) {
   const [aspectOpen, setAspectOpen] = useState(false);
   const aspectAnchorRef = useRef<HTMLButtonElement | null>(null);
@@ -131,10 +134,11 @@ function ImageQuickSettingsBar({
         aria-label={summary.text}
         title={summary.text}
         className={cn(
-          "mx-3 mt-1.5 flex min-h-10 items-center gap-1.5 overflow-x-auto overscroll-x-contain rounded-[var(--radius-card)] border px-2 py-1 no-scrollbar",
+          "mx-3 mt-1.5 flex min-h-10 items-center gap-1.5 rounded-[var(--radius-card)] border px-2 py-1",
           "border-[var(--border-subtle)] bg-[var(--bg-2)]",
         )}
       >
+        <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto overscroll-x-contain no-scrollbar">
         <span className="type-label shrink-0 px-1 text-[var(--fg-1)]">
           {summary.taskLabel}
         </span>
@@ -230,6 +234,18 @@ function ImageQuickSettingsBar({
             {costLabel}
           </span>
         )}
+        </div>
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-label="执行设置"
+          aria-haspopup="dialog"
+          onClick={onAdjust}
+          className="h-11 w-11 shrink-0 px-0"
+          title="执行设置"
+        >
+          <SlidersHorizontal className="h-4 w-4" aria-hidden />
+        </Button>
       </div>
 
       <DesktopPopover

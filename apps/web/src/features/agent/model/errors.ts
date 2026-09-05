@@ -9,6 +9,11 @@ export interface AgentErrorPresentation {
 }
 
 const ERROR_PRESENTATIONS: Record<string, AgentErrorPresentation> = {
+  agent_submission_uncertain: {
+    title: "提交待确认",
+    detail: "消息可能已提交，草稿和请求标识已保留。",
+    recoverable: true,
+  },
   feature_disabled: {
     title: "Agent 未启用",
     detail: "管理员尚未开放 Agent。",

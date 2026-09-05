@@ -2,11 +2,8 @@
 
 import {
   ArrowLeft,
-  CloudAlert,
-  CloudCheck,
   Command,
   Keyboard,
-  Loader2,
   Maximize2,
   Minimize2,
   PanelRight,
@@ -20,33 +17,26 @@ import { useState } from "react";
 import { MobileRuntimeResilienceStatus } from "@/components/RuntimeResilienceStatus";
 import { validateCanvasNodeExecution } from "@/lib/canvas/graph";
 import { isCanvasExecutableNodeType } from "@/lib/canvas/registry";
-import type { CanvasSaveState } from "@/lib/canvas/types";
 import { IconButton } from "@/components/ui/primitives";
 import { useCanvasStore } from "./CanvasStoreProvider";
 
 export function CanvasTopBar({
   title,
-  saveState,
-  saveMessage,
   onRename,
   onFitView,
   onOpenInspector,
   onOpenCommandMenu,
   onOpenShortcuts,
   onToggleFullscreen,
-  onRetrySave,
   fullscreen,
 }: {
   title: string;
-  saveState: CanvasSaveState;
-  saveMessage?: string | null;
   onRename: (title: string) => void;
   onFitView: () => void;
   onOpenInspector: () => void;
   onOpenCommandMenu: () => void;
   onOpenShortcuts: () => void;
   onToggleFullscreen: () => void;
-  onRetrySave?: () => void;
   fullscreen: boolean;
 }) {
   const historyLength = useCanvasStore((state) => state.history.length);
@@ -80,11 +70,6 @@ export function CanvasTopBar({
           key={title}
           title={title}
           onRename={onRename}
-        />
-        <SaveIndicator
-          state={saveState}
-          message={saveMessage}
-          onRetry={onRetrySave}
         />
         <div className="ml-auto flex items-center gap-1">
           <IconButton
@@ -167,12 +152,6 @@ export function CanvasTopBar({
         </Link>
         <div className="min-w-0 flex-1">
           <p className="truncate type-body-sm font-medium text-[var(--fg-0)]">{title}</p>
-          <SaveIndicator
-            state={saveState}
-            message={saveMessage}
-            onRetry={onRetrySave}
-            compact
-          />
         </div>
         <MobileRuntimeResilienceStatus />
         <IconButton
@@ -215,71 +194,5 @@ function CanvasTitleInput({
       }}
       className="min-w-0 max-w-[360px] flex-1 rounded-[var(--radius-control)] border border-transparent bg-transparent px-2 py-1 type-card-title text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] transition-[border-color,background-color,box-shadow] duration-[var(--dur-quick)] hover:border-[var(--border)] hover:bg-[var(--bg-2)] focus:border-[var(--border-strong)] focus:bg-[var(--bg-1)] focus:shadow-[var(--ring)]"
     />
-  );
-}
-
-function SaveIndicator({
-  state,
-  message,
-  onRetry,
-  compact = false,
-}: {
-  state: CanvasSaveState;
-  message?: string | null;
-  onRetry?: () => void;
-  compact?: boolean;
-}) {
-  const content = (() => {
-    if (state === "saving") {
-      return {
-        icon: (
-          <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
-        ),
-        label: "保存中",
-      };
-    }
-    if (state === "dirty") {
-      return { icon: <Loader2 className="h-3.5 w-3.5" />, label: "待保存" };
-    }
-    if (state === "conflict" || state === "error") {
-      return { icon: <CloudAlert className="h-3.5 w-3.5" />, label: state === "conflict" ? "版本冲突" : "保存失败" };
-    }
-    return { icon: <CloudCheck className="h-3.5 w-3.5" />, label: "已保存" };
-  })();
-  const className = `inline-flex items-center gap-1.5 type-caption ${
-    state === "conflict" || state === "error"
-      ? "text-[var(--danger-fg)]"
-      : "text-[var(--fg-2)]"
-  } ${compact ? "mt-0.5" : ""}`;
-  const announcement = message ? `${content.label}：${message}` : content.label;
-  if (state === "error" && onRetry) {
-    return (
-      <>
-        <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-          {announcement}
-        </span>
-        <button
-          type="button"
-          title={message ?? "保存失败，点击重试"}
-          onClick={onRetry}
-          className={className}
-        >
-          {content.icon}
-          重试保存
-        </button>
-      </>
-    );
-  }
-  return (
-    <span
-      role="status"
-      aria-live="polite"
-      aria-atomic="true"
-      title={message ?? content.label}
-      className={className}
-    >
-      {content.icon}
-      {content.label}
-    </span>
   );
 }

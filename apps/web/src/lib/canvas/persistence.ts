@@ -21,6 +21,7 @@ const MAX_EMERGENCY_DRAFT_STORAGE_LENGTH = 2 * 1024 * 1024;
 let privateCanvasPersistenceEpoch = 0;
 let privateCanvasActivationGeneration = 0;
 let privateCanvasPersistenceEnabled = false;
+let privateCanvasOwner: string | null = null;
 const CANVAS_EDGE_ROLES = new Set([
   "reference",
   "subject",
@@ -52,6 +53,40 @@ export interface PersistedCanvasSaveBatch {
   mutation_id: string;
   operations: CanvasOperation[];
   updated_at: number;
+}
+
+export interface CanvasDraftSnapshot {
+  graph: CanvasGraph;
+  revision: number;
+  pendingOperations: readonly CanvasOperation[];
+  pendingOperationGroupSizes: readonly number[];
+}
+
+export function canvasDraftSnapshotMatches(
+  acknowledged: CanvasDraftSnapshot | null,
+  current: CanvasDraftSnapshot,
+): boolean {
+  return acknowledged !== null &&
+    acknowledged.graph === current.graph &&
+    acknowledged.revision === current.revision &&
+    acknowledged.pendingOperations === current.pendingOperations &&
+    acknowledged.pendingOperationGroupSizes === current.pendingOperationGroupSizes;
+}
+
+// Reload recovery needs localStorage for both emergency drafts and the owner fence.
+export function canvasEmergencyStorageAvailable(): boolean {
+  const key = "lumen:canvas-storage-probe";
+  try {
+    const storage = localStorageOrNull();
+    if (!storage || !privateCanvasPersistenceEnabled || !privateCanvasOwner) return false;
+    if (storage.getItem(CANVAS_OWNER_STORAGE_KEY) !== privateCanvasOwner) return false;
+    storage.setItem(key, "1");
+    const available = storage.getItem(key) === "1";
+    storage.removeItem(key);
+    return available;
+  } catch {
+    return false;
+  }
 }
 
 export class SerialCanvasDraftWriter {
@@ -217,6 +252,7 @@ export async function clearPrivateCanvasPersistence(): Promise<void> {
   privateCanvasActivationGeneration += 1;
   privateCanvasPersistenceEpoch += 1;
   privateCanvasPersistenceEnabled = false;
+  privateCanvasOwner = null;
   await clearPrivateCanvasStorage();
 }
 
@@ -238,6 +274,7 @@ export async function activatePrivateCanvasPersistence(
   privateCanvasActivationGeneration = activationGeneration;
   privateCanvasPersistenceEpoch += 1;
   privateCanvasPersistenceEnabled = false;
+  privateCanvasOwner = null;
   const storage = localStorageOrNull();
   let previousOwner: string | null = null;
   try {
@@ -256,6 +293,7 @@ export async function activatePrivateCanvasPersistence(
   }
   if (activationGeneration !== privateCanvasActivationGeneration) return;
   privateCanvasPersistenceEpoch += 1;
+  privateCanvasOwner = normalizedUserId;
   privateCanvasPersistenceEnabled = true;
 }
 

@@ -418,7 +418,7 @@ export function MobileComposerPill({
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (isComposingRef.current) return;
+    if (isComposingRef.current || e.nativeEvent.isComposing || e.repeat) return;
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       if (!canSubmit) return;

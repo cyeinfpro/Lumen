@@ -26,7 +26,6 @@ import {
   formatDurationLabel,
   hasVideo,
   isFailedHistoryVideo,
-  progressForItem,
   stageCopy,
   taskElapsedLabel,
 } from "./video-task-model";
@@ -299,7 +298,7 @@ function PrimaryVideoPlayer({
 }
 
 function StatusPill({ item }: { item: VideoGenerationOut }) {
-  const terminalOk = item.status === "succeeded";
+  const terminalOk = item.status === "succeeded" && hasVideo(item);
   const terminalBad = ["failed", "canceled", "expired"].includes(item.status);
   const copy = stageCopy(item);
   return (
@@ -313,7 +312,7 @@ function StatusPill({ item }: { item: VideoGenerationOut }) {
             : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)]",
       ].join(" ")}
     >
-      {copy.label} · {Math.round(progressForItem(item))}%
+      {copy.label}
     </span>
   );
 }

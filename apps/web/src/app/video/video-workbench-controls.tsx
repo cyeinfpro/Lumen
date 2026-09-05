@@ -64,7 +64,7 @@ function formatDurationLabel(durationS: number): string {
   return durationS === SMART_VIDEO_DURATION ? "自动时长" : `${durationS}s`;
 }
 
-function formatMicroRmb(micro: number): string {
+export function formatMicroRmb(micro: number): string {
   const amount = formatRmb(micro / 1_000_000);
   return amount === "--" ? amount : `¥${amount}`;
 }
@@ -291,7 +291,7 @@ function SubmitPanel({
         onClick={onSubmit}
         leftIcon={<Send className="h-4 w-4" />}
       >
-        {loading ? "生成中" : "生成视频"}
+        {loading ? "提交中" : "生成视频"}
       </Button>
     </div>
   );
@@ -331,7 +331,7 @@ export function VideoParameterPanelView({
       id={id}
       className={cn(
         "flex min-w-0 flex-col overflow-hidden border-y border-[var(--border)] bg-transparent",
-        "min-[1120px]:rounded-[var(--radius-panel)] min-[1120px]:border min-[1120px]:bg-[var(--bg-1)]/82 min-[1120px]:shadow-[var(--shadow-2)] min-[1120px]:backdrop-blur-xl",
+        "min-[1120px]:border-y-0 min-[1120px]:border-l",
         className,
       )}
     >
@@ -345,6 +345,7 @@ export function VideoParameterPanelView({
             <p className="mt-0.5 truncate type-caption text-[var(--fg-2)]">
               {selectedModel || "未选择模型"}
             </p>
+            <p className="mt-1 type-caption text-[var(--fg-2)]">仅用于下一次提交</p>
           </div>
         </div>
         <span
@@ -370,7 +371,7 @@ export function VideoParameterPanelView({
             </span>
           </div>
           <SelectField
-            label=""
+            label="模型"
             value={selectedModel}
             onChange={onModelChange}
             options={modelOptions}
@@ -453,7 +454,7 @@ export function VideoParameterPanelView({
       </div>
 
       <div className="mt-auto shrink-0 border-t border-[var(--border)] bg-[var(--bg-1)]/72 p-3 sm:p-3.5">
-        <div className="mb-3 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-3 shadow-[var(--shadow-1)]">
+        <div className="mb-3 py-1">
           <div className="grid grid-cols-1 gap-3 min-[340px]:grid-cols-2">
             <div className="min-w-0">
               <span className="type-caption text-[var(--fg-2)]">预计预扣</span>

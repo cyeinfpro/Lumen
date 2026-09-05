@@ -10,13 +10,15 @@ function sortJsonValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortJsonValue);
   if (value === null || typeof value !== "object") return value;
   const record = value as Record<string, unknown>;
-  const sorted: Record<string, unknown> = {};
+  const sorted: Record<string, unknown> = Object.create(null);
   for (const key of Object.keys(record).sort()) {
     sorted[key] = sortJsonValue(record[key]);
   }
   return sorted;
 }
 
+// JSON values only. Ordinary JSON keeps its persisted fingerprint; legacy
+// __proto__ collisions cannot be safely aliased to the corrected fingerprint.
 export function semanticRequestFingerprint(
   scope: unknown,
   payload: unknown,
@@ -74,6 +76,6 @@ export function isAmbiguousRequestFailure(error: unknown): boolean {
   if (error === null || error === undefined) return true;
   if (typeof error !== "object" || !("status" in error)) return true;
   const status = (error as { status?: unknown }).status;
-  if (typeof status !== "number" || status <= 0) return true;
+  if (typeof status !== "number" || status < 400) return true;
   return status === 408 || status === 425 || status === 429 || status >= 500;
 }

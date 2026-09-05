@@ -345,10 +345,12 @@ test("optimistic submission reconciliation removes temporary messages exactly on
     },
     agent_run: realRun,
   };
+  // The active-run snapshot may arrive before the POST reply or message page.
+  state.applyRunSnapshot(realRun);
   state.reconcileSubmission({
     sessionId: "session-1",
-    optimisticUserId: "user-temp",
-    optimisticAssistantId: "assistant-temp",
+    optimisticUserId: realRun.user_message_id,
+    optimisticAssistantId: realRun.assistant_message_id,
     result,
   });
   state.reconcileSubmission({
@@ -459,4 +461,67 @@ test("snapshot reconciliation removes an uncertain optimistic turn by idempotenc
     ["user-authoritative", "assistant-authoritative"],
   );
   assert.equal(useAgentStore.getState().runsById[optimisticRun.id], undefined);
+});
+
+test("same-session logical retries reuse one pair atomically and never downgrade confirmed runs", async () => {
+  const { stageOptimisticSubmission, clearConfirmedAgentDraft, agentSubmissionHasDedicatedFeedback, applyAgentSubmissionFeedback } = await import(
+    new URL("../../features/agent/containers/agentSubmission.ts", import.meta.url).href
+  );
+  const { createAgentDraft } = await import("../../features/agent/model/contracts.ts");
+  useAgentStore.getState().resetForIdentity({ userId: "retry-owner", epoch: 10 });
+  const draft = { ...createAgentDraft(), text: "same text" };
+  useAgentStore.getState().setDraft("session-retry", draft);
+  const attempt = () => stageOptimisticSubmission({
+    sessionId: "session-retry", draft,
+    append: useAgentStore.getState().appendOptimistic, idempotencyKey: "same-key",
+  });
+  const first = attempt();
+  useAgentStore.getState().failOptimistic({
+    sessionId: "session-retry", ...first,
+    errorCode: "agent_submission_uncertain", errorMessage: "uncertain",
+  });
+  useAgentStore.getState().setCurrentSession("session-retry");
+  assert.equal(agentSubmissionHasDedicatedFeedback("session-retry", first), true);
+  assert.equal(agentSubmissionHasDedicatedFeedback("session-retry", null), false);
+  assert.equal(agentSubmissionHasDedicatedFeedback("session-retry", { ...first, assistantMessageId: "other" }), false);
+  assert.equal(agentSubmissionHasDedicatedFeedback("another-session", first), false);
+  useAgentStore.getState().setComposerError("later upload failure");
+  assert.equal(agentSubmissionHasDedicatedFeedback("session-retry", first), true);
+  applyAgentSubmissionFeedback({
+    sessionId: "session-retry", attempt: first, error: { status: 504 },
+    setError: useAgentStore.getState().setComposerError,
+    setAction: () => assert.fail("dedicated feedback must not erase later input actions"),
+  });
+  assert.equal(useAgentStore.getState().composerError, "later upload failure");
+  applyAgentSubmissionFeedback({
+    sessionId: "session-retry", attempt: null, error: { status: 504 },
+    setError: useAgentStore.getState().setComposerError, setAction: () => {},
+  });
+  assert.notEqual(useAgentStore.getState().composerError, "later upload failure");
+  useAgentStore.getState().setCurrentSession("another-session");
+  assert.equal(agentSubmissionHasDedicatedFeedback("session-retry", first), false);
+  useAgentStore.getState().setCurrentSession("session-retry");
+  assert.deepEqual(attempt(), first);
+  assert.equal(agentSubmissionHasDedicatedFeedback("session-retry", first), false);
+  assert.equal(useAgentStore.getState().messagesBySession["session-retry"].length, 2);
+  assert.equal(useAgentStore.getState().runsById[first.runId].status, "queued");
+  assert.equal(useAgentStore.getState().runsById[first.runId].error_code, null);
+
+  const run = { ...useAgentStore.getState().runsById[first.runId], id: "confirmed", status: "succeeded", usage: { total_tokens: 42 } };
+  useAgentStore.setState({ runsById: { [first.runId]: useAgentStore.getState().runsById[first.runId], confirmed: run } });
+  const confirmed = attempt();
+  assert.equal(confirmed.runId, "confirmed");
+  useAgentStore.getState().failOptimistic({ sessionId: "session-retry", ...confirmed, errorCode: "late", errorMessage: "late" });
+  useAgentStore.getState().discardOptimistic({ sessionId: "session-retry", runId: confirmed.runId });
+  assert.strictEqual(useAgentStore.getState().runsById.confirmed, run);
+  assert.deepEqual(Object.keys(useAgentStore.getState().runsById), [first.runId, "confirmed"]);
+
+  const other = stageOptimisticSubmission({ sessionId: "another-session", draft, append: useAgentStore.getState().appendOptimistic, idempotencyKey: "same-key" });
+  assert.notEqual(other.runId, confirmed.runId);
+  const saved = useAgentStore.getState().draftsBySession["session-retry"];
+  useAgentStore.getState().setDraftText("session-retry", "new draft while reply was pending");
+  clearConfirmedAgentDraft("session-retry", saved);
+  assert.equal(useAgentStore.getState().draftsBySession["session-retry"].text, "new draft while reply was pending");
+  clearConfirmedAgentDraft("session-retry", useAgentStore.getState().draftsBySession["session-retry"]);
+  assert.equal(useAgentStore.getState().draftsBySession["session-retry"].text, "");
 });

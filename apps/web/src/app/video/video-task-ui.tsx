@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 
-import { Button, IconButton } from "@/components/ui/primitives";
+import { Button, ErrorState, IconButton } from "@/components/ui/primitives";
 import { DURATION, EASE } from "@/lib/motion";
 import type { VideoGenerationOut } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -30,7 +30,6 @@ import {
   hasVideo,
   isActiveVideo,
   isFailedHistoryVideo,
-  progressForItem,
   stageCopy,
   taskElapsedLabel,
   taskErrorSummary,
@@ -62,6 +61,7 @@ export function prewarmVideoItem(
 
 function ActiveVideoTaskSection({
   items,
+  cancelPendingId,
   retryDisabled,
   onCancel,
   onRetry,
@@ -69,6 +69,7 @@ function ActiveVideoTaskSection({
   onUseDraft,
 }: {
   items: VideoGenerationOut[];
+  cancelPendingId?: string;
   retryDisabled: boolean;
   onCancel: (item: VideoGenerationOut) => void;
   onRetry: (item: VideoGenerationOut) => void;
@@ -90,6 +91,7 @@ function ActiveVideoTaskSection({
             key={item.id}
             item={item}
             onCancel={() => onCancel(item)}
+            cancelPending={cancelPendingId === item.id}
             onRetry={() => onRetry(item)}
             retryDisabled={retryDisabled}
             onCopy={() => onCopy(item)}
@@ -103,6 +105,7 @@ function ActiveVideoTaskSection({
 }
 
 function VideoTaskHistorySection({
+  error,
   items,
   activeCount,
   historyFilter,
@@ -121,6 +124,7 @@ function VideoTaskHistorySection({
   onDelete,
   onPreview,
 }: {
+  error: boolean;
   items: VideoGenerationOut[];
   activeCount: number;
   historyFilter: VideoHistoryFilter;
@@ -174,7 +178,7 @@ function VideoTaskHistorySection({
             showPreview={false}
           />
         ))}
-        {items.length === 0 && (
+        {items.length === 0 && !error && (
           <EmptyPanel
             icon={<Film className="h-5 w-5" />}
             title={emptyCopy.title}
@@ -199,6 +203,8 @@ function VideoTaskHistorySection({
 }
 
 export function VideoTaskDrawer({
+  cancelPendingId,
+  historyError,
   open,
   onClose,
   activeItems,
@@ -220,6 +226,8 @@ export function VideoTaskDrawer({
   onDelete,
   onPreview,
 }: {
+  cancelPendingId?: string;
+  historyError?: string | null;
   open: boolean;
   onClose: () => void;
   activeItems: VideoGenerationOut[];
@@ -351,13 +359,16 @@ export function VideoTaskDrawer({
             <div className="mobile-dialog-scroll min-h-0 flex-1 space-y-5 overflow-y-auto p-3 pb-[calc(var(--mobile-dialog-footer-pad-bottom)+0.75rem)] sm:p-4">
               <ActiveVideoTaskSection
                 items={activeItems}
+                cancelPendingId={cancelPendingId}
                 retryDisabled={retryDisabled}
                 onCancel={onCancel}
                 onRetry={onRetry}
                 onCopy={onCopy}
                 onUseDraft={onUseDraft}
               />
+              {historyError && <ErrorState title="任务记录加载失败" description={historyError} onRetry={onRefresh} />}
               <VideoTaskHistorySection
+                error={Boolean(historyError)}
                 items={historyItems}
                 activeCount={activeItems.length}
                 historyFilter={historyFilter}
@@ -506,6 +517,7 @@ function TaskErrorDetails({
 }
 
 function TaskRowActions({
+  cancelPending,
   item,
   active,
   retryable,
@@ -522,6 +534,7 @@ function TaskRowActions({
   onPreview,
 }: {
   item: VideoGenerationOut;
+  cancelPending: boolean;
   active: boolean;
   retryable: boolean;
   retryDisabled: boolean;
@@ -543,9 +556,10 @@ function TaskRowActions({
           variant="outline"
           size="sm"
           onClick={onCancel}
+          disabled={cancelPending || Boolean(item.cancel_requested_at)}
           leftIcon={<XCircle className="h-3.5 w-3.5" />}
         >
-          取消
+          {cancelPending ? "请求中" : item.cancel_requested_at ? "已请求取消" : "取消"}
         </Button>
       )}
       {retryable && (
@@ -628,39 +642,6 @@ function taskRowContainerClass(active: boolean, selected: boolean): string {
     : "border-[var(--border-subtle)] bg-[var(--bg-0)]/60";
 }
 
-function TaskRowProgress({
-  item,
-  active,
-  progressScale,
-}: {
-  item: VideoGenerationOut;
-  active: boolean;
-  progressScale: number;
-}) {
-  const reduceMotion = useReducedMotion();
-  const progressClass = active
-    ? "bg-[var(--accent)]"
-    : item.status === "succeeded"
-      ? "bg-[var(--success)]"
-      : "bg-[var(--fg-3)]";
-  return (
-    <div className="mt-3 h-2 overflow-hidden rounded-full bg-[var(--bg-2)]">
-      <motion.div
-        className={cn(
-          "h-full w-full origin-left rounded-full",
-          progressClass,
-        )}
-        initial={false}
-        animate={{ scaleX: progressScale }}
-        transition={{
-          duration: reduceMotion ? 0 : DURATION.normal,
-          ease: EASE.develop,
-        }}
-      />
-    </div>
-  );
-}
-
 function TaskRowPreview({
   item,
   selected,
@@ -690,6 +671,7 @@ function TaskRowError({ message }: { message: string | null }) {
 }
 
 function TaskRow({
+  cancelPending = false,
   item,
   onCancel,
   onRetry,
@@ -702,6 +684,7 @@ function TaskRow({
   showPreview = true,
 }: {
   item: VideoGenerationOut;
+  cancelPending?: boolean;
   onCancel: () => void;
   onRetry: () => void;
   retryDisabled?: boolean;
@@ -713,8 +696,6 @@ function TaskRow({
   showPreview?: boolean;
 }) {
   const active = isActiveVideo(item);
-  const progress = progressForItem(item);
-  const progressScale = Math.max(0, Math.min(1, progress / 100));
   const copy = stageCopy(item);
   const videoItem = taskRowVideoItem(item);
   const retryable = isFailedHistoryVideo(item);
@@ -744,11 +725,6 @@ function TaskRow({
         </div>
         <StatusPill item={item} />
       </div>
-      <TaskRowProgress
-        item={item}
-        active={active}
-        progressScale={progressScale}
-      />
       <TaskRowPreview
         item={videoItem}
         selected={selected}
@@ -757,6 +733,7 @@ function TaskRow({
       />
       <TaskRowError message={item.error_message ?? null} />
       <TaskRowActions
+        cancelPending={cancelPending}
         item={item}
         active={active}
         retryable={retryable}
@@ -777,11 +754,14 @@ function TaskRow({
 }
 
 function StatusPill({ item }: { item: VideoGenerationOut }) {
-  const terminalOk = item.status === "succeeded";
+  const terminalOk = item.status === "succeeded" && hasVideo(item);
   const terminalBad = ["failed", "canceled", "expired"].includes(item.status);
   const copy = stageCopy(item);
   return (
     <span
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
       className={[
         "rounded-full border px-2 py-1 type-caption",
         terminalOk
@@ -791,7 +771,7 @@ function StatusPill({ item }: { item: VideoGenerationOut }) {
           : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)]",
       ].join(" ")}
     >
-      {copy.label} · {Math.round(progressForItem(item))}%
+      {copy.label}
     </span>
   );
 }

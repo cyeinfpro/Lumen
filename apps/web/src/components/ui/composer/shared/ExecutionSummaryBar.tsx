@@ -22,11 +22,11 @@ export function ExecutionSummaryBar({
       className={cn(
         "mx-3 flex min-h-7 items-center gap-1.5 rounded-[var(--radius-card)] border px-2.5 py-1.5",
         "type-caption text-[var(--fg-1)]",
-        "overflow-x-auto overscroll-x-contain no-scrollbar",
-        compact ? "mt-1 whitespace-nowrap" : "mt-1.5 flex-wrap",
+        compact ? "mt-1" : "mt-1.5",
         "border-[var(--border-subtle)] bg-[var(--bg-2)]",
       )}
     >
+      <div className={cn("flex min-w-0 flex-1 items-center gap-1.5", compact ? "overflow-x-auto overscroll-x-contain whitespace-nowrap no-scrollbar" : "flex-wrap")}>
       <span className="shrink-0 text-[var(--fg-2)]">将执行：</span>
       <span className="type-label shrink-0 text-[var(--fg-0)]">
         {summary.taskLabel}
@@ -46,6 +46,7 @@ export function ExecutionSummaryBar({
           </span>
         </Fragment>
       ))}
+      </div>
       {onAdjust ? (
         <>
           <span className="min-w-1 flex-1" aria-hidden />
@@ -53,7 +54,9 @@ export function ExecutionSummaryBar({
             size="sm"
             variant="ghost"
             onClick={onAdjust}
-            className="h-8 min-h-8 shrink-0 px-2 text-[var(--fg-1)]"
+            aria-label="执行设置"
+            aria-haspopup="dialog"
+            className="h-11 min-h-11 shrink-0 px-2 text-[var(--fg-1)] md:h-8 md:min-h-8"
             leftIcon={<SlidersHorizontal className="h-3.5 w-3.5" aria-hidden />}
           >
             调整

@@ -1,38 +1,32 @@
 import Link from "next/link";
 import { AlertTriangle, ArrowRight, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 
-import { Button, Skeleton } from "@/components/ui/primitives";
+import { Button, Input, Skeleton } from "@/components/ui/primitives";
 
 export function ProjectActionsSheet({
   title,
   itemTitle,
+  error,
   renaming,
-  confirmingDelete,
   onTitleChange,
   onStartRename,
   onCancelRename,
   onSaveRename,
   onStartDelete,
-  onCancelDelete,
-  onConfirmDelete,
   onClose,
   patchPending,
-  removePending,
 }: {
   title: string;
   itemTitle: string;
+  error: string | null;
   renaming: boolean;
-  confirmingDelete: boolean;
   onTitleChange: (value: string) => void;
   onStartRename: () => void;
   onCancelRename: () => void;
   onSaveRename: () => void;
   onStartDelete: () => void;
-  onCancelDelete: () => void;
-  onConfirmDelete: () => void;
   onClose: () => void;
   patchPending: boolean;
-  removePending: boolean;
 }) {
   return (
     <div className="grid gap-4 px-5 pb-5 pt-3">
@@ -40,7 +34,7 @@ export function ProjectActionsSheet({
         <p className="type-caption text-[var(--fg-2)]">
           项目
         </p>
-        <p className="mt-1 truncate type-body font-semibold tracking-tight text-[var(--fg-0)]">
+        <p className="mt-1 truncate type-body font-semibold text-[var(--fg-0)]">
           {itemTitle || "服饰模特图"}
         </p>
       </div>
@@ -52,18 +46,15 @@ export function ProjectActionsSheet({
             onSaveRename();
           }}
         >
-          <label className="grid gap-1.5">
-            <span className="type-caption text-[var(--fg-2)]">
-              名称
-            </span>
-            <input
-              value={title}
-              onChange={(event) => onTitleChange(event.target.value)}
-              maxLength={120}
-              autoFocus
-              className="control-shell h-11 px-3 type-body text-[var(--fg-0)] outline-none focus:border-accent-border focus:shadow-[var(--ring)]"
-            />
-          </label>
+          <Input
+            label="项目名称"
+            error={error ?? undefined}
+            disabled={patchPending}
+            value={title}
+            onChange={(event) => onTitleChange(event.target.value)}
+            maxLength={120}
+            autoFocus
+          />
           <div className="grid grid-cols-2 gap-2">
             <Button type="button" variant="ghost" onClick={onCancelRename} className="min-h-11">
               取消
@@ -73,27 +64,6 @@ export function ProjectActionsSheet({
             </Button>
           </div>
         </form>
-      ) : confirmingDelete ? (
-        <div className="grid gap-3">
-          <p className="type-body text-[var(--fg-0)]">确认删除这个项目？</p>
-          <p className="type-caption leading-5 text-[var(--fg-2)]">
-            项目会从列表移除，关联对话不会被删除。
-          </p>
-          <div className="grid grid-cols-2 gap-2">
-            <Button type="button" variant="ghost" onClick={onCancelDelete} className="min-h-11">
-              取消
-            </Button>
-            <Button
-              type="button"
-              variant="danger"
-              disabled={removePending}
-              onClick={onConfirmDelete}
-              className="min-h-11"
-            >
-              删除
-            </Button>
-          </div>
-        </div>
       ) : (
         <div className="grid gap-1">
           <button
@@ -127,11 +97,11 @@ export function ProjectActionsSheet({
 
 export function SkeletonGrid() {
   return (
-    <div className="grid grid-cols-2 gap-x-4 gap-y-7 md:gap-x-5 md:gap-y-9 lg:grid-cols-3 xl:grid-cols-4">
+    <div role="status" aria-label="项目加载中" className="divide-y divide-[var(--border-subtle)]">
       {Array.from({ length: 8 }).map((_, index) => (
-        <div key={index} className="grid gap-3">
-          <Skeleton className="aspect-[3/4] w-full rounded-[var(--radius-card)]" />
-          <div className="space-y-2">
+        <div key={index} className="flex items-center gap-3 py-3">
+          <Skeleton className="h-16 w-12 shrink-0 rounded-[var(--radius-control)]" />
+          <div className="flex-1 space-y-2">
             <Skeleton className="h-4 w-3/4" />
             <Skeleton className="h-3 w-1/2" />
           </div>
@@ -141,19 +111,19 @@ export function SkeletonGrid() {
   );
 }
 
-export function ErrorPanel({ onRetry }: { onRetry: () => void }) {
+export function ErrorPanel({ onRetry, forbidden = false }: { onRetry: () => void; forbidden?: boolean }) {
   return (
-    <div className="border-y border-danger-border bg-danger-soft px-5 py-6 md:px-6 md:py-7">
+    <div role="alert" className="border-y border-danger-border bg-danger-soft px-5 py-6 md:px-6 md:py-7">
       <div className="flex items-start gap-3">
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-danger-border text-[var(--danger)]">
           <AlertTriangle className="h-4 w-4" />
         </span>
         <div className="flex-1">
           <h3 className="type-card-title">
-            项目加载失败
+            {forbidden ? "项目访问被拒绝" : "项目加载失败"}
           </h3>
           <p className="type-body-sm mt-0.5">
-            网络错误或服务繁忙，稍后重试。
+            {forbidden ? "当前账号没有访问权限。" : "网络错误或服务繁忙，稍后重试。"}
           </p>
           <Button
             className="mt-3"
@@ -179,10 +149,10 @@ export function EmptyHero() {
             服饰工作流
           </p>
           <h2 className="type-page-title mt-2 max-w-2xl ">
-            从一张商品图，到一条完整的模特图工作流
+            暂无服饰项目
           </h2>
           <p className="type-body-sm mt-3 max-w-2xl">
-            上传商品图，确认模特候选，再进入展示图生成、质检和交付。每一步都可以继续编辑和回看。
+            新项目的素材、生成任务和交付结果将在这里汇总。
           </p>
         </div>
         <Link

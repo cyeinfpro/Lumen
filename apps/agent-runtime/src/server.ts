@@ -292,6 +292,19 @@ export function createRuntimeServer(options: ServerOptions = {}): RuntimeServer 
     },
   };
 
+  const canAdmitRun = (response: ServerResponse): boolean => {
+    if (response.destroyed || response.writableEnded) return false;
+    if (draining || !readiness.state.ready) {
+      writeError(
+        response,
+        503,
+        draining ? "agent_runtime_draining" : "agent_runtime_not_ready",
+      );
+      return false;
+    }
+    return true;
+  };
+
   const server = createServer(async (request, response) => {
     const path = request.url ?? "/";
     if (request.method === "GET" && path === "/healthz") {
@@ -319,14 +332,7 @@ export function createRuntimeServer(options: ServerOptions = {}): RuntimeServer 
       writeError(response, 404, "agent_runtime_not_found");
       return;
     }
-    if (draining || !readiness.state.ready) {
-      writeError(
-        response,
-        503,
-        draining ? "agent_runtime_draining" : "agent_runtime_not_ready",
-      );
-      return;
-    }
+    if (!canAdmitRun(response)) return;
     const contentType = request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
     if (contentType !== "application/json") {
       writeError(response, 415, "agent_runtime_content_type_required");
@@ -381,6 +387,9 @@ export function createRuntimeServer(options: ServerOptions = {}): RuntimeServer 
     } finally {
       pendingBodyReads -= 1;
     }
+    // Body reads yield to shutdown/readiness changes. Keep admission through
+    // capacity reservation and execution registration synchronous.
+    if (!canAdmitRun(response)) return;
     if (
       activeRuns >= config.maxConcurrentRuns ||
       activeRunBytes + requestBytes > config.maxInflightRequestBytes

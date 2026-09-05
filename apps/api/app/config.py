@@ -293,6 +293,12 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_production_secrets(self) -> "Settings":
         _validate_session_ttl(self.session_ttl_min)
+        # Bot headers use ASCII string comparison. Preserve blank-disable and
+        # short development secrets; production length validation remains below.
+        if not self.telegram_bot_shared_secret.isascii():
+            raise ValueError(
+                "TELEGRAM_BOT_SHARED_SECRET must contain only ASCII characters"
+            )
         _validate_trusted_proxies(self.trusted_proxies)
         _normalize_and_validate_smtp(self)
         self.agent_runtime_url = _internal_service_url(

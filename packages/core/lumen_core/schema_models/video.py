@@ -224,6 +224,7 @@ class VideoGenerationOut(BaseOut):
     progress_stage: str
     progress_pct: int
     submission_epoch: int = 0
+    cancel_requested_at: datetime | None = None
     provider_name: str | None = None
     provider_kind: str | None = None
     est_token_upper: int

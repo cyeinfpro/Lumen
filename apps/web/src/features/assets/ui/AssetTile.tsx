@@ -1,21 +1,21 @@
 "use client";
 
 import {
-  Check,
   Copy,
   Crosshair,
   Download,
   Image as ImageIcon,
   ImageDown,
   ImagePlus,
+  Link2,
   Maximize2,
+  MoreHorizontal,
   RotateCcw,
   Trash2,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import {
   memo,
-  type KeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type SyntheticEvent,
   type ReactNode,
@@ -26,7 +26,7 @@ import {
   useState,
 } from "react";
 
-import { ConfirmDialog, Tooltip } from "@/components/ui/primitives";
+import { ConfirmDialog, IconButton, Tooltip } from "@/components/ui/primitives";
 import {
   ActionSheet,
   pushMobileToast,
@@ -65,10 +65,6 @@ export interface GenerationTileProps {
 const LONG_PRESS_MS = 420;
 const TAP_FEEDBACK_MS = 180;
 const PRESS_MOVE_SLOP_PX = 10;
-
-function isTileActivationKey(key: string): boolean {
-  return key === "Enter" || key === " ";
-}
 
 function ensureImageInChatStore(item: GenerationSummary) {
   const imageId = item.image.id;
@@ -160,7 +156,7 @@ function GenerationTileComponent({
   }, []);
 
   const onPointerDown = useCallback(
-    (event: ReactPointerEvent<HTMLDivElement>) => {
+    (event: ReactPointerEvent<HTMLButtonElement>) => {
       if (selectionMode || !event.isPrimary || event.button !== 0) return;
       longPressed.current = false;
       suppressNextClick.current = false;
@@ -202,7 +198,7 @@ function GenerationTileComponent({
   }, []);
 
   const onPointerMove = useCallback(
-    (event: ReactPointerEvent<HTMLDivElement>) => {
+    (event: ReactPointerEvent<HTMLButtonElement>) => {
       const start = pressStart.current;
       if (!start || start.pointerId !== event.pointerId) return;
       const distance = Math.hypot(
@@ -236,21 +232,8 @@ function GenerationTileComponent({
       longPressed.current = false;
       return;
     }
-    if (selectionMode) {
-      onToggleSelect?.(model.imageId);
-      return;
-    }
     openPreview();
-  }, [model.imageId, onToggleSelect, openPreview, selectionMode]);
-
-  const onKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLDivElement>) => {
-      if (!isTileActivationKey(event.key)) return;
-      event.preventDefault();
-      onClick();
-    },
-    [onClick],
-  );
+  }, [openPreview]);
 
   const onMakeRef = useCallback(() => {
     const before = useChatStore.getState().composer.attachments.length;
@@ -290,6 +273,16 @@ function GenerationTileComponent({
       pushMobileToast("复制失败", "danger");
     }
   }, [item.prompt]);
+
+  const onCopyLink = useCallback(async () => {
+    try {
+      if (!item.image.url) throw new Error("image_url_unavailable");
+      await navigator.clipboard.writeText(new URL(item.image.url, window.location.origin).href);
+      pushMobileToast("图片链接已复制", "success");
+    } catch {
+      pushMobileToast("链接复制失败", "danger");
+    }
+  }, [item.image.url]);
 
   const onLocate = useCallback(() => {
     const query = new URLSearchParams({
@@ -359,40 +352,18 @@ function GenerationTileComponent({
       <article
         className={cn(
           "group surface-card-v2 relative block w-full overflow-hidden text-left",
-          "active:scale-[0.995]",
+          "motion-safe:active:scale-[0.995]",
           tapped && "shadow-amber",
           selected && "border-accent-border shadow-amber",
         )}
       >
-        <div
-          ref={rootRef}
-          role="button"
-          tabIndex={0}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerEnter={onPreviewIntent}
-          onPointerUp={clearPress}
-          onPointerLeave={() => {
-            clearPress();
-            clearPreviewIntent();
-          }}
-          onPointerCancel={clearPress}
-          onClick={onClick}
-          onFocus={onPreviewIntent}
-          onBlur={clearPreviewIntent}
-          onKeyDown={onKeyDown}
-          className="block w-full cursor-pointer text-left focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
-          aria-label={model.promptShort || "查看作品"}
-          aria-pressed={selectionMode ? selected : undefined}
-        >
+        <div ref={rootRef} className="relative">
           <GenerationTileMedia
             model={model}
             imageSrc={imageSrc}
             imageSrcSet={imageSrcSet}
             imageFailed={imageFailed}
             imageLoaded={imageLoaded}
-            selectionMode={selectionMode}
-            selected={selected}
             onLoad={onImageLoad}
             onError={onImageError}
             onRetry={retryImage}
@@ -400,6 +371,40 @@ function GenerationTileComponent({
             imageSizes={imageSizes}
           />
           <GenerationTileMetadata item={item} model={model} />
+          <button
+            type="button"
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerEnter={onPreviewIntent}
+            onPointerUp={clearPress}
+            onPointerLeave={() => {
+              clearPress();
+              clearPreviewIntent();
+            }}
+            onPointerCancel={clearPress}
+            onClick={onClick}
+            onFocus={onPreviewIntent}
+            onBlur={clearPreviewIntent}
+            className="absolute inset-0 z-10 block w-full cursor-pointer text-left focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+            aria-label={model.promptShort || "查看作品"}
+          />
+        </div>
+
+        {selectionMode && onToggleSelect && (
+          <label className="absolute right-2 top-2 z-20 flex h-11 w-11 cursor-pointer items-center justify-center rounded-[var(--radius-control)] bg-[var(--bg-1)]">
+            <input
+              type="checkbox"
+              checked={selected}
+              onChange={() => onToggleSelect(model.imageId)}
+              aria-label={`选择 ${model.promptShort || "作品"}`}
+              className="h-5 w-5 accent-[var(--accent)]"
+            />
+          </label>
+        )}
+        <div className="absolute bottom-2 right-2 z-20">
+          <IconButton className="h-11 w-11" aria-label="作品菜单" tooltip="作品菜单" onClick={() => setSheetOpen(true)}>
+            <MoreHorizontal className="h-4 w-4" />
+          </IconButton>
         </div>
 
         <GenerationTileDesktopActions
@@ -418,6 +423,7 @@ function GenerationTileComponent({
         onMakeRef={onMakeRef}
         onSave={onSave}
         onCopyPrompt={onCopyPrompt}
+        onCopyLink={onCopyLink}
         onLocate={onLocate}
         canDelete={Boolean(onDeleteImage)}
         onRequestDelete={() => setDeleteDialogOpen(true)}
@@ -444,8 +450,6 @@ function GenerationTileMedia({
   imageSrcSet,
   imageFailed,
   imageLoaded,
-  selectionMode,
-  selected,
   onLoad,
   onError,
   onRetry,
@@ -457,8 +461,6 @@ function GenerationTileMedia({
   imageSrcSet: string | undefined;
   imageFailed: boolean;
   imageLoaded: boolean;
-  selectionMode: boolean;
-  selected: boolean;
   onLoad: () => void;
   onError: (event: SyntheticEvent<HTMLImageElement>) => void;
   onRetry: () => void;
@@ -502,27 +504,13 @@ function GenerationTileMedia({
           {model.age}
         </span>
       )}
-      {selectionMode && (
-        <span
-          className={cn(
-            // @ui-governance-allow media: selection control overlays the asset thumbnail.
-            "absolute right-2 top-2 inline-flex h-11 w-11 items-center justify-center rounded-full border backdrop-blur-md transition-colors md:h-8 md:w-8",
-            selected
-              ? "border-accent-border bg-[var(--accent)] text-[var(--accent-on)]"
-              : "border-[var(--border-strong)] bg-[var(--media-control-bg)] text-[var(--media-control-fg)]",
-          )}
-          aria-hidden
-        >
-          {selected && <Check className="h-4 w-4" />}
-        </span>
-      )}
     </div>
   );
 }
 
 function ImageLoadFailure({ onRetry }: { onRetry: () => void }) {
   return (
-    <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-[var(--bg-2)] text-[var(--fg-2)]">
+    <div className="pointer-events-none absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-[var(--bg-2)] text-[var(--fg-2)]">
       <ImageIcon className="h-5 w-5" />
       <span className="type-caption">图片载入失败</span>
       <button
@@ -533,7 +521,7 @@ function ImageLoadFailure({ onRetry }: { onRetry: () => void }) {
           event.stopPropagation();
           onRetry();
         }}
-        className="mt-1 inline-flex min-h-11 cursor-pointer items-center gap-1 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] px-3 type-caption text-[var(--fg-1)] hover:text-[var(--fg-0)] md:min-h-8"
+        className="pointer-events-auto mt-1 inline-flex min-h-11 cursor-pointer items-center gap-1 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] px-3 type-caption text-[var(--fg-1)] hover:text-[var(--fg-0)] md:min-h-8"
       >
         <RotateCcw className="h-3 w-3" />
         重试
@@ -550,7 +538,7 @@ function GenerationTileMetadata({
   model: GenerationTileModel;
 }) {
   return (
-    <div className="space-y-2 px-2.5 pb-2.5 pt-2.5">
+    <div className="space-y-2 py-2.5 pl-2.5 pr-14">
       <div
         className="type-body-sm leading-[1.5] text-[var(--fg-0)]"
         style={{
@@ -601,7 +589,7 @@ function GenerationTileDesktopActions({
 }) {
   if (selectionMode) return null;
   return (
-    <div className="pointer-events-none absolute right-2 top-2 hidden items-center gap-1 opacity-0 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100 md:flex">
+    <div className="pointer-events-none absolute right-2 top-2 z-20 hidden items-center gap-1 opacity-0 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100 md:flex">
       <TileAction label="预览" onClick={onPreview}>
         <Maximize2 className="h-3.5 w-3.5" />
       </TileAction>
@@ -626,6 +614,7 @@ function GenerationTileActionSheet({
   onMakeRef,
   onSave,
   onCopyPrompt,
+  onCopyLink,
   onLocate,
   canDelete,
   onRequestDelete,
@@ -635,6 +624,7 @@ function GenerationTileActionSheet({
   onMakeRef: () => void;
   onSave: () => void;
   onCopyPrompt: () => void;
+  onCopyLink: () => void;
   onLocate: () => void;
   canDelete: boolean;
   onRequestDelete: () => void;
@@ -661,6 +651,12 @@ function GenerationTileActionSheet({
           label: "复制提示词",
           icon: <Copy className="h-4 w-4" />,
           onSelect: onCopyPrompt,
+        },
+        {
+          key: "link",
+          label: "复制图片链接",
+          icon: <Link2 className="h-4 w-4" />,
+          onSelect: onCopyLink,
         },
         {
           key: "locate",

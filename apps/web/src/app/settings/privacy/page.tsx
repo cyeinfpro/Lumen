@@ -43,7 +43,7 @@ import { useUiStore } from "@/store/useUiStore";
 import { useAgentStore } from "@/store/agent/useAgentStore";
 import { removeAgentDrafts } from "@/store/agent/draftPersistence";
 import { SettingsShell } from "@/components/ui/shell/SettingsShell";
-import { Button } from "@/components/ui/primitives";
+import { Button, ConfirmDialog } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
 
 const SESSION_SKELETON_KEYS = [
@@ -70,7 +70,7 @@ export default function PrivacyPage() {
       >
         <ExportSection />
         <SessionsSection />
-        <DangerSection email={me.data?.email ?? null} loading={me.isLoading} />
+        <DangerSection key={me.data?.id ?? "pending"} email={me.data?.email ?? null} loading={me.isLoading} />
       </motion.div>
     </SettingsShell>
   );
@@ -205,10 +205,10 @@ function SessionsSection() {
   const [revokeError, setRevokeError] = useState<string | null>(null);
   const [pendingId, setPendingId] = useState<string | null>(null);
 
-  const onRevoke = (s: SessionOut) => {
+  const onRevoke = async (s: SessionOut) => {
     setRevokeError(null);
-    revoke.mutate(s.id, {
-      onSettled: () => setPendingId(null),
+    try { await revoke.mutateAsync(s.id, {
+      onSuccess: () => setPendingId(null),
       onError: (err) => {
         if (err instanceof ApiError) {
           setRevokeError(err.message || `操作失败 (HTTP ${err.status})`);
@@ -216,10 +216,11 @@ function SessionsSection() {
           setRevokeError(err.message || "操作失败");
         }
       },
-    });
+    }); } catch { /* Keep the target and local error available for retry. */ }
   };
 
   const items = q.data?.items ?? [];
+  const revokeTarget = items.find((item) => item.id === pendingId);
 
   return (
     <section className="space-y-3">
@@ -269,40 +270,42 @@ function SessionsSection() {
                 key={s.id}
                 s={s}
                 i={i}
-                onActivate={() => setPendingId(s.id)}
-                onCancel={() => setPendingId(null)}
-                onConfirm={() => onRevoke(s)}
-                confirming={pendingId === s.id}
-                pending={revoke.isPending && pendingId === s.id}
+                onActivate={() => { setRevokeError(null); setPendingId(s.id); }}
+                pending={revoke.isPending}
               />
             ))}
           </ul>
         )}
       </div>
-      {revokeError && (
-        <p role="alert" className="flex items-center gap-1.5 type-body-sm text-[var(--danger-fg)]">
-          <AlertCircle className="w-4 h-4" /> {revokeError}
-        </p>
-      )}
+      <SessionRevokeConfirmation target={revokeTarget} error={revokeError} pending={revoke.isPending}
+        onClose={() => setPendingId(null)} onConfirm={onRevoke} />
     </section>
   );
+}
+
+function SessionRevokeConfirmation({ target, error, pending, onClose, onConfirm }: {
+  target: SessionOut | undefined;
+  error: string | null;
+  pending: boolean;
+  onClose: () => void;
+  onConfirm: (session: SessionOut) => Promise<void>;
+}) {
+  return <ConfirmDialog key={target?.id ?? "none"}
+    open={!!target} onOpenChange={(open) => { if (!open) onClose(); }}
+    title="注销设备会话？" confirmText="注销" tone="danger" confirming={pending}
+    description={<><p className="break-words">{target?.ua || "未知设备"} · IP {target?.ip ?? "未知"}</p><p>此设备需要重新登录，当前会话不受影响。</p>{error ? <p role="alert" className="text-[var(--danger-fg)]">{error}</p> : null}</>}
+    onConfirm={async () => { if (target && !target.is_current) await onConfirm(target); }} />;
 }
 
 function SessionRow({
   s,
   i,
   onActivate,
-  onCancel,
-  onConfirm,
-  confirming,
   pending,
 }: {
   s: SessionOut;
   i: number;
   onActivate: () => void;
-  onCancel: () => void;
-  onConfirm: () => void;
-  confirming: boolean;
   pending: boolean;
 }) {
   const created = safeDistanceToNow(s.created_at);
@@ -339,38 +342,12 @@ function SessionRow({
       </div>
       {s.is_current ? (
         <span className="type-caption text-[var(--fg-2)] w-full md:w-auto md:self-center">—</span>
-      ) : confirming ? (
-        <motion.div
-          initial={{ opacity: 0, scale: 0.95 }}
-          animate={{ opacity: 1, scale: 1 }}
-          className="w-full md:w-auto inline-flex items-center gap-2 md:self-center"
-        >
-          <span className="type-caption text-[var(--fg-1)]">确认？</span>
-          <Button
-            variant="danger"
-            size="sm"
-            onClick={onConfirm}
-            disabled={pending}
-            loading={pending}
-            className="flex-1 md:flex-none"
-          >
-            {pending ? "踢下线中" : "踢下线"}
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onCancel}
-            disabled={pending}
-            className="flex-1 md:flex-none"
-          >
-            {copy.action.cancel}
-          </Button>
-        </motion.div>
       ) : (
         <Button
           variant="ghost"
           size="sm"
           onClick={onActivate}
+          disabled={pending}
           leftIcon={<LogOut className="w-3 h-3" />}
           className="w-full md:w-auto md:self-center text-danger hover:text-danger"
         >
@@ -414,10 +391,10 @@ function DangerSection({
     [email, confirmEmail],
   );
 
-  const onDelete = () => {
+  const onDelete = async () => {
     setError(null);
     if (!matches) return;
-    del.mutate(undefined, {
+    try { await del.mutateAsync(undefined, {
       onSuccess: () => {
         if (!mountedRef.current) return;
         clearLocalAccountState(queryClient);
@@ -433,7 +410,7 @@ function DangerSection({
           setError(err.message || "删除失败");
         }
       },
-    });
+    }); } catch { /* Keep the confirmation open with the local error. */ }
   };
 
   return (
@@ -475,10 +452,12 @@ function DangerSection({
             placeholder={email ?? (loading ? copy.state.loading : "未登录")}
             disabled={!email || del.isPending}
             autoComplete="off"
+            aria-invalid={!!confirmEmail && !matches || undefined}
+            aria-describedby={confirmEmail && !matches ? "confirm-email-error" : undefined}
             className="control-shell type-body-sm h-10 w-full px-3 text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-2)] focus:border-danger-border focus:ring-2 focus:ring-danger/20 disabled:opacity-50 max-sm:min-h-11"
           />
           {confirmEmail && !matches && (
-            <p className="type-caption text-[var(--fg-2)] mt-1.5">
+            <p id="confirm-email-error" role="alert" className="type-caption text-[var(--danger-fg)] mt-1.5">
               邮箱不匹配
             </p>
           )}
@@ -491,7 +470,6 @@ function DangerSection({
           </div>
         )}
 
-        {!armed ? (
           <Button
             variant="danger"
             size="md"
@@ -502,38 +480,28 @@ function DangerSection({
           >
             准备删除账号
           </Button>
-        ) : (
-          <motion.div
-            initial={{ opacity: 0, y: -4 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="grid grid-cols-2 gap-2"
-          >
-            <Button
-              variant="ghost"
-              size="md"
-              onClick={() => setArmed(false)}
-              disabled={del.isPending}
-            >
-              {copy.action.cancel}
-            </Button>
-            <Button
-              variant="danger"
-              size="md"
-              onClick={onDelete}
-              disabled={!matches || del.isPending}
-              loading={del.isPending}
-              leftIcon={!del.isPending ? <Trash2 className="w-4 h-4" /> : undefined}
-            >
-              {del.isPending ? "删除中" : "永久删除"}
-            </Button>
-          </motion.div>
-        )}
+        <AccountDeleteConfirmation open={armed && matches} onOpenChange={setArmed}
+          email={email} pending={del.isPending} error={error} onConfirm={onDelete} />
       </div>
     </section>
   );
 }
 
 // ———————————————————————————— helpers ————————————————————————————
+
+function AccountDeleteConfirmation({ open, onOpenChange, email, pending, error, onConfirm }: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  email: string | null;
+  pending: boolean;
+  error: string | null;
+  onConfirm: () => Promise<void>;
+}) {
+  return <ConfirmDialog open={open} onOpenChange={onOpenChange}
+    title={`删除账号 ${email ?? ""}？`} confirmText="删除账号" tone="danger" confirming={pending}
+    description={<><p>账号、对话与图像将标记为删除，所有登录会话立即失效。</p>{error ? <p role="alert" className="mt-2 text-[var(--danger-fg)]">{error}</p> : null}</>}
+    onConfirm={onConfirm} />;
+}
 
 const LOCAL_ACCOUNT_STORAGE_KEYS = [
   "lumen.haptic.enabled",

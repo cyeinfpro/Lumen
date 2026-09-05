@@ -2,7 +2,7 @@
 
 // 受控确认对话框。支持 danger tone（红色确认按钮）。Esc 或点击背景关闭。
 
-import { useCallback, useEffect, useId, useRef } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { Button } from "./Button";
 import { Dialog } from "./Dialog";
@@ -25,6 +25,25 @@ interface ConfirmDialogProps {
   tone?: "default" | "danger";
   /** 确认按钮是否处于加载态（异步操作可由外部控制） */
   confirming?: boolean;
+  /** Stable resource identity when the title is not a string. */
+  resetKey?: string | number;
+}
+
+function useConfirmationFeedback(open: boolean, title: React.ReactNode, resetKey?: string | number) {
+  const contextKey = resetKey ?? (typeof title === "string" ? title : undefined);
+  const [feedback, setFeedback] = useState({
+    open, contextKey, failed: false, session: Symbol(),
+  });
+  if (feedback.open !== open || !Object.is(feedback.contextKey, contextKey)) {
+    setFeedback({ open, contextKey, failed: false, session: Symbol() });
+  }
+  return {
+    failed: feedback.open === open && Object.is(feedback.contextKey, contextKey) && feedback.failed,
+    clearFailure: () => setFeedback((current) => ({ ...current, failed: false })),
+    recordFailure: () => setFeedback((current) => current.session === feedback.session
+      ? { ...current, failed: true }
+      : current),
+  };
 }
 
 export function ConfirmDialog({
@@ -38,20 +57,16 @@ export function ConfirmDialog({
   onCancel,
   tone = "default",
   confirming = false,
+  resetKey,
 }: ConfirmDialogProps) {
   const titleId = useId();
   const descriptionId = useId();
-  // I-2：不能只靠外部 confirming 挡重复确认。
-  // 1) 调用方可能压根不传（volcano-asset-manager-view 甚至硬编码 confirming
-  //    ={false}），确认按钮全程可点；
-  // 2) 即便传了 mutation.isPending，从 click 到 pending 生效之间隔着一次
-  //    re-render，双击的第二下可以整个穿过这道空窗。
-  // 确认动作大多是删除 / 提交 / 生成，重复触发 = 重复执行、重复扣费。
-  // 两道闸门都在 ref 上（同步生效，不额外触发渲染，也不引入 effect 里 setState）：
-  //   runningRef      —— onConfirm 执行期间硬锁；
-  //   lastConfirmAtRef —— 刚触发过的短窗口内再点直接丢弃，挡住双击与渲染空窗。
-  // 窗口过后仍可再点：用户在看到失败提示后本来就该能重试，做成永久置灰反而
-  // 会变成"点了没反应"的哑按钮。
+  const errorId = useId();
+  const [pending, setPending] = useState(false);
+  const { failed, clearFailure, recordFailure } = useConfirmationFeedback(open, title, resetKey);
+  const busy = confirming || pending;
+  // Keep the synchronous lock and short cooldown independent of React rendering.
+  // Callers may omit confirming or only publish pending on the next render.
   const runningRef = useRef(false);
   const lastConfirmAtRef = useRef(0);
   useEffect(() => {
@@ -70,10 +85,16 @@ export function ConfirmDialog({
     if (now - lastConfirmAtRef.current < CONFIRM_REFIRE_GUARD_MS) return;
     lastConfirmAtRef.current = now;
     runningRef.current = true;
+    setPending(true);
+    clearFailure();
     try {
       await onConfirm();
+    } catch {
+      // Do not expose raw API exceptions or imply an uncertain mutation was undone.
+      recordFailure();
     } finally {
       runningRef.current = false;
+      setPending(false);
     }
   };
 
@@ -81,9 +102,14 @@ export function ConfirmDialog({
     <Dialog
       open={open}
       onClose={handleCancel}
-      aria-busy={confirming}
+      aria-busy={busy}
+      closeOnEscape={!busy}
+      closeOnBackdrop={!busy}
       aria-labelledby={titleId}
-      aria-describedby={description ? descriptionId : undefined}
+      aria-describedby={[
+        description ? descriptionId : null,
+        failed ? errorId : null,
+      ].filter(Boolean).join(" ") || undefined}
       className="max-w-sm"
     >
       <Dialog.Header>
@@ -91,20 +117,24 @@ export function ConfirmDialog({
           id={titleId}
           className={cn(
             "type-card-title text-balance",
-            tone === "danger" && "text-[var(--danger)]",
+            tone === "danger" && "text-[var(--danger-fg)]",
           )}
         >
           {title}
         </h2>
       </Dialog.Header>
-      {description ? (
+      {description || failed ? (
         <Dialog.Body>
-          <div
-            id={descriptionId}
-            className="type-body-sm text-pretty text-[var(--fg-1)]"
-          >
-            {description}
-          </div>
+          {description ? (
+            <div id={descriptionId} className="type-body-sm break-words text-pretty text-[var(--fg-1)]">
+              {description}
+            </div>
+          ) : null}
+          {failed ? (
+            <p id={errorId} role="alert" className="mt-2 type-body-sm break-words text-[var(--danger-fg)]">
+              操作结果未确认，核对对象状态后重试。
+            </p>
+          ) : null}
         </Dialog.Body>
       ) : null}
       <Dialog.Footer className="aria-disabled:pointer-events-none">
@@ -112,8 +142,7 @@ export function ConfirmDialog({
           variant="ghost"
           size="sm"
           onClick={handleCancel}
-          disabled={confirming}
-          aria-disabled={confirming || undefined}
+          disabled={busy}
         >
           {cancelText}
         </Button>
@@ -121,8 +150,7 @@ export function ConfirmDialog({
           variant={tone === "danger" ? "danger" : "primary"}
           size="sm"
           onClick={handleConfirm}
-          loading={confirming}
-          aria-disabled={confirming || undefined}
+          loading={busy}
         >
           {confirmText}
         </Button>

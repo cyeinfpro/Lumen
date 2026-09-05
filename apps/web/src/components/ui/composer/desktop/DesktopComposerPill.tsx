@@ -387,7 +387,7 @@ export function DesktopComposerPill({
   }, [onSubmit, setComposerError, setForceIntent, setText, haptic]);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (isComposingRef.current || !canSubmit) return;
+    if (isComposingRef.current || e.nativeEvent.isComposing || e.repeat || !canSubmit) return;
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       void handleSubmit();
