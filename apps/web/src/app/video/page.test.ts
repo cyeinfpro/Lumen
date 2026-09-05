@@ -46,6 +46,10 @@ const videoPageViewSource = readFileSync(
   new URL("./video-page-view.tsx", import.meta.url),
   "utf8",
 );
+const videoPromptEditorSource = readFileSync(
+  new URL("./video-prompt-editor.tsx", import.meta.url),
+  "utf8",
+);
 const generationFeedSource = readFileSync(
   new URL("./use-video-generation-feed.ts", import.meta.url),
   "utf8",
@@ -98,6 +102,7 @@ const source = [
   pageSource,
   videoPageDomainSource,
   videoPageViewSource,
+  videoPromptEditorSource,
   generationFeedSource,
   draftMediaControllerSource,
   parameterHandlersSource,
@@ -954,7 +959,7 @@ test("video prompt enhancement candidates do not trap editor scrolling", () => {
   match(source, /function PromptEnhanceCandidatePreview\(/);
   match(source, /function PromptEnhanceLoadingState\(/);
   match(pageSource, /onReturnToEditor: scrollPromptEditorIntoView/);
-  match(videoPageViewSource, /onReturnToEditor=\{model\.onReturnToEditor\}/);
+  match(videoPromptEditorSource, /onReturnToEditor=\{model\.onReturnToEditor\}/);
   match(source, /function motionSafeScrollBehavior\(\): ScrollBehavior/);
   match(
     source,

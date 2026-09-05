@@ -1,13 +1,7 @@
 "use client";
 
 import { useQueryClient } from "@tanstack/react-query";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   AGENT_EVENT_NAMES,
@@ -22,10 +16,7 @@ import {
   type AgentSessionPatchInput,
   type AgentStatus,
 } from "../model/contracts";
-import {
-  getAgentActiveRun,
-  listAgentMessages,
-} from "../api/agentApi";
+import { getAgentActiveRun, listAgentMessages } from "../api/agentApi";
 import {
   useAgentActiveRunQuery,
   useAgentMessagesQuery,
@@ -57,9 +48,11 @@ import {
   useAgentSessionDirectory,
 } from "./useAgentSessionDirectory";
 import {
+  AGENT_GENERATION_EVENT_NAMES,
   AgentRefreshCoordinator,
   selectAgentGenerationChannelIds,
 } from "./agentRealtime";
+import { mergeAgentImageDefaults } from "./agentImageDefaults";
 import { useAgentSnapshotPolling } from "./useAgentSnapshotPolling";
 import { useAgentMediaActions } from "./useAgentMediaActions";
 import {
@@ -79,17 +72,6 @@ import {
   removingImageId,
   snapshotPollInterval,
 } from "./agentWorkspaceView";
-
-const GENERATION_EVENT_NAMES = [
-  "generation.queued",
-  "generation.started",
-  "generation.progress",
-  "generation.partial_image",
-  "generation.succeeded",
-  "generation.failed",
-  "generation.canceled",
-  "generation.retrying",
-] as const;
 
 export function AgentWorkspaceController({
   platform,
@@ -287,7 +269,7 @@ export function AgentWorkspaceController({
         },
       ]);
     }
-    for (const name of GENERATION_EVENT_NAMES) {
+    for (const name of AGENT_GENERATION_EVENT_NAMES) {
       entries.push([name, requestRefresh]);
     }
     return Object.fromEntries(entries);
@@ -475,16 +457,10 @@ export function AgentWorkspaceController({
   }, [deleteMutation, removeSession, selectWithRoute]);
 
   const updateDefaults = useCallback((patch: Partial<AgentImageDefaults>) => {
-    const current = selectAgentDraft(useAgentStore.getState(), useAgentStore.getState().currentSessionId);
-    const normalized = { ...patch };
-    if (patch.background === "transparent" && current.imageDefaults.output_format === "jpeg") {
-      normalized.output_format = "png";
-    }
-    if (patch.output_format === "jpeg" && current.imageDefaults.background === "transparent") {
-      normalized.output_format = "png";
-    }
-    setDraft(useAgentStore.getState().currentSessionId, {
-      imageDefaults: { ...current.imageDefaults, ...normalized },
+    const state = useAgentStore.getState();
+    const current = selectAgentDraft(state, state.currentSessionId);
+    setDraft(state.currentSessionId, {
+      imageDefaults: mergeAgentImageDefaults(current.imageDefaults, patch),
     });
   }, [setDraft]);
 

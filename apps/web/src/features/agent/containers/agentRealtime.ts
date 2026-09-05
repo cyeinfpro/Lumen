@@ -1,5 +1,15 @@
 import type { Generation } from "@/lib/types";
 
+export const AGENT_GENERATION_EVENT_NAMES = [
+  "generation.queued",
+  "generation.started",
+  "generation.progress",
+  "generation.partial_image",
+  "generation.succeeded",
+  "generation.failed",
+  "generation.canceled",
+  "generation.retrying",
+] as const;
 
 export function selectAgentGenerationChannelIds(
   generations: Record<string, Generation>,
@@ -57,7 +67,6 @@ export function mergeAgentGeneration(
     image: incoming.image ?? existing.image,
   };
 }
-
 
 export class AgentRefreshCoordinator {
   private running: Promise<void> | null = null;

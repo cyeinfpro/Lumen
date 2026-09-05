@@ -170,7 +170,7 @@ export function DesktopAccountMenu() {
       >
         <Avatar
           size="sm"
-          alt={label}
+          alt="账户头像"
           name={isDefaultAccount ? undefined : label}
           initials={avatar}
           fallback={<CircleUserRound className="w-4 h-4 text-[var(--fg-1)]" />}

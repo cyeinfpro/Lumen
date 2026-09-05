@@ -22,9 +22,7 @@ import {
 import { invalidateRealtimeRuntimes } from "@/shared/realtime/runtimeRegistry";
 import { useChatStore } from "@/store/useChatStore";
 
-const IDENTITY_REVALIDATION_RETRY_DELAYS_MS = [
-  1_000, 3_000, 10_000, 30_000,
-] as const;
+const IDENTITY_REVALIDATION_RETRY_DELAYS_MS = [1_000, 3_000, 10_000, 30_000] as const;
 
 type IdentityRefetchResult = {
   data?: AuthUser;
