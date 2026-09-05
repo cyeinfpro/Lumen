@@ -14,6 +14,10 @@ const pageViewSource = readFileSync(
   new URL("./video-page-view.tsx", import.meta.url),
   "utf8",
 );
+const promptEditorSource = readFileSync(
+  new URL("./video-prompt-editor.tsx", import.meta.url),
+  "utf8",
+);
 const directorViewportSource = readFileSync(
   new URL("./video-director-viewport.tsx", import.meta.url),
   "utf8",
@@ -148,17 +152,18 @@ test("director viewport is a stable real-media stage without fake progress", () 
 });
 
 test("camera movement categories are native collapsibles with keyboard controls", () => {
-  match(pageViewSource, /category: "镜头景别"/);
-  match(pageViewSource, /category: "运镜轨迹"/);
-  match(pageViewSource, /category: "光影氛围"/);
+  match(pageViewSource, /<VideoPromptEditor model=\{model\.composer\.prompt\} \/>/);
+  match(promptEditorSource, /category: "镜头景别"/);
+  match(promptEditorSource, /category: "运镜轨迹"/);
+  match(promptEditorSource, /category: "光影氛围"/);
   match(
-    pageViewSource,
+    promptEditorSource,
     /CAMERA_MOVEMENT_LIBRARY\.map\(\(group, index\) => \([\s\S]*?<details/,
   );
-  match(pageViewSource, /<summary className="flex min-h-11/);
-  match(pageViewSource, /role="group"\s+aria-label=\{`\$\{group\.category\}镜头词`\}/);
-  match(pageViewSource, /onClick=\{\(\) => model\.onInsertChip\(chip\)\}/);
-  match(pageViewSource, /disabled=\{model\.enhancing \|\| model\.uploadsPending\}/);
+  match(promptEditorSource, /<summary className="flex min-h-11/);
+  match(promptEditorSource, /role="group"\s+aria-label=\{`\$\{group\.category\}镜头词`\}/);
+  match(promptEditorSource, /onClick=\{\(\) => model\.onInsertChip\(chip\)\}/);
+  match(promptEditorSource, /disabled=\{model\.enhancing \|\| model\.uploadsPending\}/);
 });
 
 test("visual video controls preserve selection and change behavior", () => {
