@@ -505,6 +505,6 @@ async def test_image2_dispatch_skips_responses_fallback_when_capability_false(
 
     assert fallback_calls == 0
     assert exc.value.__class__.__name__ == "UpstreamError"
-    assert exc.value.error_code == "provider_exhausted"
+    assert exc.value.error_code == "upstream_error"
     path_errors = exc.value.payload.get("path_errors") or []
-    assert any("capability_unsupported" in str(item) for item in path_errors)
+    assert path_errors == []

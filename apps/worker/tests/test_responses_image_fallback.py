@@ -220,7 +220,7 @@ def _patch_provider_pool_to_use_resolved_runtime(
         return TestPool()
 
     async def fake_resolve(_key: str) -> str | None:
-        return None
+        return "responses" if _key == "image.primary_route" else None
 
     async def fake_resolve_public_http_target(*_args: Any, **_kwargs: Any) -> None:
         return None
@@ -1052,7 +1052,7 @@ async def test_curl_post_multipart_kills_child_on_cancellation(
 async def test_generate_image_uses_responses_stream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # 默认文生图主路径走 /v1/responses；设置可切到 /v1/images/generations direct。
+    # 显式启用 responses 引擎后保留原流式路径。
     client = DummyClient()
     progress_events: list[dict[str, Any]] = []
 
@@ -1185,7 +1185,7 @@ async def test_fake_transparent_image2_result_is_returned_without_responses_fall
     monkeypatch.setattr(image_dispatch, "_run_direct_image2_once", opaque_direct)
     monkeypatch.setattr(image_dispatch, "_run_responses_once", responses_must_not_run)
 
-    result = await image_dispatch._run_image2_with_responses_fallback(request, route)
+    result = await image_dispatch._run_non_race_image_once(request, route)
 
     assert result == [(InlineImageBytes(TINY_PNG), None)]
     assert responses_calls == 0
@@ -1264,8 +1264,19 @@ def test_retry_cache_busters_remove_partial_images_for_small_size() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("image_model,quality", [
+    (model, quality)
+    for model, qualities in [
+        ("gpt-image-2", ("low", "medium", "high")),
+        ("gpt-image-2.5-flare", ("low", "medium", "high", "xhigh", "max")),
+        ("gpt-image-2.5-sunburst", ("low", "medium", "high", "xhigh", "max")),
+    ]
+    for quality in qualities
+])
 async def test_generate_image_can_use_image2_direct_route(
     monkeypatch: pytest.MonkeyPatch,
+    image_model: str,
+    quality: str,
 ) -> None:
     client = SuccessfulDirectClient()
     progress_events: list[dict[str, Any]] = []
@@ -1292,10 +1303,11 @@ async def test_generate_image_can_use_image2_direct_route(
     b64, revised = await _first_image_result(
         upstream.generate_image(
             _image_request(
+                image_model=image_model,
                 prompt="make a 4k landscape",
                 size="3840x2160",
                 n=1,
-                quality="high",
+                quality=quality,
                 progress_callback=progress_events.append,
             )
         )
@@ -1309,11 +1321,11 @@ async def test_generate_image_can_use_image2_direct_route(
     assert post["url"] == "https://upstream.example/v1/images/generations"
     body = post["json"]
     assert body == {
-        "model": UPSTREAM_MODEL,
+        "model": image_model,
         "prompt": "make a 4k landscape",
         "size": "3840x2160",
         "n": 1,
-        "quality": "high",
+        "quality": quality,
         # 默认 PNG（OpenAI 忽略 output_compression，JPEG 仍有压缩痕迹）；PNG 不带 compression
         "output_format": "png",
         "background": "auto",
@@ -1494,7 +1506,7 @@ async def test_stream_responses_falls_back_to_direct_image2_on_moderation(
     async def fake_resolve(key: str) -> str | None:
         if key == "image.channel":
             return "stream_only"
-        if key == "image.engine":
+        if key in {"image.engine", "image.primary_route"}:
             return "responses"
         return None
 
@@ -1744,7 +1756,7 @@ async def test_confirmed_missing_image_route_uses_documented_default(
     )
 
     assert (
-        await TEST_UPSTREAM_SERVICES.core.resolve_image_primary_route() == "responses"
+        await TEST_UPSTREAM_SERVICES.core.resolve_image_primary_route() == "image2"
     )
 
 
@@ -1889,8 +1901,19 @@ async def test_direct_transparent_background_uses_native_webp_request(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("image_model,quality", [
+    (model, quality)
+    for model, qualities in [
+        ("gpt-image-2", ("low", "medium", "high")),
+        ("gpt-image-2.5-flare", ("low", "medium", "high", "xhigh", "max")),
+        ("gpt-image-2.5-sunburst", ("low", "medium", "high", "xhigh", "max")),
+    ]
+    for quality in qualities
+])
 async def test_direct_edit_transparent_background_uses_native_webp_request(
     monkeypatch: pytest.MonkeyPatch,
+    image_model: str,
+    quality: str,
 ) -> None:
     captured: dict[str, Any] = {}
 
@@ -1906,6 +1929,8 @@ async def test_direct_edit_transparent_background_uses_native_webp_request(
 
     await TEST_UPSTREAM_SERVICES.direct.direct_edit_image_once(
         _image_request(
+                image_model=image_model,
+                quality=quality,
             action="edit",
             prompt="clean product badge",
             images=[TINY_PNG],
@@ -1924,9 +1949,12 @@ async def test_direct_edit_transparent_background_uses_native_webp_request(
     assert data["output_compression"] == "90"
     assert data["prompt"] == "clean product badge"
 
+    assert data["model"] == image_model
+    assert data["quality"] == quality
+
 
 @pytest.mark.asyncio
-async def test_generate_image_image2_deterministic_failure_falls_back_to_responses(
+async def test_generate_image_image2_failure_does_not_enable_responses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = RejectedDirectClient()
@@ -1951,23 +1979,12 @@ async def test_generate_image_image2_deterministic_failure_falls_back_to_respons
     monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", fake_resolve)
     patch_responses_stream(monkeypatch, client)
 
-    b64, revised = await _first_image_result(
-        upstream.generate_image(
-            _image_request(
-                prompt="make an image",
-                size="1536x864",
-                n=1,
-                quality="high",
-            )
+    with pytest.raises(upstream.UpstreamError):
+        await _first_image_result(
+            upstream.generate_image(_image_request(prompt="make an image", size="1536x864"))
         )
-    )
-
-    assert b64 == PNG_B64
-    assert revised is None
     assert len(client.posts) == 1
-    assert len(client.streams) == 1
-    assert client.posts[0]["url"] == "https://upstream.example/v1/images/generations"
-    assert client.streams[0]["url"] == "https://upstream.example/v1/responses"
+    assert client.streams == []
 
 
 @pytest.mark.asyncio
@@ -2813,3 +2830,36 @@ async def test_extract_image_result_url_download_failure_raises_upstream_error(
         )
     assert exc_info.value.status_code == 404
     assert "image url download" in str(exc_info.value).lower()
+
+
+@pytest.mark.parametrize("model", ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"])
+@pytest.mark.parametrize("quality", ["low", "medium", "high", "xhigh", "max"])
+def test_selected_model_quality_survive_worker_and_all_request_shapes(model, quality):
+    options = request_options.image_request_options({"model": model, "render_quality": quality}, size="1024x1024")
+    assert options["image_model"] == model
+    assert options["render_quality"] == quality
+    job_body = TEST_UPSTREAM_SERVICES.image_jobs.image_job_body_base(
+        prompt="test", size="1024x1024", n=1, image_model=model, quality=quality,
+        output_format="webp", output_compression=90, background="transparent", moderation="low",
+    )
+    assert job_body["model"] == model
+    assert job_body["quality"] == quality
+    responses_body = _responses_body(image_model=model, quality=quality)
+    assert responses_body["model"] == DEFAULT_IMAGE_RESPONSES_MODEL
+    assert responses_body["tools"][0]["model"] == model
+    assert responses_body["tools"][0]["quality"] == quality
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["generate", "edit"])
+async def test_direct_engine_locks_sidecar_endpoint(monkeypatch, action):
+    captured = {}
+    async def fake_job(request, **kwargs):
+        captured.update(kwargs)
+        return PNG_B64, None
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.image_jobs, "image_job_with_failover", fake_job)
+    await image_dispatch._run_non_race_image_once(
+        _image_request(action=action, image_model="gpt-image-2.5-sunburst", quality="max"),
+        ImageProviderRoute("auto", "image2", True, "provider"),
+    )
+    assert captured["endpoint_override"] == "generations"

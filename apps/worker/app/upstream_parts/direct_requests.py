@@ -497,7 +497,7 @@ async def _direct_generate_image_once(
     before_attempt: Callable[[int], Awaitable[None]] | None = None,
     streaming_override: bool = False,
 ) -> list[tuple[str, str | None]]:
-    """Text-to-image via direct `/v1/images/generations` using gpt-image-2."""
+    """Text-to-image via direct `/v1/images/generations` using the selected GPT Image model."""
     runtime = request.upstream_runtime
     services = _runtime_services(runtime)
     prompt = request.prompt
@@ -539,11 +539,10 @@ async def _direct_generate_image_once(
             )
             dispatch_ready_emitted = True
 
-    # Model 显式 pin：UPSTREAM_MODEL 来自 lumen_core.constants（lumen-core wheel 里固化）。
-    # 加 runtime assert 防止未来改动把 model 字段隐式置空 / fallback 到上游默认。
+    # 请求显式选择图片模型；旧内部调用保留核心默认值，不依赖上游默认模型。
     assert services.infrastructure.UPSTREAM_MODEL, "model must be set"
     body: dict[str, Any] = {
-        "model": services.infrastructure.UPSTREAM_MODEL,
+        "model": request.image_model or services.infrastructure.UPSTREAM_MODEL,
         "prompt": prompt,
         "size": size,
         "n": n,
@@ -706,7 +705,7 @@ async def _direct_edit_image_once(
     proxy_override: ProviderProxyDefinition | None = None,
     pinned_target_override: Any | None = None,
 ) -> list[tuple[str, str | None]]:
-    """Image-to-image via direct `/v1/images/edits` (multipart) using gpt-image-2.
+    """Image-to-image via direct `/v1/images/edits` (multipart) using the selected GPT Image model.
 
     image2 模式下 i2i 的单次调用。多个 ref 图通过 multipart 字段名 `image[]` 上传，
     与上游 OpenAI /v1/images/edits 协议一致。复用 `_curl_post_multipart`（见
@@ -743,7 +742,7 @@ async def _direct_edit_image_once(
     quality_normalized = services.core.normalize_image_quality(quality)
 
     data: dict[str, str] = {
-        "model": services.infrastructure.UPSTREAM_MODEL,
+        "model": request.image_model or services.infrastructure.UPSTREAM_MODEL,
         "prompt": prompt,
         "size": size,
         "n": str(n),

@@ -135,10 +135,11 @@ def _image_params(config: dict[str, Any]) -> ImageParamsIn:
         size = str(config.get("size") or "").lower()
         resolution = quality if quality in {"1k", "2k", "4k"} else size
         render_quality = str(config.get("render_quality") or "").lower()
-        if render_quality not in {"auto", "low", "medium", "high"}:
+        if render_quality not in {"auto", "low", "medium", "high", "xhigh", "max"}:
             render_quality = "medium" if quality == "standard" else "high"
         return ImageParamsIn.model_validate(
             {
+                "model": config.get("model") or "gpt-image-2",
                 "aspect_ratio": config.get("aspect_ratio") or "1:1",
                 "size_mode": config.get("size_mode") or "auto",
                 "fixed_size": config.get("fixed_size"),

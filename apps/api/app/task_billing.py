@@ -15,7 +15,7 @@ from lumen_core.sizing import ResolvedSize
 
 
 _IMAGE_BILLING_TIER_VALUES = frozenset({"1k", "2k", "4k"})
-_IMAGE_RENDER_QUALITY_VALUES = frozenset({"low", "medium", "high"})
+_IMAGE_RENDER_QUALITY_VALUES = frozenset({"low", "medium", "high", "xhigh", "max"})
 
 
 @dataclass(frozen=True)

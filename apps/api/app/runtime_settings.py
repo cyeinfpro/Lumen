@@ -46,7 +46,7 @@ _IMAGE_PRIMARY_ROUTE_MAPPING = MappingProxyType(
 
 def image_primary_route_to_parts(raw: str | None) -> tuple[str, str]:
     value = (raw or "").strip().lower()
-    return _IMAGE_PRIMARY_ROUTE_MAPPING.get(value, ("auto", "responses"))
+    return _IMAGE_PRIMARY_ROUTE_MAPPING.get(value, ("auto", "image2"))
 
 
 def _expand_legacy_image_route_pairs(

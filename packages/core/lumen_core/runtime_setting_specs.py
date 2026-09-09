@@ -536,7 +536,7 @@ SUPPORTED_SETTINGS: tuple[SettingSpec, ...] = (
             "image2 = /v1/images/generations 或 /v1/images/edits direct（gpt-image-2）；"
             "image_jobs = sub2api 异步图片任务服务（/v1/image-jobs，当前仅文生图走此路，图生图保持私有图兼容路径）；"
             "dual_race = image2 + responses 两路并发，谁先完成谁赢，败方自动取消（每次任务消耗双倍上游配额）。"
-            "默认 responses。image2 模式下 i2i 4K 历史上易触发上游 502，失败会自动 fallback 到 responses。"
+            "默认 image2；直调失败只切换 Provider，不会自动启用 responses。"
         ),
         sensitive=False,
         parser=str,
@@ -568,7 +568,7 @@ SUPPORTED_SETTINGS: tuple[SettingSpec, ...] = (
     ),
     SettingSpec(
         key="image.engine",
-        description="生图引擎：responses（Codex 原生）/ image2（直调）/ dual_race（双路竞速）。",
+        description="生图引擎：image2（默认直调）；responses 和 dual_race 需显式启用。",
         sensitive=False,
         parser=str,
         env_fallback="IMAGE_ENGINE",

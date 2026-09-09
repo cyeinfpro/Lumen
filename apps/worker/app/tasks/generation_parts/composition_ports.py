@@ -575,10 +575,7 @@ class DefaultGenerationProvider:
     ) -> str | None:
         from .composition_support import inpaint_size_from_reference
 
-        return inpaint_size_from_reference(
-            reference_width,
-            reference_height,
-        )
+        return inpaint_size_from_reference(reference_width, reference_height)
 
     def generate(
         self,
@@ -606,6 +603,7 @@ class DefaultGenerationProvider:
                 background=request.background,
                 moderation=request.moderation,
                 model=request.model,
+                image_model=request.image_model,
                 progress_callback=request.progress_callback,
                 provider_override=request.provider_override,
                 user_id=request.user_id,
@@ -641,6 +639,7 @@ class DefaultGenerationProvider:
                 background=common.background,
                 moderation=common.moderation,
                 model=common.model,
+                image_model=common.image_model,
                 progress_callback=common.progress_callback,
                 provider_override=common.provider_override,
                 user_id=common.user_id,

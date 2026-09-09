@@ -100,7 +100,7 @@ export function DesktopComposerPill({
   const setQuality = useChatStore((s) => s.setQuality);
   const renderQuality = useChatStore((s) => {
     const q = s.composer.params.render_quality;
-    return q === "low" || q === "medium" || q === "high" ? q : "high";
+    return q === "low" || q === "medium" || q === "high" || q === "xhigh" || q === "max" ? q : "high";
   });
   const setRenderQuality = useChatStore((s) => s.setRenderQuality);
   const composerError = useChatStore((s) => s.composerError);

@@ -1,3 +1,4 @@
+import { normalizeImageQuality } from "../../lib/imageModels";
 import {
   createConversation as apiCreateConversation,
   postMessage as apiPostMessage,
@@ -38,7 +39,6 @@ import { drainPendingCompletionImage } from "./completionImageReconciliation";
 import {
   clampImageCount,
   normalizeImageParams,
-  normalizeRenderQuality,
 } from "./imageParams";
 import {
   adaptBackendAssistantMessage,
@@ -402,7 +402,7 @@ function buildImageParams(prepared: PreparedSend): ImageParams | undefined {
     resolvedQuality,
     prepared.params.aspect_ratio,
   );
-  const renderQuality = normalizeRenderQuality(renderQualityOverride);
+  const renderQuality = normalizeImageQuality(renderQualityOverride, prepared.params.model);
   const outputCompression =
     outputFormat === undefined
       ? undefined

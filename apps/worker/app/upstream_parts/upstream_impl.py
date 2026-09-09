@@ -359,7 +359,7 @@ _TEXT_TO_IMAGE_ROUTE_IMAGE2 = _IMAGE_ROUTE_IMAGE2
 _IMAGE_OUTPUT_FORMATS = frozenset({"png", "jpeg", "webp"})
 _IMAGE_BACKGROUNDS = frozenset({"auto", "opaque", "transparent"})
 _IMAGE_MODERATIONS = frozenset({"auto", "low"})
-_IMAGE_QUALITIES = frozenset({"auto", "low", "medium", "high"})
+_IMAGE_QUALITIES = frozenset({"auto", "low", "medium", "high", "xhigh", "max"})
 # 实测 OpenAI codex 端 image_generation 工具的 `output_compression` 参数实际不生效——
 # 设 100（应该等同 quality 100）输出仍有明显 JPEG 压缩痕迹；同 prompt 切到 PNG 干净无痕迹。
 # 因此默认走 PNG（无损）。代价是 4K PNG 体积大（~10MB base64），SSE 流时长长；

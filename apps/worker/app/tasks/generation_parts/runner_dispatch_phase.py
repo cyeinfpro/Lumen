@@ -534,6 +534,7 @@ def build_image_iterator(state: GenerationRunState) -> Any:
         moderation=str(options["moderation"]),
         n=state.requested_image_count,
         model=str(options["responses_model"]),
+        image_model=str(options.get("image_model", "gpt-image-2")),
         progress_callback=state.progress_publisher,
         provider_override=provider_override,
         user_id=state.user_id,

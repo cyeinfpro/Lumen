@@ -13,6 +13,8 @@ const RENDER_QUALITY_LABELS: Record<RenderQualityChoice, string> = {
   low: "低",
   medium: "中",
   high: "高",
+  xhigh: "Xhigh",
+  max: "Max",
 };
 
 const REASONING_LABELS: Record<string, string> = {

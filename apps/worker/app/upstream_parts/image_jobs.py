@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from dataclasses import replace
 from typing import Any, Awaitable, Callable
 
 import httpx
@@ -98,6 +99,7 @@ def _image_job_body_base(
     size: str,
     n: int,
     quality: str,
+    image_model: str | None = None,
     output_format: str | None,
     output_compression: int | None,
     background: str | None,
@@ -114,7 +116,10 @@ def _image_job_body_base(
         output_compression=output_compression,
         background=background,
         moderation=moderation,
-        policy=services.core.image_request_policy(),
+        policy=replace(
+            services.core.image_request_policy(),
+            upstream_model=image_model or services.infrastructure.UPSTREAM_MODEL,
+        ),
         hooks=services.infrastructure.upstream_image_requests.ImageJobBodyHooks(
             normalize_image_quality=services.core.normalize_image_quality,
             add_image_output_options=services.core.add_image_output_options,
@@ -164,7 +169,10 @@ def _build_responses_image_body(
         model=request.model,
         image_urls=image_urls,
         retry_attempt=request.request_context.retry_attempt,
-        policy=services.core.image_request_policy(),
+        policy=replace(
+            services.core.image_request_policy(),
+            upstream_model=request.image_model or services.infrastructure.UPSTREAM_MODEL,
+        ),
         hooks=services.infrastructure.upstream_image_requests.ResponsesImageBodyHooks(
             normalize_image_quality=services.core.normalize_image_quality,
             add_image_output_options=services.core.add_image_output_options,
@@ -629,6 +637,7 @@ async def _image_job_generate_once(
         size=request.size,
         n=request.n,
         quality=request.quality,
+        image_model=request.image_model,
         output_format=request.output_format,
         output_compression=request.output_compression,
         background=request.background,
@@ -706,6 +715,7 @@ async def _image_job_edit_once(
         size=request.size,
         n=request.n,
         quality=request.quality,
+        image_model=request.image_model,
         output_format=request.output_format,
         output_compression=request.output_compression,
         background=request.background,

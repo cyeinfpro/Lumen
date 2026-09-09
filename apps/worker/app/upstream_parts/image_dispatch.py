@@ -320,67 +320,6 @@ def _observe_transparent_results(
     return results
 
 
-async def _run_image2_with_responses_fallback(
-    request: ImageExecutionRequest,
-    route: ImageProviderRoute,
-) -> list[ImageResult]:
-    services = _request_services(request)
-    try:
-        return _observe_transparent_results(
-            request,
-            await _run_direct_image2_once(request),
-            source="image2",
-        )
-    except (
-        asyncio.CancelledError,
-        services.infrastructure.UpstreamCancelled,
-    ):
-        raise
-    except Exception as primary_error:  # noqa: BLE001
-        if direct_requests._is_direct_image_result_unknown(
-            primary_error,
-            runtime=request.upstream_runtime,
-        ):
-            raise
-        services.infrastructure.logger.warning(
-            "%s image2 provider=%s failed; falling back to responses: %r",
-            request.action,
-            route.provider_name,
-            primary_error,
-        )
-        unavailable = services.providers.provider_endpoint_unavailable_error(
-            request.provider_override,
-            "responses",
-        )
-        if unavailable is not None:
-            raise _merge_image_route_errors(
-                request,
-                primary_path="image2",
-                primary_error=primary_error,
-                fallback_path="responses",
-                fallback_error=unavailable,
-            ) from primary_error
-        try:
-            return _observe_transparent_results(
-                request,
-                [await _run_responses_once(request)],
-                source="responses",
-            )
-        except (
-            asyncio.CancelledError,
-            services.infrastructure.UpstreamCancelled,
-        ):
-            raise
-        except Exception as fallback_error:  # noqa: BLE001
-            raise _merge_image_route_errors(
-                request,
-                primary_path="image2",
-                primary_error=primary_error,
-                fallback_path="responses",
-                fallback_error=fallback_error,
-            ) from fallback_error
-
-
 async def _run_responses_with_image2_fallback(
     request: ImageExecutionRequest,
     route: ImageProviderRoute,
@@ -517,6 +456,7 @@ async def _run_non_race_image_once(
             [
                 await services.image_jobs.image_job_with_failover(
                     request,
+                    endpoint_override=("generations" if route.engine == services.core.IMAGE_ROUTE_IMAGE2 else None),
                     endpoint_preference=_image_jobs_endpoint_for_engine(
                         route.engine,
                         runtime=runtime,
@@ -526,7 +466,9 @@ async def _run_non_race_image_once(
             source="image_jobs",
         )
     if route.engine == services.core.IMAGE_ROUTE_IMAGE2:
-        return await _run_image2_with_responses_fallback(request, route)
+        return _observe_transparent_results(
+            request, await _run_direct_image2_once(request), source="image2"
+        )
     return await _run_responses_with_image2_fallback(request, route)
 
 

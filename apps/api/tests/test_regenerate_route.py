@@ -908,3 +908,25 @@ async def test_post_commit_regenerate_cancel_cleanup_keeps_cancel_when_cache_fai
         ("task:gen-running:cancel", "1", 3600),
         ("task:comp-streaming:cancel", "1", 3600),
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"])
+@pytest.mark.parametrize("quality", ["xhigh", "max"])
+async def test_regeneration_preserves_selected_model_and_quality(model, quality):
+    gen = Generation(
+        id="gen-model", message_id="assistant-old", user_id="user-1",
+        action="generate", prompt="original", size_requested="1024x1024",
+        aspect_ratio="1:1", input_image_ids=[], status="succeeded", idempotency_key="model-test",
+        upstream_request={"model": model, "render_quality": quality},
+    )
+    params = await regenerate._image_params_from_target(
+        _Db([_Result(all_values=[gen])]), user_id="user-1", conv_id="conv-1", target_msg_id="assistant-old",
+    )
+    assert params.model == model
+    assert params.render_quality == quality
+    from app.services.message_submission import image_upstream_request
+    from lumen_core.sizing import resolve_size
+    request = image_upstream_request(params, resolve_size(aspect="1:1", mode="fixed", fixed="1024x1024"))
+    assert request["model"] == model
+    assert request["render_quality"] == quality

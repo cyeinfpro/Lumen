@@ -329,9 +329,9 @@ def _model_from_actual_route(
     if endpoint.startswith(("image-jobs:responses", "responses:")):
         return short_model(responses_model_from_request(req))
     if endpoint.startswith(("image-jobs:", "images/")):
-        return short_model(UPSTREAM_MODEL)
+        return short_model(str(req.get("model") or req.get("image_model") or UPSTREAM_MODEL))
     if actual_route and actual_route.startswith(("image2", "image_jobs")):
-        return short_model(UPSTREAM_MODEL)
+        return short_model(str(req.get("model") or req.get("image_model") or UPSTREAM_MODEL))
     if actual_route and actual_route.startswith("responses"):
         return short_model(responses_model_from_request(req))
     return None
@@ -345,13 +345,13 @@ def _model_from_requested_route(
     status: str,
 ) -> str:
     if route == "image2":
-        return short_model(UPSTREAM_MODEL)
+        return short_model(str(req.get("model") or req.get("image_model") or UPSTREAM_MODEL))
     if route == "image_jobs":
         if action in {"generate", "edit"}:
-            return short_model(UPSTREAM_MODEL)
+            return short_model(str(req.get("model") or req.get("image_model") or UPSTREAM_MODEL))
         return short_model(responses_model_from_request(req))
     if route == "dual_race" and status in {"queued", "running"}:
-        return f"竞速中: {short_model(responses_model_from_request(req))} / {short_model(UPSTREAM_MODEL)}"
+        return f"竞速中: {short_model(responses_model_from_request(req))} / {short_model(str(req.get("model") or UPSTREAM_MODEL))}"
     if route == "dual_race":
         return "历史未记录"
     return short_model(responses_model_from_request(req))

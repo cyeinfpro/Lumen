@@ -1,3 +1,4 @@
+import { imageParamsForReroll } from "../../lib/imageModels";
 import { uuid } from "@/lib/utils";
 import { logWarn } from "@/lib/logger";
 import { appendPromptWithinLimit, clampPromptForRequest } from "@/lib/promptLimits";
@@ -684,7 +685,7 @@ export function createGenerationActions(
 
         const hasInput = gen.input_image_ids.length > 0;
         const intent = rerollIntent(gen);
-        const rerollRenderQuality = "high";
+        const rerollParams = imageParamsForReroll(gen);
         const rerollQuality = qualityFromFixedSize(
           gen.size_requested,
           gen.aspect_ratio,
@@ -703,7 +704,7 @@ export function createGenerationActions(
               : undefined,
             quality: rerollQuality,
             count: 1,
-            render_quality: rerollRenderQuality,
+            ...rerollParams,
             background: "auto",
             moderation: "low",
           },

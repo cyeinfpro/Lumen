@@ -42,3 +42,16 @@ test("render quality normalization uses the high-quality fallback", () => {
   assert.equal(normalizeRenderQuality(undefined), "high");
   assert.equal(normalizeRenderQuality("invalid"), "high");
 });
+
+
+test("new model quality survives persistence and switching back clamps unsupported quality", () => {
+  for (const model of ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"] as const) {
+    for (const render_quality of ["low", "medium", "high", "xhigh", "max"] as const) {
+      const params = normalizeImageParams({ ...DEFAULT_PARAMS, model, render_quality });
+      assert.equal(params.model, model);
+      assert.equal(params.render_quality, render_quality);
+      const original = normalizeImageParams({ ...params, model: "gpt-image-2" });
+      assert.equal(original.render_quality, ["xhigh", "max"].includes(render_quality) ? "high" : render_quality);
+    }
+  }
+});

@@ -172,6 +172,7 @@ def new_generation(
         message_id=command.assistant_msg.id,
         user_id=command.user_id,
         action=batch.action,
+        model=command.image_params.model,
         prompt=batch.prompt,
         size_requested=command.resolved_size.size,
         aspect_ratio=command.image_params.aspect_ratio,

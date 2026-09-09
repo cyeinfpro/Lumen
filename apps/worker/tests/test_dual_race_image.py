@@ -770,14 +770,14 @@ async def test_resolve_route_image_jobs_auto_when_provider_opted_in(
     monkeypatch.setattr(pp, "get_pool", fake_get_pool)
 
     route = await TEST_UPSTREAM_SERVICES.core.resolve_image_primary_route()
-    assert route == "responses"
+    assert route == "image2"
 
 
 @pytest.mark.asyncio
-async def test_resolve_route_responses_default_no_provider_opt_in(
+async def test_resolve_route_image2_default_no_provider_opt_in(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """没设 dual_race 且 provider 没勾 image_jobs → 默认 responses。"""
+    """没设 dual_race 且 provider 没勾 image_jobs → 默认 image2。"""
 
     async def fake_resolve(key: str) -> str | None:
         return None
@@ -791,7 +791,7 @@ async def test_resolve_route_responses_default_no_provider_opt_in(
     monkeypatch.setattr(pp, "get_pool", fake_get_pool)
 
     route = await TEST_UPSTREAM_SERVICES.core.resolve_image_primary_route()
-    assert route == "responses"
+    assert route == "image2"
 
 
 @pytest.mark.asyncio
