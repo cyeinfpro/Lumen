@@ -8,6 +8,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..constants import MAX_MESSAGE_ATTACHMENTS, MAX_PROMPT_CHARS
+from ..image_models import (
+    DEFAULT_IMAGE_MODEL,
+    ImageModel,
+    ImageRenderQuality,
+    validate_image_model_quality,
+)
 from ..message_content import public_message_content
 from ..sizing import AspectRatio as AspectRatioLiteral
 from .common import BaseOut
@@ -16,6 +22,7 @@ from .common import BaseOut
 
 
 class ImageParamsIn(BaseModel):
+    model: ImageModel = DEFAULT_IMAGE_MODEL
     # AspectRatio 的 Literal 联合在 sizing.py 里维护；此处 import 复用，
     # 避免两处列表漂移（之前 3:2/2:3/4:3/9:21 未同步就是这里遗漏）
     aspect_ratio: "AspectRatioLiteral" = "7:10"
@@ -28,7 +35,7 @@ class ImageParamsIn(BaseModel):
     # for wide/tall aspect ratios.
     quality: Literal["1k", "2k", "4k"] | None = "4k"
     # Rendering quality is distinct from the UI's 1K/2K/4K resolution preset.
-    render_quality: Literal["auto", "low", "medium", "high"] = "high"
+    render_quality: ImageRenderQuality = "high"
     output_format: Literal["png", "jpeg", "webp"] | None = None
     # Only applies to jpeg/webp. None omits the provider compression option.
     output_compression: int | None = Field(default=None, ge=0, le=100)
@@ -37,6 +44,7 @@ class ImageParamsIn(BaseModel):
 
     @model_validator(mode="after")
     def normalize_transparent_output(self) -> "ImageParamsIn":
+        validate_image_model_quality(self.model, self.render_quality)
         if self.background == "transparent" and self.output_format == "jpeg":
             self.output_format = "png"
             self.output_compression = None

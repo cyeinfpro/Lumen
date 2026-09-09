@@ -1,5 +1,9 @@
 "use client";
 
+import { imageQualityOptions } from "@/lib/imageModels";
+import { useChatStore } from "@/store/useChatStore";
+import { ImageModelSelect } from "../shared/ImageModelSelect";
+
 import type { ReactNode } from "react";
 import {
   Code2,
@@ -21,7 +25,6 @@ import { cn } from "@/lib/utils";
 import {
   COUNT_OPTIONS,
   QUALITY_OPTIONS,
-  RENDER_QUALITY_OPTIONS,
 } from "./DesktopComposerExecutionControls";
 
 const REASONING_OPTIONS: {
@@ -90,6 +93,7 @@ export function AdvancedComposerSettings({
   onClose,
 }: AdvancedComposerSettingsProps) {
   const imageMode = mode === "image";
+  const imageModel = useChatStore((state) => state.composer.params.model);
 
   return (
     <div className="flex min-h-0 flex-col">
@@ -121,6 +125,7 @@ export function AdvancedComposerSettings({
                 >
                   输出
                 </h3>
+                <ImageModelSelect />
                 <div className="grid grid-cols-2 gap-2">
                   <SettingSelect
                     label="尺寸"
@@ -134,7 +139,7 @@ export function AdvancedComposerSettings({
                     onChange={(value) =>
                       onRenderQualityChange(value as RenderQualityChoice)
                     }
-                    options={RENDER_QUALITY_OPTIONS}
+                    options={imageQualityOptions(imageModel)}
                   />
                   <SettingSelect
                     label="数量"

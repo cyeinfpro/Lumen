@@ -227,6 +227,7 @@ def image_upstream_request(
         output_format = "png"
         output_format_source = "transparent_background"
     upstream_request: dict[str, Any] = {
+        "model": image_params.model,
         "responses_model": DEFAULT_IMAGE_RESPONSES_MODEL,
         "render_quality": render_quality,
         "output_format": output_format,

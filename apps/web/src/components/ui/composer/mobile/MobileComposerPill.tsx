@@ -74,8 +74,8 @@ function parseSlash(text: string): {
   };
 }
 
-function normalizedRenderQuality(value: unknown): "low" | "medium" | "high" {
-  return value === "low" || value === "medium" || value === "high"
+function normalizedRenderQuality(value: unknown): "low" | "medium" | "high" | "xhigh" | "max" {
+  return value === "low" || value === "medium" || value === "high" || value === "xhigh" || value === "max"
     ? value
     : "high";
 }

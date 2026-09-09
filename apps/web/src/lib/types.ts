@@ -23,11 +23,13 @@ export type AspectRatio =
 
 export type SizeMode = "auto" | "fixed";
 export type Quality = "1k" | "2k" | "4k";
-export type RenderQuality = "auto" | "low" | "medium" | "high";
+export type ImageModel = "gpt-image-2" | "gpt-image-2.5-flare" | "gpt-image-2.5-sunburst";
+export type RenderQuality = "auto" | "low" | "medium" | "high" | "xhigh" | "max";
 export type RenderQualityChoice = Exclude<RenderQuality, "auto">;
 export type ImageOutputFormat = "png" | "jpeg" | "webp";
 
 export interface ImageParams {
+  model?: ImageModel;
   aspect_ratio: AspectRatio;
   size_mode: SizeMode;
   fixed_size?: string; // "WxH"

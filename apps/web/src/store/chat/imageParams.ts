@@ -1,9 +1,11 @@
+import { DEFAULT_IMAGE_MODEL, normalizeImageModel, normalizeImageQuality } from "../../lib/imageModels.ts";
 import type {
   ImageParams,
   RenderQualityChoice,
 } from "../../lib/types";
 
 export const DEFAULT_PARAMS: ImageParams = {
+  model: DEFAULT_IMAGE_MODEL,
   aspect_ratio: "7:10",
   size_mode: "fixed",
   quality: "4k",
@@ -33,6 +35,8 @@ export function normalizeImageParams(params: ImageParams): ImageParams {
       : undefined;
   return {
     ...params,
+    model: normalizeImageModel(params.model),
+    render_quality: normalizeImageQuality(params.render_quality, params.model),
     count: clampImageCount(params.count),
     ...(outputCompression === undefined
       ? { output_compression: undefined }
@@ -43,7 +47,7 @@ export function normalizeImageParams(params: ImageParams): ImageParams {
 export function normalizeRenderQuality(
   value: ImageParams["render_quality"] | undefined,
 ): RenderQualityChoice {
-  return value === "low" || value === "medium" || value === "high"
+  return value === "low" || value === "medium" || value === "high" || value === "xhigh" || value === "max"
     ? value
     : "high";
 }

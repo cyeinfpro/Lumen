@@ -44,6 +44,7 @@ class GenerationProviderRequest:
     provider_override: ResolvedProvider | None
     user_id: str | None
     context: GenerationProviderContext
+    image_model: str = "gpt-image-2"
 
 
 @dataclass(frozen=True, slots=True)

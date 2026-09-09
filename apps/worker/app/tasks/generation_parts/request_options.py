@@ -5,10 +5,11 @@ from typing import Any
 from lumen_core.constants import (
     DEFAULT_IMAGE_RESPONSES_MODEL,
 )
+from lumen_core.image_models import DEFAULT_IMAGE_MODEL, validate_image_model_quality
 from lumen_core.sizing import validate_explicit_size
 
 
-IMAGE_RENDER_QUALITY_VALUES = frozenset({"low", "medium", "high", "auto"})
+IMAGE_RENDER_QUALITY_VALUES = frozenset({"low", "medium", "high", "xhigh", "max", "auto"})
 IMAGE_OUTPUT_FORMAT_VALUES = frozenset({"png", "jpeg", "webp"})
 IMAGE_BACKGROUND_VALUES = frozenset({"auto", "opaque", "transparent"})
 IMAGE_MODERATION_VALUES = frozenset({"auto", "low"})
@@ -148,7 +149,7 @@ def request_render_quality(
         IMAGE_RENDER_QUALITY_VALUES,
         "auto",
     )
-    if quality in {"low", "medium", "high"}:
+    if quality in {"low", "medium", "high", "xhigh", "max"}:
         return quality
     return "medium"
 
@@ -169,6 +170,8 @@ def image_request_options(
     render_quality = request_render_quality(
         request, size=size
     )
+    image_model = request.get("model") or DEFAULT_IMAGE_MODEL
+    validate_image_model_quality(image_model, render_quality)
     output_format = request_option(
         request,
         "output_format",
@@ -184,6 +187,7 @@ def image_request_options(
     if background == "transparent" and output_format == "jpeg":
         output_format = "png"
     options: dict[str, Any] = {
+        "image_model": image_model,
         "responses_model": request_responses_model(
             request
         ),

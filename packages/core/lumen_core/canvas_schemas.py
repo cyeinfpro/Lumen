@@ -17,6 +17,12 @@ from pydantic import (
     model_validator,
 )
 
+from .image_models import (
+    DEFAULT_IMAGE_MODEL,
+    ImageModel,
+    ImageRenderQuality,
+    validate_image_model_quality,
+)
 from .constants import MAX_MESSAGE_ATTACHMENTS, MAX_PROMPT_CHARS
 from .immutables import immutable_nested_mapping
 from . import canvas_schema_exports as _canvas_schema_exports
@@ -148,13 +154,13 @@ class VideoAssetNodeConfig(_StrictModel):
 
 
 class ImageGenerateNodeConfig(_StrictModel):
-    model: str | None = Field(default=None, max_length=128)
+    model: ImageModel | None = None
     aspect_ratio: str = Field(default="1:1", min_length=1, max_length=16)
     size: Literal["1K", "2K", "4K", "1k", "2k", "4k"] = "1K"
     quality: Literal["standard", "high", "1k", "2k", "4k"] = "standard"
     size_mode: Literal["auto", "fixed"] = "auto"
     fixed_size: str | None = Field(default=None, max_length=32)
-    render_quality: Literal["auto", "low", "medium", "high"] = "high"
+    render_quality: ImageRenderQuality = "high"
     count: int = Field(default=1, ge=1, le=10)
     output_format: Literal["png", "jpeg", "webp"] | None = "webp"
     output_compression: int | None = Field(default=None, ge=0, le=100)
@@ -172,6 +178,7 @@ class ImageGenerateNodeConfig(_StrictModel):
 
     @model_validator(mode="after")
     def normalize_transparent_output(self) -> "ImageGenerateNodeConfig":
+        validate_image_model_quality(self.model or DEFAULT_IMAGE_MODEL, self.render_quality)
         if self.background == "transparent" and self.output_format == "jpeg":
             self.output_format = "png"
             self.output_compression = None

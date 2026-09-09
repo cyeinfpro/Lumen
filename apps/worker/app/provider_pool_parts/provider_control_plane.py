@@ -42,7 +42,7 @@ def legacy_route_to_channel_engine(route: str | None) -> tuple[str, str]:
         return "image_jobs_only", "responses"
     if value == "dual_race":
         return "auto", "dual_race"
-    return "auto", "responses"
+    return "auto", "responses" if value == "responses" else "image2"
 
 
 async def resolve_explicit_image_dispatch_setting(

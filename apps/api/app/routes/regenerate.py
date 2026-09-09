@@ -340,6 +340,7 @@ async def _image_params_from_target(
     try:
         return ImageParamsIn.model_validate(
             {
+                "model": upstream_request.get("model") or "gpt-image-2",
                 "aspect_ratio": first.aspect_ratio,
                 "size_mode": "fixed" if fixed_size else "auto",
                 "fixed_size": fixed_size,

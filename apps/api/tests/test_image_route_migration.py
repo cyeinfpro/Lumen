@@ -63,7 +63,7 @@ class _FakeDb:
         ("image2", ("auto", "image2")),
         ("image_jobs", ("image_jobs_only", "responses")),
         ("dual_race", ("auto", "dual_race")),
-        ("bad", ("auto", "responses")),
+        ("bad", ("auto", "image2")),
     ],
 )
 def test_image_primary_route_to_parts(old: str, expected: tuple[str, str]) -> None:

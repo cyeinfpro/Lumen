@@ -1,5 +1,7 @@
 "use client";
 
+import { IMAGE_MODEL_OPTIONS, imageQualityOptions, normalizeImageModel, normalizeImageQuality } from "@/lib/imageModels";
+
 import type { CanvasNodeType } from "@/lib/canvas/types";
 import {
   FixedSizeInput,
@@ -35,13 +37,6 @@ const IMAGE_QUALITY_OPTIONS: readonly SelectOption[] = [
   { value: "4k", label: "4K" },
   { value: "standard", label: "标准（旧配置）" },
   { value: "high", label: "高质量（旧配置）" },
-];
-
-const RENDER_QUALITY_OPTIONS: readonly SelectOption[] = [
-  { value: "auto", label: "自动" },
-  { value: "low", label: "低" },
-  { value: "medium", label: "中" },
-  { value: "high", label: "高" },
 ];
 
 const SIZE_MODE_OPTIONS: readonly SelectOption[] = [
@@ -91,6 +86,12 @@ function ImageGenerationParameters({
   return (
     <ConfigSection title={imageParameterSectionTitle(node.type)}>
       <SelectField
+        label="生图模型"
+        value={normalizeImageModel(node.config.model)}
+        options={IMAGE_MODEL_OPTIONS}
+        onChange={(model) => patch({ model, render_quality: normalizeImageQuality(node.config.render_quality, model) })}
+      />
+      <SelectField
         label="比例"
         value={aspectRatio}
         options={selectOptionsWithCurrent(
@@ -132,7 +133,7 @@ function ImageGenerationParameters({
       <SelectField
         label="渲染质量"
         value={String(node.config.render_quality ?? "high")}
-        options={RENDER_QUALITY_OPTIONS}
+        options={[{ value: "auto", label: "自动" }, ...imageQualityOptions(node.config.model)]}
         onChange={(value) => patch({ render_quality: value })}
       />
       <SliderField

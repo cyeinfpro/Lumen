@@ -159,9 +159,9 @@ class Settings(BaseSettings):
     upstream_global_concurrency: int = 4
     upstream_default_model: str = "gpt-5.6-sol"
     # 图像主路径偏好（覆盖 t2i + i2i），可被 system_settings 覆盖。
-    image_primary_route: str = "responses"
+    image_primary_route: str = "image2"
     image_channel: str = Field(default="auto", alias="IMAGE_CHANNEL")
-    image_engine: str = Field(default="responses", alias="IMAGE_ENGINE")
+    image_engine: str = Field(default="image2", alias="IMAGE_ENGINE")
     image_job_base_url: str = _DEFAULT_IMAGE_JOB_BASE_URL
     # 与 worker 同名；默认前端/API 只消费脱敏后的 generation diagnostics。
     expose_provider_diagnostics: bool = False

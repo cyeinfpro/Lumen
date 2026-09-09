@@ -1,3 +1,4 @@
+import { normalizeImageParams } from "./imageParams";
 import { MAX_COMPOSER_ATTACHMENTS } from "../../lib/attachmentLimits";
 import {
   MAX_PROMPT_CHARS,
@@ -47,6 +48,7 @@ export type ComposerActions = Pick<
   | "setSizeMode"
   | "setFixedSize"
   | "setQuality"
+  | "setImageModel"
   | "setRenderQuality"
   | "setImageCount"
   | "setTransparentBackground"
@@ -268,6 +270,13 @@ export function createComposerActions(
         composer: {
           ...state.composer,
           params: { ...state.composer.params, quality },
+        },
+      })),
+    setImageModel: (model) =>
+      set((state) => ({
+        composer: {
+          ...state.composer,
+          params: normalizeImageParams({ ...state.composer.params, model }),
         },
       })),
     setRenderQuality: (renderQuality) =>

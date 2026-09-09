@@ -1,5 +1,9 @@
 "use client";
 
+import { imageQualityOptions } from "@/lib/imageModels";
+import { useChatStore } from "@/store/useChatStore";
+import { ImageModelSelect } from "../shared/ImageModelSelect";
+
 import {
   ChevronDown,
   Code2,
@@ -32,15 +36,6 @@ const QUALITY_OPTIONS: ReadonlyArray<{ value: Quality; label: string }> = [
   { value: "1k", label: "1K" },
   { value: "2k", label: "2K" },
   { value: "4k", label: "4K" },
-];
-
-const RENDER_QUALITY_OPTIONS: ReadonlyArray<{
-  value: RenderQualityChoice;
-  label: string;
-}> = [
-  { value: "low", label: "低" },
-  { value: "medium", label: "中" },
-  { value: "high", label: "高" },
 ];
 
 interface MobileAdvancedSettingsProps {
@@ -95,6 +90,7 @@ export function MobileAdvancedSettings({
   onTransparentBackgroundChange,
 }: MobileAdvancedSettingsProps) {
   const imageMode = mode === "image";
+  const imageModel = useChatStore((state) => state.composer.params.model);
 
   return (
     <div className="mobile-dialog-scroll px-4 pb-5">
@@ -109,6 +105,7 @@ export function MobileAdvancedSettings({
 
       {imageMode ? (
         <div className="grid gap-4 pt-4">
+          <ImageModelSelect />
           <div className="grid grid-cols-2 gap-2">
             <MobileSettingSelect
               label="尺寸"
@@ -122,7 +119,7 @@ export function MobileAdvancedSettings({
               onChange={(value) =>
                 onRenderQualityChange(value as RenderQualityChoice)
               }
-              options={RENDER_QUALITY_OPTIONS}
+              options={imageQualityOptions(imageModel)}
             />
             <MobileSettingSelect
               label="数量"

@@ -5,6 +5,7 @@ import type {
   Generation,
   GeneratedImage,
   ImageParams,
+  ImageModel,
   Intent,
   MaskState,
   Message,
@@ -84,6 +85,7 @@ export interface ChatState {
   setSizeMode: (mode: SizeMode) => void;
   setFixedSize: (size: string | undefined) => void;
   setQuality: (quality: Quality) => void;
+  setImageModel: (model: ImageModel) => void;
   setRenderQuality: (quality: RenderQualityChoice) => void;
   setImageCount: (count: number) => void;
   setTransparentBackground: (enabled: boolean) => void;

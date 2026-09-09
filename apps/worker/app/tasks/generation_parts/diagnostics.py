@@ -293,6 +293,8 @@ def image_requested_params_snapshot(
         "has_mask": has_mask,
     }
     for key in (
+        "model",
+        "image_model",
         "responses_model",
         "render_quality",
         "output_format",
@@ -318,6 +320,8 @@ def image_effective_params_snapshot(
     opts = image_request_options if isinstance(image_request_options, dict) else {}
     out: dict[str, Any] = {"size": size}
     for key in (
+        "model",
+        "image_model",
         "responses_model",
         "render_quality",
         "output_format",

@@ -108,6 +108,8 @@ class ImageExecutionRequest:
     )
     upstream_runtime: ImageUpstreamRuntime | None = None
 
+    image_model: str | None = None
+
     def with_progress(
         self,
         progress_callback: ImageProgressCallback | None,

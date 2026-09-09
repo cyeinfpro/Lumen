@@ -1,5 +1,9 @@
 "use client";
 
+import { imageQualityOptions } from "@/lib/imageModels";
+import { useChatStore } from "@/store/useChatStore";
+import { ImageModelSelect } from "../shared/ImageModelSelect";
+
 import { ChevronDown, Layers2, SlidersHorizontal } from "lucide-react";
 import { useRef, useState } from "react";
 
@@ -21,15 +25,6 @@ export const QUALITY_OPTIONS: ReadonlyArray<{
   { value: "1k", label: "1K" },
   { value: "2k", label: "2K" },
   { value: "4k", label: "4K" },
-];
-
-export const RENDER_QUALITY_OPTIONS: ReadonlyArray<{
-  value: RenderQualityChoice;
-  label: string;
-}> = [
-  { value: "low", label: "低" },
-  { value: "medium", label: "中" },
-  { value: "high", label: "高" },
 ];
 
 export function ComposerExecutionControls({
@@ -125,6 +120,7 @@ function ImageQuickSettingsBar({
   costWarning?: boolean;
   onAdjust: () => void;
 }) {
+  const imageModel = useChatStore((state) => state.composer.params.model);
   const [aspectOpen, setAspectOpen] = useState(false);
   const aspectAnchorRef = useRef<HTMLButtonElement | null>(null);
 
@@ -147,6 +143,8 @@ function ImageQuickSettingsBar({
           aria-hidden
           className="h-5 w-px shrink-0 bg-[var(--border-subtle)]"
         />
+
+        <ImageModelSelect />
 
         <QuickSelect
           ariaLabel="生成数量"
@@ -190,7 +188,7 @@ function ImageQuickSettingsBar({
           ariaLabel="生成质量"
           value={renderQuality}
           onChange={onRenderQualityChange}
-          items={RENDER_QUALITY_OPTIONS}
+          items={imageQualityOptions(imageModel)}
         />
 
         <Button
