@@ -1,6 +1,7 @@
 "use client";
 
 import type { CSSProperties } from "react";
+import { Check } from "lucide-react";
 import { Button } from "@/components/ui/primitives";
 import type { AspectRatio } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -127,7 +128,7 @@ export function AspectRatioPicker({
                 return (
                   <Button
                     key={option.value}
-                    variant="ghost"
+                    variant={selected ? "primary" : "ghost"}
                     size="md"
                     aria-pressed={selected}
                     aria-label={`${group.label} ${option.value}`}
@@ -140,13 +141,13 @@ export function AspectRatioPicker({
                       isSheet ? "h-11" : "h-12",
                       "transition-[background-color,border-color,color,box-shadow] duration-200",
                       selected
-                        ? "border-accent-border bg-accent-soft text-accent"
+                        ? "border-[var(--accent)] font-semibold"
                         : "border-[var(--border-subtle)] bg-[var(--bg-2)]/80 text-[var(--fg-0)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-3)]",
                     )}
                   >
                     {selected ? (
-                      <span
-                        className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-[var(--accent)]"
+                      <Check
+                        className="absolute right-1 top-1 h-3 w-3"
                         aria-hidden
                       />
                     ) : null}
@@ -155,7 +156,7 @@ export function AspectRatioPicker({
                         className={cn(
                           "flex h-8 w-9 shrink-0 items-center justify-center rounded-[var(--radius-control)] border transition-[background-color,border-color] duration-200",
                           selected
-                            ? "border-accent-border bg-accent-soft"
+                            ? "border-[var(--accent-on)]/30 bg-[var(--accent-on)]/5"
                             : "border-[var(--border-subtle)] bg-[var(--bg-0)]/35 group-hover:border-[var(--border-strong)]",
                         )}
                         aria-hidden
@@ -164,14 +165,14 @@ export function AspectRatioPicker({
                           className={cn(
                             "block rounded-[var(--radius-control)] border transition-[background-color,border-color] duration-200",
                             selected
-                              ? "border-accent-border bg-accent-soft"
+                              ? "border-[var(--accent-on)] bg-[var(--accent-on)]/10"
                               : "border-[var(--border-strong)] bg-[var(--bg-3)] group-hover:border-[var(--fg-1)]",
                           )}
                           style={previewStyle(option)}
                         />
                       </span>
                       <span
-                        className="type-body block min-w-0 leading-none tabular-nums text-[var(--fg-0)]"
+                        className="block min-w-0 text-[length:var(--text-body-md)] leading-none tabular-nums"
                         style={{ fontFamily: "var(--font-mono)" }}
                       >
                         {option.value}

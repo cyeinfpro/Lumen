@@ -1,15 +1,15 @@
-import { DEFAULT_IMAGE_MODEL, normalizeImageModel, normalizeImageQuality } from "../../lib/imageModels.ts";
+import { normalizeImageModel, normalizeImageQuality } from "../../lib/imageModels.ts";
 import type {
   ImageParams,
   RenderQualityChoice,
 } from "../../lib/types";
 
 export const DEFAULT_PARAMS: ImageParams = {
-  model: DEFAULT_IMAGE_MODEL,
+  model: "gpt-image-2.5-sunburst",
   aspect_ratio: "7:10",
   size_mode: "fixed",
   quality: "4k",
-  render_quality: "high",
+  render_quality: "max",
   count: 1,
   background: "opaque",
 };

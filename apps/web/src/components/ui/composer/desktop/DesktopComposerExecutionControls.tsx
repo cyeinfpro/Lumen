@@ -4,7 +4,7 @@ import { imageQualityOptions } from "@/lib/imageModels";
 import { useChatStore } from "@/store/useChatStore";
 import { ImageModelSelect } from "../shared/ImageModelSelect";
 
-import { ChevronDown, Layers2, SlidersHorizontal } from "lucide-react";
+import { Check, ChevronDown, Layers2, SlidersHorizontal } from "lucide-react";
 import { useRef, useState } from "react";
 
 import { Button, Select } from "@/components/ui/primitives";
@@ -130,11 +130,11 @@ function ImageQuickSettingsBar({
         aria-label={summary.text}
         title={summary.text}
         className={cn(
-          "mx-3 mt-1.5 flex min-h-10 items-center gap-1.5 rounded-[var(--radius-card)] border px-2 py-1",
+          "mx-3 mt-1.5 flex min-h-10 items-center gap-1.5 rounded-[var(--radius-card)] border px-2 py-2",
           "border-[var(--border-subtle)] bg-[var(--bg-2)]",
         )}
       >
-        <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto overscroll-x-contain no-scrollbar">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
         <span className="type-label shrink-0 px-1 text-[var(--fg-1)]">
           {summary.taskLabel}
         </span>
@@ -144,7 +144,7 @@ function ImageQuickSettingsBar({
           className="h-5 w-px shrink-0 bg-[var(--border-subtle)]"
         />
 
-        <ImageModelSelect />
+        <ImageModelSelect compact />
 
         <QuickSelect
           ariaLabel="生成数量"
@@ -192,7 +192,7 @@ function ImageQuickSettingsBar({
         />
 
         <Button
-          variant="outline"
+          variant={transparentBackground ? "primary" : "outline"}
           size="sm"
           aria-pressed={transparentBackground}
           aria-label={transparentBackground ? "关闭透明底" : "开启透明底"}
@@ -201,9 +201,9 @@ function ImageQuickSettingsBar({
             onTransparentBackgroundChange(!transparentBackground)
           }
           className={cn(
-            "h-8 w-[82px] shrink-0 px-2",
+            "h-8 shrink-0 px-2",
             transparentBackground
-              ? "border-accent-border bg-accent-soft text-accent"
+              ? "border border-[var(--accent)] font-semibold"
               : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:text-[var(--fg-0)]",
           )}
           leftIcon={
@@ -214,6 +214,7 @@ function ImageQuickSettingsBar({
           }
         >
           透明底
+          <Check className={cn("h-3 w-3", !transparentBackground && "invisible")} aria-hidden />
         </Button>
 
         {attachmentCount > 0 && (
@@ -316,25 +317,27 @@ function InlineChoiceGroup<V extends string>({
     <div
       role="group"
       aria-label={ariaLabel}
-      className="flex h-8 shrink-0 items-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/68 p-0.5"
+      className="flex min-h-8 shrink-0 items-center gap-0.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] p-0.5"
     >
       {items.map((item) => {
         const active = item.value === value;
         return (
           <Button
             key={item.value}
-            variant="ghost"
+            variant={active ? "primary" : "ghost"}
             size="sm"
             aria-pressed={active}
             title={`${ariaLabel}：${item.label}`}
             onClick={() => onChange(item.value)}
             className={cn(
-              "h-6 min-w-7 rounded-[var(--radius-control)] px-1.5 type-overline",
+              "h-7 min-w-7 gap-1 rounded-[var(--radius-control)] px-1.5 type-caption motion-reduce:transition-none",
+              "aria-pressed:text-[var(--accent-on)] aria-pressed:font-semibold",
               active
-                ? "bg-[var(--bg-0)] text-[var(--fg-0)] shadow-[var(--shadow-1)]"
-                : "text-[var(--fg-2)] hover:text-[var(--fg-0)]",
+                ? "font-semibold shadow-[var(--shadow-1)]"
+                : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
             )}
           >
+            <Check className={cn("h-3 w-3 shrink-0", !active && "invisible")} aria-hidden />
             {item.label}
           </Button>
         );

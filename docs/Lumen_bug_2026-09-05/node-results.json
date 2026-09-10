@@ -1,0 +1,38 @@
+{
+  "kind": "isolated algorithm/control-flow reproductions",
+  "node": "v22.16.0",
+  "tests": [
+    {
+      "name": "HEAD is overwritten by queryClient.get",
+      "status": "passed"
+    },
+    {
+      "name": "Admission after body await needs a fresh drain check",
+      "status": "passed"
+    },
+    {
+      "name": "IME Escape closes palette before composition guard",
+      "status": "passed"
+    },
+    {
+      "name": "Empty projection timestamps yield NaN and drop missing selections",
+      "status": "passed"
+    },
+    {
+      "name": "Own __proto__ key is lost from semantic fingerprint",
+      "status": "passed"
+    },
+    {
+      "name": "Fresh key on manual resend bypasses key-based deduplication",
+      "status": "passed"
+    },
+    {
+      "name": "Agent delivery classifier misses a 504 compared to shared policy",
+      "status": "passed"
+    },
+    {
+      "name": "Tailwind source path resolves below app instead of web/src",
+      "status": "passed"
+    }
+  ]
+}

@@ -102,6 +102,7 @@ export function MobileComposerModeSegment({
       value={value}
       onChange={onChange}
       ariaLabel="模式"
+      tone="accent"
       className={className}
       items={[
         {

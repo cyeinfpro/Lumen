@@ -108,6 +108,7 @@ export function ModeSegment({
         onChange={onChange}
         ariaLabel="模式"
         density="compact"
+        tone="accent"
         items={[
           {
             value: "chat",
