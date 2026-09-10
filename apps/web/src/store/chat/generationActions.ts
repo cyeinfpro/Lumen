@@ -214,6 +214,7 @@ async function _runUpscale(
   const img = state.imagesById[imageId];
   if (!img) return;
   const gen = generationForImage(state, img);
+  const upscaleParams = imageParamsForReroll(gen ?? {});
   const aspect = (gen?.aspect_ratio ??
     DEFAULT_PARAMS.aspect_ratio) as AspectRatio;
   const preset = PRESET[aspect] ?? PRESET[DEFAULT_PARAMS.aspect_ratio];
@@ -261,7 +262,7 @@ async function _runUpscale(
       fixed_size: fixedSize,
       quality: "4k",
       count: 1,
-      render_quality: "high",
+      ...upscaleParams,
       background: "auto",
       moderation: "low",
     },
@@ -289,6 +290,7 @@ async function _runUpscale(
       action: "edit",
       prompt: upscaleText,
       size_requested: fixedSize,
+      requested_params: { ...payload.image_params },
       aspect_ratio: aspect,
       input_image_ids: [img.id],
       primary_input_image_id: img.id,

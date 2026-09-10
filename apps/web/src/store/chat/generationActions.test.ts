@@ -292,6 +292,39 @@ test("upscaleImage: 双击在途去重，只创建一条放大任务", async () 
   assert.ok(state.generations["gen-up-1"], "乐观插入放大 generation");
 });
 
+for (const source of [
+  { requested_params: { model: "gpt-image-2.5-flare", render_quality: "max" } },
+  { request_params: { model: "gpt-image-2.5-sunburst", render_quality: "xhigh" } },
+  { effective_params: { image_model: "gpt-image-2.5-flare", render_quality: "high" } },
+  { requested_params: { model: "gpt-image-2", render_quality: "medium" } },
+  {},
+]) {
+  test(`upscaleImage preserves source model and quality: ${JSON.stringify(source)}`, async () => {
+    const stub = stubHost.__apiClientStub ?? {};
+    stubHost.__apiClientStub = stub;
+    let body: Record<string, unknown> = {};
+    stub.createSilentGeneration = async (_convId, payload) => {
+      body = payload as Record<string, unknown>;
+      return silentGenerationOut("asst-up-model", "gen-up-model");
+    };
+    const { state, actions } = makeHarness();
+    state.generations["gen-old"] = { ...oldGeneration, ...source };
+    state.imagesById = { "img-1": generatedImage("img-1", "gen-old") };
+    await actions.upscaleImage("img-1");
+
+    const params = source.requested_params ?? source.request_params ?? source.effective_params;
+    const expectedModel = params && ("model" in params ? params.model : params.image_model);
+    const submitted = body.image_params as Record<string, unknown>;
+    assert.equal(submitted.model, expectedModel ?? "gpt-image-2");
+    assert.equal(submitted.render_quality, params?.render_quality ?? "high");
+    assert.equal(submitted.quality, "4k");
+    assert.equal(submitted.size_mode, "fixed");
+    assert.equal(submitted.fixed_size, "2880x2880");
+    assert.deepEqual(body.attachment_image_ids, ["img-1"]);
+    assert.deepEqual(state.generations["gen-up-model"].requested_params, submitted);
+  });
+}
+
 test("rerollImage: 双击在途去重，只创建一条重roll 任务", async () => {
   const stub = stubHost.__apiClientStub ?? {};
   stubHost.__apiClientStub = stub;
