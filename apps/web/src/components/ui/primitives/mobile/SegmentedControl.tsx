@@ -6,6 +6,7 @@ import {
   useRef,
 } from "react";
 import { Pressable } from "./Pressable";
+import { Check } from "lucide-react";
 
 export interface SegmentItem<V extends string = string> {
   value: V;
@@ -20,6 +21,7 @@ export interface SegmentedControlProps<V extends string = string> {
   ariaLabel?: string;
   className?: string;
   density?: "default" | "compact";
+  tone?: "neutral" | "accent";
 }
 
 export function SegmentedControl<V extends string = string>({
@@ -29,6 +31,7 @@ export function SegmentedControl<V extends string = string>({
   ariaLabel,
   className = "",
   density = "default",
+  tone = "neutral",
 }: SegmentedControlProps<V>) {
   const compact = density === "compact";
   const itemRefs = useRef<Array<HTMLElement | null>>([]);
@@ -109,23 +112,28 @@ export function SegmentedControl<V extends string = string>({
               compact
                 ? "type-caption font-medium transition-colors"
                 : "type-body-sm font-medium transition-colors",
-              "focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
+              "focus-visible:outline-none focus-visible:shadow-[var(--ring)] motion-reduce:transition-none",
               active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)]",
+              tone === "accent" ? "aria-selected:text-[var(--accent-on)] aria-selected:font-semibold" : "",
             ].join(" ")}
           >
             {active && (
               <span
                 className={[
                   "absolute inset-0 border border-[var(--border)] shadow-[var(--shadow-1)]",
-                  compact
-                    ? "rounded-[var(--radius-sm)] bg-[var(--bg-1)]"
-                    : "rounded-[var(--radius-md)] bg-[var(--bg-0)]",
+                  compact ? "rounded-[var(--radius-sm)]" : "rounded-[var(--radius-md)]",
+                  tone === "accent"
+                    ? "bg-[var(--accent)]"
+                    : compact ? "bg-[var(--bg-1)]" : "bg-[var(--bg-0)]",
                 ].join(" ")}
                 aria-hidden
               />
             )}
             <span className="relative flex w-full min-w-0 items-center justify-center gap-1.5 whitespace-nowrap">
               {item.label}
+              {tone === "accent" && (
+                <Check className={`h-3 w-3 shrink-0 ${active ? "" : "invisible"}`} aria-hidden />
+              )}
               {item.badge != null && (
                 <span className="shrink-0 type-caption tracking-wider text-[var(--fg-2)]">
                   {item.badge}

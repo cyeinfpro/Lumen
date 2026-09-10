@@ -1,0 +1,13 @@
+{
+  "bytes": 117987,
+  "lines": 2637,
+  "findings": 12,
+  "ui_patterns": 13,
+  "code_blocks": 60,
+  "python_syntax": "passed",
+  "json_blocks": "passed",
+  "internal_navigation": "passed",
+  "fences": "balanced",
+  "javascript_typescript_syntax_blocks": 37,
+  "javascript_typescript_syntax": "passed; not project typechecking"
+}

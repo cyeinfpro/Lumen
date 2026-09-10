@@ -1,0 +1,37 @@
+{
+  "python": "3.13.5",
+  "tests": [
+    {
+      "name": "Non-ASCII string in compare_digest raises TypeError",
+      "status": "passed"
+    },
+    {
+      "name": "ASCII validation makes malformed input reject cleanly",
+      "status": "passed"
+    },
+    {
+      "name": "Current modal selector includes tabindex=-1 and disabled tabindex=0",
+      "status": "passed",
+      "matches": [
+        "query",
+        "close",
+        "option",
+        "disabled"
+      ],
+      "scope": "CSS selector matching, not browser focus behavior"
+    },
+    {
+      "name": "Color-token contrast calculation",
+      "status": "passed",
+      "ratios": {
+        "current_info_on_white": 2.7853045362505586,
+        "current_info_on_canvas_light": 2.5532836957181204,
+        "proposed_info_fg_on_white": 4.765669927751281,
+        "proposed_info_fg_on_canvas_light": 4.36868111451885,
+        "command_group_fg3_on_dark_panel": 2.670979648675614,
+        "command_group_fg3_on_light_panel": 1.9082477717305895
+      },
+      "scope": "opaque token combinations, not computed browser styles"
+    }
+  ]
+}
