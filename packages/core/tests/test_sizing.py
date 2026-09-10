@@ -1,8 +1,12 @@
 import pytest
+from typing import get_args
 
 import lumen_core.sizing as sizing
 from lumen_core.sizing import (
     _fallback_by_budget,
+    AspectRatio,
+    ImageQuality,
+    quality_to_fixed_size,
     resolve_size,
     validate_explicit_size,
 )
@@ -72,6 +76,20 @@ def test_validate_explicit_size_rejects_invalid_boundaries(width, height, messag
 
 def test_validate_explicit_size_accepts_documented_upper_bound():
     validate_explicit_size(3840, 2160)
+
+
+@pytest.mark.parametrize("quality", get_args(ImageQuality))
+@pytest.mark.parametrize("aspect", get_args(AspectRatio))
+def test_all_quality_presets_are_valid_explicit_requests(quality, aspect):
+    fixed = quality_to_fixed_size(quality, aspect)
+    assert resolve_size(aspect, "fixed", fixed).size == fixed
+
+
+@pytest.mark.parametrize("aspect", ["21:9", "9:21"])
+def test_ultrawide_1k_presets_preserve_exact_ratio(aspect):
+    width, height = map(int, quality_to_fixed_size("1k", aspect).split("x"))
+    rw, rh = map(int, aspect.split(":"))
+    assert width * rh == height * rw
 
 
 @pytest.mark.parametrize(

@@ -43,7 +43,7 @@ SizeMode = Literal["auto", "fixed"]
 ImageQuality = Literal["1k", "2k", "4k"]
 
 # 默认 preset：按用户要求"默认最大 4K 画质 + 按比例分配"。
-# 每条均满足 validate_explicit_size：16 对齐、最长边 ≤ 3840、总像素 ≤ 8,294,400、长宽比 ≤ 3:1。
+# 每条均满足 validate_explicit_size：16 对齐、最长边 ≤ 3840、总像素 ≤ 8,294,400、长宽比 ≤ 21:9。
 # 横/竖构图配对：3:2↔2:3 / 4:3↔3:4 / 16:9↔9:16 / 21:9↔9:21
 _PRESET: Mapping[str, tuple[int, int]] = immutable_mapping(
     {
@@ -67,8 +67,8 @@ _PRESET_1K: Mapping[str, tuple[int, int]] = immutable_mapping(
         "1:1": (1024, 1024),
         "16:9": (1536, 864),
         "9:16": (864, 1536),
-        "21:9": (1536, 656),
-        "9:21": (656, 1536),
+        "21:9": (1568, 672),  # Exact 21:9 on the 16-pixel grid.
+        "9:21": (672, 1568),
         "10:7": (1344, 944),
         "7:10": (944, 1344),
         "4:5": (1024, 1280),
@@ -152,7 +152,7 @@ def validate_explicit_size(w: int, h: int) -> None:
     - 非正数、非 16 对齐
     - 最长边 > MAX_EXPLICIT_SIDE（3840）
     - 总像素不在 [MIN_EXPLICIT_PIXELS, MAX_EXPLICIT_PIXELS] = [655360, 8294400]
-    - 长宽比 > MAX_EXPLICIT_ASPECT（3:1）
+    - 长宽比 > MAX_EXPLICIT_ASPECT（21:9）
     """
     if w <= 0 or h <= 0:
         raise ValueError(f"size must be positive, got {w}x{h}")
