@@ -25,8 +25,9 @@ test("image model menu filters quality and submits the selected model", async ({
   const models = dialog.getByRole("combobox", { name: "生图模型" });
   const quality = dialog.getByRole("combobox", { name: "质量", exact: true });
   await expect(models.locator("option")).toHaveCount(3);
-  await expect(models).toHaveValue("gpt-image-2");
-  await expect(quality.locator("option")).toHaveCount(3);
+  await expect(models).toHaveValue("gpt-image-2.5-sunburst");
+  await expect(quality.locator("option")).toHaveCount(5);
+  await expect(quality).toHaveValue("max");
   for (const model of ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"]) {
     await models.selectOption(model);
     await expect(quality.locator("option")).toHaveCount(5);
@@ -34,6 +35,7 @@ test("image model menu filters quality and submits the selected model", async ({
     await expect(quality).toHaveValue("max");
   }
   await models.selectOption("gpt-image-2");
+  await expect(quality.locator("option")).toHaveCount(3);
   await expect(quality).toHaveValue("high");
   await models.selectOption("gpt-image-2.5-sunburst");
   await quality.selectOption("xhigh");
