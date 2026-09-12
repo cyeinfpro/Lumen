@@ -1,7 +1,6 @@
 # Lumen full-stack runtime entrypoint (postgres + redis + api + worker + web + tgbot/migrate/bootstrap).
-# Image tags pulled from GHCR are pinned via LUMEN_IMAGE_TAG (see docs/docker-full-stack-cutover-plan.md §6.4.1).
-# LUMEN_IMAGE_TAG 无默认值：`:-latest` 会让部署不可复现、回滚拿不到确定版本，
-# 且可能与已跑过的 migration 状态错配。未设置时 compose 直接报错退出。
+# Production images are complete name@sha256 references. LUMEN_IMAGE_TAG remains
+# update-channel metadata only and never selects a runtime image.
 # tgbot / migrate / bootstrap live behind compose profiles so default `up -d` only starts the core stack.
 
 x-service-hardening: &service-hardening
@@ -21,14 +20,6 @@ x-service-hardening: &service-hardening
       max-size: "50m"
       max-file: "5"
 
-x-app-build: &app-build
-  context: .
-  dockerfile: Dockerfile.python
-  args:
-    LUMEN_VERSION: "${LUMEN_VERSION:-dev}"
-    LUMEN_APP_UID: "${LUMEN_APP_UID:-10001}"
-    LUMEN_APP_GID: "${LUMEN_APP_GID:-10001}"
-
 x-redis-url-env: &redis-url-env
   REDIS_URL: "${REDIS_URL:-redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0}"
 
@@ -46,7 +37,7 @@ services:
     # account memory 0018 migration 需要 vector extension; alpine 镜像没装.
     # 镜像内 postgres uid=999 (Debian default), 与之前 alpine 的 uid=70 不同,
     # update.sh 升级路径会自动 chown 数据目录 (70 → 999).
-    image: pgvector/pgvector:pg16
+    image: ${LUMEN_POSTGRES_IMAGE_REF:?Set LUMEN_POSTGRES_IMAGE_REF to name@sha256 digest}
     container_name: lumen-pg
     user: "${LUMEN_POSTGRES_UID:-999}:${LUMEN_POSTGRES_GID:-999}"
     restart: unless-stopped
@@ -76,7 +67,7 @@ services:
 
   redis:
     <<: *service-hardening
-    image: redis:7.4-alpine
+    image: ${LUMEN_REDIS_IMAGE_REF:?Set LUMEN_REDIS_IMAGE_REF to name@sha256 digest}
     container_name: lumen-redis
     user: "${LUMEN_REDIS_UID:-999}:${LUMEN_REDIS_GID:-999}"
     restart: unless-stopped
@@ -107,11 +98,10 @@ services:
 
   api:
     <<: *service-hardening
-    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-api:${LUMEN_IMAGE_TAG:?Set LUMEN_IMAGE_TAG in .env to an immutable tag}
+    image: ${LUMEN_API_IMAGE_REF:?Set LUMEN_API_IMAGE_REF to name@sha256 digest}
     container_name: lumen-api
     labels:
       lumen.color: "blue"
-    build: *app-build
     working_dir: /app/apps/api
     command:
       - "uvicorn"
@@ -208,9 +198,8 @@ services:
 
   worker:
     <<: *service-hardening
-    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-worker:${LUMEN_IMAGE_TAG:?Set LUMEN_IMAGE_TAG in .env to an immutable tag}
+    image: ${LUMEN_WORKER_IMAGE_REF:?Set LUMEN_WORKER_IMAGE_REF to name@sha256 digest}
     container_name: lumen-worker
-    build: *app-build
     working_dir: /app/apps/worker
     command: ["python", "-m", "app.worker_health", "run"]
     user: "${LUMEN_APP_UID:-10001}:${LUMEN_APP_GID:-10001}"
@@ -257,15 +246,8 @@ services:
 
   web:
     <<: *service-hardening
-    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-web:${LUMEN_IMAGE_TAG:?Set LUMEN_IMAGE_TAG in .env to an immutable tag}
+    image: ${LUMEN_WEB_IMAGE_REF:?Set LUMEN_WEB_IMAGE_REF to name@sha256 digest}
     container_name: lumen-web
-    build:
-      context: ./apps/web
-      dockerfile: Dockerfile
-      args:
-        LUMEN_VERSION: "${LUMEN_VERSION:-dev}"
-        LUMEN_BACKEND_URL: "http://api:8000"
-        NPM_VERSION: "${NPM_VERSION:-10.9.0}"
     restart: unless-stopped
     stop_grace_period: 30s
     cpus: "1.0"
@@ -292,9 +274,8 @@ services:
 
   tgbot:
     <<: *service-hardening
-    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-tgbot:${LUMEN_IMAGE_TAG:?Set LUMEN_IMAGE_TAG in .env to an immutable tag}
+    image: ${LUMEN_TGBOT_IMAGE_REF:?Set LUMEN_TGBOT_IMAGE_REF to name@sha256 digest}
     container_name: lumen-tgbot
-    build: *app-build
     working_dir: /app/apps/tgbot
     command: ["python", "-m", "app.main"]
     # 与 api/worker 一致：先 env_file 读 .env，environment 块再覆盖关键变量。
@@ -336,8 +317,7 @@ services:
 
   migrate:
     <<: *service-hardening
-    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-api:${LUMEN_IMAGE_TAG:?Set LUMEN_IMAGE_TAG in .env to an immutable tag}
-    build: *app-build
+    image: ${LUMEN_API_IMAGE_REF:?Set LUMEN_API_IMAGE_REF to name@sha256 digest}
     working_dir: /app/apps/api
     command: ["alembic", "upgrade", "head"]
     environment:
@@ -354,8 +334,7 @@ services:
 
   bootstrap:
     <<: *service-hardening
-    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-api:${LUMEN_IMAGE_TAG:?Set LUMEN_IMAGE_TAG in .env to an immutable tag}
-    build: *app-build
+    image: ${LUMEN_API_IMAGE_REF:?Set LUMEN_API_IMAGE_REF to name@sha256 digest}
     working_dir: /app/apps/api
     command:
       - "/bin/sh"

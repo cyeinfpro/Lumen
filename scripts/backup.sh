@@ -12,7 +12,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 
 # 复用 lib.sh 的 lumen_try_acquire_lock，让 backup 与 install/update/uninstall 互斥。
-# 在 backup 自己的 backup-restore 锁之前加一层维护锁；维护锁被占用时跳过本次（exit 0）。
+# 在 backup 自己的 backup-restore 锁之前加一层维护锁；维护锁被占用时返回
+# EX_TEMPFAIL，让 systemd 持续退避重试并暴露失败。
 if [ ! -f "${SCRIPT_DIR}/lib.sh" ]; then
     echo "[backup] ERROR: ${SCRIPT_DIR}/lib.sh missing" >&2
     exit 1
@@ -494,6 +495,37 @@ print(
 PY
 }
 
+record_backup_success() {
+    local marker="${BACKUP_ROOT}/.backup.last-success.json"
+    python3 - "${marker}" "${TS}" "${PAIR_MARKER}" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+payload = {
+    "completed_at": sys.argv[2],
+    "pair_marker": Path(sys.argv[3]).name,
+}
+tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+data = (json.dumps(payload, sort_keys=True) + "\n").encode()
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
+try:
+    os.fchmod(fd, 0o640)
+    os.write(fd, data)
+    os.fsync(fd)
+finally:
+    os.close(fd)
+os.replace(tmp, path)
+dir_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+try:
+    os.fsync(dir_fd)
+finally:
+    os.close(dir_fd)
+PY
+}
+
 make_tmp_dir() {
     local base
     local tmp_dir
@@ -725,7 +757,7 @@ create_fresh_redis_bgsave() {
 trap cleanup EXIT
 trap '' INT TERM HUP
 
-# 维护锁：与 install/update/uninstall 互斥；被占用时跳过本次 backup（exit 0，不让 systemd timer 报警）。
+# 维护锁：与 install/update/uninstall 互斥；被占用时返回可重试失败。
 # updater 的 preflight 只能通过可验证的 inherited FD/token capability 借用父进程
 # 已持有的同一把锁。环境开关本身不再具有绕过能力。
 if [ -n "${LUMEN_BORROWED_MAINTENANCE_LOCK_KIND:-}" ]; then
@@ -741,8 +773,8 @@ elif command -v lumen_try_acquire_lock >/dev/null 2>&1; then
         exit 78
     fi
     if ! lumen_try_acquire_lock "${LUMEN_DEPLOY_ROOT}" "backup.sh"; then
-        log "skipped: maintenance lock held (install/update/uninstall in progress); next timer cycle will retry"
-        exit 0
+        log "DEFERRED: maintenance lock held; systemd must retry this backup"
+        exit 75
     fi
 fi
 
@@ -991,5 +1023,9 @@ prune_paired() {
 backup_failpoint before_retention
 prune_paired "$PG_DIR" "$REDIS_DIR" "$MAX_KEEP"
 
-log "backup $TS complete"
 emit_backup_result
+if ! record_backup_success; then
+    log "ERROR: backup pair exists but last-success marker was not durably recorded"
+    exit 70
+fi
+log "backup $TS complete"

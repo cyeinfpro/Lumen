@@ -192,12 +192,20 @@ def _validate_image_binding_artifacts(
             raise SystemExit(f"resume immutable Image ID is invalid: {service}")
         source_ref = record.get("source_ref")
         expected_name = f"lumen-{service}:{target['effective_tag']}"
-        if (
-            not isinstance(source_ref, str)
-            or source_ref.rsplit("/", 1)[-1] != expected_name
-        ):
+        if not isinstance(source_ref, str):
             raise SystemExit(f"resume immutable source ref is invalid: {service}")
-        source_repository = source_ref.rsplit(":", 1)[0]
+        source_leaf = source_ref.rsplit("/", 1)[-1]
+        if "@" in source_leaf:
+            source_repository, source_digest = source_ref.rsplit("@", 1)
+            if (
+                source_repository.rsplit("/", 1)[-1] != f"lumen-{service}"
+                or not IMAGE_DIGEST_RE.fullmatch(source_digest)
+            ):
+                raise SystemExit(f"resume immutable source ref is invalid: {service}")
+        else:
+            if source_leaf != expected_name:
+                raise SystemExit(f"resume immutable source ref is invalid: {service}")
+            source_repository = source_ref.rsplit(":", 1)[0]
         repo_digests = record.get("repo_digests")
         if not isinstance(repo_digests, list) or any(
             not isinstance(value, str)

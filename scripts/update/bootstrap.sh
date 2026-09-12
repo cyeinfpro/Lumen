@@ -116,7 +116,18 @@ UPDATE_MIGRATION_STARTED=0
 UPDATE_MIGRATION_VERIFIED=0
 UPDATE_MIGRATION_HEAD=""
 UPDATE_RESTORE_BOUNDARY_LOGGED=0
-LUMEN_UPDATE_MODE="$(printf '%s' "${LUMEN_UPDATE_MODE:-fast}" | tr '[:upper:]' '[:lower:]')"
+if [ -z "${LUMEN_UPDATE_MODE+x}" ]; then
+    raw_update_mode="fast"
+elif [ -z "${LUMEN_UPDATE_MODE}" ]; then
+    log_error "LUMEN_UPDATE_MODE 已设置但为空；允许值：fast、standard、safe、full。"
+    emit_info bootstrap invalid_update_mode "<empty>"
+    exit 64
+else
+    raw_update_mode="${LUMEN_UPDATE_MODE}"
+fi
+LUMEN_UPDATE_MODE="$(
+    printf '%s' "${raw_update_mode}" | tr '[:upper:]' '[:lower:]'
+)"
 case "${LUMEN_UPDATE_MODE}" in
     fast)
         ;;
@@ -124,10 +135,12 @@ case "${LUMEN_UPDATE_MODE}" in
         LUMEN_UPDATE_MODE="standard"
         ;;
     *)
-        log_warn "未知 LUMEN_UPDATE_MODE=${LUMEN_UPDATE_MODE}，回退到 fast。"
-        LUMEN_UPDATE_MODE="fast"
+        log_error "未知 LUMEN_UPDATE_MODE=${raw_update_mode}; 允许值：fast、standard、safe、full。"
+        emit_info bootstrap invalid_update_mode "${raw_update_mode}"
+        exit 64
         ;;
 esac
+unset raw_update_mode
 if [ "${LUMEN_UPDATE_MODE}" = "fast" ] && [ -z "${LUMEN_UPDATE_SELF_UPDATE_SCRIPTS+x}" ]; then
     # stable 首跳必须先补齐 release manifest guard 与 host runners，否则旧
     # release 会用旧 helper 校验新发布物。rolling main 才默认跳过额外 raw 拉取。

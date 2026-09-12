@@ -74,6 +74,14 @@ def test_cli_writes_complete_machine_readable_manifest(tmp_path: Path) -> None:
     digest_args: list[str] = []
     for index, service in enumerate(("api", "worker", "tgbot", "web"), start=1):
         digest_args.extend(["--image-digest", f"{service}=sha256:{index:064x}"])
+    dependency_args = [
+        "--dependency-image",
+        f"python=python:3.12-slim@sha256:{'a' * 64}",
+        "--dependency-image",
+        f"postgres=pgvector/pgvector:pg16@sha256:{'b' * 64}",
+        "--dependency-image",
+        f"redis=redis:7.4-alpine@sha256:{'c' * 64}",
+    ]
 
     result = subprocess.run(
         [
@@ -96,6 +104,7 @@ def test_cli_writes_complete_machine_readable_manifest(tmp_path: Path) -> None:
             "--generated-at",
             "2026-07-10T00:00:00Z",
             *digest_args,
+            *dependency_args,
         ],
         cwd=ROOT,
         text=True,
@@ -109,6 +118,7 @@ def test_cli_writes_complete_machine_readable_manifest(tmp_path: Path) -> None:
     assert manifest["commit_sha"] == commit
     assert manifest["version"] == "v1.2.45"
     assert set(manifest["images"]) == {"api", "worker", "tgbot", "web"}
+    assert set(manifest["dependencies"]) == {"python", "postgres", "redis"}
     for index, service in enumerate(("api", "worker", "tgbot", "web"), start=1):
         image = manifest["images"][service]
         expected_digest = f"sha256:{index:064x}"
@@ -129,6 +139,9 @@ def test_docker_release_publishes_verified_release_manifest() -> None:
     assert '--image-digest "worker=${WORKER_DIGEST}"' in workflow
     assert '--image-digest "tgbot=${TGBOT_DIGEST}"' in workflow
     assert '--image-digest "web=${WEB_DIGEST}"' in workflow
+    assert '--dependency-image "python=${PYTHON_BASE_REF}"' in workflow
+    assert '--dependency-image "postgres=${POSTGRES_IMAGE_REF}"' in workflow
+    assert '--dependency-image "redis=${REDIS_IMAGE_REF}"' in workflow
     assert "--resolve-images" not in workflow
     assert "release-manifest.json" in workflow
     assert "files: release-manifest.json" in workflow
@@ -148,7 +161,8 @@ def test_docker_release_prepares_storage_state_bind_before_starting_apps() -> No
     )
     start_apps = (
         "docker compose --env-file .env.ci -f docker-compose.yml "
-        "-f deploy/docker/docker-compose.local.yml up -d --wait api worker web"
+        "-f docker-compose.dev.yml -f deploy/docker/docker-compose.local.yml "
+        "up -d --wait api worker web"
     )
     assert prepare_state_dir in run
     assert start_apps in run

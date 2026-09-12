@@ -2,8 +2,7 @@
 Description=Lumen periodic backup
 After=docker.service
 Requires=docker.service
-StartLimitIntervalSec=300
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
@@ -35,7 +34,7 @@ TimeoutStopSec=120
 KillSignal=SIGTERM
 KillMode=mixed
 Restart=on-failure
-RestartSec=5s
+RestartSec=60s
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true

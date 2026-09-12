@@ -20,8 +20,10 @@ _TAG_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
 _STABLE_TAG_RE = re.compile(r"^v([0-9]+)\.([0-9]+)\.([0-9]+)$")
 _ALIAS_RE = re.compile(r"^v([0-9]+)(?:\.([0-9]+))?$")
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_IMMUTABLE_REF_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _SERVICES = ("api", "worker", "web", "tgbot")
+_DEPENDENCIES = ("python", "postgres", "redis")
 _ALLOWED_DOWNLOAD_HOSTS = {
     "api.github.com",
     "github.com",
@@ -88,7 +90,23 @@ def validate_manifest(payload: object, *, tag: str) -> dict[str, object]:
         service: _validate_image(service, images.get(service), tag)
         for service in _SERVICES
     }
-    return {**payload, "images": validated_images}
+    dependencies = payload.get("dependencies")
+    if not isinstance(dependencies, dict) or set(dependencies) != set(_DEPENDENCIES):
+        raise ManifestError("release manifest dependency image set is invalid")
+    validated_dependencies: dict[str, dict[str, str]] = {}
+    for name in _DEPENDENCIES:
+        value = dependencies.get(name)
+        reference = value.get("immutable_ref") if isinstance(value, dict) else None
+        if not isinstance(reference, str) or not _IMMUTABLE_REF_RE.fullmatch(
+            reference
+        ):
+            raise ManifestError(f"invalid immutable dependency image for {name}")
+        validated_dependencies[name] = {"immutable_ref": reference}
+    return {
+        **payload,
+        "dependencies": validated_dependencies,
+        "images": validated_images,
+    }
 
 
 def load_manifest(path: Path, *, tag: str) -> dict[str, object]:
@@ -256,6 +274,25 @@ def print_commit(*, path: Path, tag: str) -> None:
     print(payload["commit_sha"])
 
 
+def print_compose_env(*, path: Path, tag: str) -> None:
+    payload = load_manifest(path, tag=tag)
+    images = payload["images"]
+    dependencies = payload["dependencies"]
+    assert isinstance(images, dict)
+    assert isinstance(dependencies, dict)
+    values = {
+        "LUMEN_POSTGRES_IMAGE_REF": dependencies["postgres"]["immutable_ref"],
+        "LUMEN_REDIS_IMAGE_REF": dependencies["redis"]["immutable_ref"],
+        "LUMEN_API_IMAGE_REF": images["api"]["immutable_ref"],
+        "LUMEN_WORKER_IMAGE_REF": images["worker"]["immutable_ref"],
+        "LUMEN_WEB_IMAGE_REF": images["web"]["immutable_ref"],
+        "LUMEN_TGBOT_IMAGE_REF": images["tgbot"]["immutable_ref"],
+        "LUMEN_PYTHON_BASE_REF": dependencies["python"]["immutable_ref"],
+    }
+    for key, value in values.items():
+        print(f"{key}\t{value}")
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -269,6 +306,9 @@ def _parser() -> argparse.ArgumentParser:
     commit = subparsers.add_parser("commit")
     commit.add_argument("--tag", required=True)
     commit.add_argument("--manifest", type=Path, required=True)
+    compose_env = subparsers.add_parser("compose-env")
+    compose_env.add_argument("--tag", required=True)
+    compose_env.add_argument("--manifest", type=Path, required=True)
     subparsers.add_parser("latest-tag")
     alias = subparsers.add_parser("resolve-alias")
     alias.add_argument("--alias", required=True)
@@ -286,6 +326,8 @@ def main() -> int:
             print(resolve_alias_tag(args.alias))
         elif args.command == "commit":
             print_commit(path=args.manifest, tag=args.tag)
+        elif args.command == "compose-env":
+            print_compose_env(path=args.manifest, tag=args.tag)
         else:
             print_entries(
                 path=args.manifest,
