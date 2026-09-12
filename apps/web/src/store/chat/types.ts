@@ -110,6 +110,9 @@ export interface ChatState {
   sendMessage: (opts?: {
     intentOverride?: Exclude<Intent, "auto">;
     restoreComposerOnFailure?: boolean;
+    // Independent operations never replace or consume the global composer.
+    composerSnapshot?: ComposerState;
+    throwOnError?: boolean;
   }) => Promise<void>;
   loadHistoricalMessages: (convId: string, loadMore?: boolean) => Promise<void>;
   retryAssistant: (assistantMsgId: string) => Promise<void>;

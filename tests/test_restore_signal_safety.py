@@ -25,9 +25,36 @@ SYSTEMD_WRITER_UNITS = (
     "lumen-tgbot.service",
 )
 APPLICATION_SERVICES = ("api", "worker", "tgbot", "web")
+# Includes staged restore, consistency recovery and verified writer restart.
+# Functional assertions must not depend on fast local subprocess startup.
+SCRIPT_TIMEOUT_SECONDS = 120
 
 
-def _wait_for_file(path: Path, timeout: float = 15.0) -> None:
+def _spawn_script(*args, **kwargs) -> subprocess.Popen[str]:
+    return subprocess.Popen(*args, start_new_session=True, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _reap_owned_script_processes(monkeypatch):
+    owned: list[subprocess.Popen[str]] = []
+    original_spawn = _spawn_script
+
+    def spawn(*args, **kwargs):
+        process = original_spawn(*args, **kwargs)
+        owned.append(process)
+        return process
+
+    monkeypatch.setitem(globals(), "_spawn_script", spawn)
+    yield
+    for process in reversed(owned):
+        _terminate_process_group(process)
+        process.communicate(timeout=5)
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+
+
+def _wait_for_file(path: Path, timeout: float = SCRIPT_TIMEOUT_SECONDS) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if path.exists():
@@ -612,14 +639,13 @@ command() {
 }
 . "$1" "$2"
 """
-    process = subprocess.Popen(
+    process = _spawn_script(
         ["/bin/bash", "-c", shell, "restore-signal-test", str(RESTORE), TS],
         cwd=ROOT,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
-        start_new_session=True,
     )
     return process, marker, redis_host, db_dir, docker_log
 
@@ -666,7 +692,7 @@ command() {
 }
 . "$1" "$2"
 """
-    return subprocess.run(
+    process = _spawn_script(
         [
             "/bin/bash",
             "-c",
@@ -677,11 +703,12 @@ command() {
         ],
         cwd=ROOT,
         text=True,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         env=recovery_env,
-        timeout=20,
-        check=False,
     )
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 
 
 def _interrupt(
@@ -689,10 +716,10 @@ def _interrupt(
     marker: Path,
     sig: signal.Signals,
 ) -> tuple[int, str]:
-    _wait_for_file(marker)
-    os.killpg(process.pid, sig)
     try:
-        stdout, stderr = process.communicate(timeout=30)
+        _wait_for_file(marker)
+        os.killpg(process.pid, sig)
+        stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     finally:
         _terminate_process_group(process)
     return process.returncode, stdout + stderr
@@ -809,7 +836,7 @@ def test_restore_aborts_before_stopping_services_when_state_snapshot_fails(
     )
     before = _tree_snapshot(redis_host)
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
 
     assert process.returncode == 70, output
@@ -832,7 +859,7 @@ def test_restore_rejects_unbound_backup_pair_before_archive_or_service_use(
     )
     before = _tree_snapshot(redis_host)
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
 
     assert process.returncode == 3, output
@@ -851,7 +878,7 @@ def test_restore_revalidates_bound_pair_after_staging_before_stopping_services(
     )
     before = _tree_snapshot(redis_host)
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
 
     assert process.returncode == 3, output
@@ -869,7 +896,7 @@ def test_old_legal_archive_restores_only_verified_rdb_and_clears_journal(
 ) -> None:
     process, _marker, redis_host, db_dir, docker_log = _prepare_restore(tmp_path)
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
 
     assert process.returncode == 0, output
@@ -896,7 +923,7 @@ def test_generated_aof_missing_segment_is_rejected_before_redis_restart(
         aof_valid=False,
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
 
     assert process.returncode == 5, output
@@ -927,7 +954,7 @@ def test_restore_readiness_failure_keeps_committed_pair_and_stops_services(
         worker_ready=worker_ready,
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
 
     assert process.returncode == 70, output
@@ -953,7 +980,7 @@ def test_readiness_failure_does_not_attempt_post_commit_data_rollback(
         fail_rollback_item="dump.rdb",
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
 
     assert process.returncode == 70, output
@@ -977,7 +1004,7 @@ def test_sigkill_after_pg_rollback_resumes_with_redis_rollback(
         env_out=env,
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
     journal = tmp_path / "restore-state" / "active.json"
 
@@ -1054,7 +1081,7 @@ def test_signal_during_partial_redis_stash_restores_every_original_item(
     assert pair_lock.is_dir()
 
     os.killpg(process.pid, signal.SIGTERM)
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     returncode = process.returncode
     output = stdout + stderr
 
@@ -1100,7 +1127,7 @@ def test_sigkill_during_redis_copy_is_recovered_before_next_restore(
     _wait_for_file(marker)
 
     os.killpg(process.pid, signal.SIGKILL)
-    process.communicate(timeout=15)
+    process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
 
     journal = tmp_path / "restore-state" / "active.json"
     assert process.returncode == -signal.SIGKILL
@@ -1151,7 +1178,7 @@ def test_sigkill_after_pg_promotion_before_readiness_recovers_old_pair(
     _wait_for_file(marker)
 
     os.killpg(process.pid, signal.SIGKILL)
-    process.communicate(timeout=15)
+    process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
 
     journal = tmp_path / "restore-state" / "active.json"
     assert process.returncode == -signal.SIGKILL
@@ -1206,7 +1233,7 @@ def test_sigkill_after_readiness_commit_keeps_new_pair_and_cleans_rollbacks(
         env_out=env,
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
     journal = tmp_path / "restore-state" / "active.json"
 
@@ -1244,7 +1271,7 @@ def test_sigkill_after_storage_commit_happens_before_any_writer_restart(
         env_out=env,
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
     journal = tmp_path / "restore-state" / "active.json"
 
@@ -1279,7 +1306,7 @@ def test_storage_commit_recovery_retains_rollbacks_until_readiness_passes(
         env_out=env,
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
     journal = tmp_path / "restore-state" / "active.json"
 
@@ -1352,7 +1379,7 @@ def test_redis_stop_failure_does_not_mutate_data_or_restart_applications(
     before = _tree_snapshot(redis_host)
 
     os.killpg(process.pid, signal.SIGTERM)
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
 
     assert process.returncode == 70, output

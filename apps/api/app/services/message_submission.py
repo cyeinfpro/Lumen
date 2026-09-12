@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
 from lumen_core.arq_jobs import arq_job_id
+from lumen_core.image_models import MAX_IMAGE_COUNT
 from lumen_core.constants import (
     DEFAULT_CHAT_MODEL,
     DEFAULT_IMAGE_RESPONSES_MODEL,
@@ -537,14 +538,18 @@ async def _create_generation_tasks(
     db = command.db
     image_params = command.image_params
     resolved_size = command.resolved_size
-    requested_count = max(1, min(10, image_params.count))
+    requested_count = max(1, min(MAX_IMAGE_COUNT, image_params.count))
     action = (
         GenerationAction.EDIT.value
         if command.intent == Intent.IMAGE_TO_IMAGE
         else GenerationAction.GENERATE.value
     )
     primary = command.attachment_ids[0] if command.attachment_ids else None
-    prompt_full = (command.text or "") + command.prompt_suffix
+    prompt_text = command.text or ""
+    prompt_full = (
+        prompt_text if command.prompt_suffix and prompt_text.endswith(command.prompt_suffix)
+        else prompt_text + command.prompt_suffix
+    )
     upstream_request = image_upstream_request(
         image_params,
         resolved_size,

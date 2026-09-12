@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import time
 import types
 from concurrent.futures import ThreadPoolExecutor
@@ -129,18 +130,42 @@ def test_slow_tiktoken_load_falls_back_without_blocking(monkeypatch):
 
     encoding = object()
     fake_tiktoken = types.ModuleType("tiktoken")
+    loader_started = threading.Event()
+    release_loader = threading.Event()
+    loader_finished = threading.Event()
 
     def get_encoding(_name: str):  # noqa: ANN202
-        time.sleep(0.2)
+        loader_started.set()
+        release_loader.wait()
+        loader_finished.set()
         return encoding
 
     fake_tiktoken.get_encoding = get_encoding  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "tiktoken", fake_tiktoken)
+    monkeypatch.delenv("LUMEN_TIKTOKEN_LOAD_TIMEOUT_SEC", raising=False)
     _reset_tiktoken_state(monkeypatch, cw)
+    original_join = threading.Thread.join
+    requested_timeouts: list[float | None] = []
 
-    started = time.monotonic()
-    assert cw._get_tiktoken_encoding(timeout_sec=0.01) is None
-    assert time.monotonic() - started < 0.1
+    def tracked_join(thread: threading.Thread, timeout: float | None = None) -> None:
+        if thread.name == "lumen-tiktoken-loader":
+            requested_timeouts.append(timeout)
+        original_join(thread, timeout)
+
+    monkeypatch.setattr(threading.Thread, "join", tracked_join)
+    # Verify the actual dependency ordering rather than a sub-100ms wall-clock
+    # threshold that includes OS scheduling and captured logging. The loader
+    # cannot finish until the caller has already returned its fallback.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            result = pool.submit(cw._get_tiktoken_encoding, timeout_sec=0.01)
+            assert loader_started.wait(timeout=2)
+            assert result.result(timeout=2) is None
+            assert requested_timeouts == [0.01]
+            assert not loader_finished.is_set()
+        finally:
+            release_loader.set()
+            cw._TOKEN_COUNTER_RUNTIME.reset()
 
 
 def test_count_tokens_keeps_estimator_after_cold_slow_load(monkeypatch):

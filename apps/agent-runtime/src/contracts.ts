@@ -510,7 +510,10 @@ function strictRequestChecks(request: RuntimeRequest): void {
   }
   const allowedTools = request.allowed_tools as readonly string[];
   const imageEnabled = allowedTools.includes(AGENT_TOOL_CREATE_IMAGE);
-  if (imageEnabled !== Boolean(request.tool_gateway_url && request.tool_capability)) {
+  if (
+    (request.tool_gateway_url !== null) !== (request.tool_capability !== null) ||
+    imageEnabled !== (request.tool_gateway_url !== null)
+  ) {
     throw new Error("tool gateway and capability must match the image tool allowlist");
   }
   if (
@@ -549,10 +552,11 @@ function strictRequestChecks(request: RuntimeRequest): void {
   ) {
     throw new Error("thinking level map requires reasoning support");
   }
-  const dispatchBindings = Boolean(
-    request.provider_dispatch_url && request.provider_dispatch_capability,
-  );
-  if (dispatchBindings !== Boolean(request.safety_budget)) {
+  const dispatchBindings = request.provider_dispatch_url !== undefined;
+  if (
+    dispatchBindings !== (request.provider_dispatch_capability !== undefined) ||
+    dispatchBindings !== (request.safety_budget !== undefined)
+  ) {
     throw new Error("provider dispatch bindings require a safety budget");
   }
   if (

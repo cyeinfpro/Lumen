@@ -12,6 +12,7 @@ import type { NdjsonLineTooLargeError } from "../src/ndjson.js";
 class FakeResponse extends EventEmitter {
   destroyed = false;
   writableEnded = false;
+  writableNeedDrain = false;
   readonly lines: string[] = [];
 
   constructor(private readonly writable: boolean) {
@@ -20,6 +21,7 @@ class FakeResponse extends EventEmitter {
 
   write(line: string): boolean {
     this.lines.push(line);
+    this.writableNeedDrain = !this.writable;
     return this.writable;
   }
 
@@ -69,9 +71,13 @@ describe("NDJSON event writer", () => {
     const response = new FakeResponse(true);
     const output = writer(response, { maxLineBytes: 512 });
 
+    // Exercise all 10,000 writes without allocating 10,000 Vitest async
+    // assertion trackers; count every result and assert the same contract.
+    let acceptedCount = 0;
     for (let index = 0; index < 10_000; index += 1) {
-      await expect(output.emit("run.heartbeat")).resolves.toBe(true);
+      if (await output.emit("run.heartbeat")) acceptedCount += 1;
     }
+    expect(acceptedCount).toBe(10_000);
     await expect(
       output.emit(
         "run.completed",
@@ -84,6 +90,8 @@ describe("NDJSON event writer", () => {
       ),
     ).resolves.toBe(true);
     expect(response.lines).toHaveLength(10_001);
+    expect(output.sequence).toBe(10_001);
+    expect(output.bytesWritten).toBe(Buffer.byteLength(response.lines.join(""), "utf8"));
   });
 
   it("latches backpressure failure and rejects later terminal writes immediately", async () => {

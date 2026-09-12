@@ -538,15 +538,17 @@ export function splitRuntimeTextDelta(
   },
 ): string[] {
   const output: string[] = [];
-  let remaining = value;
-  while (remaining.length > 0) {
-    const codePoints = Array.from(remaining);
+  // Convert once. Rebuilding the complete unconsumed suffix for every small
+  // wire chunk causes quadratic copying on long streamed responses.
+  const codePoints = Array.from(value);
+  let offset = 0;
+  while (offset < codePoints.length) {
     let low = 1;
-    let high = Math.min(codePoints.length, 8_192);
+    let high = Math.min(codePoints.length - offset, 8_192);
     let best = 0;
     while (low <= high) {
       const middle = Math.floor((low + high) / 2);
-      const candidate = codePoints.slice(0, middle).join("");
+      const candidate = codePoints.slice(offset, offset + middle).join("");
       const bytes = runtimeEventLineBytes(
         "text.delta",
         options.firstSequence + output.length,
@@ -567,8 +569,8 @@ export function splitRuntimeTextDelta(
         options.maxLineBytes,
       );
     }
-    output.push(codePoints.slice(0, best).join(""));
-    remaining = codePoints.slice(best).join("");
+    output.push(codePoints.slice(offset, offset + best).join(""));
+    offset += best;
   }
   return output;
 }

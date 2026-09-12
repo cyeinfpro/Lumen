@@ -24,6 +24,36 @@ SYSTEMD_WRITER_UNITS = (
     "lumen-tgbot.service",
 )
 APPLICATION_SERVICES = ("api", "worker", "tgbot", "web")
+# These are process-heavy consistency tests, not 15-second latency tests.
+# The negative Redis path performs up to 240 fake CLI invocations.
+SCRIPT_TIMEOUT_SECONDS = 120
+
+
+def _spawn_script(*args, **kwargs) -> subprocess.Popen[str]:
+    return subprocess.Popen(*args, start_new_session=True, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _reap_owned_script_processes(monkeypatch):
+    owned: list[subprocess.Popen[str]] = []
+    original_spawn = _spawn_script
+
+    def spawn(*args, **kwargs):
+        process = original_spawn(*args, **kwargs)
+        owned.append(process)
+        return process
+
+    monkeypatch.setitem(globals(), "_spawn_script", spawn)
+    yield
+    for process in reversed(owned):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate(timeout=5)
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
 
 
 def _write_committed_pair(backup_root: Path, timestamp: str) -> None:
@@ -70,7 +100,7 @@ def _assert_all_markers_reference_complete_pairs(backup_root: Path) -> None:
         )
 
 
-def _wait_for_file(path: Path, timeout: float = 8.0) -> None:
+def _wait_for_file(path: Path, timeout: float = SCRIPT_TIMEOUT_SECONDS) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if path.exists():
@@ -594,14 +624,13 @@ def _start_backup(
     (tmp_path / "tmp").mkdir()
     shell = f"umask {process_umask}\n" if process_umask else ""
     shell += '. "$1"\n'
-    process = subprocess.Popen(
+    process = _spawn_script(
         ["/bin/bash", "-c", shell, "backup-signal-test", str(BACKUP)],
         cwd=ROOT,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
-        start_new_session=True,
     )
     return process, marker, backup_root, maint_root, lock_file
 
@@ -627,15 +656,16 @@ def _run_backup_recovery(
         }
     )
     shell = '. "$1"\n'
-    return subprocess.run(
+    process = _spawn_script(
         ["/bin/bash", "-c", shell, "backup-recovery-test", str(BACKUP)],
         cwd=ROOT,
         text=True,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         env=recovery_env,
-        timeout=20,
-        check=False,
     )
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 
 
 def _assert_flock_released(path: Path) -> None:
@@ -660,7 +690,7 @@ def test_sighup_retains_host_claim_and_releases_both_locks(
     assert pair_lock.is_file()
 
     os.killpg(process.pid, signal.SIGHUP)
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
 
     assert process.returncode == 129, output
@@ -701,7 +731,7 @@ def test_successful_backup_freezes_all_writers_before_both_snapshots(
         block_phase="",
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
 
     assert process.returncode == 0, stdout + stderr
     calls = (tmp_path / "docker.log").read_text(encoding="utf-8").splitlines()
@@ -750,7 +780,7 @@ def test_pair_marker_is_persisted_0640_under_restrictive_umask(
         process_umask="077",
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
 
     assert process.returncode == 0, output
@@ -778,7 +808,7 @@ def test_nonroot_backup_stages_rdb_as_root_owned_private_container_file(
         block_phase="",
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
 
     assert process.returncode == 0, output
@@ -820,7 +850,7 @@ def test_invalid_staged_rdb_is_cleaned_up_and_writers_are_restarted(
         rdb_valid=False,
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
 
     assert process.returncode == 4, output
@@ -848,7 +878,7 @@ def test_backup_refuses_active_systemd_fallback_writer_before_compose_stop(
         active_systemd_units=(unit,),
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
 
     assert process.returncode == 70, output
@@ -871,7 +901,7 @@ def test_backup_waits_out_preexisting_bgsave_then_starts_fresh_generation(
         bgsave_mode="preexisting",
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
 
     assert process.returncode == 0, output
@@ -898,7 +928,7 @@ def test_backup_aborts_when_preexisting_bgsave_never_becomes_idle(
         bgsave_mode="preexisting-stuck",
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
 
     assert process.returncode == 3, output
@@ -924,7 +954,7 @@ def test_backup_receipt_failure_preserves_new_pair_and_skips_retention(
         last_success_is_directory=True,
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
 
     assert process.returncode == 70, stdout + stderr
     assert "terminal receipt failure" in stdout + stderr
@@ -948,7 +978,7 @@ def test_backup_retention_keeps_complete_pairs(
         ),
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
 
     assert process.returncode == 0, stdout + stderr
     assert len(list(backup_root.glob(".backup-pair.*.json"))) == max_keep
@@ -966,7 +996,7 @@ def test_backup_retention_protects_receipt_pair_when_future_pair_exists(
         existing_timestamps=(future_timestamp,),
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
 
     assert process.returncode == 0, stdout + stderr
     receipt = json.loads(
@@ -989,7 +1019,7 @@ def test_retention_crash_never_leaves_marker_for_partial_pair(
         failpoint="after_prune_marker",
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
 
     assert process.returncode == -signal.SIGKILL, stdout + stderr
     assert (backup_root / ".backup.last-success.json").is_file()
@@ -1017,7 +1047,7 @@ def test_backup_crash_failpoints_expose_only_marker_committed_pairs(
         failpoint=failpoint,
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
 
     assert process.returncode == -signal.SIGKILL, output
@@ -1046,7 +1076,7 @@ def test_backup_aborts_before_stopping_services_when_state_snapshot_fails(
         inspect_failure_service="worker",
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
 
     assert process.returncode == 70, output
@@ -1070,7 +1100,7 @@ def test_sigkill_leaves_durable_consumer_state_and_next_run_restores_writers(
     _wait_for_file(marker)
 
     os.killpg(process.pid, signal.SIGKILL)
-    process.communicate(timeout=15)
+    process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
 
     journal = backup_root / ".recovery" / "backup.json"
     assert process.returncode == -signal.SIGKILL
@@ -1105,7 +1135,7 @@ def test_unknown_backup_journal_state_is_preserved_and_never_restarts_writers(
     )
     _wait_for_file(marker)
     os.killpg(process.pid, signal.SIGKILL)
-    process.communicate(timeout=15)
+    process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     journal = backup_root / ".recovery" / "backup.json"
     payload = json.loads(journal.read_text(encoding="utf-8"))
     payload["phase"] = "unknown"
@@ -1152,7 +1182,7 @@ def test_backup_rejects_unproven_redis_bgsave_completion(
         **kwargs,
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
 
     assert process.returncode == 3, output
@@ -1172,7 +1202,7 @@ def test_partial_live_aof_is_ignored_and_archive_remains_rdb_only(
         appendonlydir_mode="partial-fail",
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     assert process.returncode == 0, stdout + stderr
     archives = list((backup_root / "redis").glob("*.redis.tgz"))
     assert len(archives) == 1
@@ -1197,7 +1227,7 @@ def test_missing_optional_aof_still_produces_dump_only_archive(
         appendonly_file_mode="missing",
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
 
     assert process.returncode == 0, stdout + stderr
     archives = list((backup_root / "redis").glob("*.redis.tgz"))
@@ -1232,7 +1262,7 @@ def test_backup_restart_readiness_failure_retains_journal_and_pair(
         worker_ready=worker_ready,
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
 
     assert process.returncode == 70, output
@@ -1255,7 +1285,7 @@ def test_backup_restart_accepts_healthy_legacy_worker_contract(
         legacy_worker=True,
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
 
     assert process.returncode == 0, output
@@ -1293,7 +1323,7 @@ def test_backup_restart_never_uses_unproven_legacy_worker_fallback(
         worker_docker_health=worker_docker_health,
     )
 
-    stdout, stderr = process.communicate(timeout=15)
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
     output = stdout + stderr
 
     assert process.returncode == 70, output

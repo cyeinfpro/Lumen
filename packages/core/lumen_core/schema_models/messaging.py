@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from ..constants import MAX_MESSAGE_ATTACHMENTS, MAX_PROMPT_CHARS
 from ..image_models import (
     DEFAULT_IMAGE_MODEL,
+    MAX_IMAGE_COUNT,
     ImageModel,
     ImageRenderQuality,
     validate_image_model_quality,
@@ -29,7 +30,7 @@ class ImageParamsIn(BaseModel):
     size_mode: Literal["auto", "fixed"] = "auto"
     fixed_size: str | None = None
     style_preset_id: str | None = None
-    count: int = Field(default=1, ge=1, le=10)
+    count: int = Field(default=1, ge=1, le=MAX_IMAGE_COUNT)
     # UI resolution preset used for billing. fixed_size remains the actual
     # upstream dimensions, whose pixel count can be lower than the nominal tier
     # for wide/tall aspect ratios.

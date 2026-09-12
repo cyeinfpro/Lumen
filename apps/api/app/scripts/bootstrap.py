@@ -40,6 +40,12 @@ _MIN_PASSWORD_LEN = 8
 _MAX_PASSWORD_RETRIES = 3
 
 
+def validate_bootstrap_password(password: str | None) -> None:
+    """One policy for CLI, environment and interactive input; None skips setup."""
+    if password is not None and len(password) < _MIN_PASSWORD_LEN:
+        raise ValueError(f"password too short (min {_MIN_PASSWORD_LEN} chars)")
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="app.scripts.bootstrap",
@@ -138,6 +144,7 @@ async def _upsert_user(
     ).scalar_one_or_none()
 
     if user is None:
+        validate_bootstrap_password(password)
         pwd_hash = hash_password(password) if password else None
         user = User(
             email=email,
@@ -178,6 +185,11 @@ async def main(argv: list[str] | None = None) -> int:
         if env_pw:
             password = env_pw
     needs_password_prompt = password is None
+    try:
+        validate_bootstrap_password(password)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
     async with SessionLocal() as session:
         inserted_allowed = await _ensure_allowed_email(session, email)

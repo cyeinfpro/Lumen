@@ -31,6 +31,7 @@ PRICING_SOURCE_SNAPSHOT = "snapshot"
 MAX_BILLABLE_TOKENS = 1_000_000_000
 MAX_RATE_PER_1K_MICRO = 1_000_000_000
 MAX_MULTIPLIER_X10000 = 1_000_000_000
+MAX_PERSISTABLE_MICRO = 2**63 - 1
 
 
 class PricingOverflowError(ValueError):
@@ -130,6 +131,9 @@ class ModelPricing:
     long_context_output_multiplier_x10000: int = 10_000
     supports_cache_breakdown: bool = True
     pricing_source: str = PRICING_SOURCE_MISSING
+    # None infers provenance for raw rules. Persisted flags survive normalization.
+    reasoning_inherits_output: bool | None = None
+    image_output_inherits_output: bool | None = None
 
     def model_dump(self) -> dict[str, Any]:
         return asdict(self)
@@ -182,6 +186,16 @@ class ModelPricing:
             ),
             supports_cache_breakdown=bool(self.supports_cache_breakdown),
             pricing_source=self.pricing_source,
+            reasoning_inherits_output=(
+                self.reasoning_inherits_output
+                if self.reasoning_inherits_output is not None
+                else reasoning_rate == 0
+            ),
+            image_output_inherits_output=(
+                self.image_output_inherits_output
+                if self.image_output_inherits_output is not None
+                else image_output_rate == 0
+            ),
         )
 
 
@@ -421,8 +435,18 @@ def missing_pricing_buckets(
             usage.cache_creation_1h_tokens,
             pricing.cache_creation_1h_per_1k_micro,
         ),
-        ("image_output", usage.image_output_tokens, pricing.image_output_per_1k_micro),
-        ("reasoning", usage.reasoning_tokens, pricing.reasoning_per_1k_micro),
+        (
+            "image_output",
+            usage.image_output_tokens,
+            output_rate if pricing.image_output_inherits_output
+            else pricing.image_output_per_1k_micro,
+        ),
+        (
+            "reasoning",
+            usage.reasoning_tokens,
+            output_rate if pricing.reasoning_inherits_output
+            else pricing.reasoning_per_1k_micro,
+        ),
     )
     return tuple(name for name, tokens, rate in checks if tokens > 0 and rate <= 0)
 
@@ -487,8 +511,18 @@ def compute_breakdown(
         + _cost(usage.cache_creation_5m_tokens, pricing.cache_creation_5m_per_1k_micro)
         + _cost(usage.cache_creation_1h_tokens, pricing.cache_creation_1h_per_1k_micro)
     )
-    image_cost = _cost(usage.image_output_tokens, pricing.image_output_per_1k_micro)
-    reasoning_cost = _cost(usage.reasoning_tokens, pricing.reasoning_per_1k_micro)
+    # Only inherited buckets use the effective tier/context output rate.
+    # Explicit independent rates, including legacy snapshots, are unchanged.
+    image_rate = (
+        output_rate if pricing.image_output_inherits_output
+        else pricing.image_output_per_1k_micro
+    )
+    reasoning_rate = (
+        output_rate if pricing.reasoning_inherits_output
+        else pricing.reasoning_per_1k_micro
+    )
+    image_cost = _cost(usage.image_output_tokens, image_rate)
+    reasoning_cost = _cost(usage.reasoning_tokens, reasoning_rate)
     total = (
         input_cost
         + output_cost
@@ -497,8 +531,19 @@ def compute_breakdown(
         + image_cost
         + reasoning_cost
     )
+    for field_name, amount in (
+        ("input_cost_micro", input_cost),
+        ("output_cost_micro", output_cost),
+        ("cache_read_cost_micro", cache_read_cost),
+        ("cache_creation_cost_micro", cache_creation_cost),
+        ("image_output_cost_micro", image_cost),
+        ("reasoning_cost_micro", reasoning_cost),
+        ("total_cost_micro", total),
+    ):
+        _guard_factor(field_name, amount, MAX_PERSISTABLE_MICRO)
     multiplier = _nonnegative(rate_multiplier_x10000)
     actual = _apply_multiplier(total, multiplier)
+    _guard_factor("actual_cost_micro", actual, MAX_PERSISTABLE_MICRO)
     if total > 0 and multiplier > 0:
         actual = max(1, actual)
     return CostBreakdown(

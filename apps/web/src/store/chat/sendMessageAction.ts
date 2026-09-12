@@ -32,9 +32,9 @@ import { uuid } from "@/lib/utils";
 import {
   cloneComposerState,
   hasComposerContent,
-  isResetComposerDraft,
   resolveIntent,
 } from "./composerSlice";
+import { mergeSubmissionMessages, mergeSubmissionGenerations } from "./submissionReconciliation";
 import { drainPendingCompletionImage } from "./completionImageReconciliation";
 import {
   clampImageCount,
@@ -350,25 +350,28 @@ function commitOptimisticSend(
   convId: string,
   optimistic: OptimisticSend,
   createInitialComposer: () => ComposerState,
-): void {
+  consumedComposer: ComposerState | null,
+): ComposerState | null {
+  let resetToken: ComposerState | null = null;
   setBounded(_messageConvIds, optimistic.userId, convId);
   setBounded(_messageConvIds, optimistic.assistantId, convId);
   for (const id of optimistic.generationIds) {
     setBounded(_generationConvIds, id, convId);
   }
   invalidateConversationHistoryCache(convId);
-  set((state) => ({
-    messages: [
-      ...state.messages,
-      optimistic.userMessage,
-      optimistic.assistantMessage,
-    ],
-    generations:
-      optimistic.generationIds.length > 0
-        ? { ...state.generations, ...optimistic.generations }
-        : state.generations,
-    composer: resetComposerAfterSend(state, createInitialComposer),
-  }));
+  set((state) => {
+    // Composer setters are immutable. Only consume the exact draft captured
+    // before any asynchronous work; explicit operation snapshots own no draft.
+    if (consumedComposer !== null && state.composer === consumedComposer) {
+      resetToken = resetComposerAfterSend(state, createInitialComposer);
+    }
+    return {
+      messages: [...state.messages, optimistic.userMessage, optimistic.assistantMessage],
+      generations: mergeSubmissionGenerations(state.generations, optimistic.generations),
+      ...(resetToken !== null ? { composer: resetToken } : {}),
+    };
+  });
+  return resetToken;
 }
 
 function buildChatParams(prepared: PreparedSend): Record<string, unknown> | undefined {
@@ -542,15 +545,8 @@ function migrateOptimisticGenerations(
     const realId = realIds[index];
     if (!old || !realId) continue;
     _generationIdAliases.delete(realId);
-    migrated[realId] = {
-      ...remaining[realId],
-      ...old,
-      id: realId,
-      message_id: realAssistantId,
-      image: remaining[realId]?.image ?? old.image,
-      status: remaining[realId]?.status ?? old.status,
-      stage: remaining[realId]?.stage ?? old.stage,
-      finished_at: remaining[realId]?.finished_at ?? old.finished_at,
+    migrated[realId] = remaining[realId] ?? {
+      ...old, id: realId, message_id: realAssistantId,
     };
   }
   return realIds.length > 0 ? { ...remaining, ...migrated } : remaining;
@@ -566,11 +562,12 @@ function replaceOptimisticMessages(
 ): ChatState | Partial<ChatState> {
   if (state.currentConvId !== convId) return state;
   return {
-    messages: state.messages.map((message) => {
-      if (message.id === optimistic.userId) return realUser;
-      if (message.id === optimistic.assistantId) return realAssistant;
-      return message;
-    }),
+    messages: mergeSubmissionMessages(
+      state.messages, [realUser, realAssistant], {
+        [optimistic.userId]: realUser.id,
+        [optimistic.assistantId]: realAssistant.id,
+      },
+    ),
     generations: migrateOptimisticGenerations(
       state,
       optimistic,
@@ -715,6 +712,7 @@ function handlePostFailure(
   err: unknown,
   options: SendMessageOptions,
   composer: ComposerState,
+  resetToken: ComposerState | null,
 ): void {
   const code = err instanceof ApiError ? err.code : "client_exception";
   const rawMessage = err instanceof Error ? err.message : "发送失败";
@@ -727,10 +725,67 @@ function handlePostFailure(
   set((state) => ({
     composerError: `发送失败：${message}`,
     ...(options?.restoreComposerOnFailure !== false &&
-    isResetComposerDraft(state.composer, composer)
+    resetToken !== null && state.composer === resetToken
       ? { composer: cloneComposerState(composer) }
       : {}),
   }));
+}
+
+function rejectSendPreparation(
+  set: ChatStateSetter,
+  options: SendMessageOptions,
+  message: string | null,
+  fallback = "发送内容无效",
+): null {
+  if (message) set({ composerError: message });
+  if (options?.throwOnError) throw new Error(message ?? fallback);
+  return null;
+}
+
+async function prepareSubmission(
+  set: ChatStateSetter,
+  get: ChatStateGetter,
+  composer: ComposerState,
+  options: SendMessageOptions,
+  signal: AbortSignal,
+): Promise<{ convId: string; prepared: PreparedSend } | null> {
+  if (!hasComposerContent(composer)) {
+    return rejectSendPreparation(set, options, null, "发送内容为空");
+  }
+  if (isPromptTooLong(composer.text.trim())) {
+    return rejectSendPreparation(set, options, PROMPT_TOO_LONG_MESSAGE);
+  }
+  const convId = await ensureConversation(set, get, signal);
+  if (!convId) {
+    return rejectSendPreparation(set, options, null, get().composerError ?? "发送已取消");
+  }
+  const historyError = initialHistorySendError(get(), convId);
+  if (historyError) return rejectSendPreparation(set, options, historyError);
+  const candidate = prepareSend(composer, options);
+  if (!candidate.prepared) return rejectSendPreparation(set, options, candidate.error);
+  return { convId, prepared: candidate.prepared };
+}
+
+async function prepareSemanticSend(
+  userId: string | null,
+  convId: string,
+  payload: PostMessagePayload,
+  isCurrent: () => boolean,
+) {
+  if (!isCurrent()) return null;
+  const lease = await semanticPostIdempotency.acquire({
+    operation: "conversation.message.create",
+    userId,
+    conversationId: convId,
+  }, payload);
+  if (!isCurrent()) {
+    await semanticPostIdempotency.discard(lease);
+    return null;
+  }
+  await semanticPostIdempotency.markSubmitted(lease);
+  if (isCurrent()) return lease;
+  await semanticPostIdempotency.discard(lease);
+  return null;
 }
 
 export function createSendMessageAction(
@@ -743,84 +798,46 @@ export function createSendMessageAction(
     const controller = new AbortController();
     const untrack = trackSendRequest(controller);
     let optimistic: OptimisticSend | null = null;
+    let resetToken: ComposerState | null = null;
+    const userId = get().currentUserId;
+    const conversationEpoch = _conversationMutationFence.snapshot();
+    const userEpoch = _userSessionFence.snapshot();
+    const initialComposer = options?.composerSnapshot ?? get().composer;
+    const consumedComposer = options?.composerSnapshot ? null : initialComposer;
+    const cancelled = () => {
+      if (options?.throwOnError) throw new Error("发送已取消");
+    };
     try {
       set({ composerError: null });
-      const initialComposer = get().composer;
-      if (!hasComposerContent(initialComposer)) return;
-      if (isPromptTooLong(initialComposer.text.trim())) {
-        set({ composerError: PROMPT_TOO_LONG_MESSAGE });
-        return;
-      }
-      const convId = await ensureConversation(set, get, controller.signal);
-      if (!convId) return;
-      const historyError = initialHistorySendError(get(), convId);
-      if (historyError) {
-        set({ composerError: historyError });
-        return;
-      }
-      const result = prepareSend(get().composer, options);
-      if (!result.prepared) {
-        if (result.error) set({ composerError: result.error });
-        return;
-      }
-      const userId = get().currentUserId;
-      const conversationEpoch = _conversationMutationFence.snapshot();
-      const userEpoch = _userSessionFence.snapshot();
-      if (
-        isStaleSend(
-          get,
-          convId,
-          userId,
-          conversationEpoch,
-          userEpoch,
-          controller.signal,
-        )
-      ) {
-        return;
-      }
-      const payload = buildPostPayload(result.prepared);
-      const idempotency = await semanticPostIdempotency.acquire(
-        {
-          operation: "conversation.message.create",
-          userId,
-          conversationId: convId,
-        },
-        payload,
+      // Copy before the first await; subsequent input remains a separate draft.
+      const submittedComposer = cloneComposerState(initialComposer);
+      const ready = await prepareSubmission(set, get, submittedComposer, options, controller.signal);
+      if (!ready) return;
+      const { convId, prepared } = ready;
+      const isCurrent = () => !isStaleSend(
+        get, convId, userId, conversationEpoch, userEpoch, controller.signal,
       );
-      if (
-        isStaleSend(
-          get,
-          convId,
-          userId,
-          conversationEpoch,
-          userEpoch,
-          controller.signal,
-        )
-      ) {
-        await semanticPostIdempotency.discard(idempotency);
+      const payload = buildPostPayload(prepared);
+      const idempotency = await prepareSemanticSend(userId, convId, payload, isCurrent);
+      if (!idempotency) {
+        cancelled();
         return;
       }
-      await semanticPostIdempotency.markSubmitted(idempotency);
-      if (
-        isStaleSend(
-          get,
-          convId,
-          userId,
-          conversationEpoch,
-          userEpoch,
-          controller.signal,
-        )
-      ) {
+      // Returning from an async phase introduces another microtask boundary.
+      // Recheck here, immediately before any visible or billable submission.
+      if (!isCurrent()) {
         await semanticPostIdempotency.discard(idempotency);
+        cancelled();
         return;
       }
-      optimistic = buildOptimisticSend(result.prepared, idempotency.key);
+      optimistic = buildOptimisticSend(prepared, idempotency.key);
       try {
-        commitOptimisticSend(
+        resetToken = commitOptimisticSend(
           set,
           convId,
           optimistic,
           dependencies.createInitialComposer,
+          consumedComposer,
         );
       } catch (err) {
         await semanticPostIdempotency.discard(idempotency);
@@ -835,7 +852,7 @@ export function createSendMessageAction(
           buildPostBody(payload, idempotency.key),
           { signal: controller.signal },
         );
-        const validated = validateSuccessfulSend(result.prepared, output);
+        const validated = validateSuccessfulSend(prepared, output);
         await semanticPostIdempotency.confirm(idempotency);
         if (
           isStaleSend(
@@ -848,6 +865,7 @@ export function createSendMessageAction(
           )
         ) {
           removeOptimisticSend(set, optimistic);
+          cancelled();
           return;
         }
         applySuccessfulSend(
@@ -860,7 +878,10 @@ export function createSendMessageAction(
       } catch (err) {
         await semanticPostIdempotency.recordFailure(idempotency, err);
         removeOptimisticSend(set, optimistic);
-        if (isAbortRequest(err, controller.signal)) return;
+        if (isAbortRequest(err, controller.signal)) {
+          cancelled();
+          return;
+        }
         if (
           isStaleSend(
             get,
@@ -871,9 +892,11 @@ export function createSendMessageAction(
             controller.signal,
           )
         ) {
+          cancelled();
           return;
         }
-        handlePostFailure(set, err, options, result.prepared.composer);
+        handlePostFailure(set, err, options, prepared.composer, resetToken);
+        if (options?.throwOnError) throw err;
       }
     } finally {
       untrack();

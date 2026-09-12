@@ -5,6 +5,7 @@ from typing import Literal, get_args
 ImageModel = Literal["gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"]
 ImageRenderQuality = Literal["auto", "low", "medium", "high", "xhigh", "max"]
 DEFAULT_IMAGE_MODEL: ImageModel = "gpt-image-2"
+MAX_IMAGE_COUNT = 10
 IMAGE_MODELS = frozenset(get_args(ImageModel))
 IMAGE_RENDER_QUALITIES = frozenset(get_args(ImageRenderQuality))
 

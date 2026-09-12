@@ -250,7 +250,9 @@ export interface RuntimeServer {
 }
 
 export function createRuntimeServer(options: ServerOptions = {}): RuntimeServer {
-  const config = validateRuntimeConfig(options.config ?? loadConfig());
+  const config = validateRuntimeConfig(options.config ?? loadConfig(), {
+    allowDisabledSecret: true,
+  });
   const metrics = options.metrics ?? new RuntimeMetrics();
   const readiness = new RuntimeReadiness(config);
   const authenticator = new RuntimeAuthenticator(

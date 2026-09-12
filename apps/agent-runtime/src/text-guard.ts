@@ -163,6 +163,7 @@ class IncrementalProtocolScanner {
   private fenceClosePossible = false;
   private fenceCloseLeadingSpaces = 0;
   private fenceCloseMarkers = 0;
+  private fenceCloseTrailingSpace = false;
 
   get retainedChars(): number {
     return this.candidate.length + this.openingFenceCount + this.tickRun;
@@ -296,10 +297,13 @@ class IncrementalProtocolScanner {
       return;
     }
     if (character === this.fenceCharacter) {
-      this.fenceCloseMarkers += 1;
+      // Closing fence markers must be contiguous, not joined across spaces.
+      if (this.fenceCloseTrailingSpace) this.fenceClosePossible = false;
+      else this.fenceCloseMarkers += 1;
       return;
     }
     if (this.fenceCloseMarkers > 0 && (character === " " || character === "\t")) {
+      this.fenceCloseTrailingSpace = true;
       return;
     }
     this.fenceClosePossible = false;
@@ -309,6 +313,7 @@ class IncrementalProtocolScanner {
     this.fenceClosePossible = true;
     this.fenceCloseLeadingSpaces = 0;
     this.fenceCloseMarkers = 0;
+    this.fenceCloseTrailingSpace = false;
   }
 
   private consumeNormal(character: string): void {
@@ -372,9 +377,19 @@ class IncrementalProtocolScanner {
         Array.from(RESERVED_FUNCTIONS).some((name) =>
           name.startsWith(partialName)
         );
-      if (couldBeReserved && this.candidate.length <= 128) return;
+      if (couldBeReserved) {
+        // Do not turn an oversized ambiguous reserved prefix into allowed text.
+        // Fail closed while keeping the scanner's retained state bounded.
+        if (this.candidate.length > 128) this.blocked = true;
+        return;
+      }
     }
+    // The character that disproved this candidate can itself open a marker,
+    // close inline code, or start a new line. Release only the literal prefix
+    // and pass the current character through the normal state transition.
+    this.candidate = this.candidate.slice(0, -character.length);
     this.releaseCandidate();
+    this.consumeNormal(character);
   }
 
   private candidateCouldBeReserved(): boolean {
@@ -434,7 +449,9 @@ export class StreamingTextGuard {
   }
 
   get retainedChars(): number {
-    return Array.from(this.pending).length + this.scanner.retainedChars;
+    // UTF-16 units conservatively bound retained memory without allocating a
+    // code-point array for every incoming character in a long stream.
+    return this.pending.length + this.scanner.retainedChars;
   }
 
   replace(initialText: string): void {

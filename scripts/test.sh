@@ -24,7 +24,12 @@ bash scripts/test_uninstall.sh
 if [ "${LUMEN_TEST_SKIP_GOVERNANCE:-0}" != "1" ]; then
     echo
     echo "==> python ruff"
-    uv run ruff check packages/core apps/api apps/worker apps/tgbot image-job tests
+    uv run ruff check packages/core apps/api apps/worker apps/tgbot image-job tests scripts/repository_integrity.py
+
+    echo
+    echo "==> repository file integrity inventory"
+    uv run python scripts/repository_integrity.py
+    uv run pytest -q tests/test_repository_integrity.py
 
     echo
     echo "==> python complexity budget"
@@ -107,10 +112,6 @@ echo
 echo "==> tools/mock-image-upstream/tests"
 uv run pytest tools/mock-image-upstream/tests "$@"
 
-echo
-echo "==> tests (operations scripts)"
-uv run pytest tests "$@"
-
 if [ "${LUMEN_TEST_SKIP_AGENT_RUNTIME:-0}" != "1" ]; then
     echo
     echo "==> apps/agent-runtime tests"
@@ -160,6 +161,13 @@ if [ "${LUMEN_TEST_SKIP_WEB:-0}" != "1" ]; then
         NEXT_DIST_DIR="${LUMEN_WEB_TEST_DIST_DIR:-.next-build-check}" npm run build
     )
 fi
+
+# Keep the slower subprocess-heavy operations suite last: compile/lint and
+# runtime contract failures should surface before backup/restore simulations.
+# This changes only execution order; no suite or assertion is omitted.
+echo
+echo "==> tests (operations scripts)"
+uv run pytest tests "$@" --durations=15
 
 echo
 echo "==> all suites passed"

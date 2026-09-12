@@ -28,12 +28,15 @@ from lumen_core.schema_models import (
 )
 
 from ...services.active_user import (
+    AccountMode,
     ActiveUserFenceError,
     account_mode_from_user,
     active_user_fence_http_error,
     lock_active_user_snapshot,
 )
 from ...services.agent_conversations import studio_conversation_filter
+from ..regenerate_source import primary_generations
+from ...services.message_request import validate_mask_image
 from ...services.message_idempotency import (
     SILENT_GENERATION_IDEMPOTENCY_OPERATION,
     idempotency_request_metadata,
@@ -50,6 +53,7 @@ class SilentGenerationIn(BaseModel):
     # persisted ``semantic-`` + SHA-256 keys before the client-side fix.
     idempotency_key: str = Field(min_length=1, max_length=96)
     parent_message_id: str
+    mask_image_id: str | None = Field(default=None, min_length=1, max_length=64)
     intent: Literal["text_to_image", "image_to_image"] = "text_to_image"
     image_params: ImageParamsIn = Field(default_factory=ImageParamsIn)
     prompt: str = Field(default="", max_length=MAX_PROMPT_CHARS)
@@ -94,6 +98,9 @@ def silent_generation_request_hash(body: SilentGenerationIn) -> str:
         "attachment_image_ids": list(body.attachment_image_ids),
         "image_params": body.image_params.model_dump(mode="json"),
     }
+    # Preserve durable idempotency fingerprints emitted by older clients.
+    if body.mask_image_id is not None:
+        payload["mask_image_id"] = body.mask_image_id
     encoded = json.dumps(
         payload,
         ensure_ascii=False,
@@ -202,8 +209,9 @@ async def lookup_silent_generation(
         .scalars()
         .all()
     )
+    generations = primary_generations(generations or [anchor])
     if not generations:
-        generations = [anchor]
+        raise http_error_fn("idempotency_conflict", "idempotency_key conflict", 409)
     if has_persisted_contract:
         require_matching_task_idempotency(
             generations,
@@ -235,6 +243,35 @@ async def lookup_silent_generation(
     )
 
 
+async def _recover_concurrent_silent_generation(
+    db: AsyncSession,
+    *,
+    runtime: SilentGenerationRuntime,
+    user_id: str,
+    expected_account_mode: AccountMode,
+    session_id: str | None,
+    lookup_args: dict[str, Any],
+) -> SilentGenerationOut:
+    # Creation can flush. Roll back before reading the concurrent winner, and
+    # explicitly reload identity rather than touching expired ORM attributes.
+    await db.rollback()
+    try:
+        snapshot = await lock_active_user_snapshot(
+            db, user_id, expected_account_mode, session_id=session_id,
+        )
+    except ActiveUserFenceError as exc:
+        raise active_user_fence_http_error(exc) from exc
+    refreshed_lookup = {
+        **lookup_args,
+        "user": snapshot.user,
+        "retention_policy": await runtime.retention_policy_for_user(db, snapshot.user),
+    }
+    prior = await runtime.lookup_silent_generation(db, **refreshed_lookup)
+    if prior is None:
+        raise runtime.http_error("idempotency_conflict", "idempotency_key conflict", 409)
+    return prior
+
+
 async def create_silent_generation(
     conv_id: str,
     body: SilentGenerationIn,
@@ -244,13 +281,15 @@ async def create_silent_generation(
     runtime: SilentGenerationRuntime,
     session_id: str | None = None,
 ) -> SilentGenerationOut:
+    # Preserve scalar identity across flush/commit failures and ORM expiration.
+    user_id = str(user.id)
     expected_account_mode = account_mode_from_user(user)
     redis = runtime.get_redis()
     conv = (
         await db.execute(
             select(Conversation).where(
                 Conversation.id == conv_id,
-                Conversation.user_id == user.id,
+                Conversation.user_id == user_id,
                 Conversation.deleted_at.is_(None),
                 studio_conversation_filter(),
             )
@@ -264,7 +303,7 @@ async def create_silent_generation(
     retention_policy = await runtime.retention_policy_for_user(db, user)
     lookup_args = {
         "user": user,
-        "user_id": user.id,
+        "user_id": user_id,
         "conv_id": conv_id,
         "idempotency_key": body.idempotency_key,
         "parent_message_id": body.parent_message_id,
@@ -276,7 +315,7 @@ async def create_silent_generation(
         return prior
     if await runtime.lock_idempotency_key(
         db,
-        user.id,
+        user_id,
         conv_id,
         body.idempotency_key,
     ):
@@ -307,7 +346,7 @@ async def create_silent_generation(
                 await db.execute(
                     select(Image.id).where(
                         Image.id.in_(attachment_ids),
-                        Image.user_id == user.id,
+                        Image.user_id == user_id,
                         Image.deleted_at.is_(None),
                         *(
                             (image_retention_filter,)
@@ -328,6 +367,16 @@ async def create_silent_generation(
             )
 
     intent = Intent(body.intent)
+    if body.mask_image_id is not None:
+        await validate_mask_image(
+            db,
+            user_id=user_id,
+            intent=intent,
+            attachment_ids=attachment_ids,
+            mask_image_id=body.mask_image_id,
+            visibility_filter=await runtime.byok_image_visible_filter(db, user),
+            http_error=runtime.http_error,
+        )
     default_image_output_format = runtime.default_image_output_format
     spec = runtime.get_spec("image.output_format")
     if spec is not None:
@@ -338,46 +387,45 @@ async def create_silent_generation(
     try:
         snapshot = await lock_active_user_snapshot(
             db,
-            user.id,
+            user_id,
             expected_account_mode,
             session_id=session_id,
         )
     except ActiveUserFenceError as exc:
         raise active_user_fence_http_error(exc) from exc
-    user = snapshot.user
-    result = await runtime.create_assistant_task(
-        db=db,
-        user_id=user.id,
-        account_mode=snapshot.account_mode,
-        conv=conv,
-        user_msg=parent_msg,
-        intent=intent,
-        idempotency_key=body.idempotency_key,
-        image_params=image_params,
-        chat_params=ChatParamsIn(),
-        system_prompt=None,
-        attachment_ids=attachment_ids,
-        text=body.prompt,
-        default_image_output_format=default_image_output_format,
-        request_metadata=idempotency_request_metadata(
-            {runtime.request_hash_key: request_hash},
-            operation_namespace=SILENT_GENERATION_IDEMPOTENCY_OPERATION,
-            request_fingerprint=request_hash,
-        ),
-    )
-    conv.last_activity_at = datetime.now(timezone.utc)
     try:
+        result = await runtime.create_assistant_task(
+            db=db,
+            user_id=user_id,
+            account_mode=snapshot.account_mode,
+            conv=conv,
+            user_msg=parent_msg,
+            intent=intent,
+            idempotency_key=body.idempotency_key,
+            image_params=image_params,
+            chat_params=ChatParamsIn(),
+            system_prompt=None,
+            attachment_ids=attachment_ids,
+            mask_image_id=body.mask_image_id,
+            text=body.prompt,
+            default_image_output_format=default_image_output_format,
+            request_metadata=idempotency_request_metadata(
+                {runtime.request_hash_key: request_hash},
+                operation_namespace=SILENT_GENERATION_IDEMPOTENCY_OPERATION,
+                request_fingerprint=request_hash,
+            ),
+        )
+        conv.last_activity_at = datetime.now(timezone.utc)
         await db.commit()
     except IntegrityError:
-        await db.rollback()
-        prior = await runtime.lookup_silent_generation(db, **lookup_args)
-        if prior is not None:
-            return prior
-        raise runtime.http_error(
-            "idempotency_conflict",
-            "idempotency_key conflict",
-            409,
+        return await _recover_concurrent_silent_generation(
+            db, runtime=runtime, user_id=user_id,
+            expected_account_mode=expected_account_mode, session_id=session_id,
+            lookup_args=lookup_args,
         )
+    except Exception:
+        await db.rollback()
+        raise
 
     await db.refresh(result.assistant_msg)
     await runtime.await_post_commit_publishes(
@@ -385,7 +433,7 @@ async def create_silent_generation(
             "message_appended",
             runtime.publish_message_appended(
                 redis=redis,
-                user_id=user.id,
+                user_id=user_id,
                 conv_id=conv_id,
                 message_ids=[result.assistant_msg.id],
             ),
@@ -396,7 +444,7 @@ async def create_silent_generation(
             runtime.publish_assistant_task(
                 db=db,
                 redis=redis,
-                user_id=user.id,
+                user_id=user_id,
                 conv_id=conv_id,
                 assistant_msg_id=result.assistant_msg.id,
                 outbox_payloads=result.outbox_payloads,
@@ -404,7 +452,7 @@ async def create_silent_generation(
             ),
             result.assistant_msg.id,
         ),
-        user_id=user.id,
+        user_id=user_id,
         conv_id=conv_id,
     )
     return SilentGenerationOut(

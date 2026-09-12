@@ -253,6 +253,7 @@ async def persist_message_request(
     command: PersistMessageRequestCommand,
 ) -> MessageTransactionResult:
     user = command.user
+    user_id = user.id  # Scalar survives rollback/ORM expiration.
     conversation = command.conversation
     body = command.body
     intent = command.intent
@@ -292,6 +293,13 @@ async def persist_message_request(
                 "conversation not found",
                 404,
             )
+        prior = await runtime.lookup_idempotent_post(
+            db, user_id, command.conversation_id, body.idempotency_key,
+            operation_namespace=command.idempotency_operation,
+            request_fingerprint=command.request_fingerprint,
+        )
+        if prior is not None:
+            return MessageTransactionResult(prior, None, None, [])
         db.add(user_message)
         await db.flush()
         if is_chat_intent(intent):
@@ -340,7 +348,7 @@ async def persist_message_request(
         await db.rollback()
         prior = await runtime.lookup_idempotent_post(
             db,
-            user.id,
+            user_id,
             command.conversation_id,
             body.idempotency_key,
             operation_namespace=command.idempotency_operation,

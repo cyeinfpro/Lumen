@@ -1,4 +1,6 @@
 import { Type } from "typebox";
+import { encodeBoundedToolResult, safeTextEnd } from "./bounded-results.js";
+import { readVirtualFilePage } from "./virtual-file-page.js";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -31,7 +33,7 @@ function complete(
   mode: "file_list" | "file_read" | "file_search",
   value: unknown,
 ) {
-  const resultText = JSON.stringify(value).slice(0, 20_000);
+  const resultText = encodeBoundedToolResult(value);
   completeLocalTool(state);
   return {
     content: [{ type: "text" as const, text: resultText }],
@@ -81,13 +83,14 @@ function readFileTool(
     name: AGENT_TOOL_READ_FILE,
     label: "Read file",
     description:
-      "Read a bounded line range from one user-supplied virtual text file by exact name. This tool cannot access host or container paths.",
+      "Read one virtual file by exact name. Follow next_cursor using cursor to continue, including within long lines. The cursor is bound to this file version. No host or container paths are accessible.",
     executionMode: "sequential",
     parameters: Type.Object(
       {
         name: Type.String({ minLength: 1, maxLength: 128 }),
         line_start: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000_000 })),
         line_count: Type.Optional(Type.Integer({ minimum: 1, maximum: 400 })),
+        cursor: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
       },
       { additionalProperties: false },
     ),
@@ -101,19 +104,13 @@ function readFileTool(
       );
       const file = findFile(request, params.name);
       if (!file) failLocalTool(state, toolCallId, "agent_file_not_found");
-      const lines = file.content.split(/\r?\n/u);
-      const lineStart = params.line_start ?? 1;
-      const lineCount = params.line_count ?? 200;
-      const selected = lines.slice(lineStart - 1, lineStart - 1 + lineCount);
-      const content = selected.join("\n").slice(0, 18_000);
-      return complete(state, ordinal, "file_read", {
-        name: file.name,
-        line_start: lineStart,
-        line_end: lineStart + Math.max(0, selected.length - 1),
-        total_lines: lines.length,
-        truncated: selected.join("\n").length > content.length,
-        content,
-      });
+      let page;
+      try {
+        page = readVirtualFilePage(file, params);
+      } catch {
+        failLocalTool(state, toolCallId, "agent_file_page_invalid");
+      }
+      return complete(state, ordinal, "file_read", page);
     },
   });
 }
@@ -157,10 +154,11 @@ function searchFilesTool(
       for (const file of candidates) {
         for (const [index, line] of file.content.split(/\r?\n/u).entries()) {
           if (!line.toLocaleLowerCase().includes(normalized)) continue;
+          const snippet = line.trim();
           matches.push({
             name: file.name,
             line: index + 1,
-            text: line.trim().slice(0, 500),
+            text: snippet.slice(0, safeTextEnd(snippet, 500)),
           });
           if (matches.length >= maximum) break;
         }
