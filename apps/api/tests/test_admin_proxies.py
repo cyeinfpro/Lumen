@@ -332,4 +332,5 @@ def test_provider_proxy_rows_brand_new_proxy_keeps_empty_password() -> None:
 
 
 async def _async_noop_audit(*_args: Any, **_kwargs: Any) -> None:
+    assert _kwargs["autocommit"] is False
     return None

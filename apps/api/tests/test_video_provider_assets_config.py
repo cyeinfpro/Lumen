@@ -70,7 +70,8 @@ async def _persist_update(
     async def delete(_db: Any, _key: str) -> None:
         return None
 
-    async def audit(*_args: Any, **_kwargs: Any) -> bool:
+    async def audit(*_args: Any, **kwargs: Any) -> bool:
+        assert kwargs["autocommit"] is False
         return True
 
     async def list_after(*_args: Any, **_kwargs: Any) -> VideoProvidersOut:

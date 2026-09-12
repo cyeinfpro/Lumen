@@ -802,6 +802,7 @@ async def delete_image_impl(
             "source": img.source,
             "owner_generation_id": img.owner_generation_id,
         },
+        autocommit=False,
     )
     await db.commit()
     return {"ok": True}

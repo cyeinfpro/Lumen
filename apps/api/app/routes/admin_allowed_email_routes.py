@@ -90,6 +90,7 @@ async def add_allowed_email(
             admin,
             event_type="admin.allowed_email.add",
             details={"email_hash": deps.hash_email(email), "id": allowed.id},
+            autocommit=False,
         )
         await db.commit()
     except IntegrityError:
@@ -130,6 +131,7 @@ async def delete_allowed_email(
             "email_hash": deps.hash_email(allowed.email),
             "id": allowed.id,
         },
+        autocommit=False,
     )
     await db.delete(allowed)
     await db.commit()

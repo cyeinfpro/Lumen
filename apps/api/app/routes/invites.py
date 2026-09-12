@@ -134,6 +134,7 @@ async def create_invite_link(
             "email_hash": _email_hash(email_norm),
             "expires_at": expires_at.isoformat(),
         },
+        autocommit=False,
     )
     await db.commit()
     await db.refresh(inv)
@@ -209,6 +210,7 @@ async def revoke_invite_link(
             actor_email_hash=_email_hash(admin.email),
             actor_ip_hash=request_ip_hash(request),
             details={"invite_id": inv.id},
+            autocommit=False,
         )
         await db.commit()
         logger.info(

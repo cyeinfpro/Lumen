@@ -1,8 +1,4 @@
-"""审计日志双写服务。
-
-调用方在已有 `logger.info(audit_event=..., extra=...)` 旁追加 `await write_audit(...)`。
-默认使用独立事务写入，避免污染调用方事务。
-"""
+"""Audit persistence helpers for isolated events and caller-owned transactions."""
 
 from __future__ import annotations
 
@@ -66,14 +62,13 @@ async def write_audit(
 
     `autocommit=True` uses an isolated transaction so audit failures do not
     poison the caller's transaction and reports success as a best-effort
-    boolean. `autocommit=False` writes through the supplied session inside a
-    savepoint（flush 失败只回滚审计行，不污染调用方事务），并保留
-    commit/rollback 给调用方。
+    boolean. `autocommit=False` writes through the supplied session and leaves
+    commit/rollback ownership with the caller.
 
     Caller-transaction writes return ``True`` on success and raise
-    :class:`AuditPersistenceError` after savepoint rollback on failure. This
-    fail-closed contract prevents callers that ignore the boolean result from
-    committing business changes without their audit row.
+    :class:`AuditPersistenceError` on failure. A database flush failure leaves
+    the caller transaction unusable until rollback, preventing business changes
+    from committing without their audit row.
     """
     if autocommit:
         return await write_audit_isolated(
@@ -86,32 +81,25 @@ async def write_audit(
             details=details,
         )
 
+    row = AuditLog(
+        user_id=user_id,
+        event_type=event_type,
+        actor_email_hash=actor_email_hash or hash_email(actor_email),
+        actor_ip_hash=actor_ip_hash,
+        target_user_id=target_user_id,
+        details=details or {},
+    )
+    session.add(row)
     try:
-        # savepoint 内 flush：失败时只回滚审计行，不污染调用方事务。
-        # 直接 flush 失败会把 session 事务置为 DEACTIVE，调用方后续
-        # commit 抛 PendingRollbackError，且其未提交改动一并丢失。
-        async with session.begin_nested():
-            row = AuditLog(
-                user_id=user_id,
-                event_type=event_type,
-                actor_email_hash=actor_email_hash or hash_email(actor_email),
-                actor_ip_hash=actor_ip_hash,
-                target_user_id=target_user_id,
-                details=details or {},
-            )
-            session.add(row)
-            await session.flush()
-        return True
+        await session.flush()
     except Exception as exc:  # noqa: BLE001
         audit_write_failures_total.labels(mode="session").inc()
-        # ERROR (was warning): audit failures must surface in alerting so
-        # security events are not silently dropped on DB outages.
-        logger.error(
-            "CRITICAL: audit session write failed event_type=%s err=%s",
+        logger.exception(
+            "audit transaction write failed event_type=%s",
             event_type,
-            exc,
         )
         raise AuditPersistenceError(event_type) from exc
+    return True
 
 
 async def write_audit_isolated(

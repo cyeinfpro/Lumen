@@ -631,6 +631,7 @@ async def test_reference_image_binary_rate_limits_before_db(
 @pytest.mark.asyncio
 async def test_delete_image_writes_audit_log(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_write_audit(db, **kwargs):
+        assert kwargs.pop("autocommit") is False
         db.add(AuditLog(**kwargs))
         await db.flush()
 

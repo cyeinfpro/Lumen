@@ -368,6 +368,7 @@ async def delete_my_account(
             "videos_deleted": task_cleanup["videos_deleted"],
             "memory_extractions_canceled": task_cleanup["memory_extractions_canceled"],
         },
+        autocommit=False,
     )
     await db.commit()
 
@@ -453,6 +454,7 @@ async def revoke_my_session(
                 "session_id": sid,
                 "is_current": sid == getattr(request.state, "session_id", None),
             },
+            autocommit=False,
         )
         await db.commit()
     return None
