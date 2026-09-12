@@ -33,6 +33,7 @@ tmp/
 apps/worker/var/
 var/storage/
 var/test-storage-worker/
+var/audit/
 **/scheduled_tasks*.json
 **/scheduled_tasks*.lock
 scripts/.lumen-self-update.last

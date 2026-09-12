@@ -1322,7 +1322,17 @@ async def test_lookup_idempotent_post_replays_fully_legacy_task() -> None:
 
 
 @pytest.mark.asyncio
-async def test_silent_generation_lookup_returns_original_task_set() -> None:
+@pytest.mark.parametrize("bonus_metadata", [
+    None,
+    {"is_dual_race_bonus": True},
+    {"bonus_billing_obligation": True},
+    {"billing_policy": "batch_extra_settled_separately"},
+    {"batch_parent_generation_id": "generation-1"},
+])
+@pytest.mark.parametrize("persisted_contract", [False, True])
+async def test_silent_generation_lookup_returns_original_task_set(
+    bonus_metadata: dict[str, Any] | None, persisted_contract: bool,
+) -> None:
     body = _silent_body()
     request_hash = messages._silent_generation_request_hash(body)  # noqa: SLF001
     assistant = _message(
@@ -1336,6 +1346,17 @@ async def test_silent_generation_lookup_returns_original_task_set() -> None:
         _silent_generation_row("generation-1", request_hash=request_hash),
         _silent_generation_row("generation-2", request_hash=request_hash),
     ]
+    if persisted_contract:
+        for generation in generations:
+            generation.upstream_request = messages._idempotency_request_metadata(
+                generation.upstream_request,
+                operation_namespace=messages._SILENT_GENERATION_IDEMPOTENCY_OPERATION,
+                request_fingerprint=request_hash,
+            )
+    if bonus_metadata is not None:
+        bonus = _silent_generation_row("billing-only")
+        bonus.upstream_request = bonus_metadata
+        generations.append(bonus)
     db = _Db(
         [
             _Result(generations[0]),
@@ -1599,12 +1620,29 @@ async def test_silent_generation_rechecks_after_postgres_advisory_lock(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("conflict_phase", ["flush", "commit"])
 async def test_silent_generation_unique_conflict_replays_concurrent_winner(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, conflict_phase: str,
 ) -> None:
+    class ExpiringUser(SimpleNamespace):
+        expired = False
+
+        def __getattribute__(self, name: str) -> Any:
+            if name in {"id", "account_mode"} and super().__getattribute__("expired"):
+                raise AssertionError("implicit ORM reload after rollback")
+            return super().__getattribute__(name)
+
+    request_user = ExpiringUser(**vars(_wallet_user()))
+
     class _RaceDb(_Db):
         async def commit(self) -> None:
-            raise IntegrityError("insert generation", {}, Exception("duplicate"))
+            if conflict_phase == "commit":
+                raise IntegrityError("insert generation", {}, Exception("duplicate"))
+            await super().commit()
+
+        async def rollback(self) -> None:
+            await super().rollback()
+            request_user.expired = True
 
     prior = messages.SilentGenerationOut(
         assistant_message=messages.MessageOut.model_validate(
@@ -1620,7 +1658,9 @@ async def test_silent_generation_unique_conflict_replays_concurrent_winner(
     lookup_results = [None, prior]
     captured_metadata: list[dict[str, Any]] = []
 
-    async def lookup(*_args: Any, **_kwargs: Any) -> Any:
+    async def lookup(*_args: Any, **kwargs: Any) -> Any:
+        assert kwargs["user"].id == "user-1"
+        assert kwargs["user"].account_mode == "wallet"
         return lookup_results.pop(0)
 
     async def no_lock(*_args: Any, **_kwargs: Any) -> bool:
@@ -1628,6 +1668,8 @@ async def test_silent_generation_unique_conflict_replays_concurrent_winner(
 
     async def create_task(*_args: Any, **kwargs: Any) -> messages.AssistantTaskResult:
         captured_metadata.append(kwargs["request_metadata"])
+        if conflict_phase == "flush":
+            raise IntegrityError("flush generation", {}, Exception("duplicate"))
         return messages.AssistantTaskResult(
             assistant_msg=_message(
                 id="loser-assistant",
@@ -1657,7 +1699,7 @@ async def test_silent_generation_unique_conflict_replays_concurrent_winner(
     out = await messages.create_silent_generation(
         "conv-1",
         body,
-        _wallet_user(),  # type: ignore[arg-type]
+        request_user,  # type: ignore[arg-type]
         db,  # type: ignore[arg-type]
     )
 
@@ -2188,6 +2230,9 @@ async def test_post_message_pins_image_task_to_active_user_api_credential(
             _Result(_conv()),
             _Result(None),
             _Result(None),
+            # Completion/Generation idempotency is rechecked under the write lock.
+            _Result(None),
+            _Result(None),
             _Result((_credential(), _supplier(purposes=["image"]))),
         ],
         locked_account_mode="byok",
@@ -2268,6 +2313,9 @@ async def test_post_message_image_task_uses_supplier_default_image_model(
     image_db = _Db(
         [
             _Result(_conv()),
+            _Result(None),
+            _Result(None),
+            # The supplier query follows the locked idempotency recheck.
             _Result(None),
             _Result(None),
             _Result((_credential(), image_supplier)),

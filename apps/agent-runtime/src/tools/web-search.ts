@@ -1,4 +1,5 @@
 import { parseHTML } from "linkedom";
+import { encodeBoundedToolResult, safeTextEnd } from "./bounded-results.js";
 import { Type } from "typebox";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 
@@ -34,7 +35,10 @@ async function readBoundedText(response: Response): Promise<string> {
     await response.body?.cancel();
     throw new Error("search response too large");
   }
-  if (!response.ok || response.body === null) throw new Error("search unavailable");
+  if (!response.ok || response.body === null) {
+    await response.body?.cancel();
+    throw new Error("search unavailable");
+  }
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -62,12 +66,12 @@ async function readBoundedJson(response: Response): Promise<unknown> {
 
 function text(value: unknown, maximum: number): string {
   if (typeof value !== "string") return "";
-  return Array.from(value)
+  const normalized = Array.from(value)
     .map((char) => char.charCodeAt(0) < 32 ? " " : char)
     .join("")
     .replace(/\s+/gu, " ")
-    .trim()
-    .slice(0, maximum);
+    .trim();
+  return normalized.slice(0, safeTextEnd(normalized, maximum));
 }
 
 function stripMarkup(value: unknown): string {
@@ -90,7 +94,10 @@ function publicUrl(value: unknown): string | null {
       return null;
     }
     url.hash = "";
-    return url.toString().slice(0, 2_048);
+    const serialized = url.toString();
+    // A URL is an identifier, not display text. Truncation can corrupt a
+    // signed query or point to an entirely different document.
+    return serialized.length <= 2_048 ? serialized : null;
   } catch {
     return null;
   }
@@ -106,7 +113,8 @@ function addSource(
   if (!url || seen.has(url) || output.length >= maximum) return;
   seen.add(url);
   const title = text(raw.title, 240) || new URL(url).hostname;
-  output.push({ title, url, snippet: stripMarkup(raw.snippet).slice(0, 800) });
+  const snippet = stripMarkup(raw.snippet);
+  output.push({ title, url, snippet: snippet.slice(0, safeTextEnd(snippet, 800)) });
 }
 
 function duckResultUrl(value: string): string {
@@ -174,7 +182,7 @@ function duckSources(payload: unknown, maximum: number): { answer: string; sourc
   };
 }
 
-function wikipediaSources(payload: unknown, maximum: number): SearchSource[] {
+function wikipediaSources(payload: unknown, maximum: number, language: "zh" | "en"): SearchSource[] {
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return [];
   const query = (payload as Record<string, unknown>).query;
   if (query === null || typeof query !== "object" || Array.isArray(query)) return [];
@@ -185,12 +193,13 @@ function wikipediaSources(payload: unknown, maximum: number): SearchSource[] {
   for (const item of items) {
     if (item === null || typeof item !== "object" || Array.isArray(item)) continue;
     const record = item as Record<string, unknown>;
-    const title = text(record.title, 240);
-    if (!title) continue;
-    const language = /[\u3400-\u9fff]/u.test(title) ? "zh" : "en";
+    if (typeof record.title !== "string" || !record.title.trim()) continue;
+    // Preserve the returned article identity and the edition queried. The
+    // display label's length or alphabet must never rewrite either of them.
+    const articleTitle = record.title;
     addSource(sources, seen, {
-      title,
-      url: `https://${language}.wikipedia.org/wiki/${encodeURIComponent(title.replaceAll(" ", "_"))}`,
+      title: articleTitle,
+      url: `https://${language}.wikipedia.org/wiki/${encodeURIComponent(articleTitle.replaceAll(" ", "_"))}`,
       snippet: record.snippet,
     }, maximum);
   }
@@ -265,7 +274,7 @@ export async function searchPublicWeb(
     }
   }
   if (wiki.status === "fulfilled") {
-    for (const source of wikipediaSources(wiki.value, maximum)) {
+    for (const source of wikipediaSources(wiki.value, maximum, language)) {
       if (sources.length >= maximum) break;
       if (!seen.has(source.url)) {
         seen.add(source.url);
@@ -313,7 +322,7 @@ export function createWebSearchTool(
       } catch {
         failLocalTool(state, toolCallId, "agent_web_search_unavailable");
       }
-      const resultText = JSON.stringify(result).slice(0, 20_000);
+      const resultText = encodeBoundedToolResult(result);
       completeLocalTool(state);
       return {
         content: [{ type: "text", text: resultText }],

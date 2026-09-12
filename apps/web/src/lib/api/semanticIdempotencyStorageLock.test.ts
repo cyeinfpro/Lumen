@@ -412,7 +412,11 @@ boundedTest("concurrent stale-owner observers recover without callback overlap",
   assert.equal(store.read(name)?.fence, 5);
 });
 
-boundedTest("heartbeat keeps a live long callback mutually exclusive", async () => {
+test("heartbeat keeps a live long callback mutually exclusive", { timeout: 3_000 }, async (t) => {
+  // Exercise actual heartbeat callbacks without making CPU scheduling speed
+  // part of the lease contract. Expired-owner tests remain separately covered.
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const clock = new ManualClock();
   const store = new MemoryTransactionalStore();
   let active = 0;
   let maxActive = 0;
@@ -431,9 +435,9 @@ boundedTest("heartbeat keeps a live long callback mutually exclusive", async () 
     label: string,
     request = createTransactionalLockRequest(
       async () => store,
-      Date.now,
+      clock.now,
       tokens(label),
-      runtime,
+      { ...runtime, monotonicNow: clock.monotonicNow },
     ),
   ) =>
     request("semantic-live-heartbeat.lock", { mode: "exclusive" }, async () => {
@@ -447,19 +451,36 @@ boundedTest("heartbeat keeps a live long callback mutually exclusive", async () 
     });
 
   const first = run("first");
-  await withDeadline(firstEntered.promise, "live owner entry");
-  const second = run("second");
+  // Observe rejection immediately, even if an assertion below fails before join.
+  void first.catch(() => undefined);
+  let second: Promise<void> | undefined;
   try {
-    await new Promise((resolve) => setTimeout(resolve, 260));
+    await withDeadline(firstEntered.promise, "live owner entry");
+    const originalExpiry = store.read("semantic-live-heartbeat.lock")!.expiresAt;
+    for (let beat = 0; beat < 11; beat += 1) {
+      clock.advance(25);
+      t.mock.timers.tick(25);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.ok(clock.wall > originalExpiry);
+    assert.ok(store.read("semantic-live-heartbeat.lock")!.expiresAt > clock.wall);
+    second = run("second");
+    void second.catch(() => undefined);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(maxActive, 1);
+    releaseFirst.resolve(undefined);
+    await withDeadline(
+      Promise.all([first, second]),
+      "live owner and waiter completion",
+    );
     assert.equal(maxActive, 1);
   } finally {
     releaseFirst.resolve(undefined);
+    await withDeadline(
+      Promise.allSettled(second ? [first, second] : [first]),
+      "live owner cleanup",
+    );
   }
-  await withDeadline(
-    Promise.all([first, second]),
-    "live owner and waiter completion",
-  );
-  assert.equal(maxActive, 1);
 });
 
 boundedTest("failed transactional commit rolls back a fenced root mutation", async () => {

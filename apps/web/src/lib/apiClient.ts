@@ -522,6 +522,7 @@ export interface SilentGenerationIn {
   image_params?: ImageParams;
   prompt?: string;
   attachment_image_ids?: string[];
+  mask_image_id?: string;
 }
 
 export interface SilentGenerationOut {

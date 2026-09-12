@@ -214,20 +214,14 @@ test("chat reconciliation preserves terminal states and retry drafts", () => {
   match(taskRecovery, /userSessionFence\.isCurrent\(userFence\)/);
   match(runtime, /isConversationMutationCurrent\(/);
   match(generationActions, /restoreComposerOnFailure: false/);
-  match(
-    generationActions,
-    /isResetComposerDraft\(cur, retryComposer\) \|\| isRetryDraft/,
-  );
-  match(
-    generationActions,
-    /current\.params === transientComposer\.params[\s\S]*?isResetComposerDraft\(current, temporaryComposer\)/,
-  );
-  match(generationActions, /cur === transientComposer/);
-  match(generationActions, /cur === resetComposer/);
-  match(
-    generationActions,
-    /if \(ownsTemporaryComposer \|\| ownsResetComposer\)/,
-  );
+  // Retry/inpaint now submit independent snapshots: requiring the old
+  // temporary-composer restore implementation would reintroduce lost drafts.
+  match(generationActions, /composerSnapshot: \{/);
+  match(generationActions, /throwOnError: true/);
+  doesNotMatch(generationActions, /transientComposer|ownsResetComposer/);
+  const send = source("src/store/chat/sendMessageAction.ts");
+  match(send, /state\.composer === consumedComposer/);
+  match(send, /state\.composer === resetToken/);
   match(composer, /export function isResetComposerDraft\(/);
   match(composer, /export function isRetryComposerDraft\(/);
   match(composer, /export function isTemporaryInpaintComposerDraft\(/);

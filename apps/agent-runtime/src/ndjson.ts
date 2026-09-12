@@ -91,6 +91,10 @@ function waitForDrain(
     response.once("drain", onDrain);
     response.once("close", onClose);
     response.once("error", onError);
+    // A close or drain can already have occurred during write(). Subscribe
+    // first, then inspect state so we never wait for an event that is gone.
+    if (response.destroyed || response.writableEnded) onClose();
+    else if (!response.writableNeedDrain) onDrain();
   });
 }
 
@@ -144,13 +148,9 @@ export class NdjsonEventWriter implements EventWriter {
         payload,
       );
       const line = `${JSON.stringify(event)}\n`;
-      const lineBytes = runtimeEventLineBytes(
-        type,
-        this.nextSequence,
-        this.runId,
-        this.executionEpoch,
-        payload,
-      );
+      // Measure the bytes we actually send. Serializing payload twice both
+      // doubles hot-path work and can disagree for values with toJSON().
+      const lineBytes = Buffer.byteLength(line, "utf8");
       if (lineBytes > this.maxLineBytes) {
         throw new NdjsonLineTooLargeError(lineBytes, this.maxLineBytes);
       }

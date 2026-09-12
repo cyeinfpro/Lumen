@@ -10,6 +10,7 @@ export interface ReadinessState {
 }
 
 export class RuntimeReadiness {
+  private draining = false;
   readonly state: ReadinessState = {
     ready: false,
     checkedAt: null,
@@ -19,12 +20,24 @@ export class RuntimeReadiness {
   constructor(private readonly config: RuntimeConfig) {}
 
   markDraining(): void {
+    this.draining = true;
     this.state.ready = false;
     this.state.checkedAt = new Date().toISOString();
     this.state.errorCode = "agent_runtime_draining";
   }
 
+  private recordProbeResult(ready: boolean): void {
+    // Probe completion and shutdown are separate lifecycle events. Always read
+    // the current state here, rather than reusing a pre-await readiness state.
+    if (this.draining) return;
+    this.state.ready = ready;
+    this.state.errorCode = ready ? null : "agent_runtime_not_ready";
+    this.state.checkedAt = new Date().toISOString();
+  }
+
   async check(): Promise<ReadinessState> {
+    if (this.draining) return { ...this.state };
+    let ready = false;
     try {
       if (
         Buffer.byteLength(this.config.sharedSecret, "utf8") <
@@ -33,13 +46,11 @@ export class RuntimeReadiness {
         throw new Error("runtime shared secret is not configured");
       }
       await verifyPiIsolation();
-      this.state.ready = true;
-      this.state.errorCode = null;
+      ready = true;
     } catch {
-      this.state.ready = false;
-      this.state.errorCode = "agent_runtime_not_ready";
+      // A failed isolation probe must remain unavailable.
     }
-    this.state.checkedAt = new Date().toISOString();
+    this.recordProbeResult(ready);
     return { ...this.state };
   }
 }

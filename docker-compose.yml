@@ -378,6 +378,7 @@ services:
 
   migrate:
     <<: *service-hardening
+    env_file: ${LUMEN_COMPOSE_ENV_FILE:-.env}
     image: ${LUMEN_API_IMAGE_REF:?Set LUMEN_API_IMAGE_REF to name@sha256 digest}
     working_dir: /app/apps/api
     command: ["alembic", "upgrade", "head"]
@@ -395,6 +396,7 @@ services:
 
   bootstrap:
     <<: *service-hardening
+    env_file: ${LUMEN_COMPOSE_ENV_FILE:-.env}
     image: ${LUMEN_API_IMAGE_REF:?Set LUMEN_API_IMAGE_REF to name@sha256 digest}
     working_dir: /app/apps/api
     command:
@@ -403,7 +405,7 @@ services:
       - |
         : "$${LUMEN_ADMIN_EMAIL:?Set LUMEN_ADMIN_EMAIL when running bootstrap profile}"
         : "$${LUMEN_ADMIN_PASSWORD:?Set LUMEN_ADMIN_PASSWORD when running bootstrap profile}"
-        exec python -m app.scripts.bootstrap
+        exec python -m app.scripts.bootstrap "$${LUMEN_ADMIN_EMAIL}" --role admin
     environment:
       <<: *app-runtime-env
       APP_ENV: "${APP_ENV:-dev}"

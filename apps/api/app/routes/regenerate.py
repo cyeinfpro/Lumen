@@ -66,6 +66,7 @@ from ..services.regenerate_task_cleanup import (
     post_commit_regenerate_cancel_cleanup as _post_commit_regenerate_cancel_cleanup_service,
 )
 from . import regenerate_options as _regenerate_options
+from .regenerate_source import primary_generations, requested_generation_count
 from .messages import (
     DEFAULT_IMAGE_OUTPUT_FORMAT as _DEFAULT_IMAGE_OUTPUT_FORMAT,
     await_post_commit_publishes as _await_post_commit_publishes,
@@ -260,6 +261,7 @@ async def _lookup_idempotent_regenerate(
             .scalars()
             .all()
         )
+        gen_hits = primary_generations(gen_hits)
         _require_matching_task_idempotency(
             gen_hits,
             operation_namespace=_MESSAGE_REGENERATE_IDEMPOTENCY_OPERATION,
@@ -280,13 +282,7 @@ async def _ordered_target_generations(
     conv_id: str,
     target_msg_id: str,
 ) -> list[Generation]:
-    """Canonical ``first generation`` selector for a regenerate target.
-
-    Both ``_image_params_from_target`` (size/format) and
-    ``_mask_image_id_from_target`` (mask pairing) MUST use this same ordering
-    so size + mask come from the same row. See review note REGEN-01.
-    """
-    return list(
+    rows = list(
         (
             await db.execute(
                 select(Generation)
@@ -299,10 +295,9 @@ async def _ordered_target_generations(
                 )
                 .order_by(Generation.created_at.asc(), Generation.id.asc())
             )
-        )
-        .scalars()
-        .all()
+        ).scalars().all()
     )
+    return primary_generations(rows)
 
 
 async def _image_params_from_target(
@@ -344,7 +339,7 @@ async def _image_params_from_target(
                 "aspect_ratio": first.aspect_ratio,
                 "size_mode": "fixed" if fixed_size else "auto",
                 "fixed_size": fixed_size,
-                "count": max(1, min(16, len(gens))),
+                "count": requested_generation_count(gens),
                 "quality": _str_option(
                     upstream_request.get("billing_tier"),
                     {"1k", "2k", "4k"},
@@ -375,7 +370,11 @@ async def _image_params_from_target(
             target_msg_id,
             exc,
         )
-        return ImageParamsIn()
+        raise _http(
+            "invalid_regenerate_snapshot",
+            "原生成参数不完整或已不兼容，请明确选择参数后重新提交",
+            422,
+        ) from exc
 
 
 async def _mask_image_id_from_target(
@@ -557,194 +556,149 @@ async def regenerate_message(
     db: Annotated[AsyncSession, Depends(get_db)],
     request: Request = None,
 ) -> RegenerateOut:
+    user_id = user.id
     expected_account_mode = account_mode_from_user(user)
     redis = get_redis()
-    await MESSAGES_LIMITER.check(redis, f"rl:msg:{user.id}")
-
-    conv, target, user_msg = await _regenerate_messages(
-        db,
-        user_id=user.id,
-        conv_id=conv_id,
-        message_id=message_id,
-    )
+    await MESSAGES_LIMITER.check(redis, f"rl:msg:{user_id}")
+    await _regenerate_messages(db, user_id=user_id, conv_id=conv_id, message_id=message_id)
     request_fingerprint = _regenerate_request_fingerprint(
-        target_message_id=message_id,
-        intent=body.intent,
+        target_message_id=message_id, intent=body.intent,
     )
-
-    # ---- idempotency short-circuit ---------------------------------------
-    # If the same idempotency_key was already used by this user, return its result.
     prior = await _lookup_idempotent_regenerate(
-        db,
-        user.id,
-        conv.id,
-        body.idempotency_key,
+        db, user_id, conv_id, body.idempotency_key,
         request_fingerprint=request_fingerprint,
     )
     if prior is not None:
         return prior
-
     intent = _INTENT_BY_STR.get(body.intent)
     if intent is None:
         raise _http("invalid_intent", "invalid regenerate intent", 422)
 
-    # ---- vision/i2i sanity: pull attachments from user message ----
-    user_content = user_msg.content or {}
-    attachment_ids = await _validated_attachment_ids(
-        db,
-        user_id=user.id,
-        user_content=user_content,
-        intent=intent,
-    )
-
-    text = user_content.get("text") or ""
-
-    # ---- transactional: cancel old assistant + sub-tasks, then create new ---
+    # Every task/hold/outbox flush and commit is in the same recovery boundary.
+    # IDs used after rollback are request scalars, never expired ORM attributes.
     try:
-        session_id = durable_session_id(request)
         snapshot = await lock_active_user_snapshot(
-            db,
-            user.id,
-            expected_account_mode,
-            session_id=session_id,
+            db, user_id, expected_account_mode,
+            session_id=durable_session_id(request),
         )
-    except ActiveUserFenceError as exc:
-        raise active_user_fence_http_error(exc) from exc
-    user = snapshot.user
-    conv = (
-        await db.execute(
-            select(Conversation)
-            .where(
-                Conversation.id == conv.id,
-                Conversation.user_id == user.id,
-                Conversation.deleted_at.is_(None),
-                studio_conversation_filter(),
+        user = snapshot.user
+        conv = (
+            await db.execute(
+                select(Conversation).where(
+                    Conversation.id == conv_id,
+                    Conversation.user_id == user_id,
+                    Conversation.deleted_at.is_(None),
+                    studio_conversation_filter(),
+                ).with_for_update(of=Conversation)
             )
-            .with_for_update(of=Conversation)
-        )
-    ).scalar_one_or_none()
-    if conv is None:
-        raise _http("not_found", "conversation not found", 404)
-    now = datetime.now(timezone.utc)
-    cleanup = await _cancel_regenerate_target_active_tasks(
-        db,
-        target_msg_id=target.id,
-        user_id=user.id,
-        canceled_at=now,
-        account_mode=snapshot.account_mode,
-        queue_redis=redis,
-    )
-
-    # Mark old assistant message canceled (don't delete — keep history).
-    target.status = MessageStatus.CANCELED.value
-
-    # Reuse the same helper used by POST /messages so behaviour is bit-identical.
-    image_params = await _image_params_from_target(
-        db, user_id=user.id, conv_id=conv.id, target_msg_id=target.id
-    )
-    mask_image_id = (
-        await _mask_image_id_from_target(
-            db,
-            user_id=user.id,
-            conv_id=conv.id,
-            target_msg_id=target.id,
-        )
-        if intent == Intent.IMAGE_TO_IMAGE
-        else None
-    )
-    default_image_output_format = (
-        await _default_image_output_format(db)
-        if intent in (Intent.TEXT_TO_IMAGE, Intent.IMAGE_TO_IMAGE)
-        else _DEFAULT_IMAGE_OUTPUT_FORMAT
-    )
-    chat_params = _chat_params_from_user_content(user_content)
-    system_prompt = await _regenerate_system_prompt(
-        db,
-        user=user,
-        conv=conv,
-        target=target,
-        intent=intent,
-        chat_params=chat_params,
-    )
-
-    result = await _create_assistant_task(
-        db=db,
-        user_id=user.id,
-        account_mode=snapshot.account_mode,
-        conv=conv,
-        user_msg=user_msg,
-        intent=intent,
-        idempotency_key=body.idempotency_key,
-        image_params=image_params,
-        chat_params=chat_params,
-        system_prompt=system_prompt,
-        attachment_ids=attachment_ids,
-        text=text,
-        default_image_output_format=default_image_output_format,
-        mask_image_id=mask_image_id,
-        request_metadata=_idempotency_request_metadata(
-            None,
-            operation_namespace=_MESSAGE_REGENERATE_IDEMPOTENCY_OPERATION,
+        ).scalar_one_or_none()
+        if conv is None:
+            raise _http("not_found", "conversation not found", 404)
+        prior = await _lookup_idempotent_regenerate(
+            db, user_id, conv_id, body.idempotency_key,
             request_fingerprint=request_fingerprint,
-        ),
-    )
-
-    conv.last_activity_at = now
-    try:
+        )
+        if prior is not None:
+            return prior
+        # Revalidate message visibility after waiting for the business locks.
+        conv, target, user_msg = await _regenerate_messages(
+            db, user_id=user_id, conv_id=conv_id, message_id=message_id,
+        )
+        user_content = user_msg.content if isinstance(user_msg.content, dict) else {}
+        image_intent = intent in (Intent.TEXT_TO_IMAGE, Intent.IMAGE_TO_IMAGE)
+        source_rows = (
+            await _ordered_target_generations(
+                db, user_id=user_id, conv_id=conv_id, target_msg_id=message_id,
+            ) if image_intent else []
+        )
+        # Same-intent reruns replay the actual image operation. Intent changes
+        # continue to use the parent user's input, as the original route did.
+        replay_source = (
+            source_rows[0] if source_rows and target.intent == intent.value else None
+        )
+        operation_content = (
+            {"text": replay_source.prompt, "attachments": [
+                {"image_id": image_id} for image_id in replay_source.input_image_ids
+            ]} if replay_source is not None else user_content
+        )
+        attachment_ids = await _validated_attachment_ids(
+            db, user_id=user_id, user_content=operation_content, intent=intent,
+        )
+        text = operation_content.get("text") or ""
+        image_params = (
+            await _image_params_from_target(
+                db, user_id=user_id, conv_id=conv_id, target_msg_id=message_id,
+            ) if image_intent else ImageParamsIn()
+        )
+        mask_image_id = (
+            await _mask_image_id_from_target(
+                db, user_id=user_id, conv_id=conv_id, target_msg_id=message_id,
+            ) if intent == Intent.IMAGE_TO_IMAGE and replay_source is not None else None
+        )
+        default_image_output_format = (
+            await _default_image_output_format(db)
+            if image_intent else _DEFAULT_IMAGE_OUTPUT_FORMAT
+        )
+        chat_params = _chat_params_from_user_content(user_content)
+        system_prompt = await _regenerate_system_prompt(
+            db, user=user, conv=conv, target=target, intent=intent,
+            chat_params=chat_params,
+        )
+        now = datetime.now(timezone.utc)
+        cleanup = await _cancel_regenerate_target_active_tasks(
+            db, target_msg_id=message_id, user_id=user_id, canceled_at=now,
+            account_mode=snapshot.account_mode, queue_redis=redis,
+        )
+        target.status = MessageStatus.CANCELED.value
+        result = await _create_assistant_task(
+            db=db, user_id=user_id, account_mode=snapshot.account_mode,
+            conv=conv, user_msg=user_msg, intent=intent,
+            idempotency_key=body.idempotency_key, image_params=image_params,
+            chat_params=chat_params, system_prompt=system_prompt,
+            attachment_ids=attachment_ids, text=text,
+            default_image_output_format=default_image_output_format,
+            mask_image_id=mask_image_id,
+            request_metadata=_idempotency_request_metadata(
+                None,
+                operation_namespace=_MESSAGE_REGENERATE_IDEMPOTENCY_OPERATION,
+                request_fingerprint=request_fingerprint,
+            ),
+        )
+        conv.last_activity_at = now
         await db.commit()
+    except ActiveUserFenceError as exc:
+        await db.rollback()
+        raise active_user_fence_http_error(exc) from exc
     except IntegrityError:
-        # Why: concurrent regenerate with same idempotency_key won the race;
-        # rely on the unique constraint and return prior result.
         await db.rollback()
         prior = await _lookup_idempotent_regenerate(
-            db,
-            user.id,
-            conv.id,
-            body.idempotency_key,
+            db, user_id, conv_id, body.idempotency_key,
             request_fingerprint=request_fingerprint,
         )
         if prior is not None:
             return prior
         raise _http("idempotency_conflict", "idempotency_key conflict", 409)
+    except Exception:
+        await db.rollback()
+        raise
+
     await db.refresh(result.assistant_msg)
-    await _post_commit_regenerate_cancel_cleanup(
-        redis,
-        user_id=user.id,
-        cleanup=cleanup,
-    )
-
+    await _post_commit_regenerate_cancel_cleanup(redis, user_id=user_id, cleanup=cleanup)
     await _await_post_commit_publishes(
-        (
-            "message_appended",
-            _publish_message_appended(
-                redis=redis,
-                user_id=user.id,
-                conv_id=conv_id,
-                message_ids=[result.assistant_msg.id],
-            ),
-            None,
-        ),
-        (
-            "assistant_task",
-            _publish_assistant_task(
-                db=db,
-                redis=redis,
-                user_id=user.id,
-                conv_id=conv_id,
-                assistant_msg_id=result.assistant_msg.id,
-                outbox_payloads=result.outbox_payloads,
-                outbox_rows=result.outbox_rows,
-            ),
-            result.assistant_msg.id,
-        ),
-        user_id=user.id,
-        conv_id=conv_id,
+        ("message_appended", _publish_message_appended(
+            redis=redis, user_id=user_id, conv_id=conv_id,
+            message_ids=[result.assistant_msg.id],
+        ), None),
+        ("assistant_task", _publish_assistant_task(
+            db=db, redis=redis, user_id=user_id, conv_id=conv_id,
+            assistant_msg_id=result.assistant_msg.id,
+            outbox_payloads=result.outbox_payloads, outbox_rows=result.outbox_rows,
+        ), result.assistant_msg.id),
+        user_id=user_id, conv_id=conv_id,
     )
-
     return RegenerateOut(
         assistant_message_id=result.assistant_msg.id,
-        completion_id=result.completion_id,
-        generation_ids=result.generation_ids,
+        completion_id=result.completion_id, generation_ids=result.generation_ids,
     )
 
 

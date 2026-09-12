@@ -8,9 +8,11 @@ import hmac
 import ipaddress
 import json
 import secrets
+import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
+from contextlib import asynccontextmanager
 from typing import Any, Literal
 
 import httpx
@@ -229,15 +231,15 @@ class AgentRuntimeRequest(_StrictModel):
         max_length=8,
     )
     image_defaults: AgentRuntimeImageDefaults
-    tool_gateway_url: str | None = Field(default=None, max_length=2048)
-    tool_capability: str | None = Field(default=None, max_length=8192, repr=False)
+    tool_gateway_url: str | None = Field(default=None, min_length=8, max_length=2048)
+    tool_capability: str | None = Field(default=None, min_length=32, max_length=8192, repr=False)
     reasoning_effort: (
         Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"] | None
     ) = None
     tool_policy: AgentRuntimeToolPolicy
-    provider_dispatch_url: str | None = Field(default=None, max_length=2048)
+    provider_dispatch_url: str | None = Field(default=None, min_length=8, max_length=2048)
     provider_dispatch_capability: str | None = Field(
-        default=None, max_length=8192, repr=False
+        default=None, min_length=32, max_length=8192, repr=False
     )
     safety_budget: AgentRuntimeSafetyBudget | None = None
     operation: Literal["prompt", "continue"] | None = None
@@ -263,7 +265,10 @@ class AgentRuntimeRequest(_StrictModel):
         if len(set(self.allowed_tools)) != len(self.allowed_tools):
             raise ValueError("allowed_tools must be unique")
         image_enabled = "lumen_create_image" in self.allowed_tools
-        if image_enabled != bool(self.tool_gateway_url and self.tool_capability):
+        if (
+            (self.tool_gateway_url is not None) != (self.tool_capability is not None)
+            or image_enabled != (self.tool_gateway_url is not None)
+        ):
             raise ValueError("image gateway bindings do not match allowed_tools")
         if self.version < 5 and (
             self.workspace_files
@@ -300,10 +305,11 @@ class AgentRuntimeRequest(_StrictModel):
             self.references or self.allowed_tools or self.workspace_files
         ):
             raise ValueError("continuation cannot replay tool input")
-        dispatch_enabled = bool(
-            self.provider_dispatch_url and self.provider_dispatch_capability
-        )
-        if dispatch_enabled != bool(self.safety_budget):
+        dispatch_enabled = self.provider_dispatch_url is not None
+        if (
+            dispatch_enabled != (self.provider_dispatch_capability is not None)
+            or dispatch_enabled != (self.safety_budget is not None)
+        ):
             raise ValueError("provider dispatch bindings require a safety budget")
 
     @model_validator(mode="after")
@@ -569,26 +575,64 @@ async def _next_stream_chunk(
     next_chunk = asyncio.create_task(iterator.__anext__())
     cancel_wait = (
         asyncio.create_task(cancel_requested.wait())
-        if cancel_requested is not None
-        else None
+        if cancel_requested is not None else None
     )
     waiters = {next_chunk, *([cancel_wait] if cancel_wait is not None else [])}
-    done, pending = await asyncio.wait(
-        waiters,
-        timeout=timeout_seconds,
-        return_when=asyncio.FIRST_COMPLETED,
+    try:
+        done, _ = await asyncio.wait(
+            waiters, timeout=timeout_seconds,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if cancel_requested is not None and cancel_requested.is_set():
+            raise AgentRuntimeClientError("agent_cancelled")
+        if not done:
+            raise AgentRuntimeClientError("agent_runtime_event_timeout")
+        return next_chunk.result()
+    finally:
+        # Covers external CancelledError as well as timeout/application cancel.
+        for task in waiters:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*waiters, return_exceptions=True)
+
+
+@asynccontextmanager
+async def _open_runtime_stream(
+    stream_context: Any,
+    *,
+    cancel_requested: asyncio.Event | None,
+    timeout_seconds: float,
+) -> AsyncIterator[httpx.Response]:
+    """Bound response-header acquisition without imposing a whole-run deadline."""
+    if cancel_requested is not None and cancel_requested.is_set():
+        raise AgentRuntimeClientError("agent_cancelled", delivery="proven_absent")
+    opening = asyncio.create_task(stream_context.__aenter__())
+    cancel_wait = (
+        asyncio.create_task(cancel_requested.wait())
+        if cancel_requested is not None else None
     )
-    for task in pending:
-        task.cancel()
-    if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
-    if not done:
-        raise AgentRuntimeClientError("agent_runtime_event_timeout")
-    if cancel_wait is not None and cancel_wait in done:
-        next_chunk.cancel()
-        await asyncio.gather(next_chunk, return_exceptions=True)
-        raise AgentRuntimeClientError("agent_cancelled")
-    return next_chunk.result()
+    waiters = {opening, *([cancel_wait] if cancel_wait is not None else [])}
+    try:
+        done, _ = await asyncio.wait(
+            waiters, timeout=timeout_seconds,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        # Once opening started, cancellation does not prove upstream absence.
+        if cancel_requested is not None and cancel_requested.is_set():
+            raise AgentRuntimeClientError("agent_cancelled")
+        if not done:
+            raise AgentRuntimeClientError("agent_runtime_header_timeout")
+        yield opening.result()
+    finally:
+        exc_info = sys.exc_info()
+        for task in waiters:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*waiters, return_exceptions=True)
+        # The open can win concurrently with cancellation. Close that response
+        # even when it was never yielded to the caller.
+        if not opening.cancelled() and opening.exception() is None:
+            await stream_context.__aexit__(*exc_info)
 
 
 def canonical_runtime_request(
@@ -703,6 +747,8 @@ class AgentRuntimeClient:
     event_idle_timeout_seconds: float = 45.0
     max_request_bytes: int = 16 * 1024 * 1024
     max_line_bytes: int = 64 * 1024
+    header_timeout_seconds: float = 15.0
+    health_timeout_seconds: float = 5.0
     _client: httpx.AsyncClient | None = field(default=None, init=False, repr=False)
 
     @property
@@ -737,11 +783,18 @@ class AgentRuntimeClient:
                 delivery="proven_absent",
             )
         try:
-            response = await self._http().get("/readyz")
+            async with asyncio.timeout(self.health_timeout_seconds):
+                response = await self._http().get(
+                    "/readyz", timeout=httpx.Timeout(self.health_timeout_seconds)
+                )
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             raise AgentRuntimeClientError(
                 "agent_runtime_unavailable",
                 delivery="proven_absent",
+            ) from exc
+        except (TimeoutError, httpx.TimeoutException) as exc:
+            raise AgentRuntimeClientError(
+                "agent_runtime_health_timeout", delivery="proven_absent"
             ) from exc
         if response.status_code != 200:
             raise AgentRuntimeClientError(
@@ -812,7 +865,11 @@ class AgentRuntimeClient:
                     "x-lumen-agent-signature": signature,
                 },
             )
-            async with stream_context as response:
+            async with _open_runtime_stream(
+                stream_context,
+                cancel_requested=cancel_requested,
+                timeout_seconds=self.header_timeout_seconds,
+            ) as response:
                 if response.status_code != 200:
                     raise AgentRuntimeClientError(
                         "agent_runtime_rejected",

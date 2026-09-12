@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 
 from app.routes import regenerate
 from app.routes.messages import AssistantTaskResult
@@ -115,6 +116,7 @@ def _target() -> SimpleNamespace:
         id="assistant-old",
         conversation_id="conv-1",
         role="assistant",
+        intent="chat",
         parent_message_id="user-msg",
         status="streaming",
     )
@@ -277,7 +279,7 @@ async def test_image_params_from_target_preserves_explicit_format() -> None:
 
 
 @pytest.mark.asyncio
-async def test_image_params_from_target_falls_back_for_invalid_stored_aspect() -> None:
+async def test_image_params_from_target_rejects_invalid_snapshot_without_resetting() -> None:
     gen = Generation(
         id="gen-old",
         message_id="assistant-old",
@@ -293,14 +295,20 @@ async def test_image_params_from_target_falls_back_for_invalid_stored_aspect() -
     )
     db = _Db([_Result(all_values=[gen])])
 
-    out = await regenerate._image_params_from_target(
-        db,  # type: ignore[arg-type]
-        user_id="user-1",
-        conv_id="conv-1",
-        target_msg_id="assistant-old",
-    )
+    # A corrupt field must not silently reset the valid resolution and quality.
+    with pytest.raises(HTTPException) as excinfo:
+        await regenerate._image_params_from_target(
+            db,  # type: ignore[arg-type]
+            user_id="user-1",
+            conv_id="conv-1",
+            target_msg_id="assistant-old",
+        )
 
-    assert out == regenerate.ImageParamsIn()
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.detail["error"]["code"] == "invalid_regenerate_snapshot"
+    assert gen.size_requested == "2048x2048"
+    assert gen.upstream_request == {"render_quality": "medium"}
+    assert db.committed is False
 
 
 @pytest.mark.asyncio
@@ -354,6 +362,13 @@ async def test_regenerate_rejects_image_to_image_without_reference(
             _Result(_parent_user({"text": "edit this", "attachments": []})),
             _Result(None),
             _Result(None),
+            # Locked idempotency recheck, then fresh visible input rows.
+            _Result(None),
+            _Result(None),
+            _Result(_conv()),
+            _Result(_target()),
+            _Result(_parent_user({"text": "edit this", "attachments": []})),
+            _Result(all_values=[]),
         ]
     )
 
@@ -410,17 +425,23 @@ async def test_regenerate_publishes_appended_event_for_new_assistant(
     )
 
     target = _target()
+    parent = _parent_user({"text": "hello", "attachments": []})
     db = _Db(
         [
             _Result(_conv()),
             _Result(target),
-            _Result(_parent_user({"text": "hello", "attachments": []})),
+            _Result(parent),
             _Result(None),
             _Result(None),
             _Result(None),
+            _Result(None),
+            # Revalidation follows the second idempotency lookup.
+            _Result(_conv()),
+            _Result(target),
+            _Result(parent),
             _Result(None),
             _Result(all_values=[]),
-            _Result(None),
+            _Result(all_values=[]),
         ]
     )
 
@@ -554,8 +575,14 @@ async def test_regenerate_uses_current_image_output_format_setting(
             _Result(None),
             _Result(None),
             _Result(None),
+            _Result(_conv()),
+            _Result(target),
+            _Result(_parent_user({"text": "make image", "attachments": []})),
+            # The operation source and image settings use the same ordered rows.
             _Result(all_values=[gen]),
-            _Result(None),
+            _Result(all_values=[gen]),
+            _Result(all_values=[]),
+            _Result(all_values=[]),
         ]
     )
 

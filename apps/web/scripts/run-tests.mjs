@@ -98,7 +98,9 @@ function run(args = process.argv.slice(2)) {
     return;
   }
 
-  const result = spawnSync(process.execPath, ["--test", ...testFiles], {
+  // Keep failure details at the end of bounded CI/remote logs, not only
+  // interleaved with passing TAP entries. Discovery and exit status are unchanged.
+  const result = spawnSync(process.execPath, ["--test", "--test-reporter=spec", ...testFiles], {
     cwd: DEFAULT_WEB_ROOT,
     stdio: "inherit",
   });

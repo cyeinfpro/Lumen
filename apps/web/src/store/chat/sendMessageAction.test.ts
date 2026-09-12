@@ -650,6 +650,219 @@ test("abortAllSendRequests leaves an already-submitted send in flight", async ()
   assert.equal(harness.get().composerError, null);
 });
 
+test("delayed semantic preparation preserves a newer draft in the same conversation", async () => {
+  await semanticPostIdempotency.clear();
+  const entered = deferred<void>();
+  const release = deferred<void>();
+  const store = semanticPostIdempotency as { acquire: typeof semanticPostIdempotency.acquire };
+  const original = store.acquire;
+  const harness = createHarness();
+  let submittedText: unknown;
+  stubHost.__conversationsStub = {
+    postMessage: async (_convId, body) => {
+      submittedText = (body as { text: string }).text;
+      return { user_message: backendUserMessage(), assistant_message: backendAssistantMessage(),
+        completion_id: "draft-comp" };
+    },
+  };
+  store.acquire = async (scope: unknown, payload: unknown) => {
+    entered.resolve();
+    await release.promise;
+    return original.call(semanticPostIdempotency, scope, payload);
+  };
+  try {
+    const pending = harness.sendMessage({ intentOverride: "chat" });
+    await entered.promise;
+    const newerDraft = { ...harness.get().composer, text: "第二条尚未发送的草稿" };
+    harness.set({ composer: newerDraft });
+    release.resolve();
+    await pending;
+    assert.equal(submittedText, "画一只猫");
+    assert.strictEqual(harness.get().composer, newerDraft);
+    assert.equal(harness.get().messages.length, 2);
+  } finally {
+    release.resolve();
+    store.acquire = original;
+    await semanticPostIdempotency.clear();
+  }
+});
+
+test("independent inpaint snapshot submits its mask without consuming the global draft", async () => {
+  await semanticPostIdempotency.clear();
+  const harness = createHarness();
+  const originalDraft = harness.get().composer;
+  let submitted: Record<string, unknown> = {};
+  stubHost.__conversationsStub = {
+    postMessage: async (_convId, body) => {
+      submitted = body as Record<string, unknown>;
+      assert.strictEqual(harness.get().composer, originalDraft);
+      return { user_message: backendUserMessage(), assistant_message: backendAssistantMessage(),
+        generation_ids: ["inpaint-gen"] };
+    },
+  };
+  await harness.sendMessage({
+    composerSnapshot: {
+      ...createComposerState(null), text: "只修改涂抹区域", mode: "image", forceIntent: "image",
+      attachments: [{ id: "reference", kind: "generated", source_image_id: "source-image",
+        data_url: "http://image.test/source.png", mime: "image/png" }],
+      mask: { image_id: "mask-one", target_attachment_id: "reference", preview_data_url: "preview" },
+    },
+    throwOnError: true,
+  });
+  assert.equal(submitted.text, "只修改涂抹区域");
+  assert.equal(submitted.mask_image_id, "mask-one");
+  assert.deepEqual(submitted.attachment_image_ids, ["source-image"]);
+  assert.strictEqual(harness.get().composer, originalDraft);
+  assert.ok(harness.get().generations["inpaint-gen"]);
+  await semanticPostIdempotency.clear();
+});
+
+test("independent send failure rejects without replacing the user's draft", async () => {
+  await semanticPostIdempotency.clear();
+  const harness = createHarness();
+  const originalDraft = harness.get().composer;
+  stubHost.__conversationsStub = {
+    postMessage: async () => { throw new TypeError("controlled response loss"); },
+  };
+  await assert.rejects(harness.sendMessage({
+    composerSnapshot: { ...createComposerState(null), text: "独立操作" },
+    intentOverride: "chat", throwOnError: true,
+  }), /controlled response loss/);
+  assert.strictEqual(harness.get().composer, originalDraft);
+  assert.deepEqual(harness.get().messages, []);
+  await semanticPostIdempotency.clear();
+});
+
+test("auto-create delay sends the captured text and preserves later input", async () => {
+  await semanticPostIdempotency.clear();
+  const created = deferred<{ id: string }>();
+  const harness = createHarness({ currentConvId: null });
+  let submittedText: unknown;
+  stubHost.__conversationsStub = {
+    createConversation: async () => created.promise,
+    postMessage: async (_convId, body) => {
+      submittedText = (body as { text: string }).text;
+      return {
+        user_message: backendUserMessage(),
+        assistant_message: backendAssistantMessage(),
+        completion_id: "create-draft-comp",
+      };
+    },
+  };
+  const pending = harness.sendMessage({ intentOverride: "chat" });
+  const newerDraft = { ...harness.get().composer, text: "建会话时写下的下一条" };
+  harness.set({ composer: newerDraft });
+  created.resolve({ id: "conv-new" });
+  await pending;
+  assert.equal(submittedText, "画一只猫");
+  assert.strictEqual(harness.get().composer, newerDraft);
+  await semanticPostIdempotency.clear();
+});
+
+test("markSubmitted delay cannot consume a newer draft", async () => {
+  await semanticPostIdempotency.clear();
+  const entered = deferred<void>();
+  const release = deferred<void>();
+  const journal = semanticPostIdempotency as {
+    markSubmitted: typeof semanticPostIdempotency.markSubmitted;
+  };
+  const original = journal.markSubmitted;
+  const harness = createHarness();
+  let submittedText: unknown;
+  journal.markSubmitted = async (lease: unknown) => {
+    await original.call(semanticPostIdempotency, lease);
+    entered.resolve();
+    await release.promise;
+  };
+  stubHost.__conversationsStub = {
+    postMessage: async (_convId, body) => {
+      submittedText = (body as { text: string }).text;
+      return {
+        user_message: backendUserMessage(),
+        assistant_message: backendAssistantMessage(),
+        completion_id: "marked-draft-comp",
+      };
+    },
+  };
+  try {
+    const pending = harness.sendMessage({ intentOverride: "chat" });
+    await entered.promise;
+    const newerDraft = { ...harness.get().composer, text: "登记幂等状态时的新草稿" };
+    harness.set({ composer: newerDraft });
+    release.resolve();
+    await pending;
+    assert.equal(submittedText, "画一只猫");
+    assert.strictEqual(harness.get().composer, newerDraft);
+  } finally {
+    release.resolve();
+    journal.markSubmitted = original;
+    await semanticPostIdempotency.clear();
+  }
+});
+
+test("returning from semantic preparation rechecks the conversation before POST", async () => {
+  await semanticPostIdempotency.clear();
+  const journal = semanticPostIdempotency as {
+    markSubmitted: typeof semanticPostIdempotency.markSubmitted;
+  };
+  const original = journal.markSubmitted;
+  const harness = createHarness();
+  const newerDraft = { ...harness.get().composer, text: "新会话草稿" };
+  let posts = 0;
+  journal.markSubmitted = async (lease: unknown) => {
+    await original.call(semanticPostIdempotency, lease);
+    // Switch after the phase's own continuation, but before its caller can
+    // commit optimistic rows. No sleeps or timing-sensitive network mocks.
+    queueMicrotask(() => queueMicrotask(() => {
+      runtime._conversationMutationFence.advance();
+      harness.set({ currentConvId: "conv-2", composer: newerDraft, messages: [] });
+    }));
+  };
+  stubHost.__conversationsStub = {
+    postMessage: async () => {
+      posts += 1;
+      throw new Error("stale request reached POST");
+    },
+  };
+  try {
+    await harness.sendMessage({ intentOverride: "chat" });
+    assert.equal(posts, 0);
+    assert.strictEqual(harness.get().composer, newerDraft);
+    assert.deepEqual(harness.get().messages, []);
+    assert.deepEqual(harness.get().generations, {});
+  } finally {
+    journal.markSubmitted = original;
+    await semanticPostIdempotency.clear();
+  }
+});
+
+test("failed POST does not restore a draft deliberately cleared by the user", async () => {
+  await semanticPostIdempotency.clear();
+  const started = deferred<void>();
+  const release = deferred<void>();
+  const harness = createHarness();
+  stubHost.__conversationsStub = {
+    postMessage: async () => {
+      started.resolve();
+      await release.promise;
+      throw new TypeError("controlled post failure");
+    },
+  };
+  const pending = harness.sendMessage({ intentOverride: "chat" });
+  await started.promise;
+  const clearedByUser = { ...harness.get().composer, text: "" };
+  harness.set({ composer: clearedByUser });
+  release.resolve();
+  await pending;
+  assert.strictEqual(harness.get().composer, clearedByUser);
+  assert.deepEqual(harness.get().messages, []);
+  assert.equal(
+    harness.get().composerError,
+    `发送失败：${runtime.errorCodeToMessage("client_exception")}`,
+  );
+  await semanticPostIdempotency.clear();
+});
+
 test("abortAllSendRequests aborts a send that has not reached the backend", async () => {
   runtime.clearUserScopedRuntime();
   const harness = createHarness();

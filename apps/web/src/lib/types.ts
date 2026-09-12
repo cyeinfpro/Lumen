@@ -219,6 +219,7 @@ export interface Generation {
   aspect_ratio: AspectRatio;
   input_image_ids: string[];
   primary_input_image_id: string | null;
+  mask_image_id?: string | null;
   status: GenerationStatus;
   stage: GenerationStage;
   // SSE 与任务快照均可填入；不识别时降级到粗 stage。

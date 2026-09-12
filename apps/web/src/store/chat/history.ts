@@ -346,6 +346,20 @@ function appendGenerationId(
   }
 }
 
+function generationReferenceSnapshot(
+  generation: BackendGeneration,
+  existing: Generation | undefined,
+): Pick<Generation, "input_image_ids" | "primary_input_image_id" | "mask_image_id"> {
+  return {
+    input_image_ids: stringArray(generation.input_image_ids),
+    primary_input_image_id: stringOrNull(generation.primary_input_image_id),
+    // Missing means an older response omitted the field; null explicitly
+    // confirms that this operation has no mask. Never collapse the two states.
+    mask_image_id: generation.mask_image_id === undefined
+      ? existing?.mask_image_id : generation.mask_image_id,
+  };
+}
+
 function buildGenerationSnapshot(
   generation: BackendGeneration,
   existing: Generation | undefined,
@@ -369,8 +383,7 @@ function buildGenerationSnapshot(
       generation.aspect_ratio,
       existing?.aspect_ratio ?? DEFAULT_PARAMS.aspect_ratio,
     ),
-    input_image_ids: stringArray(generation.input_image_ids),
-    primary_input_image_id: stringOrNull(generation.primary_input_image_id),
+    ...generationReferenceSnapshot(generation, existing),
     status: coerceGenerationStatus(
       generation.status,
       existing?.status ?? "succeeded",

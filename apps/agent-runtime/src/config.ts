@@ -44,8 +44,8 @@ function integerEnv(
 
 function sharedSecret(): string {
   const value = process.env.AGENT_RUNTIME_SHARED_SECRET?.trim() ?? "";
-  if (Buffer.byteLength(value, "utf8") < MIN_SHARED_SECRET_BYTES) {
-    return "";
+  if (value !== "" && Buffer.byteLength(value, "utf8") < MIN_SHARED_SECRET_BYTES) {
+    throw new Error("AGENT_RUNTIME_SHARED_SECRET must contain at least 32 UTF-8 bytes");
   }
   return value;
 }
@@ -248,7 +248,7 @@ export function loadConfig(): RuntimeConfig {
       "AGENT_RUNTIME_SHUTDOWN_GRACE_SECONDS",
       20,
       1,
-      25,
+      20,
     ),
   }, { allowDisabledSecret: true });
 }

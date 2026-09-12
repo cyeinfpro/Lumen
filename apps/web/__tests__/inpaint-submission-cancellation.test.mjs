@@ -118,21 +118,17 @@ function createPostAbortHarness() {
     const patch = typeof update === "function" ? update(state) : update;
     if (patch && patch !== state) Object.assign(state, patch);
   };
-  state.sendMessage = async () => {
+  state.sendMessage = async (options) => {
+    // Independent requests must carry their own input; they own no global
+    // composer to clear. Native sendMessageAction tests cover that boundary.
+    assert.equal(options.throwOnError, true);
+    assert.equal(options.restoreComposerOnFailure, false);
+    assert.notStrictEqual(options.composerSnapshot, state.composer);
+    assert.equal(options.composerSnapshot.text, "replace the selected area");
+    assert.equal(options.composerSnapshot.mask.image_id, "uploaded-mask");
+    assert.equal(options.composerSnapshot.attachments[0].source_image_id, "image-1");
+    assert.deepEqual(state.composer, backupComposer);
     await Promise.resolve();
-    set((current) => ({
-      composer: {
-        ...composerState(""),
-        mode: current.composer.mode,
-        params: current.composer.params,
-        reasoningEffort: current.composer.reasoningEffort,
-        fast: current.composer.fast,
-        webSearch: current.composer.webSearch,
-        fileSearch: current.composer.fileSearch,
-        codeInterpreter: current.composer.codeInterpreter,
-        imageGeneration: current.composer.imageGeneration,
-      },
-    }));
     postStarted.resolve();
     await abortSettled.promise;
   };
@@ -503,13 +499,13 @@ test("identity switch during inpaint POST cannot drain old completion UI", async
   assert.equal(submittingRef.current, false);
 });
 
-test("inpaint abort after POST start restores the operation backup across conversation switch", async () => {
+test("independent inpaint preserves the draft before and after POST cancellation", async () => {
   const harness = createPostAbortHarness();
 
   const pendingSubmission =
     harness.actions.submitInpaintTask(inpaintPayload());
   await harness.postStarted.promise;
-  assert.equal(harness.state.composer.text, "");
+  assert.deepEqual(harness.state.composer, harness.backupComposer);
 
   harness.switchConversationAndAbort();
   const result = await pendingSubmission;

@@ -35,6 +35,7 @@ export interface BackendGeneration {
   aspect_ratio: string;
   input_image_ids: string[];
   primary_input_image_id: string | null;
+  mask_image_id?: string | null;
   status: GenerationTaskStatus;
   progress_stage: string;
   stage?: string | null;

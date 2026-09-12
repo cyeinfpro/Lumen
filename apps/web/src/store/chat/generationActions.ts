@@ -29,9 +29,6 @@ import {
   didPromptNeedTrimming,
   inpaintAspectRatio,
   inpaintValidationError,
-  isResetComposerDraft,
-  isRetryComposerDraft,
-  isTemporaryInpaintComposerDraft,
 } from "./composerSlice";
 import {
   aggregateGenerationStatus,
@@ -39,6 +36,8 @@ import {
   generationIdsOfMessage,
 } from "@/features/generation";
 import { DEFAULT_PARAMS } from "./imageParams";
+import { resolveRerollMask } from "./rerollMask";
+import { mergeSubmissionMessages, mergeSubmissionGenerations } from "./submissionReconciliation";
 import type {
   ChatState,
   ChatStateGetter,
@@ -179,6 +178,12 @@ async function createSemanticSilentGeneration(
     payload,
   );
   if (!(await prepareSemanticSubmission(idempotency, isCurrent))) return null;
+  // The helper's return is another await boundary. Fence again immediately
+  // before handing a possibly billable operation to the transport.
+  if (!isCurrent()) {
+    await semanticPostIdempotency.discard(idempotency);
+    return null;
+  }
   markGenerationRequestSubmitted(request);
   try {
     const output = await createSilentGeneration(request.convId, {
@@ -304,9 +309,57 @@ async function _runUpscale(
   // 短暂显示放大前的旧快照。
   invalidateConversationHistoryCache(convId);
   set((s) => ({
-    messages: [...s.messages, realAssistant],
-    generations: { ...s.generations, ...optimisticGens },
+    messages: mergeSubmissionMessages(s.messages, [realAssistant]),
+    generations: mergeSubmissionGenerations(s.generations, optimisticGens),
   }));
+}
+
+function buildRegenerationPlaceholders(
+  get: ChatStateGetter,
+  convId: string,
+  generationIds: string[],
+  source: Omit<Parameters<typeof buildPendingRegenerationGeneration>[0], "newGenerationId">,
+): Record<string, Generation> {
+  const placeholders: Record<string, Generation> = {};
+  for (const generationId of generationIds) {
+    const pending = buildPendingRegenerationGeneration({
+      ...source,
+      newGenerationId: generationId,
+    });
+    if (!pending) continue;
+    placeholders[generationId] = pending;
+    setBounded(_generationConvIds, generationId, convId);
+    // A late acknowledgement must not replace an already materialized task.
+    if (!get().generations[generationId]) {
+      rememberGenerationForConversation(convId, pending);
+    }
+  }
+  return placeholders;
+}
+
+function buildRerollPayload(
+  generation: Generation,
+  parentMessageId: string,
+  maskImageId: string | null,
+): SilentGenerationPayload {
+  const fixedSize = generation.size_requested.includes("x");
+  return {
+    parent_message_id: parentMessageId,
+    intent: rerollIntent(generation),
+    prompt: clampPromptForRequest(generation.prompt),
+    attachment_image_ids: generation.input_image_ids,
+    ...(maskImageId ? { mask_image_id: maskImageId } : {}),
+    image_params: {
+      aspect_ratio: generation.aspect_ratio,
+      size_mode: fixedSize ? "fixed" : "auto",
+      fixed_size: fixedSize ? generation.size_requested : undefined,
+      quality: qualityFromFixedSize(generation.size_requested, generation.aspect_ratio),
+      count: 1,
+      ...imageParamsForReroll(generation),
+      background: "auto",
+      moderation: "low",
+    },
+  };
 }
 
 export function createGenerationActions(
@@ -359,45 +412,23 @@ export function createGenerationActions(
         // BUG-018: 若用户消息文本为空（仅附件），使用原始消息内容作为 retry 文本。
         const retryText = userMsg.text.trim() || "(继续)";
 
-        // 把 composer 临时覆盖为该消息的快照，再 sendMessage。
-        // 用 try/finally 确保 sendMessage 抛错时 composer 也能被清理（sendMessage 成功路径会 clearComposer，
-        // 失败路径只留错误提示而 composer 仍是临时快照——这里兜底清掉，避免下次发送沿用 retry 草稿）。
-        const composerSnapshot = cloneComposerState(get().composer);
-        const retryAttachmentIds = userMsg.attachments.map(
-          (attachment) => attachment.id,
-        );
-        set((s) => ({
-          composer: {
-            ...s.composer,
+        const current = cloneComposerState(get().composer);
+        await get().sendMessage({
+          intentOverride: asst.intent_resolved,
+          restoreComposerOnFailure: false,
+          composerSnapshot: {
+            ...current,
             text: retryText,
-            attachments: userMsg.attachments,
-            params: userMsg.image_params,
-            webSearch: userMsg.web_search ?? s.composer.webSearch,
-            fileSearch: userMsg.file_search ?? s.composer.fileSearch,
-            codeInterpreter:
-              userMsg.code_interpreter ?? s.composer.codeInterpreter,
-            imageGeneration:
-              userMsg.image_generation ?? s.composer.imageGeneration,
+            attachments: structuredClone(userMsg.attachments),
+            params: { ...userMsg.image_params },
+            mask: null,
+            forceIntent: undefined,
+            webSearch: userMsg.web_search ?? current.webSearch,
+            fileSearch: userMsg.file_search ?? current.fileSearch,
+            codeInterpreter: userMsg.code_interpreter ?? current.codeInterpreter,
+            imageGeneration: userMsg.image_generation ?? current.imageGeneration,
           },
-        }));
-        const retryComposer = cloneComposerState(get().composer);
-        try {
-          await get().sendMessage({
-            intentOverride: asst.intent_resolved,
-            restoreComposerOnFailure: false,
-          });
-        } finally {
-          const cur = get().composer;
-          const isRetryDraft = isRetryComposerDraft(
-            cur,
-            retryText,
-            retryAttachmentIds,
-            retryComposer,
-          );
-          if (isResetComposerDraft(cur, retryComposer) || isRetryDraft) {
-            set({ composer: composerSnapshot });
-          }
-        }
+        });
       } finally {
         _retryInFlightAssistants.delete(assistantMsgId);
       }
@@ -406,6 +437,10 @@ export function createGenerationActions(
     async retryGeneration(generationId) {
       if (_retryInFlightGenerations.has(generationId)) return;
       _retryInFlightGenerations.add(generationId);
+      const before = get().generations[generationId];
+      const owner = get().currentUserId;
+      const convId = get().currentConvId;
+      const fence = _conversationMutationFence.snapshot();
       try {
         await retryTask("generations", generationId);
       } finally {
@@ -424,7 +459,8 @@ export function createGenerationActions(
 
       set((s) => {
         const gen = s.generations[generationId];
-        if (!gen) return s;
+        if (!gen || gen !== before || !convId || s.currentUserId !== owner ||
+          !isConversationMutationCurrent(s.currentConvId, convId, fence)) return s;
 
         const nextGen: Generation = {
           ...gen,
@@ -532,6 +568,11 @@ export function createGenerationActions(
         ) {
           return;
         }
+        // Scope can change between the helper resolving and this continuation.
+        if (!generationRequestIsCurrent(get, activeRequest)) {
+          await semanticPostIdempotency.discard(idempotency);
+          return;
+        }
         // 1) 乐观从 messages 中移除旧 assistant；保存快照用于回滚。
         // 同时失效会话历史缓存：否则切走切回会短暂恢复出已被移除的旧助手消息
         // （旧 generation 也已本地标 canceled，缓存快照仍是旧状态）。
@@ -558,7 +599,8 @@ export function createGenerationActions(
           }
 
           const isImage = isImageIntent(newIntent);
-          const newGenId = isImage ? out.generation_ids?.[0] : undefined;
+          const newGenIds = isImage ? [...new Set(out.generation_ids)] : [];
+          const newGenId = newGenIds[0];
           const completionId = !isImage
             ? (out.completion_id ?? undefined)
             : undefined;
@@ -572,49 +614,29 @@ export function createGenerationActions(
             intent_resolved: newIntent,
             status: "pending",
             generation_id: newGenId,
+            generation_ids: newGenIds.length ? newGenIds : undefined,
             completion_id: completionId,
             created_at: now,
           };
           setBounded(_messageConvIds, out.assistant_message_id, convId);
           rememberCompletionMessage(completionId, out.assistant_message_id);
 
-          // 同时为 image intent 占位一个 queued generation，让当前会话画布立刻显示骨架。
-          const pendingGen = buildPendingRegenerationGeneration({
+          const pendingGens = buildRegenerationPlaceholders(get, convId, newGenIds, {
             state,
             assistantMessageId: out.assistant_message_id,
             parentUserId,
             newIntent,
-            newGenerationId: newGenId,
             oldGeneration: oldGen,
           });
-          if (pendingGen) rememberGenerationForConversation(convId, pendingGen);
 
           // await 期间 loadHistoricalMessages 可能已重写缓存，插入 pending 后再失效一次。
           invalidateConversationHistoryCache(convId);
-          set((s) => {
-            // 把 pending assistant 插回原位置（按 created_at 顺序时它就该在那）
-            const nextMessages = [
-              ...s.messages.slice(0, asstIdx),
-              pendingAsst,
-              ...s.messages.slice(asstIdx),
-            ];
-            let nextGens = s.generations;
-            // 旧 generation 标 canceled（保留以便用户看到历史轨迹由 SSE 决定，但本地立即标记）
-            if (oldGenId && nextGens[oldGenId]) {
-              nextGens = {
-                ...nextGens,
-                [oldGenId]: {
-                  ...nextGens[oldGenId],
-                  status: "canceled",
-                  finished_at: now,
-                },
-              };
-            }
-            if (pendingGen) {
-              nextGens = { ...nextGens, [pendingGen.id]: pendingGen };
-            }
-            return { messages: nextMessages, generations: nextGens };
-          });
+          set((s) => ({
+            messages: mergeSubmissionMessages(s.messages, [pendingAsst]),
+            generations: mergeSubmissionGenerations(s.generations, pendingGens),
+          }));
+          // Old tasks remain governed by backend cancellation/settlement events.
+          // In particular, successful historical results are never cancelled here.
         } catch (err) {
           await semanticPostIdempotency.recordFailure(idempotency, err);
           if (!generationRequestIsCurrent(get, activeRequest)) {
@@ -685,32 +707,22 @@ export function createGenerationActions(
         const parentMsgId = generationParentUserMessageId(state, genId);
         if (!parentMsgId) return;
 
-        const hasInput = gen.input_image_ids.length > 0;
-        const intent = rerollIntent(gen);
-        const rerollParams = imageParamsForReroll(gen);
-        const rerollQuality = qualityFromFixedSize(
-          gen.size_requested,
-          gen.aspect_ratio,
-        );
-
-        const payload: SilentGenerationPayload = {
-          parent_message_id: parentMsgId,
-          intent,
-          prompt: clampPromptForRequest(gen.prompt),
-          attachment_image_ids: hasInput ? gen.input_image_ids : [],
-          image_params: {
-            aspect_ratio: gen.aspect_ratio,
-            size_mode: gen.size_requested.includes("x") ? "fixed" : "auto",
-            fixed_size: gen.size_requested.includes("x")
-              ? gen.size_requested
-              : undefined,
-            quality: rerollQuality,
-            count: 1,
-            ...rerollParams,
-            background: "auto",
-            moderation: "low",
-          },
-        };
+        let maskImageId: string | null;
+        try {
+          maskImageId = await resolveRerollMask(gen, () =>
+            apiFetch<{ id: string; mask_image_id?: string | null }>(
+              `/generations/${encodeURIComponent(gen.id)}`,
+              { signal: activeRequest.controller.signal },
+            ),
+          );
+        } catch (error) {
+          if (activeRequest.controller.signal.aborted ||
+              !generationRequestIsCurrent(get, activeRequest)) return;
+          throw error;
+        }
+        if (!generationRequestIsCurrent(get, activeRequest)) return;
+        const payload = buildRerollPayload(gen, parentMsgId, maskImageId);
+        const intent = payload.intent;
         const submission = await createSemanticSilentGeneration(
           activeRequest,
           "reroll",
@@ -737,6 +749,8 @@ export function createGenerationActions(
             aspect_ratio: gen.aspect_ratio,
             input_image_ids: gen.input_image_ids,
             primary_input_image_id: gen.primary_input_image_id,
+            mask_image_id: maskImageId,
+            requested_params: { ...payload.image_params },
             status: "queued",
             stage: "queued",
             attempt: 0,
@@ -747,8 +761,8 @@ export function createGenerationActions(
         // 短暂显示重roll 前的旧快照。
         invalidateConversationHistoryCache(convId);
         set((s) => ({
-          messages: [...s.messages, realAssistant],
-          generations: { ...s.generations, ...optimisticGens },
+          messages: mergeSubmissionMessages(s.messages, [realAssistant]),
+          generations: mergeSubmissionGenerations(s.generations, optimisticGens),
         }));
       } finally {
         releaseRequest();
@@ -759,15 +773,9 @@ export function createGenerationActions(
     // —— 独立的局部修改提交入口 ——
     // 浏览态（Lightbox / 卡片 / 对话气泡）的"局部修改"会调到这里。
     //
-    // 实现：
-    //   1) 把 mask blob 上传到后端拿到 mask_image_id
-    //   2) 备份用户当前 composer 草稿
-    //   3) 临时把 composer 覆盖为：单张 inpaint 参考图 + mask + prompt + image 模式
-    //   4) 复用 sendMessage（它会发出 image_to_image + mask_image_id，并 reset composer 偏好以外的字段）
-    //   5) finally 还原用户原始 text/attachments/mask/forceIntent —— 保留 mode/params/偏好已经被 sendMessage 留住
-    //
-    // 不走 createSilentGeneration：silent endpoint 当前不接受 mask_image_id，且 inpaint 期望在
-    // 对话历史里出现一条用户消息（带 prompt 与所引用的图），UX 上更自然。
+    // 上传 mask 后构造独立请求快照，复用 sendMessage 的幂等提交与身份检查。
+    // 不替换、不清空全局 composer，因此用户已有草稿和继续输入都保留。
+    // 首次局部修改走消息接口以保留用户指令；结果 reroll 走支持 mask 的 silent 接口。
     async submitInpaintTask({
       sourceImageId,
       sourceSrc,
@@ -846,72 +854,33 @@ export function createGenerationActions(
       // 优先用 source 传入的尺寸，缺失（旧入口/历史数据）才退到 composer.params.aspect_ratio。
       const inferredAspect = inpaintAspectRatio(sourceWidth, sourceHeight);
 
-      set((s) => ({
-        composer: {
-          ...s.composer,
-          text,
-          attachments: [tempAtt],
-          mode: "image",
-          forceIntent: "image",
-          mask: {
-            image_id: maskUploaded.id,
-            preview_data_url: maskPreviewDataUrl,
-            target_attachment_id: tempAttId,
-          },
-          // 局部修改强制单张 + 跟随原图比例（fallback：保留 composer 偏好）
-          // size_mode/fixed_size 由 sendMessage 按 quality + aspect_ratio 重算，无需在此覆盖
-          params: {
-            ...s.composer.params,
-            aspect_ratio: inferredAspect ?? s.composer.params.aspect_ratio,
-            count: 1,
-          },
-        },
-      }));
-      const transientComposer = get().composer;
-      const temporaryComposer = cloneComposerState(transientComposer);
-      let resetComposer: typeof transientComposer | null = null;
-
-      const captureTransactionReset = () => {
-        const current = get().composer;
-        if (
-          current !== transientComposer &&
-          current.params === transientComposer.params &&
-          isResetComposerDraft(current, temporaryComposer)
-        ) {
-          resetComposer = current;
-        }
-      };
-
       try {
-        const sendPromise = get().sendMessage({
+        await get().sendMessage({
           restoreComposerOnFailure: false,
-        });
-        // sendMessage 在发起 POST 前会跨过一次 ensureConversation await，
-        // 随后写入 reset composer。同步 mock 与真实异步路径都在这里捕获。
-        captureTransactionReset();
-        await Promise.resolve();
-        captureTransactionReset();
-        await sendPromise;
-      } finally {
-        // sendMessage reset composer 后，把用户原本未发出的草稿字段补回。
-        // 对象令牌限定为本次操作写入的 transient/reset；会话 fence 失效不影响恢复，
-        // 但任何后续输入或其他发送都会换掉 composer 对象，绝不会被覆盖。
-        const cur = get().composer;
-        const ownsTemporaryComposer =
-          cur === transientComposer &&
-          isTemporaryInpaintComposerDraft(
-            cur,
+          throwOnError: true,
+          composerSnapshot: {
+            ...backup,
             text,
-            tempAttId,
-            temporaryComposer,
-          );
-        const ownsResetComposer =
-          resetComposer !== null &&
-          cur === resetComposer &&
-          isResetComposerDraft(cur, temporaryComposer);
-        if (ownsTemporaryComposer || ownsResetComposer) {
-          set({ composer: backup });
+            attachments: [tempAtt],
+            mode: "image",
+            forceIntent: "image",
+            mask: {
+              image_id: maskUploaded.id,
+              preview_data_url: maskPreviewDataUrl,
+              target_attachment_id: tempAttId,
+            },
+            params: {
+              ...backup.params,
+              aspect_ratio: inferredAspect ?? backup.params.aspect_ratio,
+              count: 1,
+            },
+          },
+        });
+      } catch (error) {
+        if (!isConversationMutationCurrent(get().currentConvId, convId, mutationFence)) {
+          return { status: "cancelled" };
         }
+        throw error;
       }
 
       if (
@@ -923,12 +892,7 @@ export function createGenerationActions(
       ) {
         return { status: "cancelled" };
       }
-      // sendMessage 失败时只设 composerError 不抛错（其他调用方依赖这一行为）；
-      // 但 inpaint 路径需要把失败传给 InpaintModal，否则会走成功 toast/清草稿/关弹窗。
-      const sendError = get().composerError;
-      if (sendError) {
-        throw new Error(sendError);
-      }
+      // The independent send path propagates its own error, not another request's shared UI error.
       return { status: "submitted" } satisfies InpaintSubmissionResult;
     },
   };
