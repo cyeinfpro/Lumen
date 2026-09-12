@@ -244,17 +244,18 @@ def test_backup_self_update_missing_journal_fails_before_publish(
 
     result = run_bash(
         f"""
-        set -euo pipefail
+        set -uo pipefail
         . {shlex.quote(str(LIB))}
+        rc=0
         lumen_self_update_scripts \
-            {shlex.quote(str(target))} {COMMIT} 0 backup.sh
-        printf 'result=%s\\n' "$LUMEN_SELF_UPDATE_RESULT"
+            {shlex.quote(str(target))} {COMMIT} 0 backup.sh || rc=$?
+        printf 'rc=%s result=%s\\n' "$rc" "$LUMEN_SELF_UPDATE_RESULT"
         """,
         env=env,
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
-    assert "result=failed" in result.stdout
+    assert "rc=78 result=failed" in result.stdout
     assert "下载 lib/backup_journal.sh 失败" in result.stderr
     assert_transaction_restored(target, originals)
 
@@ -363,16 +364,17 @@ def test_lumenctl_sync_dependency_failure_keeps_update_entry_untouched(
 
     result = run_bash(
         f"""
-        set -euo pipefail
+        set -uo pipefail
         . {shlex.quote(str(LUMENCTL))}
-        lumenctl_sync_script_unit 0 {shlex.quote(str(target))}
-        printf 'result=%s\\n' "$LUMEN_SELF_UPDATE_RESULT"
+        rc=0
+        lumenctl_sync_script_unit 0 {shlex.quote(str(target))} || rc=$?
+        printf 'rc=%s result=%s\\n' "$rc" "$LUMEN_SELF_UPDATE_RESULT"
         """,
         env=github_env(fakebin, remote, curl_log),
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
-    assert "result=failed" in result.stdout
+    assert "rc=78 result=failed" in result.stdout
     assert local_update.read_bytes() == local_bytes
     assert not (target / "update").exists()
     assert not list(target.glob(".lumen-self-update.*"))
@@ -464,17 +466,18 @@ def test_branch_bootstrap_download_failure_leaves_target_unit_untouched(
 
     result = run_bash(
         f"""
-        set -euo pipefail
+        set -uo pipefail
         . {shlex.quote(str(LIB))}
+        rc=0
         lumen_self_update_scripts_from_github_branch \
-            {shlex.quote(str(target))} main 0 lib.sh
-        printf 'result=%s\\n' "$LUMEN_SELF_UPDATE_RESULT"
+            {shlex.quote(str(target))} main 0 lib.sh || rc=$?
+        printf 'rc=%s result=%s\\n' "$rc" "$LUMEN_SELF_UPDATE_RESULT"
         """,
         env=github_env(fakebin, remote, curl_log),
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
-    assert "result=failed" in result.stdout
+    assert "rc=78 result=failed" in result.stdout
     assert local_lib.read_bytes() == local_bytes
     assert not (target / "lib").exists()
     assert not list(target.glob(".lumen-self-update.*"))
@@ -508,16 +511,18 @@ def test_strict_self_update_rejects_main_even_with_expected_commit(
 
     result = run_bash(
         f"""
-        set -euo pipefail
+        set -uo pipefail
         . {shlex.quote(str(LIB))}
-        lumen_self_update_scripts {shlex.quote(str(target))} main 0 update.sh
-        printf 'result=%s\\n' "$LUMEN_SELF_UPDATE_RESULT"
+        rc=0
+        lumen_self_update_scripts \
+            {shlex.quote(str(target))} main 0 update.sh || rc=$?
+        printf 'rc=%s result=%s\\n' "$rc" "$LUMEN_SELF_UPDATE_RESULT"
         """,
         env=env,
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
-    assert "result=failed" in result.stdout
+    assert "rc=78 result=failed" in result.stdout
     assert local_script.read_bytes() == local_bytes
     assert not curl_called.exists()
 

@@ -129,6 +129,14 @@ Stable install/update does not silently fall back to `main`. If a release image 
 LUMEN_UPDATE_BUILD=1 bash scripts/lumenctl.sh update-lumen
 ```
 
+`LUMEN_UPDATE_BUILD=1` is an emergency, pre-call operator override. The updater
+records `build_mode=explicit_local` and `artifact_trust=local_unpublished`,
+uses a `local-unpublished-<source-commit>` image tag, and discards the official
+release manifest binding. This local artifact will not receive or reuse the
+official release signature, SBOM, or artifact proof
+（不会获得或复用官方 release 的签名、SBOM 或 artifact 证明）. Fix and republish
+the official release before treating the deployment as a normal stable update.
+
 Default fast update skips the preflight backup for speed. Use standard mode or trigger a backup first when the deployment requires a restore point:
 
 ```bash

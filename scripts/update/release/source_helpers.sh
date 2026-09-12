@@ -317,11 +317,41 @@ sync_main_fallback_release() {
     return 0
 }
 
-enable_local_build_fallback() {
-    if [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ]; then
-        log_warn "[fetch_release] GHCR 镜像不可用，自动启用本地 build 继续。"
+require_official_image_or_explicit_local_build() {
+    local image="$1"
+    local tag="$2"
+    local commit_sha="${RELEASE_SOURCE_COMMIT:-}"
+    local manifest_cache="${RELEASE_SOURCE_MANIFEST_CACHE:-}"
+
+    if [ "${LUMEN_UPDATE_BUILD:-0}" = "1" ]; then
+        log_warn "[fetch_release] ${image}:${tag} 不可用或已跳过；按调用前显式的 LUMEN_UPDATE_BUILD=1 构建本地非官方镜像。"
+        emit_info fetch_release build_mode "explicit_local"
+        emit_info fetch_release artifact_trust "local_unpublished"
+        emit_info fetch_release requested_image "${image}:${tag}"
+        LUMEN_UPDATE_ARTIFACT_TRUST="local_unpublished"
+        export LUMEN_UPDATE_ARTIFACT_TRUST
+
+        # Local builds must not inherit official release image proofs. The
+        # source commit remains proven separately, but the produced image is a
+        # host-local artifact with its own non-release tag.
+        if [ -n "${manifest_cache}" ]; then
+            rm -f "${manifest_cache}" 2>/dev/null || true
+        fi
+        RELEASE_SOURCE_MANIFEST_CACHE=""
+        RELEASE_MANIFEST_FILE=""
+        RELEASE_MANIFEST_TAG=""
+        RELEASE_MANIFEST_SHA256=""
+        TARGET_RELEASE_TAG=""
+        if printf '%s\n' "${commit_sha}" | grep -Eq '^[0-9a-f]{40}$'; then
+            TARGET_TAG="local-unpublished-${commit_sha:0:12}"
+            emit_info fetch_release effective_tag "${TARGET_TAG}"
+        fi
+        return 0
     fi
-    LUMEN_UPDATE_BUILD=1
-    export LUMEN_UPDATE_BUILD
-    emit_info fetch_release build_fallback "local"
+
+    log_error "[fetch_release] 官方镜像 ${image}:${tag} 不存在或不可验证。"
+    log_error "[fetch_release] 修复 release 发布；若确需本地构建，请重新执行并显式设置 LUMEN_UPDATE_BUILD=1。"
+    emit_info fetch_release build_mode "disabled"
+    emit_info fetch_release missing_image "${image}:${tag}"
+    return 69
 }
