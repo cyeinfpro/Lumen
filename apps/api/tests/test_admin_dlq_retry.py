@@ -66,7 +66,8 @@ async def test_dlq_retry_restages_outbox_without_premature_resolution(
     )
     db = _Db([dlq, "gen-1", outbox])
 
-    async def fake_audit(*_args: Any, **_kwargs: Any) -> None:
+    async def fake_audit(*_args: Any, **kwargs: Any) -> None:
+        assert kwargs["autocommit"] is False
         return None
 
     monkeypatch.setattr(admin, "write_admin_audit", fake_audit)
@@ -180,6 +181,7 @@ async def test_dlq_sweep_pages_all_cleanable_kinds_without_starvation(
     audits: list[dict[str, Any]] = []
 
     async def fake_audit(*_args: Any, **kwargs: Any) -> None:
+        assert kwargs["autocommit"] is False
         audits.append(kwargs)
 
     monkeypatch.setattr(admin, "write_admin_audit", fake_audit)

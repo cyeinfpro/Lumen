@@ -86,7 +86,8 @@ async def test_invite_preview_rejects_deleted_creator(monkeypatch: pytest.Monkey
 async def test_revoke_invite_allows_any_admin_to_manage_invite(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_write_audit(*_args, **_kwargs) -> bool:
+    async def fake_write_audit(*_args, **kwargs) -> bool:
+        assert kwargs["autocommit"] is False
         return True
 
     monkeypatch.setattr(invites, "write_audit", fake_write_audit)

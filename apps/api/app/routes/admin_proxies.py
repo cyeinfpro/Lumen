@@ -346,6 +346,7 @@ async def update_proxies(
         admin,
         event_type="admin.proxies.update",
         details={"count": len(new_proxies), "names": sorted(seen_names)},
+        autocommit=False,
     )
     await db.commit()
     admin_model_cache_from_request(request).invalidate()

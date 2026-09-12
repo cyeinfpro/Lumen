@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from app.audit import AuditPersistenceError
 from app.config import settings
 from app.routes import admin, me, me_export
 from app.services import account_deletion
@@ -757,6 +758,7 @@ async def test_delete_my_account_keeps_audit_detail_and_post_commit_cleanup(
             "actor_email": user.email,
             "actor_ip_hash": None,
             "target_user_id": user.id,
+            "autocommit": False,
             "details": {
                 "users": 1,
                 "sessions_revoked": 2,
@@ -778,6 +780,66 @@ async def test_delete_my_account_keeps_audit_detail_and_post_commit_cleanup(
     ]
     assert any(header.startswith("session=") for header in cookie_headers)
     assert any(header.startswith("csrf=") for header in cookie_headers)
+
+
+@pytest.mark.asyncio
+async def test_delete_my_account_audit_failure_skips_commit_and_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = SimpleNamespace(
+        id="user-self-delete",
+        email="member@example.com",
+        account_mode="wallet",
+    )
+    db = _AdminDeleteDb(
+        [
+            _AdminDeleteResult(scalar=user.id),
+            _AdminDeleteResult(rowcount=1),
+            _AdminDeleteResult(rowcount=2),
+            _AdminDeleteResult(rowcount=3),
+            _AdminDeleteResult(rowcount=4),
+        ]
+    )
+    cleanup = {
+        "generations_canceled": 0,
+        "completions_canceled": 0,
+        "video_generations_canceled": 0,
+        "videos_deleted": 0,
+        "memory_extractions_canceled": 0,
+    }
+    post_commit: list[dict[str, Any]] = []
+
+    async def cancel_account_active_tasks(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return cleanup
+
+    async def fail_audit(*_args: Any, **kwargs: Any) -> None:
+        assert kwargs["autocommit"] is False
+        raise AuditPersistenceError("me.account.delete")
+
+    async def post_commit_account_task_cleanup(**kwargs: Any) -> None:
+        post_commit.append(kwargs)
+
+    monkeypatch.setattr(me, "get_redis", lambda: object())
+    monkeypatch.setattr(me, "cancel_account_active_tasks", cancel_account_active_tasks)
+    monkeypatch.setattr(me, "write_audit", fail_audit)
+    monkeypatch.setattr(
+        me,
+        "post_commit_account_task_cleanup",
+        post_commit_account_task_cleanup,
+    )
+
+    response = Response()
+    with pytest.raises(AuditPersistenceError):
+        await me.delete_my_account(
+            None,  # type: ignore[arg-type]
+            user,
+            response,
+            db,  # type: ignore[arg-type]
+        )
+
+    assert db.committed is False
+    assert post_commit == []
+    assert all(key != b"set-cookie" for key, _value in response.raw_headers)
 
 
 @pytest.mark.asyncio
