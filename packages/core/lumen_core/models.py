@@ -60,6 +60,7 @@ from .model_entities import (  # noqa: F401 - compatibility re-exports
     PosterMaster,
     PosterRender,
     OutboxDeadLetter,
+    StorageApplyOperation,
 )
 
 from . import canvas_models as _canvas_models  # noqa: F401
