@@ -28,6 +28,8 @@ LIB_MODULE_DIR = ROOT / "scripts" / "lib"
 LIB_MODULES = sorted(LIB_MODULE_DIR.glob("*.sh"))
 UPDATE_MODULE_DIR = ROOT / "scripts" / "update"
 UPDATE_MODULES = sorted(UPDATE_MODULE_DIR.rglob("*.sh"))
+UPDATE_SOURCE_HELPERS = UPDATE_MODULE_DIR / "release" / "source_helpers.sh"
+UPDATE_FETCH = UPDATE_MODULE_DIR / "release" / "fetch.sh"
 INSTALL_MODULE_DIR = ROOT / "scripts" / "install"
 INSTALL_SOURCE_RELATIVE = (
     "state.sh",
@@ -1867,8 +1869,81 @@ def test_compose_supports_split_db_root_for_cifs_data_root() -> None:
     assert 'shared_db_root="$(lumen_env_value LUMEN_DB_ROOT "${SHARED_ENV}"' in update
     assert '"${LUMEN_DB_ROOT}/postgres"' in update
     assert '"${LUMEN_DATA_ROOT}/storage"' in update
-    assert "enable_local_build_fallback()" in update
-    assert "GHCR 镜像不可用，自动启用本地 build 继续" in update
+
+
+def test_missing_release_image_never_enables_local_build_implicitly() -> None:
+    source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (UPDATE_SOURCE_HELPERS, UPDATE_FETCH)
+    )
+
+    assert "enable_local_build_fallback" not in source
+    assert "LUMEN_UPDATE_BUILD=1\n" not in source
+    assert "require_official_image_or_explicit_local_build" in source
+    assert 'emit_info fetch_release artifact_trust "local_unpublished"' in source
+
+
+def test_local_build_gate_requires_preexisting_audited_opt_in(
+    tmp_path: Path,
+) -> None:
+    helper = bash_function_source(
+        UPDATE_SOURCE_HELPERS,
+        "require_official_image_or_explicit_local_build",
+    )
+    manifest_cache = tmp_path / "release-manifest.json"
+    manifest_cache.write_text("{}\n", encoding="utf-8")
+    result = run_bash(
+        f"""
+        set +e
+        {helper}
+        log_error() {{ :; }}
+        log_warn() {{ :; }}
+        emit_info() {{ printf 'info:%s:%s:%s\\n' "$1" "$2" "$3"; }}
+        unset LUMEN_UPDATE_BUILD
+        require_official_image_or_explicit_local_build \
+            ghcr.io/cyeinfpro/lumen-api v9.9.9
+        implicit_rc=$?
+        printf 'implicit_rc=%s build=%s\\n' \
+            "$implicit_rc" "${{LUMEN_UPDATE_BUILD-unset}}"
+        LUMEN_UPDATE_BUILD=1
+        RELEASE_SOURCE_COMMIT={"a" * 40}
+        RELEASE_SOURCE_MANIFEST_CACHE={shlex.quote(str(manifest_cache))}
+        RELEASE_MANIFEST_FILE=/tmp/official-release-manifest.json
+        RELEASE_MANIFEST_TAG=v9.9.9
+        RELEASE_MANIFEST_SHA256={"b" * 64}
+        TARGET_RELEASE_TAG=v9.9.9
+        TARGET_TAG=v9.9.9
+        require_official_image_or_explicit_local_build \
+            ghcr.io/cyeinfpro/lumen-api v9.9.9
+        explicit_rc=$?
+        printf 'explicit_rc=%s build=%s\\n' \
+            "$explicit_rc" "$LUMEN_UPDATE_BUILD"
+        printf 'trust=%s tag=%s release_tag=%s manifest=%s cache=%s\\n' \
+            "$LUMEN_UPDATE_ARTIFACT_TRUST" \
+            "$TARGET_TAG" \
+            "${{TARGET_RELEASE_TAG-unset}}" \
+            "${{RELEASE_MANIFEST_FILE-unset}}" \
+            "${{RELEASE_SOURCE_MANIFEST_CACHE-unset}}"
+        """
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "implicit_rc=69 build=unset" in result.stdout
+    assert "explicit_rc=0 build=1" in result.stdout
+    assert "info:fetch_release:build_mode:explicit_local" in result.stdout
+    assert "info:fetch_release:artifact_trust:local_unpublished" in result.stdout
+    assert (
+        "trust=local_unpublished tag=local-unpublished-aaaaaaaaaaaa "
+        "release_tag= manifest= cache="
+    ) in result.stdout
+    assert not manifest_cache.exists()
+
+
+def test_readme_does_not_present_local_build_as_official_release() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "artifact_trust=local_unpublished" in readme
+    assert "不会获得或复用官方 release 的签名、SBOM 或 artifact 证明" in readme
 
 
 def test_update_preserves_web_bind_and_proxy_env() -> None:
@@ -2226,9 +2301,9 @@ def test_release_manifest_python_prerequisite_is_consistent() -> None:
 
 
 def test_linux_prerequisites_install_and_verify_flock() -> None:
-    prerequisites = (
-        ROOT / "scripts" / "install" / "prerequisites.sh"
-    ).read_text(encoding="utf-8")
+    prerequisites = (ROOT / "scripts" / "install" / "prerequisites.sh").read_text(
+        encoding="utf-8"
+    )
 
     assert 'basics_missing+=("util-linux")' in prerequisites
     assert prerequisites.count("command -v flock") >= 2
@@ -2362,7 +2437,7 @@ def test_update_sources_are_bound_to_release_tags_or_commits() -> None:
     assert "LUMEN_UPDATE_GIT_REF 必须是具体 release tag 或 40 位 commit" in text
     assert 'git rev-parse --verify "${GIT_REF}^{commit}"' in text
     assert "git pull --ff-only" not in text
-    assert "拒绝从 branch 自更新" in text
+    assert "缺少 immutable release tag/commit" in text
 
 
 def test_release_migration_fails_closed_when_systemd_stop_fails() -> None:
@@ -4162,6 +4237,7 @@ except BlockingIOError:
     # 阶段 rsync 进去的当前 commit 的 update.sh 替换成上一个 commit 的版本，导致
     # log/grep 断言失败。CI 测试本来就只想验证当前 working tree 的脚本，禁用 self-update。
     export LUMEN_SELF_UPDATE=0
+    export LUMEN_UPDATE_SELF_UPDATE_SCRIPTS=0
 
     bash scripts/lumenctl.sh install-lumen --image-tag=old > "${{LOG_DIR}}/install.out" 2> "${{LOG_DIR}}/install.err"
     test -L "${{DEPLOY_ROOT}}/current"
@@ -4171,6 +4247,11 @@ except BlockingIOError:
 
     # 将刚安装的完整 working-tree release 固化成测试 commit，确保更新器拿到
     # 的源码 proof 与后续 source tree 完全一致（包括本轮新增的 updater 文件）。
+    # Git worktree checkout 的 .git 是指向主仓库的文本文件；安装 rsync 可能把
+    # 它带进临时 release。测试必须先移除该指针，再创建隔离的临时仓库。
+    if [ -f "${{DEPLOY_ROOT}}/current/.git" ] && [ ! -d "${{DEPLOY_ROOT}}/current/.git" ]; then
+      rm -f "${{DEPLOY_ROOT}}/current/.git"
+    fi
     git -C "${{DEPLOY_ROOT}}/current" init -q
     git -C "${{DEPLOY_ROOT}}/current" config user.email test@example.com
     git -C "${{DEPLOY_ROOT}}/current" config user.name "Lumen Test"

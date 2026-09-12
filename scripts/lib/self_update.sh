@@ -1175,7 +1175,20 @@ lumen_self_update_scripts() {
     else
         rc=$?
     fi
-    lumen_self_update_release_transaction_lock || true
+
+    # Older internal branches report semantic failure through the public
+    # result variable while returning zero. The public API must fail closed.
+    if [ "${LUMEN_SELF_UPDATE_RESULT:-}" = "failed" ] \
+            && [ "${rc}" -eq 0 ]; then
+        rc=78
+    fi
+    if ! lumen_self_update_release_transaction_lock; then
+        log_warn "[self_update] 无法释放 scripts transaction lock。"
+        LUMEN_SELF_UPDATE_RESULT=failed
+        if [ "${rc}" -eq 0 ]; then
+            rc=70
+        fi
+    fi
     return "${rc}"
 }
 
@@ -1199,12 +1212,12 @@ lumen_self_update_scripts_from_github_branch() {
         log_warn "[self_update] LUMEN_SELF_UPDATE_COMMIT 不是有效的 40 位 commit。"
         # shellcheck disable=SC2034  # Public result consumed by sourcing callers.
         LUMEN_SELF_UPDATE_RESULT=failed
-        return 0
+        return 78
     fi
     commit_sha="${commit_sha:-$(lumen_resolve_github_branch_commit "${branch}")}" || {
         # shellcheck disable=SC2034  # Public result consumed by sourcing callers.
         LUMEN_SELF_UPDATE_RESULT=failed
-        return 0
+        return 78
     }
     LUMEN_UPDATE_EXPECTED_SCRIPTS_COMMIT="${commit_sha}"
     export LUMEN_UPDATE_EXPECTED_SCRIPTS_COMMIT
