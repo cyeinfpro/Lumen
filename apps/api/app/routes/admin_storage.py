@@ -1,24 +1,21 @@
 """管理员存储后端配置端点（V1.0.x）。
 
-GET /admin/storage          — 当前后端配置 + mount 状态 + 最近一次 apply/test 结果
+GET /admin/storage          — desired 配置 + mount 状态 + durable apply/test 结果
 POST /admin/storage/test    — 测试 SMB 连通性（不切真实挂载，临时挂 /var/lib/lumen-storage/scratch）
-PUT /admin/storage          — 应用配置（写 conf + 触发 host 上的 lumen-storage-apply.service）
+PUT /admin/storage          — 持久化 desired operation，后台触发 host apply
 
 写入流程：
-  1. 校验入参 + 写 storage.* keys 到 SystemSetting（password 留空 = 保留旧值）
-  2. 把当前完整配置写到 /var/lib/lumen-storage/storage.conf
-     （host 与 lumen-api 通过 docker bind 双向共享这个目录）
-  3. 写 /var/lib/lumen-storage/apply.trigger
-     （PathChanged 触发 host 上的 lumen-storage-apply.service —— PID 1 启动，绕过容器 sandbox）
-  4. 等 ~5 秒看是否能拿到结果；apply 流程会 docker stop lumen-api，所以
-     这个连接很可能在等结果前被断开。返回 202 风格的 pending 状态，UI 重连后
-     poll GET /admin/storage 比对 last_apply.call_id 知道是否完成。
+  1. 同一事务写 storage.* desired settings、operation row 和 audit。
+  2. durable commit 后只唤醒 router-owned reconciler。
+  3. reconciler 用 owner + lease + fence claim operation，再写 conf + trigger。
+  4. host 写原子 terminal result；reconciler 回写 succeeded/failed。
 """
 
 from __future__ import annotations
 
 import asyncio
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -33,9 +30,10 @@ from typing import Annotated, Iterator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import Image
+from lumen_core.models import Image, StorageApplyOperation
 from lumen_core.runtime_settings import get_spec
 from lumen_core.schemas import (
     StorageApplyResponseOut,
@@ -54,11 +52,14 @@ from ..deps import AdminUser, verify_csrf
 from ..config import settings
 from ..images.application.storage_maintenance import sweep_orphan_image_files
 from ..runtime_settings import get_setting, update_settings
+from ..services.storage_apply_dispatch import (
+    create_storage_apply_lifespan,
+    latest_storage_apply_record,
+    wake_storage_apply_reconciler,
+)
 
 
 logger = logging.getLogger(__name__)
-
-router = APIRouter(prefix="/admin/storage", tags=["admin-storage"])
 
 STATE_DIR = Path(os.environ.get("LUMEN_STORAGE_STATE_DIR", "/var/lib/lumen-storage"))
 STORAGE_CONF = STATE_DIR / "storage.conf"
@@ -93,8 +94,6 @@ _FORBIDDEN_LOCAL_ROOTS = frozenset(
     }
 )
 
-# Apply 流程会 docker stop lumen-api 自身，不能等太久；UI 走 polling 模式补全。
-_APPLY_INLINE_WAIT_SEC = 5.0
 _TEST_TIMEOUT_SEC = 30.0
 _POLL_INTERVAL = 0.4
 
@@ -263,7 +262,10 @@ async def _load_config(db: AsyncSession) -> StorageConfigOut:
             has_password=bool(smb_password),
         ),
         status=status,
-        last_apply=_read_json(LAST_APPLY_FILE),
+        last_apply=await latest_storage_apply_record(
+            db,
+            legacy_result=_read_json(LAST_APPLY_FILE),
+        ),
         last_test=_read_json(LAST_TEST_FILE),
     )
 
@@ -386,6 +388,37 @@ async def _wait_for_call(path: Path, call_id: str, timeout: float) -> dict | Non
             return data
         await asyncio.sleep(_POLL_INTERVAL)
     return None
+
+
+async def _load_storage_conf_text(db: AsyncSession) -> str:
+    cfg = await _load_config(db)
+    smb_password = await get_setting(db, _spec("storage.smb.password")) or ""
+    return _build_storage_conf(cfg, smb_password)
+
+
+def _stage_storage_apply(operation_id: str, conf_text: str) -> None:
+    _ensure_state_dir()
+    with _stage_lock("apply"):
+        if APPLY_TRIGGER.exists():
+            try:
+                current_id = APPLY_TRIGGER.read_text(encoding="ascii").strip()
+            except OSError as exc:
+                raise RuntimeError("cannot read existing storage apply trigger") from exc
+            if current_id != operation_id:
+                _clear_stale_trigger(APPLY_TRIGGER, stale_after=15 * 60)
+        _write_atomic(STORAGE_CONF, conf_text, mode=0o660)
+        _write_atomic(APPLY_TRIGGER, f"{operation_id}\n", mode=0o600)
+
+
+router = APIRouter(
+    prefix="/admin/storage",
+    tags=["admin-storage"],
+    lifespan=create_storage_apply_lifespan(
+        load_conf_text=_load_storage_conf_text,
+        stage_operation=_stage_storage_apply,
+        read_host_result=lambda: _read_json(LAST_APPLY_FILE),
+    ),
+)
 
 
 @router.get("", response_model=StorageConfigOut)
@@ -616,6 +649,7 @@ async def retry_image_reconcile_quarantine(
 @router.put(
     "",
     response_model=StorageApplyResponseOut,
+    status_code=202,
     dependencies=[Depends(verify_csrf)],
 )
 async def put_storage_endpoint(
@@ -675,51 +709,57 @@ async def put_storage_endpoint(
         await update_settings(db, pairs)
     except ValueError as exc:
         await db.rollback()
-        raise _http("invalid_request", str(exc), 422)
+        raise _http("invalid_request", str(exc), 422) from exc
 
-    cfg = await _load_config(db)
-    smb_password = await get_setting(db, _spec("storage.smb.password")) or ""
-    conf_text = _build_storage_conf(cfg, smb_password)
-    call_id = uuid.uuid4().hex
+    conf_text = await _load_storage_conf_text(db)
+    operation_id = uuid.uuid4().hex
+    operation = StorageApplyOperation(
+        id=operation_id,
+        requested_by=admin.id,
+        desired_config_sha256=hashlib.sha256(
+            conf_text.encode("utf-8")
+        ).hexdigest(),
+        status="pending",
+        active_slot=1,
+    )
+    db.add(operation)
     try:
-        with _stage_lock("apply"):
-            _clear_stale_trigger(APPLY_TRIGGER, stale_after=15 * 60)
-            _write_atomic(STORAGE_CONF, conf_text, mode=0o660)
-            _write_atomic(APPLY_TRIGGER, f"{call_id}\n", mode=0o600)
-    except HTTPException:
+        # Flush before audit so a concurrent active operation maps cleanly to
+        # 409 instead of being wrapped as an audit persistence failure.
+        await db.flush()
+        await write_audit(
+            db,
+            event_type="admin.storage.update.requested",
+            user_id=admin.id,
+            actor_email_hash=hash_email(admin.email),
+            actor_ip_hash=request_ip_hash(request),
+            details={
+                "backend": body.backend,
+                "operation_id": operation_id,
+            },
+            autocommit=False,
+        )
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise _http(
+            "storage_operation_pending",
+            "another storage apply is active",
+            409,
+        ) from exc
+    except Exception:
         await db.rollback()
         raise
 
-    await write_audit(
-        db,
-        event_type="admin.storage.update",
-        user_id=admin.id,
-        actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=request_ip_hash(request),
-        details={"backend": body.backend, "call_id": call_id},
-    )
-    await db.commit()
-
-    # Apply 流程会 docker stop lumen-api，所以可能在拿到结果前 connection 就断了。
-    # 短等一下：如果在容器被停之前结果回来了（fast path 或失败），返回带 status；
-    # 否则返回 pending，UI 自己 poll GET /admin/storage 看 last_apply.call_id。
-    result = await _wait_for_call(LAST_APPLY_FILE, call_id, _APPLY_INLINE_WAIT_SEC)
+    # This call never performs host I/O. If the process exits here, startup and
+    # periodic scans still find the committed pending operation.
+    wake_storage_apply_reconciler(request)
     cfg = await _load_config(db)
-    if result is None:
-        return StorageApplyResponseOut(
-            config=cfg,
-            call_id=call_id,
-            status="pending",
-            message=(
-                "配置已写入，挂载切换正在后台执行（约 30 秒）。"
-                "API 重启期间页面会短暂无响应，请稍候再刷新。"
-            ),
-        )
     return StorageApplyResponseOut(
         config=cfg,
-        call_id=call_id,
-        status=str(result.get("status", "pending")),
-        message=str(result.get("message", "")),
+        call_id=operation_id,
+        status="pending",
+        message="配置请求已持久化，等待 host 确认应用结果。",
     )
 
 
