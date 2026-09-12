@@ -90,8 +90,19 @@ elif [ -z "${CURRENT_WEB_BIND_HOST}" ] || [ "${CURRENT_WEB_BIND_HOST}" = "0.0.0.
     CONFIG_CHANGED=1
 fi
 
-# 解析目标 tag
-TARGET_TAG="$(lumen_image_tag_resolve "${LUMEN_UPDATE_CHANNEL}" "${SHARED_ENV}" 2>/dev/null || echo "")"
+# 解析目标 tag。保留 resolver 的具体错误码；配置错误不能伪装成普通空结果。
+TARGET_TAG=""
+if TARGET_TAG="$(
+        lumen_image_tag_resolve "${LUMEN_UPDATE_CHANNEL}" "${SHARED_ENV}"
+)"; then
+    :
+else
+    TARGET_TAG_RC=$?
+    emit_info check reason "target_tag_resolution_failed"
+    log_error "[check] 无法解析目标 tag（channel=${LUMEN_UPDATE_CHANNEL}, rc=${TARGET_TAG_RC}）。"
+    emit_fail check "${TARGET_TAG_RC}"
+    exit "${TARGET_TAG_RC}"
+fi
 if [ -z "${TARGET_TAG}" ]; then
     emit_info check reason "target_tag_empty"
     log_error "[check] 无法解析目标 tag（channel=${LUMEN_UPDATE_CHANNEL}）。"
@@ -99,6 +110,7 @@ if [ -z "${TARGET_TAG}" ]; then
     emit_fail check 1
     exit 1
 fi
+unset TARGET_TAG_RC
 export LUMEN_IMAGE_TAG="${TARGET_TAG}"
 TARGET_RELEASE_TAG=""
 UPDATE_IMAGE_REGISTRY="$(lumen_env_value LUMEN_IMAGE_REGISTRY "${SHARED_ENV}" 2>/dev/null || true)"
@@ -115,6 +127,57 @@ elif lumen_release_alias_tag "${TARGET_TAG}" \
     fi
     emit_info check release_alias "${TARGET_TAG}->${TARGET_RELEASE_TAG}"
 fi
+
+if [ "${UPDATE_IMAGE_REGISTRY%/}" = "ghcr.io/cyeinfpro" ] \
+        && [ -n "${TARGET_RELEASE_TAG}" ]; then
+    CHECK_IMAGE_MANIFEST="$(
+        mktemp "${SHARED_DIR}/.check-image-manifest.XXXXXXXXXX" 2>/dev/null
+    )" || {
+        log_error "[check] 无法创建 release image manifest 临时文件。"
+        emit_fail check 1
+        exit 1
+    }
+    if ! lumen_fetch_release_manifest \
+            "${TARGET_RELEASE_TAG}" "${CHECK_IMAGE_MANIFEST}" \
+            || ! lumen_apply_release_manifest_compose_env \
+                "${CHECK_IMAGE_MANIFEST}" "${TARGET_RELEASE_TAG}" "${SHARED_ENV}"; then
+        rm -f "${CHECK_IMAGE_MANIFEST}" 2>/dev/null || true
+        log_error "[check] 无法从 ${TARGET_RELEASE_TAG} 绑定完整生产镜像 digest。"
+        emit_fail check 1
+        exit 1
+    fi
+    rm -f "${CHECK_IMAGE_MANIFEST}"
+elif [ "${UPDATE_IMAGE_REGISTRY%/}" = "ghcr.io/cyeinfpro" ] \
+        && [ "${TARGET_TAG}" = "main" ]; then
+    if ! lumen_require_immutable_image_refs \
+            "${SHARED_ENV}" \
+            LUMEN_POSTGRES_IMAGE_REF \
+            LUMEN_REDIS_IMAGE_REF; then
+        log_error "[check] rolling main 不得隐式升级数据库或缓存镜像；请先配置其 immutable refs。"
+        emit_fail check 64
+        exit 64
+    fi
+    if ! lumen_apply_rolling_app_image_refs \
+            "${UPDATE_IMAGE_REGISTRY}" "${TARGET_TAG}" "${SHARED_ENV}"; then
+        log_error "[check] rolling main 应用镜像 digest 解析失败。"
+        emit_fail check 1
+        exit 1
+    fi
+else
+    if ! lumen_require_immutable_image_refs \
+            "${SHARED_ENV}" \
+            LUMEN_POSTGRES_IMAGE_REF \
+            LUMEN_REDIS_IMAGE_REF \
+            LUMEN_API_IMAGE_REF \
+            LUMEN_WORKER_IMAGE_REF \
+            LUMEN_WEB_IMAGE_REF \
+            LUMEN_TGBOT_IMAGE_REF; then
+        log_error "[check] 自定义 registry/通道必须预先提供完整生产镜像 digest refs。"
+        emit_fail check 64
+        exit 64
+    fi
+fi
+
 if TARGET_VERSION_FROM_TAG="$(semver_from_image_tag "${TARGET_TAG}" 2>/dev/null || true)" \
         && [ -n "${TARGET_VERSION_FROM_TAG}" ]; then
     export LUMEN_VERSION="${TARGET_VERSION_FROM_TAG}"

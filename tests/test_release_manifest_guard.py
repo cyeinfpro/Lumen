@@ -37,6 +37,17 @@ def _manifest(tag: str = "v1.2.3") -> dict[str, object]:
         "short_sha": "a" * 7,
         "generated_at": "2026-07-11T00:00:00Z",
         "alembic_heads": ["0042_generation_billing_retry"],
+        "dependencies": {
+            "python": {
+                "immutable_ref": "python:3.12-slim@sha256:" + ("a" * 64)
+            },
+            "postgres": {
+                "immutable_ref": "pgvector/pgvector:pg16@sha256:" + ("b" * 64)
+            },
+            "redis": {
+                "immutable_ref": "redis:7.4-alpine@sha256:" + ("c" * 64)
+            },
+        },
         "images": images,
     }
 
@@ -50,6 +61,7 @@ def test_release_manifest_guard_validates_exact_image_set(tmp_path: Path) -> Non
 
     assert loaded["version"] == "v1.2.3"
     assert set(loaded["images"]) == {"api", "worker", "web", "tgbot"}
+    assert set(loaded["dependencies"]) == {"python", "postgres", "redis"}
 
 
 def test_release_manifest_guard_rejects_mutated_digest_or_tag(
@@ -69,6 +81,19 @@ def test_release_manifest_guard_rejects_mutated_digest_or_tag(
     path.write_text(json.dumps(_manifest()), encoding="utf-8")
     with pytest.raises(guard.ManifestError, match="version mismatch"):
         guard.load_manifest(path, tag="v1.2.4")
+
+
+def test_release_manifest_guard_rejects_mutable_dependency_image(
+    tmp_path: Path,
+) -> None:
+    guard = _load_guard()
+    payload = _manifest()
+    payload["dependencies"]["redis"]["immutable_ref"] = "redis:7.4-alpine"  # type: ignore[index]
+    path = tmp_path / "release-manifest.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(guard.ManifestError, match="dependency image"):
+        guard.load_manifest(path, tag="v1.2.3")
 
 
 def test_release_manifest_guard_resolves_alias_to_latest_stable_release() -> None:

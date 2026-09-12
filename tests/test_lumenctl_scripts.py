@@ -1973,6 +1973,12 @@ def test_update_failure_restores_env_bytes_and_retains_unready_release_evidence(
         f"# preserve exact bytes\n"
         f"LUMEN_IMAGE_REGISTRY=example.invalid\n"
         f"LUMEN_IMAGE_TAG=v1.2.44\n"
+        f"LUMEN_POSTGRES_IMAGE_REF=pgvector/pgvector:pg16@sha256:{'1' * 64}\n"
+        f"LUMEN_REDIS_IMAGE_REF=redis:7.4-alpine@sha256:{'2' * 64}\n"
+        f"LUMEN_API_IMAGE_REF=example.invalid/lumen-api@sha256:{'3' * 64}\n"
+        f"LUMEN_WORKER_IMAGE_REF=example.invalid/lumen-worker@sha256:{'4' * 64}\n"
+        f"LUMEN_WEB_IMAGE_REF=example.invalid/lumen-web@sha256:{'5' * 64}\n"
+        f"LUMEN_TGBOT_IMAGE_REF=example.invalid/lumen-tgbot@sha256:{'6' * 64}\n"
         f"LUMEN_VERSION=1.2.44\n"
         f"LUMEN_UPDATE_CHANNEL=stable\n"
         f"LUMEN_DATA_ROOT={data_root}\n"
@@ -2031,8 +2037,9 @@ if [ "${1:-}" = "image" ] && [ "${2:-}" = "inspect" ]; then
       *org.opencontainers.image.revision*)
         printf '%s\\n' "${TEST_MAIN_IMAGE_COMMIT:?}"
         ;;
-      *RepoDigests*)
-        repository="${image%:*}"
+          *RepoDigests*)
+            repository="${image%%@*}"
+            [ "${repository}" != "${image}" ] || repository="${image%:*}"
         service="${repository##*/}"
         service="${service#lumen-}"
         case "${service}" in
@@ -2050,7 +2057,8 @@ if [ "${1:-}" = "image" ] && [ "${2:-}" = "inspect" ]; then
     exit 0
   fi
   image="${*: -1}"
-  repository="${image%:*}"
+      repository="${image%%@*}"
+      [ "${repository}" != "${image}" ] || repository="${image%:*}"
   service="${repository##*/}"
   service="${service#lumen-}"
   case "${service}" in
@@ -2070,10 +2078,10 @@ case "$*" in
   *"inspect lumen-api"*)
     exit 1
     ;;
-  *"config --images"*)
-    printf 'example.invalid/lumen-api:%s\\n' "${LUMEN_IMAGE_TAG:?}"
-    printf 'example.invalid/lumen-worker:%s\\n' "${LUMEN_IMAGE_TAG:?}"
-    printf 'example.invalid/lumen-web:%s\\n' "${LUMEN_IMAGE_TAG:?}"
+      *"config --images"*)
+        printf '%s\\n' "${LUMEN_API_IMAGE_REF:?}"
+        printf '%s\\n' "${LUMEN_WORKER_IMAGE_REF:?}"
+        printf '%s\\n' "${LUMEN_WEB_IMAGE_REF:?}"
     exit 0
     ;;
   *"alembic heads"*|*"alembic current"*)
@@ -2185,7 +2193,7 @@ esac
         for release_id in release_ids
         if release_id not in {current_id, previous_id}
     ]
-    assert len(retained) == 1
+    assert len(retained) == 1, result.stderr + result.stdout
     assert retained[0].startswith("releases-")
     assert (
         deploy_root / "releases" / retained[0] / "scripts" / "fallback-main-marker"
@@ -2268,6 +2276,14 @@ exit 0
             "PATH": f"{fakebin}{os.pathsep}{env['PATH']}",
             "TEST_DOCKER_LOG": str(log),
             "LUMEN_VERIFY_IMAGE_SIGNATURES": "1",
+            "LUMEN_API_IMAGE_REF": f"example.invalid/lumen-api@sha256:{'1' * 64}",
+            "LUMEN_WORKER_IMAGE_REF": (
+                f"example.invalid/lumen-worker@sha256:{'2' * 64}"
+            ),
+            "LUMEN_WEB_IMAGE_REF": f"example.invalid/lumen-web@sha256:{'3' * 64}",
+            "LUMEN_TGBOT_IMAGE_REF": (
+                f"example.invalid/lumen-tgbot@sha256:{'4' * 64}"
+            ),
         }
     )
     result = subprocess.run(
@@ -3003,7 +3019,7 @@ def test_update_script_defaults_to_fast_update_path() -> None:
     text = update_source_text()
     code = _strip_shell_comments(text)
 
-    assert "LUMEN_UPDATE_MODE:-fast" in code
+    assert 'raw_update_mode="fast"' in code
     assert "LUMEN_UPDATE_SELF_UPDATE_SCRIPTS=0" in code
     assert "LUMEN_UPDATE_FAST_EXPLICIT_PULL:-0" in code
     assert '! lumen_image_tag_is_rolling "${TARGET_TAG}"' in code
@@ -3817,7 +3833,7 @@ fi
 if [ "$#" -ge 1 ] && [ "$1" = "info" ]; then
   exit 0
 fi
-if [ "$#" -ge 1 ] && [ "$1" = "compose" ]; then
+    if [ "$#" -ge 1 ] && [ "$1" = "compose" ]; then
   shift
   [ "${1:-}" = "--ansi=never" ] && shift
   if [ "${1:-}" = "ps" ]; then
@@ -3828,11 +3844,11 @@ if [ "$#" -ge 1 ] && [ "$1" = "compose" ]; then
   # Mock alembic heads / current（update.sh migrate_db 阶段会比对）。
   # 真 alembic 会输出 "<rev_id> (head)"；mock 给同 rev_id 让 verify 通过。
   rest="$*"
-  case "${rest}" in
-    *"config --images"*)
-      printf 'ghcr.io/cyeinfpro/lumen-api:%s\\n' "${LUMEN_IMAGE_TAG:-main}"
-      printf 'ghcr.io/cyeinfpro/lumen-worker:%s\\n' "${LUMEN_IMAGE_TAG:-main}"
-      printf 'ghcr.io/cyeinfpro/lumen-web:%s\\n' "${LUMEN_IMAGE_TAG:-main}"
+      case "${rest}" in
+        *"config --images"*)
+          printf '%s\\n' "${LUMEN_API_IMAGE_REF:?}"
+          printf '%s\\n' "${LUMEN_WORKER_IMAGE_REF:?}"
+          printf '%s\\n' "${LUMEN_WEB_IMAGE_REF:?}"
       exit 0
       ;;
     *"alembic heads"*)
@@ -3856,7 +3872,8 @@ if [ "$#" -ge 2 ] && [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
         printf '%s\\n' "${TEST_IMAGE_COMMIT:?}"
         ;;
       *RepoDigests*)
-        repository="${image%:*}"
+        repository="${image%%@*}"
+        [ "${repository}" != "${image}" ] || repository="${image%:*}"
         service="${repository##*/}"
         service="${service#lumen-}"
         case "${service}" in
@@ -3874,7 +3891,8 @@ if [ "$#" -ge 2 ] && [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
     exit 0
   fi
   image="${*: -1}"
-  repository="${image%:*}"
+      repository="${image%%@*}"
+      [ "${repository}" != "${image}" ] || repository="${image%:*}"
   service="${repository##*/}"
   service="${service#lumen-}"
   case "${service}" in
@@ -3953,10 +3971,20 @@ case "${original}" in
     printf '{"tag_name":"main"}\\n'
     exit 0
     ;;
-  *ghcr.io/token*)
-    printf '{"token":"fake"}\\n'
-    exit 0
-    ;;
+      *ghcr.io/token*)
+        printf '{"token":"fake"}\\n'
+        exit 0
+        ;;
+      *ghcr.io/v2/cyeinfpro/lumen-*/manifests/*)
+        if [[ "${original}" == *"-D -"* ]]; then
+          printf 'HTTP/2 200\\r\\n'
+          printf 'Docker-Content-Digest: sha256:%064d\\r\\n' 0
+          printf '\\r\\n'
+        else
+          printf '200'
+        fi
+        exit 0
+        ;;
   *raw.githubusercontent.com/*)
     # self_update_scripts 的拉取：在测试环境用 404 让 self_update softfail，
     # 走"继续用本地脚本"路径（避免把 mock 默认的 GHCR JSON 写进 update.sh 等）
@@ -4163,14 +4191,15 @@ except BlockingIOError:
     # log/grep 断言失败。CI 测试本来就只想验证当前 working tree 的脚本，禁用 self-update。
     export LUMEN_SELF_UPDATE=0
 
-    bash scripts/lumenctl.sh install-lumen --image-tag=old > "${{LOG_DIR}}/install.out" 2> "${{LOG_DIR}}/install.err"
+    bash scripts/lumenctl.sh install-lumen --image-tag=v0 > "${{LOG_DIR}}/install.out" 2> "${{LOG_DIR}}/install.err"
     test -L "${{DEPLOY_ROOT}}/current"
     test -f "${{DEPLOY_ROOT}}/current/docker-compose.yml"
     test -f "${{DEPLOY_ROOT}}/shared/.env"
-    grep -q '^LUMEN_IMAGE_TAG=old$' "${{DEPLOY_ROOT}}/shared/.env"
+    grep -q '^LUMEN_IMAGE_TAG=v0$' "${{DEPLOY_ROOT}}/shared/.env"
 
     # 将刚安装的完整 working-tree release 固化成测试 commit，确保更新器拿到
     # 的源码 proof 与后续 source tree 完全一致（包括本轮新增的 updater 文件）。
+    rm -f "${{DEPLOY_ROOT}}/current/.git"
     git -C "${{DEPLOY_ROOT}}/current" init -q
     git -C "${{DEPLOY_ROOT}}/current" config user.email test@example.com
     git -C "${{DEPLOY_ROOT}}/current" config user.name "Lumen Test"

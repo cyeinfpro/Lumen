@@ -19,15 +19,8 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-api:${LUMEN_IMAGE_TAG:-latest}
+    image: ${LUMEN_API_IMAGE_REF:?Set LUMEN_API_IMAGE_REF to name@sha256 digest}
     container_name: lumen-api-green
-    build:
-      context: .
-      dockerfile: Dockerfile.python
-      args:
-        LUMEN_VERSION: "${LUMEN_VERSION:-dev}"
-        LUMEN_APP_UID: "${LUMEN_APP_UID:-10001}"
-        LUMEN_APP_GID: "${LUMEN_APP_GID:-10001}"
     working_dir: /app/apps/api
     command:
       - "uvicorn"
