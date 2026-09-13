@@ -57,6 +57,7 @@ import {
   rememberGenerationForConversation,
   setBounded,
   _conversationMutationFence,
+  _userSessionFence,
   _generationConvIds,
   _messageConvIds,
 } from "./runtime";
@@ -792,6 +793,12 @@ export function createGenerationActions(
         throw new Error(msg);
       }
       const mutationFence = _conversationMutationFence.snapshot();
+      const userId = get().currentUserId;
+      const userFence = _userSessionFence.snapshot();
+      const isCurrent = () =>
+        get().currentUserId === userId &&
+        _userSessionFence.isCurrent(userFence) &&
+        isConversationMutationCurrent(get().currentConvId, convId, mutationFence);
       const text = prompt.trim();
       const validationError = inpaintValidationError(
         text,
@@ -810,13 +817,7 @@ export function createGenerationActions(
         });
         maskUploaded = await apiUploadImage(maskFile);
       } catch (err) {
-        if (
-          !isConversationMutationCurrent(
-            get().currentConvId,
-            convId,
-            mutationFence,
-          )
-        ) {
+        if (!isCurrent()) {
           return { status: "cancelled" };
         }
         const msg = err instanceof Error ? err.message : "mask 上传失败";
@@ -827,13 +828,7 @@ export function createGenerationActions(
         set({ composerError: `局部修改失败：${msg}` });
         throw err instanceof Error ? err : new Error(msg);
       }
-      if (
-        !isConversationMutationCurrent(
-          get().currentConvId,
-          convId,
-          mutationFence,
-        )
-      ) {
+      if (!isCurrent()) {
         return { status: "cancelled" };
       }
 
@@ -877,19 +872,13 @@ export function createGenerationActions(
           },
         });
       } catch (error) {
-        if (!isConversationMutationCurrent(get().currentConvId, convId, mutationFence)) {
+        if (!isCurrent()) {
           return { status: "cancelled" };
         }
         throw error;
       }
 
-      if (
-        !isConversationMutationCurrent(
-          get().currentConvId,
-          convId,
-          mutationFence,
-        )
-      ) {
+      if (!isCurrent()) {
         return { status: "cancelled" };
       }
       // The independent send path propagates its own error, not another request's shared UI error.

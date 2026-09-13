@@ -323,6 +323,30 @@ async def create_silent_generation(
         if prior is not None:
             return prior
 
+    # Match deletion's lock order before validating input or creating holds.
+    # The preflight conversation may have been deleted while this request waited.
+    try:
+        snapshot = await lock_active_user_snapshot(
+            db, user_id, expected_account_mode, session_id=session_id,
+        )
+    except ActiveUserFenceError as exc:
+        raise active_user_fence_http_error(exc) from exc
+    user = snapshot.user
+    conv = (
+        await db.execute(
+            select(Conversation).where(
+                Conversation.id == conv_id,
+                Conversation.user_id == user_id,
+                Conversation.deleted_at.is_(None),
+                studio_conversation_filter(),
+            ).with_for_update(of=Conversation).execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if conv is None:
+        raise runtime.http_error("not_found", "conversation not found", 404)
+    await runtime.ensure_conversation_visible(db, conv, user)
+    retention_policy = await runtime.retention_policy_for_user(db, user)
+
     parent_msg = (
         await db.execute(
             select(Message).where(
@@ -384,15 +408,6 @@ async def create_silent_generation(
         if raw_default_format in runtime.image_output_format_values:
             default_image_output_format = raw_default_format
     image_params = body.image_params
-    try:
-        snapshot = await lock_active_user_snapshot(
-            db,
-            user_id,
-            expected_account_mode,
-            session_id=session_id,
-        )
-    except ActiveUserFenceError as exc:
-        raise active_user_fence_http_error(exc) from exc
     try:
         result = await runtime.create_assistant_task(
             db=db,

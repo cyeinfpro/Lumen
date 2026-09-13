@@ -164,6 +164,7 @@ function createPostAbortHarness() {
           hasSamePreferences(composer, baseline),
       },
       "./runtime": {
+        _userSessionFence: { snapshot: () => 1, isCurrent: (value) => value === 1 },
         _conversationMutationFence: {
           snapshot: () => fenceVersion,
         },
@@ -241,6 +242,7 @@ test("stale inpaint fence cancels without success UI or draft cleanup", async ()
         inpaintValidationError: () => null,
       },
       "./runtime": {
+        _userSessionFence: { snapshot: () => 1, isCurrent: (value) => value === 1 },
         _conversationMutationFence: {
           snapshot: () => fenceVersion,
         },
@@ -498,6 +500,53 @@ test("identity switch during inpaint POST cannot drain old completion UI", async
   assert.deepEqual(submittingValues, [true]);
   assert.equal(submittingRef.current, false);
 });
+
+for (const change of ["account", "session"]) {
+  for (const uploadFails of [false, true]) {
+    test(`inpaint upload ${uploadFails ? "failure" : "success"} cannot cross a ${change} change`, async () => {
+      let userEpoch = 1;
+      const uploadStarted = deferred();
+      const uploadResult = deferred();
+      let sends = 0;
+      const state = {
+        currentUserId: "user-a", currentConvId: "conv-1",
+        composer: composerState("new account draft"), composerError: "current notice",
+        sendMessage: async () => { sends += 1; },
+      };
+      const { createGenerationActions } = loadModule("src/store/chat/generationActions.ts", {
+        "@/lib/api/images": {
+          uploadImage: () => { uploadStarted.resolve(); return uploadResult.promise; },
+        },
+        "@/lib/logger": { logWarn() {} },
+        "@/lib/utils": { uuid: () => "temporary" },
+        "./composerSlice": {
+          cloneComposerState, inpaintAspectRatio: () => "1:1", inpaintValidationError: () => null,
+        },
+        "./runtime": {
+          _conversationMutationFence: { snapshot: () => 1 },
+          _userSessionFence: { snapshot: () => userEpoch, isCurrent: (value) => value === userEpoch },
+          isConversationMutationCurrent: (current, expected, snapshot) =>
+            current === expected && snapshot === 1,
+        },
+      });
+      const actions = createGenerationActions((update) => {
+        Object.assign(state, typeof update === "function" ? update(state) : update);
+      }, () => state, { runtimeFastDefault: () => null });
+      const pending = actions.submitInpaintTask(inpaintPayload());
+      await uploadStarted.promise;
+      if (change === "account") state.currentUserId = "user-b";
+      else userEpoch += 1;
+      state.composerError = "new session notice";
+      const draft = state.composer;
+      if (uploadFails) uploadResult.reject(new Error("old upload failed"));
+      else uploadResult.resolve({ id: "old-account-mask" });
+      assert.deepEqual(await pending, { status: "cancelled" });
+      assert.equal(sends, 0);
+      assert.strictEqual(state.composer, draft);
+      assert.equal(state.composerError, "new session notice");
+    });
+  }
+}
 
 test("independent inpaint preserves the draft before and after POST cancellation", async () => {
   const harness = createPostAbortHarness();
