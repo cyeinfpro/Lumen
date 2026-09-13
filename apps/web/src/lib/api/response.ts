@@ -15,7 +15,15 @@ export async function readErrorResponseData(res: Response): Promise<unknown> {
     : await res.text().catch(() => null);
 }
 
-export async function readSuccessResponseData(res: Response): Promise<unknown> {
+export interface SuccessResponseOptions {
+  /** Only endpoints whose response contract explicitly permits JSON null. */
+  allowNull?: boolean;
+}
+
+export async function readSuccessResponseData(
+  res: Response,
+  options: SuccessResponseOptions = {},
+): Promise<unknown> {
   if (res.status === 204) return undefined;
   const contentType = res.headers.get("content-type") ?? "";
   if (!isJsonContentType(contentType)) {
@@ -37,7 +45,7 @@ export async function readSuccessResponseData(res: Response): Promise<unknown> {
       content_type: contentType,
     });
   }
-  if (data === null) {
+  if (data === null && !options.allowNull) {
     throw new ApiError({
       code: "response_schema_error",
       message: "Successful typed API response contains JSON null",

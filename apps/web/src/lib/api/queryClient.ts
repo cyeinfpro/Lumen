@@ -4,6 +4,8 @@ import type { ResponseValidator } from "./response";
 
 type QueryOptions<T = unknown> = Omit<RequestInit, "method" | "body"> & {
   budget?: RequestBudget;
+  /** Opt in only when the endpoint contract permits JSON null. */
+  allowNullResponse?: boolean;
   validate?: ResponseValidator<T>;
 };
 

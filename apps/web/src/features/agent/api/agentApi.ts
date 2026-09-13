@@ -174,7 +174,7 @@ export function getAgentActiveRun(
 ): Promise<AgentRun | null> {
   return apiFetch<AgentRun | null>(
     `/agent/sessions/${encodeURIComponent(sessionId)}/active-run`,
-    { signal, validate: validateNullableAgentRun },
+    { signal, allowNullResponse: true, validate: validateNullableAgentRun },
   );
 }
 

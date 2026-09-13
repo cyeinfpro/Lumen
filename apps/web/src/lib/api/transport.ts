@@ -35,6 +35,8 @@ export type TransportRequest<T = unknown> = RequestInit & {
   budget?: RequestBudget;
   expectNoContent?: boolean;
   applyCsrf?: boolean;
+  /** Opt in only when the endpoint contract permits JSON null. */
+  allowNullResponse?: boolean;
   validate?: ResponseValidator<T>;
 };
 
@@ -118,6 +120,7 @@ export class ApiTransport {
   ): Promise<T | undefined> {
     const {
       expectNoContent = false,
+      allowNullResponse = false,
       validate,
       ...requestInit
     } = init;
@@ -126,7 +129,9 @@ export class ApiTransport {
       requestInit,
       async (response): Promise<T | undefined> => {
         if (expectNoContent) return undefined;
-        const data = await readSuccessResponseData(response);
+        const data = await readSuccessResponseData(response, {
+          allowNull: allowNullResponse,
+        });
         return validate
           ? applyResponseValidator(response, path, data, validate)
           : (data as T);
@@ -136,7 +141,7 @@ export class ApiTransport {
 
   async requestRaw<T>(
     path: string,
-    init: Omit<TransportRequest<T>, "expectNoContent" | "validate">,
+    init: Omit<TransportRequest<T>, "expectNoContent" | "allowNullResponse" | "validate">,
     readSuccess: (response: Response) => Promise<T>,
     readError: (response: Response) => Promise<unknown> = readResponseData,
   ): Promise<T> {
