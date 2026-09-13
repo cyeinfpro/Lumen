@@ -163,6 +163,8 @@ if lumen_with_lock "update" 1830 do_update "$@"; then
     lumen_update_journal_status complete
     discard_update_state_snapshot
     lumen_update_clear_expected_scripts_commit
+    # Only this post-readiness, post-journal record proves update completion.
+    lumen_emit_step "phase=complete" "status=done" "rc=0" "ts=$(date -u +%FT%TZ)"
     trap - ERR
     trap 'lumen_release_lock' EXIT
     exit 0

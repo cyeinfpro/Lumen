@@ -563,6 +563,7 @@ async def _launch(
             release_reason = "launched"
             return pid, unit, proc, started_at
         except Exception as exc:
+            _record_launch_failure(log_fh)
             if exc.__class__.__name__ != "UpdateMarkerBusy":
                 raise
             raise runtime.http_error(
@@ -580,6 +581,19 @@ async def _launch(
                 succeeded=launched,
                 reason=release_reason,
             )
+
+
+def _record_launch_failure(log_fh: Any) -> None:
+    # Persist a terminal failure, rather than leaving an info-only check phase
+    # that looks successful after the error banner or browser session is gone.
+    try:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        log_fh.write(
+            f"::lumen-step:: phase=check status=fail rc=1 ts={timestamp}\n"
+        )
+        log_fh.flush()
+    except OSError:
+        pass  # Preserve the original launch error if the log also becomes unwritable.
 
 
 def _write_trigger_log(

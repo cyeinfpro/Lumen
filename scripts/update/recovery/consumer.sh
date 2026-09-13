@@ -10,6 +10,15 @@ lumen_update_recovery_marker_path() {
 }
 
 lumen_update_recovery_marker_write() {
+    # A CLI journal has no API request/claim to resume. Waking the API runner
+    # for it creates a PathExists restart loop and disables future updates.
+    # CLI recovery remains explicit through LUMEN_UPDATE_RESUME=1.
+    [ -n "${LUMEN_UPDATE_REQUEST_SHA256:-}" ] || return 0
+    if [ "${LUMEN_UPDATE_API_OPERATION_ID:-}" != "${OPERATION_ID:?}" ] \
+            || [[ ! "${LUMEN_UPDATE_REQUEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+        printf 'update recovery handoff identity is invalid\n' >&2
+        return 1
+    fi
     python3 - "$(lumen_update_recovery_marker_path)" "${OPERATION_ID:?}" <<'PY'
 import errno
 import os

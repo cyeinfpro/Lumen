@@ -123,15 +123,12 @@ lumen_update_journal_exec() {
 
 lumen_update_journal_init() {
     local result resumed
-    if ! lumen_update_recovery_marker_write; then
-        return 1
-    fi
     result="$(
         lumen_update_journal_exec \
             init \
             "${OPERATION_ID:?}" \
             "${LUMEN_UPDATE_RESUME:-0}"
-    )"
+    )" || return $?
     OPERATION_ID="${result%%	*}"
     resumed="${result#*	}"
     export OPERATION_ID
@@ -140,6 +137,8 @@ lumen_update_journal_init() {
     if [ "${resumed}" = "1" ]; then
         eval "$(lumen_update_journal_exec restore-context)"
     fi
+    # Publish the wake-up only after the matching journal is durable.
+    lumen_update_recovery_marker_write
 }
 
 lumen_update_journal_export_context() {

@@ -7,6 +7,8 @@ After=multi-user.target
 # writes this file via /admin/update; PID 1 starts the runner so we sidestep the
 # whole sandbox/sudo/polkit chain.
 PathChanged=/opt/lumendata/backup/.update.trigger
+# Only validated API-to-host handoffs publish this automatic-resume marker.
+# CLI journals are resumed explicitly and must not wake the API runner.
 PathExists=/opt/lumen/shared/.update-resume
 Unit=lumen-update-runner.service
 
