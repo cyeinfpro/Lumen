@@ -111,6 +111,23 @@ test("retry acknowledgement cannot reset the already completed newer attempt", a
   assert.strictEqual(h.state.generations["old-gen"], completed);
 });
 
+for (const transition of ["account", "session"] as const) {
+  test(`retry acknowledgement cannot mutate a changed ${transition}`, async () => {
+    const h = harness();
+    const before = { ...generation("old-gen", "old-asst"), status: "failed" as const };
+    h.state.generations["old-gen"] = before;
+    h.api.retryTask = async () => {
+      if (transition === "account") h.state.currentUserId = "new-owner";
+      else runtime._userSessionFence.advance();
+      h.state.composerError = "new session notification";
+      return { status: "queued" };
+    };
+    await h.actions.retryGeneration("old-gen");
+    assert.strictEqual(h.state.generations["old-gen"], before);
+    assert.equal(h.state.composerError, "new session notification");
+  });
+}
+
 test("regenerate associates all batch IDs without cancelling historical success", async () => {
   await semanticPostIdempotency.clear();
   const h = harness();

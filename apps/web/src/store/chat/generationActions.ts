@@ -438,10 +438,14 @@ export function createGenerationActions(
     async retryGeneration(generationId) {
       if (_retryInFlightGenerations.has(generationId)) return;
       _retryInFlightGenerations.add(generationId);
-      const before = get().generations[generationId];
-      const owner = get().currentUserId;
-      const convId = get().currentConvId;
+      const state = get();
+      const before = state.generations[generationId];
+      const owner = state.currentUserId;
+      const convId = state.currentConvId;
       const fence = _conversationMutationFence.snapshot();
+      const sessionFence = _userSessionFence.snapshot();
+      const taskConvId = _generationConvIds.get(generationId) ??
+        (before?.message_id ? _messageConvIds.get(before.message_id) : undefined) ?? convId;
       try {
         await retryTask("generations", generationId);
       } finally {
@@ -450,13 +454,10 @@ export function createGenerationActions(
 
       // 与 regenerate/upscale/reroll 同类：乐观重新入队后同步失效会话历史缓存，
       // 否则切走切回会短暂显示该 generation 旧的失败/取消状态。
-      const retriedGen = get().generations[generationId];
-      invalidateConversationHistoryCache(
-        retriedGen?.message_id
-          ? (_messageConvIds.get(retriedGen.message_id) ??
-            get().currentConvId)
-          : get().currentConvId,
-      );
+      if (get().currentUserId !== owner || !_userSessionFence.isCurrent(sessionFence)) return;
+      // A late acknowledgement belongs to the captured task, never a newly
+      // selected conversation or a replacement login session.
+      invalidateConversationHistoryCache(taskConvId);
 
       set((s) => {
         const gen = s.generations[generationId];

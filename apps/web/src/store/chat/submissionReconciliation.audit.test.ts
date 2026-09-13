@@ -38,6 +38,23 @@ test("batch acknowledgements retain every returned generation ID", () => {
   assert.deepEqual(result[0].generation_ids, ["g1", "g2", "g3"]);
 });
 
+test("an empty batch list still preserves a realtime legacy generation ID", () => {
+  const current = { ...assistant("asst-1", "streaming"),
+    generation_ids: [], generation_id: "early-generation" };
+  const ack = { ...assistant("asst-1"), generation_ids: ["g1", "g2"] };
+  const result = mergeSubmissionMessages([current], [ack]);
+  assert.deepEqual(result[0].generation_ids, ["g1", "g2", "early-generation"]);
+  assert.equal(result[0].status, "streaming");
+});
+
+test("an empty acknowledgement batch list does not discard its primary ID", () => {
+  const current = { ...assistant("asst-1", "succeeded"), generation_ids: ["current"] };
+  const ack = { ...assistant("asst-1"), generation_ids: [], generation_id: "ack-primary" };
+  const result = mergeSubmissionMessages([current], [ack]);
+  assert.deepEqual(result[0].generation_ids, ["ack-primary", "current"]);
+  assert.equal(result[0].status, "succeeded");
+});
+
 test("queued placeholders cannot replace an existing terminal task", () => {
   const completed = { ...generation("succeeded"), finished_at: 3 };
   const result = mergeSubmissionGenerations({ "gen-1": completed }, { "gen-1": generation("queued") });

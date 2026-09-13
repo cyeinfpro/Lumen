@@ -3747,8 +3747,17 @@ async def test_silent_generation_parent_query_filters_deleted_messages() -> None
         )
 
     assert getattr(excinfo.value, "status_code", None) == 404
-    rendered = str(db.statements[2])
-    assert "messages.deleted_at IS NULL" in rendered
+    assert excinfo.value.detail["error"]["message"] == "parent message not found"
+    # Identity/conversation fences can add queries before the parent lookup.
+    # Locate the actual input query rather than accidentally checking a lock.
+    parent_queries = [
+        statement for statement in db.statements
+        if _statement_has_eq_filter(statement, messages.Message.id, "deleted-parent")
+    ]
+    assert len(parent_queries) == 1
+    assert "messages.deleted_at IS NULL" in str(parent_queries[0])
+    assert db.added == []
+    assert db.committed is False
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,9 @@
 import type { AssistantMessage, Generation, Message } from "../../lib/types";
 
 function submissionGenerationIds(message: AssistantMessage): string[] {
-  return message.generation_ids ?? (message.generation_id ? [message.generation_id] : []);
+  return message.generation_ids?.length
+    ? message.generation_ids
+    : (message.generation_id ? [message.generation_id] : []);
 }
 
 function normalizeAcknowledgement(message: Message): Message {
