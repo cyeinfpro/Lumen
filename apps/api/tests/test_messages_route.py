@@ -1781,6 +1781,86 @@ async def test_silent_generation_creation_persists_request_hash_on_every_generat
     assert db.committed is True
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("invalidated", "status_code"),
+    [("conversation", 404), ("parent", 404), ("attachment", 400)],
+)
+async def test_silent_generation_revalidates_visibility_under_write_locks(
+    monkeypatch: pytest.MonkeyPatch, invalidated: str, status_code: int,
+) -> None:
+    """Deletion may commit while the request is waiting for its user lock."""
+    class DeletionRaceDb(_Db):
+        user_locked = False
+
+        async def execute(self, statement: Any) -> _Result:
+            rendered = str(statement).lower()
+            if "from users" in rendered:
+                self.user_locked = True
+            if self.user_locked and invalidated == "parent" and "from messages" in rendered:
+                self.statements.append(statement)
+                return _Result(None)
+            if self.user_locked and invalidated == "attachment" and "from images" in rendered:
+                self.statements.append(statement)
+                return _Result(all_values=[])
+            return await super().execute(statement)
+
+    async def no_lookup(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def no_lock(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    async def no_publish(**_kwargs: Any) -> None:
+        return None
+
+    creations: list[Any] = []
+
+    async def create_task(**kwargs: Any) -> messages.AssistantTaskResult:
+        creations.append(kwargs)
+        return messages.AssistantTaskResult(
+            assistant_msg=_message(
+                id="unexpected-assistant", role=messages.Role.ASSISTANT.value,
+                parent_message_id="parent-1", status=messages.MessageStatus.PENDING.value,
+            ),
+            completion_id=None, generation_ids=["unexpected-generation"],
+            outbox_payloads=[], outbox_rows=[],
+        )
+
+    monkeypatch.setattr(messages, "get_redis", lambda: object())
+    monkeypatch.setattr(messages, "get_spec", lambda _key: None)
+    monkeypatch.setattr(messages, "_lookup_silent_generation", no_lookup)
+    monkeypatch.setattr(messages, "_lock_idempotency_key", no_lock)
+    monkeypatch.setattr(messages, "_create_assistant_task", create_task)
+    monkeypatch.setattr(messages, "_publish_message_appended", no_publish)
+    monkeypatch.setattr(messages, "_publish_assistant_task", no_publish)
+    db = DeletionRaceDb([
+        _Result(_conv()),
+        _Result(_message(id="parent-1", role=messages.Role.USER.value)),
+        _Result(all_values=["reference"]),
+    ])
+    if invalidated == "conversation":
+        db.locked_conversation_override = None
+    body = _silent_body(intent="image_to_image", attachment_image_ids=["reference"])
+
+    with pytest.raises(HTTPException) as excinfo:
+        await messages.create_silent_generation("conv-1", body, _wallet_user(), db)
+
+    assert excinfo.value.status_code == status_code
+    assert creations == []
+    assert db.committed is False
+    user_lock = next(
+        index for index, statement in enumerate(db.statements)
+        if "from users" in str(statement).lower()
+    )
+    conversation_lock = next(
+        index for index, statement in enumerate(db.statements)
+        if "from conversations" in str(statement).lower()
+        and getattr(statement, "_for_update_arg", None) is not None
+    )
+    assert user_lock < conversation_lock
+
+
 def test_idempotency_advisory_lock_key_is_conversation_scoped() -> None:
     assert (
         messages._idempotency_lock_key("user-1", "conv-a", "same-key")  # noqa: SLF001
