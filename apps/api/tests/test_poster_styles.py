@@ -14,6 +14,7 @@ import hashlib
 import json
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -774,28 +775,57 @@ async def test_sync_lease_allows_only_one_active_owner(
 def test_sync_lease_is_atomic_across_processes(tmp_path: Path) -> None:
     script = (
         "import sys\n"
+        "import time\n"
         "from pathlib import Path\n"
         "from app.routes import poster_styles as target\n"
         "root = Path(sys.argv[1])\n"
         "target._library_sync_state_path = lambda: root / 'state.json'\n"
         "target._library_sync_lock_path = lambda: root / 'sync.lock'\n"
+        "(root / f'ready-{sys.argv[2]}').touch()\n"
+        "while not (root / 'start').exists():\n"
+        "    time.sleep(0.01)\n"
         "token, _state = target._claim_library_sync_lease_sync()\n"
-        "print('won' if token else 'lost')\n"
+        "print('won' if token else 'lost', flush=True)\n"
     )
-    processes = [
-        subprocess.Popen(  # noqa: S603
-            [sys.executable, "-c", script, str(tmp_path)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        for _ in range(4)
-    ]
+    processes: list[subprocess.Popen[str]] = []
     results: list[str] = []
-    for process in processes:
-        stdout, stderr = process.communicate(timeout=20)
-        assert process.returncode == 0, stderr
-        results.append(stdout.strip())
+    try:
+        for index in range(4):
+            processes.append(
+                subprocess.Popen(  # noqa: S603
+                    [sys.executable, "-c", script, str(tmp_path), str(index)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            )
+        # Cold imports are not lock contention. Start all contenders together
+        # after initialization, retaining the original 20-second claim budget.
+        startup_deadline = time.monotonic() + 60
+        ready_paths = [tmp_path / f"ready-{index}" for index in range(4)]
+        while not all(path.exists() for path in ready_paths):
+            for process in processes:
+                if process.poll() is not None:
+                    stdout, stderr = process.communicate(timeout=1)
+                    pytest.fail(f"Lease worker exited before readiness: {stderr or stdout}")
+            assert time.monotonic() < startup_deadline, "Lease workers did not initialize"
+            time.sleep(0.01)
+        (tmp_path / "start").touch()
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=20)
+            assert process.returncode == 0, stderr
+            results.append(stdout.strip())
+    finally:
+        # Failed startup/assertions must not leave contenders in later tests.
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+        for process in processes:
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate(timeout=5)
 
     assert results.count("won") == 1
     assert results.count("lost") == 3

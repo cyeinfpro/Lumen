@@ -29,6 +29,8 @@ export type NoContent = undefined;
 
 export type ApiFetchInit<T = unknown> = RequestInit & {
   expectNoContent?: boolean;
+  /** Opt in only when the endpoint contract permits JSON null. */
+  allowNullResponse?: boolean;
   validate?: ResponseValidator<T>;
   /**
    * @deprecated Prefer a typed client and RequestBudget. Omitted requests use

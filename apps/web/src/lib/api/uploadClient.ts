@@ -6,6 +6,8 @@ import type { ResponseValidator } from "./response";
 type UploadOptions<T = unknown> = Omit<RequestInit, "method" | "body"> & {
   method?: "POST" | "PUT" | "PATCH";
   budget?: RequestBudget;
+  /** Opt in only when the endpoint contract permits JSON null. */
+  allowNullResponse?: boolean;
   validate?: ResponseValidator<T>;
 };
 

@@ -16,7 +16,7 @@ import {
   type AgentSessionPatchInput,
   type AgentStatus,
 } from "../model/contracts";
-import { getAgentActiveRun, listAgentMessages } from "../api/agentApi";
+import { refreshAgentSnapshot } from "./agentSnapshot";
 import {
   useAgentActiveRunQuery,
   useAgentMessagesQuery,
@@ -204,30 +204,9 @@ export function AgentWorkspaceController({
     return candidates[0] ?? null;
   }, [currentSessionId, runsById]);
   const snapshotPollIntervalMs = snapshotPollInterval(Boolean(activeRun));
-  const refreshSnapshot = useCallback(
-    async (signal?: AbortSignal) => {
-      const sessionId = useAgentStore.getState().currentSessionId;
-      if (!sessionId) return;
-      const identity = getPrivateIdentitySnapshot();
-      const [snapshot, run] = await Promise.all([
-        listAgentMessages(sessionId, { limit: 100, includeTasks: true, signal }),
-        getAgentActiveRun(sessionId, signal),
-      ]);
-      const currentIdentity = getPrivateIdentitySnapshot();
-      if (
-        useAgentStore.getState().currentSessionId !== sessionId ||
-        currentIdentity.userId !== identity.userId ||
-        currentIdentity.epoch !== identity.epoch
-      ) return;
-      applySnapshot(sessionId, snapshot);
-      if (run) applyRunSnapshot(run);
-      await confirmObservedAgentRuns(identity, sessionId, snapshot.runs);
-    },
-    [applyRunSnapshot, applySnapshot],
-  );
   const coordinatedRefresh = useCallback((signal?: AbortSignal) =>
-    refreshCoordinator.request(() => refreshSnapshot(signal)),
-  [refreshCoordinator, refreshSnapshot]);
+    refreshCoordinator.request(() => refreshAgentSnapshot(signal)),
+  [refreshCoordinator]);
   const requestRefresh = useCallback(() => {
     void coordinatedRefresh().catch(() => undefined);
   }, [coordinatedRefresh]);

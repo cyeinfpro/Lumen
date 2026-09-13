@@ -12,6 +12,8 @@ type CommandOptions<T = unknown> = Omit<RequestInit, "method"> & {
   method?: "POST" | "PUT" | "PATCH" | "DELETE";
   budget?: RequestBudget;
   expectNoContent?: boolean;
+  /** Opt in only when the endpoint contract permits JSON null. */
+  allowNullResponse?: boolean;
   validate?: ResponseValidator<T>;
 };
 
