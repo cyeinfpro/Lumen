@@ -272,6 +272,50 @@ async def _recover_concurrent_silent_generation(
     return prior
 
 
+async def _publish_silent_generation(
+    db: AsyncSession,
+    *,
+    runtime: SilentGenerationRuntime,
+    redis: Any,
+    user_id: str,
+    conv_id: str,
+    result: Any,
+) -> SilentGenerationOut:
+    """Publish only the task whose transaction has already committed."""
+    await db.refresh(result.assistant_msg)
+    await runtime.await_post_commit_publishes(
+        (
+            "message_appended",
+            runtime.publish_message_appended(
+                redis=redis,
+                user_id=user_id,
+                conv_id=conv_id,
+                message_ids=[result.assistant_msg.id],
+            ),
+            None,
+        ),
+        (
+            "assistant_task",
+            runtime.publish_assistant_task(
+                db=db,
+                redis=redis,
+                user_id=user_id,
+                conv_id=conv_id,
+                assistant_msg_id=result.assistant_msg.id,
+                outbox_payloads=result.outbox_payloads,
+                outbox_rows=result.outbox_rows,
+            ),
+            result.assistant_msg.id,
+        ),
+        user_id=user_id,
+        conv_id=conv_id,
+    )
+    return SilentGenerationOut(
+        assistant_message=MessageOut.model_validate(result.assistant_msg),
+        generation_ids=result.generation_ids,
+    )
+
+
 async def create_silent_generation(
     conv_id: str,
     body: SilentGenerationIn,
@@ -442,35 +486,11 @@ async def create_silent_generation(
         await db.rollback()
         raise
 
-    await db.refresh(result.assistant_msg)
-    await runtime.await_post_commit_publishes(
-        (
-            "message_appended",
-            runtime.publish_message_appended(
-                redis=redis,
-                user_id=user_id,
-                conv_id=conv_id,
-                message_ids=[result.assistant_msg.id],
-            ),
-            None,
-        ),
-        (
-            "assistant_task",
-            runtime.publish_assistant_task(
-                db=db,
-                redis=redis,
-                user_id=user_id,
-                conv_id=conv_id,
-                assistant_msg_id=result.assistant_msg.id,
-                outbox_payloads=result.outbox_payloads,
-                outbox_rows=result.outbox_rows,
-            ),
-            result.assistant_msg.id,
-        ),
+    return await _publish_silent_generation(
+        db,
+        runtime=runtime,
+        redis=redis,
         user_id=user_id,
         conv_id=conv_id,
-    )
-    return SilentGenerationOut(
-        assistant_message=MessageOut.model_validate(result.assistant_msg),
-        generation_ids=result.generation_ids,
+        result=result,
     )
