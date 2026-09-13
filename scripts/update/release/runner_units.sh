@@ -146,7 +146,15 @@ refresh_update_runner_units() {
         rm -rf "${tmp_dir}"
         return 1
     fi
-    if ! lumen_run_as_root systemctl enable --now lumen-update.path; then
+    # Re-arm a watcher poisoned by an older runner's start-limit failure.
+    # Never restart the runner here: it may be executing this very update.
+    if ! lumen_run_as_root systemctl reset-failed lumen-update.path lumen-update-runner.service; then
+        log_error "[refresh_update_runner] 无法重置更新入口失败状态。"
+        rm -rf "${tmp_dir}"
+        return 1
+    fi
+    if ! lumen_run_as_root systemctl enable --now lumen-update.path \
+            || ! lumen_run_as_root systemctl restart lumen-update.path; then
         log_error "[refresh_update_runner] 启用 lumen-update.path 失败，拒绝完成 switch。"
         rm -rf "${tmp_dir}"
         return 1

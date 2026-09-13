@@ -406,3 +406,30 @@ async def test_clean_terminal_journal_allows_new_launch(
 
     assert (pid, unit, proc) == (0, "lumen-update-runner.service", None)
     assert lock.releases == [{"succeeded": True, "reason": "launched"}]
+
+
+@pytest.mark.asyncio
+async def test_host_runner_timeout_persists_failed_check_for_status_refresh(tmp_path: Path) -> None:
+    from app.services.admin.update_status import parse_steps
+
+    lock = LockRecorder()
+    runtime, _shared_root, backup_root = _runtime(
+        tmp_path, lock, start_update_via_path_unit=lambda **_kwargs: None,
+    )
+    with pytest.raises(TypedHttpError) as excinfo:
+        await _launch(runtime)
+    assert excinfo.value.code == "update_runner_not_started"
+    phases = parse_steps((backup_root / ".update.log").read_text())
+    assert len(phases) == 1
+    assert phases[0].phase == "check"
+    assert phases[0].status == "done"
+    assert phases[0].rc == 1
+    assert lock.releases == [{"succeeded": False, "reason": "launch_failed"}]
+
+
+def test_launch_failure_logging_does_not_hide_original_error() -> None:
+    class UnwritableLog:
+        def write(self, _value: str) -> None:
+            raise OSError("full disk")
+
+    update_trigger._record_launch_failure(UnwritableLog())

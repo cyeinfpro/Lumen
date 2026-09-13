@@ -284,6 +284,8 @@ def test_update_recovery_marker_survives_failure_and_clears_at_terminal_state(
         LUMEN_UPDATE_JOURNAL={shlex.quote(str(journal))}
         LUMEN_UPDATE_RECOVERY_MARKER={shlex.quote(str(marker))}
         OPERATION_ID=update-consumer
+        LUMEN_UPDATE_API_OPERATION_ID=update-consumer
+        LUMEN_UPDATE_REQUEST_SHA256={"a" * 64}
         lumen_update_journal_init
         test -f {shlex.quote(str(marker))}
         lumen_update_journal_phase_start lock
@@ -302,6 +304,8 @@ def test_update_recovery_marker_survives_failure_and_clears_at_terminal_state(
         LUMEN_UPDATE_JOURNAL={shlex.quote(str(journal))}
         LUMEN_UPDATE_RECOVERY_MARKER={shlex.quote(str(marker))}
         OPERATION_ID=update-consumer
+        LUMEN_UPDATE_API_OPERATION_ID=update-consumer
+        LUMEN_UPDATE_REQUEST_SHA256={"a" * 64}
         LUMEN_UPDATE_RESUME=1
         lumen_update_journal_init
         lumen_update_journal_status rolled_back

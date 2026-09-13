@@ -261,7 +261,9 @@ install_update_runner_units() {
         emit_step_done
         return 0
     fi
-    if ! lumen_run_as_root systemctl enable --now lumen-update.path; then
+    if ! lumen_run_as_root systemctl reset-failed lumen-update.path lumen-update-runner.service \
+            || ! lumen_run_as_root systemctl enable --now lumen-update.path \
+            || ! lumen_run_as_root systemctl restart lumen-update.path; then
         log_warn "启用 lumen-update.path 失败，面板一键更新将不可用；可稍后手动执行 systemctl enable --now lumen-update.path。"
         rm -rf "${tmp_dir}"
         emit_step_done

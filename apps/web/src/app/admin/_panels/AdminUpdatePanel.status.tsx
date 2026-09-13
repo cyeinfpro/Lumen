@@ -22,18 +22,20 @@ import {
   type UpdateBanner,
 } from "./AdminUpdatePanel.helpers";
 
-type UpdateConsoleState = "rollback" | "running" | "failed" | "complete" | "idle";
+type UpdateConsoleState = "rollback" | "running" | "failed" | "complete" | "incomplete" | "idle";
 
 function updateConsoleState(
   running: boolean,
   failed: boolean,
   isRollingBack: boolean,
   hasPhases: boolean,
+  complete: boolean,
 ): UpdateConsoleState {
   if (running && isRollingBack) return "rollback";
   if (running) return "running";
   if (failed) return "failed";
-  if (hasPhases) return "complete";
+  if (complete) return "complete";
+  if (hasPhases) return "incomplete";
   return "idle";
 }
 
@@ -86,6 +88,8 @@ function updateConsolePillLabel(state: UpdateConsoleState): string {
       return "上次失败";
     case "complete":
       return "上次完成";
+    case "incomplete":
+      return "未完成";
     default:
       return "空闲";
   }
@@ -113,6 +117,7 @@ function updateConsoleSubtitle({
 }
 
 export function UpdateConsoleHeader({
+  complete,
   running,
   failed,
   isRollingBack,
@@ -127,6 +132,7 @@ export function UpdateConsoleHeader({
   onRollbackPrevious,
   onDetailsToggle,
 }: {
+  complete: boolean;
   running: boolean;
   failed: boolean;
   isRollingBack: boolean;
@@ -141,7 +147,7 @@ export function UpdateConsoleHeader({
   onRollbackPrevious: () => void;
   onDetailsToggle: () => void;
 }) {
-  const state = updateConsoleState(running, failed, isRollingBack, phases.length > 0);
+  const state = updateConsoleState(running, failed, isRollingBack, phases.length > 0, complete);
   return (
     <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
       <div className="flex min-w-0 gap-3">
@@ -375,26 +381,29 @@ export function ReloadNotice({
 function progressLabel(
   running: boolean,
   failed: boolean,
+  complete: boolean,
   activePhase: UpdateStepRecord | null,
 ): string {
   if (running) return `执行中：${phaseLabel(activePhase?.phase ?? "")}`;
   if (failed) return `失败于：${phaseLabel(activePhase?.phase ?? "")}`;
-  return "更新已完成";
+  return complete ? "更新已完成" : "更新尚未完成";
 }
 
-function progressClass(running: boolean, failed: boolean): string {
+function progressClass(running: boolean, failed: boolean, complete: boolean): string {
   if (failed) return "bg-danger/80";
   if (running) return "bg-info/80";
-  return "bg-success/80";
+  return complete ? "bg-success/80" : "bg-[var(--fg-2)]";
 }
 
 export function UpdateProgress({
+  complete,
   visible,
   running,
   failed,
   activePhase,
   progressPct,
 }: {
+  complete: boolean;
   visible: boolean;
   running: boolean;
   failed: boolean;
@@ -406,7 +415,7 @@ export function UpdateProgress({
     <div className="mt-3">
       <div className="flex items-center justify-between gap-3">
         <span className="truncate type-caption font-medium text-[var(--fg-1)]">
-          {progressLabel(running, failed, activePhase)}
+          {progressLabel(running, failed, complete, activePhase)}
         </span>
         <span className="shrink-0 font-mono type-caption text-[var(--fg-2)]">
           {progressPct}%
@@ -416,7 +425,7 @@ export function UpdateProgress({
         <div
           className={cn(
             "h-full transition-[width] duration-500 ease-out",
-            progressClass(running, failed),
+            progressClass(running, failed, complete),
           )}
           style={{ width: `${progressPct}%` }}
         />

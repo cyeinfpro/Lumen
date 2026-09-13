@@ -46,6 +46,7 @@ const PHASE_LABEL: Record<string, string> = {
   health_check: "健康检查",
   health_post: "健康检查",
   cleanup: "清理旧版本",
+  complete: "更新完成",
   rollback: "回滚",
 };
 

@@ -25,6 +25,7 @@ import {
   type AdminStreamStatus,
   type UpdateBanner,
 } from "./AdminUpdatePanel.helpers";
+import { updateOutcome } from "./AdminUpdatePanel.outcome";
 import { UpdateDetails } from "./AdminUpdatePanel.details";
 import { RollbackConfirmDialog } from "./AdminUpdatePanel.dialogs";
 import {
@@ -96,10 +97,9 @@ export function LumenUpdateBlock({
     }
     return order;
   }, [phases]);
-  const failed = useMemo(
-    () => phases.some((phase) => phase.status === "done" && phase.rc != null && phase.rc !== 0),
-    [phases],
-  );
+  const outcome = updateOutcome(running, phases, banner?.kind === "error");
+  const failed = outcome === "failed";
+  const complete = outcome === "complete";
   const activePhase = useMemo(() => {
     const runningIndex = phases.findIndex((phase) => phase.status === "running");
     if (runningIndex >= 0) return phases[runningIndex];
@@ -109,12 +109,12 @@ export function LumenUpdateBlock({
   const completedCount = useMemo(
     () =>
       phases.filter(
-        (phase) => phase.status === "done" && (phase.rc ?? 0) === 0,
+        (phase) => phase.status === "done" && phase.rc === 0,
       ).length,
     [phases],
   );
   const totalCount = checklist.length;
-  const progressPct = progressPercent(completedCount, totalCount);
+  const progressPct = complete ? 100 : Math.min(99, progressPercent(completedCount, totalCount));
 
   const [userLogOpen, setUserLogOpen] = useState<boolean | null>(null);
   const logOpen = userLogOpen ?? running;
@@ -135,11 +135,11 @@ export function LumenUpdateBlock({
   const previousRunningRef = useRef(running);
   useEffect(() => {
     const wasRunning = previousRunningRef.current;
-    previousRunningRef.current = running;
-    if (!wasRunning || running || failed) return;
+    previousRunningRef.current = running || (wasRunning && !failed && !complete);
+    if (!wasRunning || running || !complete) return;
     const timeout = setTimeout(() => setReloadCountdown(RELOAD_DELAY_SEC), 0);
     return () => clearTimeout(timeout);
-  }, [running, failed]);
+  }, [running, failed, complete]);
   useEffect(() => {
     if (reloadCountdown == null) return;
     if (reloadCountdown <= 0) {
@@ -179,6 +179,7 @@ export function LumenUpdateBlock({
   return (
     <div className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-3 shadow-[var(--shadow-1)] backdrop-blur-sm">
       <UpdateConsoleHeader
+        complete={complete}
         running={running}
         failed={failed}
         isRollingBack={isRollingBack}
@@ -209,6 +210,7 @@ export function LumenUpdateBlock({
         onReload={reloadNow}
       />
       <UpdateProgress
+        complete={complete}
         visible={anyPending(running, phases.length > 0)}
         running={running}
         failed={failed}
