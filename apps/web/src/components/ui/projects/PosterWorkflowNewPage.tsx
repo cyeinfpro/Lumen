@@ -464,9 +464,7 @@ export function PosterWorkflowNewPage() {
                 onChange={(event) => setCopy(event.target.value.slice(0, COPY_MAX))}
                 rows={6}
                 maxLength={COPY_MAX}
-                placeholder={
-                  "例如：\n夏季新品·椰子香水\n清新调，海洋木质底；525 ml 经典瓶身\n限时五折 · 立即下单"
-                }
+                placeholder={"例如：\n夏季新品·椰子香水\n清新调，海洋木质底；525 ml 经典瓶身\n限时五折 · 立即下单"}
                 className="control-shell -mt-3 w-full resize-y px-3 py-2 type-body leading-7 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] placeholder:text-[var(--fg-3)] focus:border-accent-border focus:shadow-[var(--ring)]"
               />
 
