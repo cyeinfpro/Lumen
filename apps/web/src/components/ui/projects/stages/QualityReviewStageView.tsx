@@ -157,6 +157,7 @@ function ReviseAndDeliver({
         返修指令
       </p>
       <input
+        aria-label="返修指令"
         value={controller.instruction}
         onChange={(event) => controller.setInstruction(event.target.value)}
         className="control-shell mt-3 h-10 w-full px-3 type-body-sm text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] placeholder:text-[var(--fg-3)] focus:border-accent-border focus:shadow-[var(--ring)]"

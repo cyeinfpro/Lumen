@@ -62,6 +62,7 @@ export function WalletSearchForm({
       className="grid gap-3 md:grid-cols-[1fr_140px_auto]"
     >
       <Input
+        aria-label="搜索用户邮箱或用户 ID"
         value={query}
         onChange={(event) => onQueryChange(event.target.value)}
         placeholder="邮箱 / 用户 ID"
@@ -248,11 +249,13 @@ function WalletAdjustmentCard({
     <div className="space-y-2 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-4">
       <p className="type-body-sm font-medium">调账</p>
       <Input
+        aria-label="调账金额（正数增加，负数扣减）"
         value={amount}
         onChange={(event) => onAmountChange(event.target.value)}
         placeholder="+10 / -5"
       />
       <Input
+        aria-label="调账理由"
         value={reason}
         onChange={(event) => onReasonChange(event.target.value)}
         placeholder="理由"

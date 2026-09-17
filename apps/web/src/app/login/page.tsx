@@ -26,6 +26,7 @@ import {
 } from "@/lib/apiClient";
 import { isValidEmailInput, normalizeEmailInput } from "@/lib/email";
 import { errorToText } from "@/lib/errors";
+import { useFormFeedback } from "@/hooks/useFormFeedback";
 
 export default function LoginPage() {
   return (
@@ -45,7 +46,8 @@ function LoginInner() {
   const [password, setPassword] = useState("");
   const [showPwd, setShowPwd] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const feedback = useFormFeedback("login-form-error");
+  const error = feedback.message;
   const submitGuardRef = useRef(false);
 
   // review §9 / #34: 仅当后端 /auth/api-suppliers 返回非空（即 BYOK 公开注册开启
@@ -61,19 +63,19 @@ function LoginInner() {
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError(null);
+    feedback.clear();
 
     const trimmedEmail = normalizeEmailInput(email);
     if (!trimmedEmail) {
-      setError("邮箱未填");
+      feedback.report("邮箱未填", "login-email");
       return;
     }
     if (!isValidEmailInput(trimmedEmail)) {
-      setError("邮箱格式不正确");
+      feedback.report("邮箱格式不正确", "login-email");
       return;
     }
     if (!password) {
-      setError("密码未填");
+      feedback.report("密码未填", "login-password");
       return;
     }
 
@@ -86,27 +88,27 @@ function LoginInner() {
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.code === "secure_cookie_requires_https") {
-          setError(
+          feedback.report(
             "密码验证成功，但当前使用 HTTP，浏览器无法保存 Secure 会话 Cookie。改用 HTTPS 地址后重新登录。",
           );
         } else if (err.code === "session_unverified") {
-          setError("密码验证成功，但登录会话未能确认。检查 Cookie 或反向代理配置后重试。");
+          feedback.report("密码验证成功，但登录会话未能确认。检查 Cookie 或反向代理配置后重试。");
         } else if (
           err.status === 401 ||
           err.status === 403 ||
           err.status === 404
         ) {
-          setError("邮箱或密码不正确");
+          feedback.report("邮箱或密码不正确");
         } else if (err.status === 422) {
-          setError("提交内容不合法");
+          feedback.report("提交内容不合法");
         } else if (err.status === 429) {
-          setError("尝试次数过多，稍后再试");
+          feedback.report("尝试次数过多，稍后再试");
         } else {
           // 兜底使用统一错误映射，避免暴露原始 ApiError code
-          setError(errorToText(err));
+          feedback.report(errorToText(err));
         }
       } else {
-        setError(errorToText(err));
+        feedback.report(errorToText(err));
       }
       submitGuardRef.current = false;
       setSubmitting(false);
@@ -143,10 +145,11 @@ function LoginInner() {
                 </p>
               </div>
 
-              <form onSubmit={onSubmit} className="auth-form" noValidate>
+              <form onSubmit={onSubmit} className="auth-form" noValidate onInput={feedback.clear}>
                 <Field id="login-email" label="邮箱" icon={<Mail className="w-3.5 h-3.5" />}>
                   <input
                     id="login-email"
+                    {...feedback.fieldProps("login-email")}
                     name="email"
                     type="email"
                     required
@@ -171,6 +174,7 @@ function LoginInner() {
                   <div className="relative">
                     <input
                       id="login-password"
+                    {...feedback.fieldProps("login-password")}
                       name="password"
                       type={showPwd ? "text" : "password"}
                       required
@@ -216,6 +220,8 @@ function LoginInner() {
                   <motion.div
                     initial={{ opacity: 0, y: -2 }}
                     animate={{ opacity: 1, y: 0 }}
+                    id={feedback.errorId}
+                    tabIndex={-1}
                     role="alert"
                     aria-live="assertive"
                     className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger"

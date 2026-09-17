@@ -18,6 +18,13 @@ import {
 } from "@/lib/apiClient";
 import { qk } from "@/lib/queries";
 import { cn } from "@/lib/utils";
+import { copyTextToClipboard } from "@/lib/clipboard";
+import {
+  ProjectImageDownloadButton,
+  ProjectImageDownloadStatus,
+  useProjectImageDownloads,
+} from "../components/ProjectImageDownloads";
+
 import { ImagePreviewModal } from "../components/ImagePreviewModal";
 import { StageFrame } from "../components/StageFrame";
 import { imageSrc } from "../utils";
@@ -81,24 +88,12 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
     },
   });
 
-  const downloadAll = () => {
-    let count = 0;
-    for (const render of renders) {
-      const image = findImageById(workflow, render.image_id);
-      if (!image) continue;
-      const href = image.url || image.display_url;
-      if (!href) continue;
-      const link = document.createElement("a");
-      link.href = href;
-      link.download = `poster_${render.aspect_ratio}_${render.id.slice(0, 8)}.png`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      count += 1;
-    }
-    if (count) toast.success(`已派发 ${count} 张下载`);
-    else toast.warning("没有可下载的成品");
-  };
+  const downloads = useProjectImageDownloads(workflow.id);
+  const downloadFiles = renders.flatMap((render) => {
+    const image = findImageById(workflow, render.image_id);
+    const url = image?.url || image?.display_url;
+    return url ? [{ url, filename: `poster_${render.aspect_ratio}_${render.id.slice(0, 8)}.png` }] : [];
+  });
 
   const copySummary = async () => {
     const meta = (workflow.metadata_jsonb || {}) as Record<string, unknown>;
@@ -112,10 +107,10 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
       `尺寸：${aspects}\n` +
       `创建：${workflow.created_at}\n`;
     try {
-      await navigator.clipboard.writeText(text);
+      await copyTextToClipboard(text);
       toast.success("项目信息已复制到剪贴板");
     } catch {
-      toast.error("复制失败，手动选择");
+      toast.error("复制失败，请检查浏览器剪贴板权限后重试");
     }
   };
 
@@ -123,18 +118,19 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
     <StageFrame
       eyebrow="N°07 — 交付"
       title="交付"
-      subtitle="批量下载所有尺寸，把成品加入项目素材，后续可从项目中心继续查找。"
+      subtitle="逐张下载所有尺寸，并可加入项目素材。若浏览器拦截连续下载，请使用单张下载按钮。"
       actions={
         <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2 sm:flex sm:flex-wrap">
           <Button
             variant="primary"
             size="sm"
-            onClick={downloadAll}
+            onClick={() => void downloads.start(downloadFiles)}
+            loading={downloads.busy}
             leftIcon={<Download className="h-3.5 w-3.5" />}
-            disabled={!renders.length}
+            disabled={!downloadFiles.length}
             className="w-full sm:w-auto"
           >
-            全部下载
+            逐张下载全部
           </Button>
           <Button
             variant="secondary"
@@ -159,6 +155,7 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
         </div>
       }
     >
+      <ProjectImageDownloadStatus downloads={downloads} />
       {!renders.length ? (
         <div className="mt-4 flex h-32 flex-col items-center justify-center gap-2 border border-dashed border-[var(--border)] text-[var(--fg-2)]">
           <span className="type-caption">
@@ -172,6 +169,7 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
               key={render.id}
               workflow={workflow}
               render={render}
+              downloading={downloads.busy}
               onPreview={(image) => {
                 setPreviewList([image]);
                 setPreviewIndex(0);
@@ -184,7 +182,7 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
       <div className="mt-8 grid gap-2 border-t border-[var(--border)] pt-5">
         <p className="inline-flex items-center gap-2 type-caption text-[var(--success)]">
           <Check className="h-3 w-3" />
-          交付就绪
+          {renders.length ? "交付就绪" : "尚无可交付成品"}
         </p>
         <p className="type-body-sm leading-[1.7] text-[var(--fg-1)]">
           {allSaved
@@ -221,9 +219,11 @@ function DeliveryCard({
   workflow,
   render,
   onPreview,
+  downloading,
 }: {
   workflow: WorkflowRun;
   render: PosterRender;
+  downloading: boolean;
   onPreview: (image: BackendImageMeta) => void;
 }) {
   const image = findImageById(workflow, render.image_id);
@@ -236,6 +236,7 @@ function DeliveryCard({
       <button
         type="button"
         onClick={() => onPreview(image)}
+        aria-label={`预览海报 ${render.aspect_ratio}`}
         className={cn(
           "relative block w-full overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]",
           aspectCls,
@@ -263,24 +264,11 @@ function DeliveryCard({
         </span>
       </div>
       <div className="mt-3">
-        <Button
-          variant="outline"
-          size="sm"
-          fullWidth
-          disabled={!downloadHref}
-          onClick={() => {
-            if (!downloadHref) return;
-            const link = document.createElement("a");
-            link.href = downloadHref;
-            link.download = `poster_${render.aspect_ratio}_${render.id.slice(0, 8)}.png`;
-            document.body.appendChild(link);
-            link.click();
-            link.remove();
-          }}
-          leftIcon={<Download className="h-3.5 w-3.5" />}
-        >
-          下载
-        </Button>
+        <ProjectImageDownloadButton
+          file={{ url: downloadHref, filename: `poster_${render.aspect_ratio}_${render.id.slice(0, 8)}.png` }}
+          disabled={downloading}
+          label={`下载海报 ${render.aspect_ratio}`}
+        />
       </div>
     </li>
   );

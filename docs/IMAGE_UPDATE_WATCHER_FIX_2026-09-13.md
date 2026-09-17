@@ -63,3 +63,8 @@ systemctl is-active lumen-update.path
 宿主机 journal complete、请求清理及 watcher 的 active/waiting 状态。
 
 保持上一 release 可回滚，不对同机其他项目或数据执行清理操作。
+
+## 本地验收记录
+
+版本同步检查、相关 Shell 语法检查、更新/安装/权限专项测试、API 更新测试、前端生产构建均通过。
+前端新增测试、TypeScript 类型检查、UI/架构/复杂度检查与 ESLint 的结果由独立质量操作记录。

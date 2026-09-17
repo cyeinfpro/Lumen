@@ -72,6 +72,7 @@ export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
       <section className="border-t border-[var(--border)] py-4">
         <p className="type-label text-[var(--fg-1)]">风格方向</p>
         <Textarea
+          aria-label="模特风格方向"
           value={stylePrompt}
           onChange={(event) => setStylePrompt(event.target.value)}
           rows={4}
@@ -84,6 +85,7 @@ export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
       <section className="border-t border-[var(--border)] py-4">
         <p className="type-label text-[var(--fg-1)]">避免特征</p>
         <Input
+          aria-label="模特避免特征"
           value={avoid}
           onChange={(event) => setAvoid(event.target.value)}
           wrapperClassName="mt-3"
@@ -106,6 +108,7 @@ export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
           />
         </div>
         <Input
+          aria-label="配饰内容"
           value={accessories}
           onChange={(event) => setAccessories(event.target.value)}
           disabled={!accessoryOn}

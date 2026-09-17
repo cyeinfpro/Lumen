@@ -30,6 +30,7 @@ import {
   useSystemSettingsQuery,
   useUpdateSystemSettingsMutation,
 } from "@/lib/queries";
+import { cn } from "@/lib/utils";
 import { Button, IconButton } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
 import { UnsavedSettingsGuard } from "@/components/ui/primitives/UnsavedSettingsGuard";
@@ -277,8 +278,9 @@ export function TelegramPanel() {
                     key={p.name}
                     type="button"
                     onClick={() => toggleProxy(p.name)}
+                    aria-pressed={sel}
                     className={
-                      "inline-flex items-center gap-1.5 h-8 px-3 rounded-full border type-caption transition-colors " +
+                      "inline-flex items-center gap-1.5 h-8 px-3 rounded-full border type-caption transition-colors max-sm:min-h-11 " +
                       (sel
                         ? "bg-[var(--accent)]/15 border-[var(--accent)]/40 text-[var(--accent)]"
                         : "bg-[var(--bg-2)] border-[var(--border)] text-[var(--fg-1)] hover:bg-[var(--bg-3)]")
@@ -308,6 +310,7 @@ export function TelegramPanel() {
                   key={s.value}
                   type="button"
                   onClick={() => setForm((f) => ({ ...f, proxy_strategy: s.value }))}
+                  aria-pressed={active}
                   className={
                     "text-left p-3 rounded-[var(--radius-card)] border type-caption transition-colors " +
                     (active
@@ -518,7 +521,7 @@ function Field({
             variant="ghost"
             size="sm"
             onClick={onToggleMask}
-            aria-label={masked ? "显示" : "隐藏"}
+            aria-label={`${masked ? "显示" : "隐藏"}${label}`}
             className="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 bg-[var(--bg-2)] hover:bg-[var(--bg-3)]"
           >
             {masked ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
@@ -546,24 +549,35 @@ function ToggleField({
 }) {
   return (
     <div className="flex items-start gap-3">
-      {/* 自定义 switch primitive，不在 IconButton/Button 范围内 */}
+      {/* 自定义 switch primitive，不在 IconButton/Button 范围内。*/}
+      {/* 外圈按钮保留 44px 移动端命中区，内圈轨道维持 24px 视觉高度。 */}
       <button
         type="button"
         role="switch"
+        aria-label={label}
         aria-checked={on}
         onClick={() => onChange(!on)}
-        className={
-          "shrink-0 mt-0.5 w-11 h-6 rounded-full transition-colors relative " +
-          (on
-            ? "bg-[var(--accent)]"
-            : "bg-[var(--bg-3)] border border-[var(--border)]")
-        }
+        className={cn(
+          "relative mt-0.5 inline-flex h-6 w-11 min-w-11 shrink-0 items-center justify-center rounded-full",
+          "touch-manipulation transition-[box-shadow] focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
+          "max-sm:min-h-11 max-sm:min-w-11",
+        )}
       >
         <span
-          className={
-            "absolute top-0.5 w-5 h-5 rounded-full bg-[var(--fg-0)] transition-transform " +
-            (on ? "translate-x-5" : "translate-x-0.5")
-          }
+          aria-hidden="true"
+          className={cn(
+            "absolute left-1/2 top-1/2 h-6 w-11 -translate-x-1/2 -translate-y-1/2 rounded-full transition-colors",
+            on
+              ? "bg-[var(--accent)]"
+              : "border border-[var(--border)] bg-[var(--bg-3)]",
+          )}
+        />
+        <span
+          aria-hidden="true"
+          className={cn(
+            "relative h-5 w-5 rounded-full bg-[var(--fg-0)] transition-transform",
+            on ? "translate-x-2.5" : "-translate-x-2.5",
+          )}
         />
       </button>
       <div className="min-w-0">

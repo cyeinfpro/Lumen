@@ -459,6 +459,7 @@ export function PosterWorkflowNewPage() {
                 }
               />
               <textarea
+                aria-label="海报文案"
                 value={copy}
                 onChange={(event) => setCopy(event.target.value.slice(0, COPY_MAX))}
                 rows={6}

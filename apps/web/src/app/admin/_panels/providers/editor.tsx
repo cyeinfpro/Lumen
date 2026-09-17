@@ -521,6 +521,7 @@ function ProviderJobOverrides({
           旁路服务地址（可选）
         </label>
         <Input
+          aria-label="旁路服务地址（可选）"
           type="url"
           placeholder="留空 = 使用全局任务旁路地址"
           value={draft.image_jobs_base_url ?? ""}

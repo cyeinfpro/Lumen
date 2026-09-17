@@ -100,6 +100,7 @@ function BootstrapCard({
       </div>
       <div className="grid gap-3 md:grid-cols-[120px_auto]">
         <input
+          aria-label="美元兑人民币汇率"
           value={rate}
           onChange={(event) => onRateChange(event.target.value)}
           inputMode="decimal"

@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useFormFeedback } from "@/hooks/useFormFeedback";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
@@ -59,11 +60,11 @@ function getSignupValidationError({
   email: string;
   password: string;
   confirm: string;
-}): string | null {
-  if (!verificationToken) return "API 密钥 未验证";
-  if (!isValidEmailInput(email)) return "邮箱格式不正确";
-  if (password.length < 8) return "密码至少 8 位";
-  if (password !== confirm) return "两次密码输入不一致";
+}): { message: string; fieldId: string } | null {
+  if (!verificationToken) return { message: "请先验证 API 密钥", fieldId: "signup-api-key" };
+  if (!isValidEmailInput(email)) return { message: "邮箱格式不正确", fieldId: "signup-email" };
+  if (password.length < 8) return { message: "密码至少 8 位", fieldId: "signup-password" };
+  if (password !== confirm) return { message: "两次密码输入不一致", fieldId: "signup-confirm-password" };
   return null;
 }
 
@@ -99,7 +100,16 @@ export default function SignupPage() {
   const [confirm, setConfirm] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const verificationFeedback = useFormFeedback("signup-verification-error");
+  const accountFeedback = useFormFeedback("signup-account-error");
+  const previousVerification = useRef("");
+  useEffect(() => {
+    if (previousVerification.current === verificationToken) return;
+    previousVerification.current = verificationToken;
+    const target = document.getElementById(verificationToken ? "signup-email" : "signup-api-key");
+    target?.focus({ preventScroll: true });
+    target?.scrollIntoView({ block: "nearest", behavior: "instant" });
+  }, [verificationToken]);
   const verifyGuardRef = useRef(false);
   const submitGuardRef = useRef(false);
 
@@ -110,13 +120,13 @@ export default function SignupPage() {
   const activeSupplierId = resolveSupplierId(supplierId, selectedSupplier?.id);
 
   const onVerify = async () => {
-    setError(null);
+    verificationFeedback.clear();
     if (!activeSupplierId) {
-      setError("供应商未选");
+      verificationFeedback.report("请选择供应商", "signup-supplier");
       return;
     }
     if (!apiKey.trim()) {
-      setError("API 密钥 未填");
+      verificationFeedback.report("请输入 API 密钥", "signup-api-key");
       return;
     }
     if (verifyGuardRef.current) return;
@@ -130,7 +140,7 @@ export default function SignupPage() {
     } catch (err) {
       setVerificationToken("");
       setKeyHint("");
-      setError(byokErrorText(err));
+      verificationFeedback.report(byokErrorText(err), "signup-api-key");
     } finally {
       verifyGuardRef.current = false;
       setVerifying(false);
@@ -139,7 +149,7 @@ export default function SignupPage() {
 
   const onCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError(null);
+    accountFeedback.clear();
     const trimmedEmail = normalizeEmailInput(email);
     const validationError = getSignupValidationError({
       verificationToken,
@@ -148,7 +158,8 @@ export default function SignupPage() {
       confirm,
     });
     if (validationError) {
-      setError(validationError);
+      const feedback = verificationToken ? accountFeedback : verificationFeedback;
+      feedback.report(validationError.message, validationError.fieldId);
       return;
     }
     if (submitGuardRef.current) return;
@@ -163,12 +174,12 @@ export default function SignupPage() {
       if (code && VERIFICATION_RESET_RE.test(code)) {
         setVerificationToken("");
         setKeyHint("");
-        setError(BYOK_ERROR_TEXT[code] ?? "验证已失效，重新验证 API 密钥");
+        verificationFeedback.report(BYOK_ERROR_TEXT[code] ?? "验证已失效，重新验证 API 密钥", "signup-api-key");
         submitGuardRef.current = false;
         setSubmitting(false);
         return;
       }
-      setError(byokErrorText(err));
+      accountFeedback.report(byokErrorText(err));
       submitGuardRef.current = false;
       setSubmitting(false);
     }
@@ -208,6 +219,14 @@ export default function SignupPage() {
             onSupplierChange={setSupplierId}
             onApiKeyChange={setApiKey}
             onVerify={() => void onVerify()}
+            feedback={verificationFeedback}
+            submitting={submitting}
+            onChangeKey={() => {
+              setVerificationToken("");
+              setKeyHint("");
+              verificationFeedback.clear();
+              accountFeedback.clear();
+            }}
           />
 
           <SignupAccountForm
@@ -217,7 +236,7 @@ export default function SignupPage() {
             showPassword={showPassword}
             submitting={submitting}
             verificationToken={verificationToken}
-            error={error}
+            feedback={accountFeedback}
             onSubmit={onCreate}
             onEmailChange={setEmail}
             onPasswordChange={setPassword}
@@ -244,6 +263,9 @@ function ApiKeyVerificationSection({
   onSupplierChange,
   onApiKeyChange,
   onVerify,
+  feedback,
+  submitting,
+  onChangeKey,
 }: {
   suppliers: PublicApiSupplier[];
   activeSupplierId: string;
@@ -258,11 +280,16 @@ function ApiKeyVerificationSection({
   onSupplierChange: (value: string) => void;
   onApiKeyChange: (value: string) => void;
   onVerify: () => void;
+  feedback: ReturnType<typeof useFormFeedback>;
+  submitting: boolean;
+  onChangeKey: () => void;
 }) {
-  const controlsDisabled = disabled || verifying || Boolean(verificationToken);
+  const controlsDisabled = disabled || verifying || submitting || Boolean(verificationToken);
 
   return (
-    <section className="page-section grid gap-4 !pt-0">
+    <form className="page-section grid gap-4 !pt-0" noValidate onInput={feedback.clear}
+      aria-label="连接 API 密钥"
+      onSubmit={(event) => { event.preventDefault(); if (!controlsDisabled) onVerify(); }}>
       <div className="type-label flex items-center gap-2">
         <KeyRound className="w-3.5 h-3.5" />
         连接 API 密钥
@@ -276,6 +303,7 @@ function ApiKeyVerificationSection({
         <span className="type-label">供应商</span>
         <Select
           id="signup-supplier"
+          {...feedback.fieldProps("signup-supplier")}
           name="supplier"
           value={activeSupplierId}
           disabled={controlsDisabled}
@@ -284,7 +312,7 @@ function ApiKeyVerificationSection({
           wrapperClassName="w-full"
         >
           {suppliers.length === 0 ? (
-            <option value="">暂无可用供应商</option>
+            <option value="">{suppliersFetching ? "正在加载供应商…" : "暂无可用供应商"}</option>
           ) : (
             suppliers.map((supplier) => (
               <option key={supplier.id} value={supplier.id}>
@@ -300,24 +328,24 @@ function ApiKeyVerificationSection({
           <Server className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--fg-2)]" />
           <input
             id="signup-api-key"
+            {...feedback.fieldProps("signup-api-key")}
             name="api-key"
             type="password"
             value={apiKey}
-            disabled={verifying || Boolean(verificationToken)}
+            disabled={controlsDisabled}
             onChange={(event) => onApiKeyChange(event.target.value)}
             placeholder="sk-..."
             autoComplete="off"
             autoCapitalize="none"
             autoCorrect="off"
             spellCheck={false}
-            enterKeyHint="next"
+            enterKeyHint="go"
             className="auth-control pl-10 pr-3"
           />
         </div>
       </label>
       <button
-        type="button"
-        onClick={onVerify}
+        type="submit"
         disabled={controlsDisabled}
         aria-busy={verifying}
         className="type-control inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] hover:bg-[var(--bg-3)] disabled:opacity-50"
@@ -328,7 +356,17 @@ function ApiKeyVerificationSection({
           keyHint={keyHint}
         />
       </button>
-    </section>
+      <SignupFormError feedback={feedback} />
+      {verificationToken ? (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p role="status" className="type-caption text-[var(--success-fg)]">密钥验证通过，继续填写账号信息。</p>
+          <button type="button" onClick={onChangeKey} disabled={submitting}
+            className="type-caption inline-flex min-h-11 items-center px-2 text-[var(--link-fg)] hover:underline disabled:opacity-50">
+            更换 API 密钥
+          </button>
+        </div>
+      ) : null}
+    </form>
   );
 }
 
@@ -379,7 +417,7 @@ function VerificationButtonContent({
     return (
       <>
         <Loader2 className="w-4 h-4 animate-spin" />
-        验证 Key
+        正在验证 API 密钥…
       </>
     );
   }
@@ -394,7 +432,7 @@ function VerificationButtonContent({
   return (
     <>
       <KeyRound className="w-4 h-4" />
-      验证 Key
+      验证 API 密钥
     </>
   );
 }
@@ -406,7 +444,7 @@ function SignupAccountForm({
   showPassword,
   submitting,
   verificationToken,
-  error,
+  feedback,
   onSubmit,
   onEmailChange,
   onPasswordChange,
@@ -419,7 +457,7 @@ function SignupAccountForm({
   showPassword: boolean;
   submitting: boolean;
   verificationToken: string;
-  error: string | null;
+  feedback: ReturnType<typeof useFormFeedback>;
   onSubmit: (event: React.FormEvent) => void;
   onEmailChange: (value: string) => void;
   onPasswordChange: (value: string) => void;
@@ -429,7 +467,7 @@ function SignupAccountForm({
   const passwordInputType = showPassword ? "text" : "password";
 
   return (
-    <form onSubmit={onSubmit} className="page-section auth-form">
+    <form onSubmit={onSubmit} className="page-section auth-form" noValidate onInput={feedback.clear} aria-label="创建账号">
       <div className="type-label flex items-center gap-2">
         <Mail className="w-3.5 h-3.5" />
         创建账号
@@ -438,6 +476,7 @@ function SignupAccountForm({
         <span className="type-label">邮箱</span>
         <input
           id="signup-email"
+          {...feedback.fieldProps("signup-email")}
           name="email"
           type="email"
           disabled={submitting}
@@ -460,6 +499,7 @@ function SignupAccountForm({
           <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--fg-2)]" />
           <input
             id="signup-password"
+          {...feedback.fieldProps("signup-password")}
             name="password"
             type={passwordInputType}
             disabled={submitting}
@@ -489,6 +529,7 @@ function SignupAccountForm({
         <span className="type-label">确认密码</span>
         <input
           id="signup-confirm-password"
+          {...feedback.fieldProps("signup-confirm-password")}
           name="password-confirmation"
           type={passwordInputType}
           disabled={submitting}
@@ -501,25 +542,25 @@ function SignupAccountForm({
         />
       </label>
 
-      {error ? (
-        <div
-          role="alert"
-          aria-live="assertive"
-          className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger"
-        >
-          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-          <span>{error}</span>
-        </div>
+      <SignupFormError feedback={feedback} />
+      {!verificationToken ? (
+        <p id="signup-verification-hint" className="type-caption text-[var(--fg-1)]">
+          请先在上方验证 API 密钥。已填写的账号信息会保留在本页。
+        </p>
       ) : null}
 
       <button
         type="submit"
         disabled={submitting || !verificationToken}
+        aria-describedby={!verificationToken ? "signup-verification-hint" : undefined}
         aria-busy={submitting}
         className="type-control inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[transform,background-color] hover:bg-[var(--accent-hover)] active:scale-[var(--press-scale-soft)] disabled:opacity-50"
       >
         {submitting ? (
-          <Loader2 className="w-4 h-4 animate-spin" />
+          <>
+            <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+            创建中…
+          </>
         ) : (
           <>
             创建账号
@@ -528,6 +569,17 @@ function SignupAccountForm({
         )}
       </button>
     </form>
+  );
+}
+
+function SignupFormError({ feedback }: { feedback: ReturnType<typeof useFormFeedback> }) {
+  if (!feedback.message) return null;
+  return (
+    <div id={feedback.errorId} tabIndex={-1} role="alert"
+      className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger">
+      <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+      <span>{feedback.message}</span>
+    </div>
   );
 }
 

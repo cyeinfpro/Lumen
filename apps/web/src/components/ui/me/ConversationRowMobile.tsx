@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/primitives/mobile";
 import { Button } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
+import { isImeOrRepeatedKey } from "@/lib/interactionKeys";
 import type { ConversationSummary } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
 
@@ -127,8 +128,9 @@ export function ConversationRowMobile({
 
   const submitRename = () => {
     const next = renameValue.trim();
+    if (!next) return;
     setRenameOpen(false);
-    if (!next || next === titleOf(conv)) return;
+    if (next === titleOf(conv)) return;
     onRename(next);
   };
 
@@ -275,11 +277,14 @@ export function ConversationRowMobile({
             重命名会话
           </h3>
           <input
+            aria-label="会话名称"
             autoFocus
             name="conversation-title"
+            maxLength={120}
             value={renameValue}
             onChange={(e) => setRenameValue(e.target.value)}
             onKeyDown={(e) => {
+              if (isImeOrRepeatedKey(e.nativeEvent)) return;
               if (e.key === "Enter") {
                 e.preventDefault();
                 submitRename();

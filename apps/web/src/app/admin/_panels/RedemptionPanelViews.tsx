@@ -152,6 +152,7 @@ export function CodeBatchForm({
         </label>
       </div>
       <input
+        aria-label="兑换码备注"
         value={note}
         onChange={(event) => onNoteChange(event.target.value)}
         placeholder="备注"
@@ -437,6 +438,7 @@ export function RedemptionCodesCard({
           className="grid gap-2 md:grid-cols-[1fr_auto]"
         >
           <input
+            aria-label="搜索兑换码前缀或批次 ID"
             value={qInput}
             onChange={(event) => onQInputChange(event.target.value)}
             placeholder="搜索前缀或 batch id"
