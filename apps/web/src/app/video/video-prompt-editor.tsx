@@ -83,6 +83,7 @@ export function VideoPromptEditor({
           </div>
         </div>
         <textarea
+          aria-label="镜头描述"
           ref={promptEditorRef}
           value={model.value}
           onChange={(event) => model.onChange(event.target.value)}

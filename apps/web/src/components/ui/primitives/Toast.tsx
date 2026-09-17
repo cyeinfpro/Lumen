@@ -140,7 +140,9 @@ function ToastRow({ item }: { item: ToastItem }) {
   const dismiss = useToastStore((s) => s.dismiss);
   const reduceMotion = useReducedMotion();
   const tone = TONE_CLASSES[item.tone];
-  const [paused, setPaused] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const paused = hovered || focused;
 
   useAutoDismiss(item.id, item.durationMs, dismiss, paused);
 
@@ -168,9 +170,9 @@ function ToastRow({ item }: { item: ToastItem }) {
       role={item.tone === "error" || item.tone === "warning" ? "alert" : "status"}
       aria-live={item.tone === "error" || item.tone === "warning" ? "assertive" : "polite"}
       aria-atomic="true"
-      onMouseEnter={() => setPaused(true)}
-      onMouseLeave={() => setPaused(false)}
-      onFocusCapture={() => setPaused(true)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onFocusCapture={() => setFocused(true)}
       onBlurCapture={(event) => {
         if (
           event.relatedTarget instanceof Node &&
@@ -178,7 +180,7 @@ function ToastRow({ item }: { item: ToastItem }) {
         ) {
           return;
         }
-        setPaused(false);
+        setFocused(false);
       }}
       className={cn(
         "pointer-events-auto w-[320px] max-w-[calc(100vw-2rem)]",
@@ -213,7 +215,7 @@ function ToastRow({ item }: { item: ToastItem }) {
               item.action?.onClick();
               dismiss(item.id);
             }}
-            className="type-caption mt-1.5 inline-flex items-center justify-center font-medium text-info underline-offset-2 hover:underline max-sm:-ml-2 max-sm:min-h-11 max-sm:min-w-11 max-sm:px-2"
+            className="type-caption mt-1.5 inline-flex items-center justify-center font-medium text-[var(--link-fg)] underline-offset-2 hover:underline max-sm:-ml-2 max-sm:min-h-11 max-sm:min-w-11 max-sm:px-2"
           >
             {item.action.label}
           </button>

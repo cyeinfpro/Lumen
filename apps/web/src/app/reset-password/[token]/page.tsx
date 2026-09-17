@@ -1,6 +1,7 @@
 "use client";
 
-import { use, useDeferredValue, useMemo, useRef, useState } from "react";
+import { use, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useFormFeedback } from "@/hooks/useFormFeedback";
 import Link from "next/link";
 import {
   AlertCircle,
@@ -46,8 +47,13 @@ function ResetPasswordConfirm({ token }: { token: string }) {
   const [showPwd, setShowPwd] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const feedback = useFormFeedback("reset-confirm-error");
+  const { message: error, report: setError } = feedback;
   const submitGuardRef = useRef(false);
+
+  useEffect(() => {
+    if (done) document.getElementById("reset-confirm-success")?.focus();
+  }, [done]);
 
   const deferredPassword = useDeferredValue(password);
   const strength = useMemo(
@@ -65,13 +71,13 @@ function ResetPasswordConfirm({ token }: { token: string }) {
 
   const onSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
-    setError(null);
+    feedback.clear();
     if (passwordTooShort) {
-      setError("密码至少 8 位");
+      setError("密码至少 8 位", "reset-password");
       return;
     }
     if (password !== confirm) {
-      setError("两次密码输入不一致");
+      setError("两次密码输入不一致", "reset-confirm");
       return;
     }
 
@@ -131,6 +137,8 @@ function ResetPasswordConfirm({ token }: { token: string }) {
           {done ? (
             <div className="space-y-4">
               <div
+                id="reset-confirm-success"
+                tabIndex={-1}
                 role="status"
                 aria-live="polite"
                 className="rounded-[var(--radius-dialog)] border border-success-border bg-success-soft p-5 type-body-sm text-success"
@@ -149,11 +157,12 @@ function ResetPasswordConfirm({ token }: { token: string }) {
               </Link>
             </div>
           ) : (
-            <form onSubmit={onSubmit} className="auth-form" noValidate>
+            <form onSubmit={onSubmit} className="auth-form" noValidate onInput={feedback.clear} aria-label="设置新密码">
               <Field id="reset-password" label="新密码" icon={<Lock className="h-3.5 w-3.5" />}>
                 <div className="relative">
                   <input
                     id="reset-password"
+                    {...feedback.fieldProps("reset-password", "reset-password-hint")}
                     name="password"
                     type={showPwd ? "text" : "password"}
                     required
@@ -182,6 +191,7 @@ function ResetPasswordConfirm({ token }: { token: string }) {
                 </div>
                 <PasswordStrength strength={strength} show={password.length > 0} />
                 <p
+                  id="reset-password-hint"
                   className={
                     "type-caption mt-1.5 " +
                     (password.length > 0 && passwordTooShort
@@ -200,6 +210,8 @@ function ResetPasswordConfirm({ token }: { token: string }) {
               >
                 <input
                   id="reset-confirm"
+                  {...feedback.fieldProps("reset-confirm", confirmMismatch ? "reset-confirm-mismatch" : undefined)}
+                  aria-invalid={confirmMismatch || feedback.fieldProps("reset-confirm")["aria-invalid"]}
                   name="password-confirmation"
                   type={showPwd ? "text" : "password"}
                   required
@@ -219,6 +231,7 @@ function ResetPasswordConfirm({ token }: { token: string }) {
                 />
                 {confirmMismatch && (
                   <p
+                    id="reset-confirm-mismatch"
                     role="alert"
                     aria-live="assertive"
                     className="mt-1.5 flex items-center gap-1 type-caption text-danger"
@@ -230,6 +243,8 @@ function ResetPasswordConfirm({ token }: { token: string }) {
 
               {error && (
                 <div
+                  id={feedback.errorId}
+                  tabIndex={-1}
                   role="alert"
                   aria-live="assertive"
                   className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger"
@@ -256,6 +271,10 @@ function ResetPasswordConfirm({ token }: { token: string }) {
                   </>
                 )}
               </button>
+              <Link href="/reset-password"
+                className="type-body-sm inline-flex min-h-11 items-center justify-center text-[var(--fg-1)] underline underline-offset-4 hover:text-[var(--fg-0)]">
+                重新获取重置链接
+              </Link>
             </form>
           )}
         </div>

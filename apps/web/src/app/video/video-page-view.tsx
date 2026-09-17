@@ -476,6 +476,7 @@ function ReferenceSection({
           <div className="relative min-w-0 flex-1">
             <Tags className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--fg-2)]" />
             <input
+              aria-label="视频参考素材地址"
               value={model.assetUrlInput}
               disabled={model.pending}
               onChange={(event) =>

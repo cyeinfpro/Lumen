@@ -32,13 +32,11 @@ function CandidateGallery({
   candidate,
   generating,
   onPreview,
-  onChoose,
 }: {
   images: BackendImageMeta[];
   candidate: ModelCandidate;
   generating: boolean;
   onPreview: CandidateCardProps["onPreview"];
-  onChoose?: () => void;
 }) {
   if (images.length === 0) {
     return (
@@ -62,11 +60,8 @@ function CandidateGallery({
     <button
       type="button"
       key={candidateImage.id}
-      onClick={() =>
-        images.length > 1
-          ? onPreview(candidateImage, images, index)
-          : onChoose?.()
-      }
+      onClick={() => onPreview(candidateImage, images, index)}
+      aria-label={`预览模特候选 ${candidate.candidate_index}，第 ${index + 1} 张`}
       className="relative h-full min-h-0 w-full overflow-hidden focus-visible:outline-none"
     >
       <Image
@@ -122,6 +117,7 @@ function CandidateActions({
         disabled={!hasImage || selected || generating}
         loading={approving && !selected}
         onClick={onChoose ?? onApprove}
+        aria-pressed={chosen}
         leftIcon={
           chosen ? (
             <Check className="h-4 w-4" />
@@ -135,7 +131,7 @@ function CandidateActions({
       <Button
         variant="outline"
         fullWidth
-        disabled={!hasImage || generating}
+        disabled={!hasImage || generating || !onSaveToLibrary}
         loading={savingToLibrary}
         onClick={onSaveToLibrary}
         leftIcon={<BookmarkPlus className="h-4 w-4" />}
@@ -181,7 +177,6 @@ export function CandidateCard({
             candidate={candidate}
             generating={generating}
             onPreview={onPreview}
-            onChoose={onChoose}
           />
         </div>
 
@@ -207,7 +202,7 @@ export function CandidateCard({
           方案 {candidate.candidate_index}
         </p>
         <span className="type-caption text-[var(--fg-2)]">
-          {images.length > 1 ? `${images.length} 张` : "1 张"}
+          {images.length} 张
         </span>
       </div>
       <p className="mt-2 type-caption leading-5 text-[var(--fg-2)]">

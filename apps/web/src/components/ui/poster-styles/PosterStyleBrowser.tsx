@@ -233,6 +233,7 @@ export function PosterStyleBrowser({
             <div className="relative flex-1 min-w-0">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--fg-2)]" />
               <input
+                aria-label="搜索海报风格名称或标签"
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder="搜索名称、标签"

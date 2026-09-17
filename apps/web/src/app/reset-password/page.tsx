@@ -15,6 +15,7 @@ import {
 import { ApiError, apiFetch } from "@/lib/apiClient";
 import { isValidEmailInput, normalizeEmailInput } from "@/lib/email";
 import { errorToText } from "@/lib/errors";
+import { useFormFeedback } from "@/hooks/useFormFeedback";
 
 export default function ResetPasswordPage() {
   return (
@@ -29,21 +30,22 @@ function ResetPasswordInner() {
   const [email, setEmail] = useState(() => params.get("email") ?? "");
   const [submitting, setSubmitting] = useState(false);
   const [sentTo, setSentTo] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const feedback = useFormFeedback("reset-form-error");
+  const error = feedback.message;
   const submitGuardRef = useRef(false);
 
   const onSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
-    setError(null);
+    feedback.clear();
     setSentTo(null);
 
     const trimmedEmail = normalizeEmailInput(email);
     if (!trimmedEmail) {
-      setError("邮箱未填");
+      feedback.report("邮箱未填", "reset-email");
       return;
     }
     if (!isValidEmailInput(trimmedEmail)) {
-      setError("邮箱格式不正确");
+      feedback.report("邮箱格式不正确", "reset-email");
       return;
     }
 
@@ -58,9 +60,9 @@ function ResetPasswordInner() {
       setSentTo(trimmedEmail);
     } catch (err) {
       if (err instanceof ApiError && err.status === 429) {
-        setError("请求过于频繁，稍后再试");
+        feedback.report("请求过于频繁，稍后再试");
       } else {
-        setError(errorToText(err));
+        feedback.report(errorToText(err));
       }
     } finally {
       submitGuardRef.current = false;
@@ -90,10 +92,11 @@ function ResetPasswordInner() {
             </div>
           </header>
 
-          <form onSubmit={onSubmit} className="auth-form" noValidate>
+          <form onSubmit={onSubmit} className="auth-form" noValidate onInput={feedback.clear}>
             <Field id="reset-email" label="邮箱" icon={<Mail className="h-3.5 w-3.5" />}>
               <input
                 id="reset-email"
+                    {...feedback.fieldProps("reset-email")}
                 name="email"
                 type="email"
                 required
@@ -123,7 +126,9 @@ function ResetPasswordInner() {
 
             {error && (
               <div
-                role="alert"
+                id={feedback.errorId}
+                    tabIndex={-1}
+                    role="alert"
                 aria-live="assertive"
                 className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger"
               >

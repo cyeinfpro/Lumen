@@ -3,7 +3,7 @@
 // 单条会话 item：hover 出 more 菜单，点击菜单后使用内嵌确认。
 // 用 ref 挂载 focus/scrollIntoView，方便父级键盘导航定位。
 
-import { forwardRef, useEffect, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useRef, useState } from "react";
 import {
   Archive,
   ArchiveRestore,
@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import type { ConversationSummary } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
+import { isImeOrRepeatedKey } from "@/lib/interactionKeys";
 import { Button } from "@/components/ui/primitives";
 
 export function titleOf(c: ConversationSummary): string {
@@ -71,31 +72,27 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
       return () => window.clearTimeout(t);
     }, [view]);
 
-    // 外部点击 / Esc 关闭 popover
-    useEffect(() => {
-      if (view === "closed") return;
-      const onDoc = (e: MouseEvent) => {
-        if (!rootRef.current) return;
-        if (rootRef.current.contains(e.target as Node)) return;
-        setView("closed");
-      };
-      const onKey = (e: KeyboardEvent) => {
-        if (e.key === "Escape") setView("closed");
-      };
-      document.addEventListener("mousedown", onDoc);
-      document.addEventListener("keydown", onKey);
-      return () => {
-        document.removeEventListener("mousedown", onDoc);
-        document.removeEventListener("keydown", onKey);
-      };
-    }, [view]);
+    const busy = isItemBusy(deleting, renaming, archiving);
+    const closePopover = useCallback(() => setView("closed"), []);
+    usePopoverDismissal(view !== "closed", rootRef, closePopover);
 
     const openRename = () => {
       setRenameValue(titleOf(conv));
       setView("rename");
     };
 
-    const busy = Boolean(deleting || renaming || archiving);
+    const submitRename = () => {
+      const next = renameValue.trim();
+      if (!next || busy) return;
+      if (next !== titleOf(conv)) onRename(next);
+      closePopover();
+    };
+
+    const onRenameInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+      if (isImeOrRepeatedKey(event.nativeEvent) || event.key !== "Escape") return;
+      event.stopPropagation();
+      closePopover();
+    };
 
     return (
       <li ref={ref} className="group relative" data-conv-id={conv.id}>
@@ -205,29 +202,28 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
           {view === "rename" && (
             <form
               role="dialog"
+              aria-label="重命名会话"
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && isImeOrRepeatedKey(event.nativeEvent)) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                }
+              }}
               onClick={(e) => e.stopPropagation()}
               onSubmit={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                const next = renameValue.trim();
-                if (next && next !== titleOf(conv)) {
-                  onRename(next);
-                }
-                setView("closed");
+                submitRename();
               }}
               className="surface-panel absolute right-0 top-full z-[var(--z-tray)] mt-1 w-64 p-2"
             >
               <input
+                aria-label="会话名称"
                 ref={renameInputRef}
                 type="text"
                 value={renameValue}
                 onChange={(e) => setRenameValue(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") {
-                    e.stopPropagation();
-                    setView("closed");
-                  }
-                }}
+                onKeyDown={onRenameInputKeyDown}
                 onClick={(e) => e.stopPropagation()}
                 maxLength={120}
                 className="control-shell h-10 w-full px-2 type-body-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] focus:border-accent-border"
@@ -240,7 +236,7 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
                   size="sm"
                   onClick={(e) => {
                     e.stopPropagation();
-                    setView("closed");
+                    closePopover();
                   }}
                   className="h-8 px-2"
                 >
@@ -248,6 +244,7 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
                 </Button>
                 <Button
                   type="submit"
+                  disabled={busy || !renameValue.trim()}
                   variant="primary"
                   size="sm"
                   onClick={(e) => e.stopPropagation()}
@@ -264,6 +261,7 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
           {view === "confirmDelete" && (
             <div
               role="dialog"
+              aria-label="删除会话"
               onClick={(e) => e.stopPropagation()}
               className="surface-panel absolute right-0 top-full z-[var(--z-tray)] mt-1 w-64 border-danger-border p-2.5"
             >
@@ -281,7 +279,7 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
                   size="sm"
                   onClick={(e) => {
                     e.stopPropagation();
-                    setView("closed");
+                    closePopover();
                   }}
                   className="h-8 px-2"
                   leftIcon={<X className="w-3 h-3" />}
@@ -295,7 +293,7 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
                   onClick={(e) => {
                     e.stopPropagation();
                     onDelete();
-                    setView("closed");
+                    closePopover();
                   }}
                   className="h-8 px-2.5"
                   leftIcon={<Trash2 className="w-3 h-3" />}
@@ -310,6 +308,36 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
     );
   },
 );
+
+// 外部点击 / Esc 关闭 popover。
+function usePopoverDismissal(
+  open: boolean,
+  rootRef: React.RefObject<HTMLDivElement | null>,
+  close: () => void,
+) {
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (event: MouseEvent) => {
+      const root = rootRef.current;
+      if (!root || root.contains(event.target as Node)) return;
+      close();
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (isImeOrRepeatedKey(event) || event.key !== "Escape") return;
+      close();
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, rootRef, close]);
+}
+
+function isItemBusy(...flags: Array<boolean | undefined>): boolean {
+  return flags.some(Boolean);
+}
 
 function MenuButton({
   children,

@@ -1,6 +1,6 @@
 "use client";
 
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   type ComponentPropsWithoutRef,
   type KeyboardEventHandler,
@@ -124,7 +124,8 @@ function DialogRoot({
     },
     [onKeyDown, onModalKeyDown],
   );
-  const transition = getDialogTransition();
+  const reduceMotion = useReducedMotion();
+  const transition = reduceMotion ? { duration: 0 } : getDialogTransition();
 
   useBodyScrollLock(open);
 
@@ -134,7 +135,7 @@ function DialogRoot({
         <motion.div
           key="dialog-layer"
           data-lumen-modal-layer
-          initial={{ opacity: 0 }}
+          initial={reduceMotion ? false : { opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={transition}
@@ -164,9 +165,9 @@ function DialogRoot({
             aria-busy={ariaBusy || undefined}
             tabIndex={-1}
             onKeyDown={handleKeyDown}
-            initial={{ opacity: 0, scale: 0.96, y: 8 }}
+            initial={reduceMotion ? false : { opacity: 0, scale: 0.96, y: 8 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.96, y: 8 }}
+            exit={reduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.96, y: 8 }}
             transition={transition}
             className={cn(
               "mobile-dialog-panel surface-dialog dialog-layout relative w-full overflow-hidden text-[var(--fg-0)] focus-visible:outline-none",

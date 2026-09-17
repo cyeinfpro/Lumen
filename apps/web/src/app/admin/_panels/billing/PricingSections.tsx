@@ -197,6 +197,7 @@ function ImagePricingTable({ form }: { form: ImagePricingFormState }) {
               </td>
               <td data-label="像素下界" className="px-3 py-2">
                 <Input
+                  aria-label={`${tier} 像素下界`}
                   value={form.thresholds[tier] ?? String(threshold)}
                   onChange={(event) =>
                     form.setThreshold(tier, event.target.value)
@@ -207,6 +208,7 @@ function ImagePricingTable({ form }: { form: ImagePricingFormState }) {
               </td>
               <td data-label="单价 (¥/张)" className="px-3 py-2">
                 <Input
+                  aria-label={`${tier} 单价（元 / 张）`}
                   value={form.prices[tier] ?? row?.price.rmb ?? ""}
                   onChange={(event) =>
                     form.setPrice(tier, event.target.value)
@@ -256,11 +258,13 @@ export function ImagePricingSection({
       <ImagePricingTable form={form} />
       <div className="grid gap-3 border-t border-[var(--border-subtle)] pt-4 sm:grid-cols-[1fr_1fr_auto]">
         <Input
+          aria-label="新增图片档位名称"
           value={form.newTier}
           onChange={(event) => form.setNewTier(event.target.value)}
           placeholder="新增档位，如 8k"
         />
         <Input
+          aria-label="新增图片档位像素下界"
           value={form.newTierThreshold}
           onChange={(event) => form.setNewTierThreshold(event.target.value)}
           placeholder="像素下界，如 33177600"
@@ -300,6 +304,7 @@ function VideoPriceInput({
   return (
     <td data-label={videoRuleLabel(variant)} className="px-3 py-2">
       <Input
+        aria-label={`${row.model} ${videoRuleLabel(variant)} ${resolution} 单价`}
         value={value}
         onChange={(event) =>
           form.setDraft(row.model, variant, resolution, event.target.value)
@@ -506,6 +511,7 @@ export function VideoPricingSection({
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
           <Input
+            aria-label="视频官方价倍率"
             value={form.officialMultiplier}
             onChange={(event) =>
               form.setOfficialMultiplier(event.target.value)
@@ -559,6 +565,7 @@ function ModelPricingRow({
       </td>
       <td data-label="输入 ¥/1K" className="px-3 py-2">
         <Input
+          aria-label={`${row.model} 输入单价（元 / 1K token）`}
           value={form.drafts[`${row.model}:in`] ?? row.input?.price.rmb ?? ""}
           disabled={!row.input}
           onChange={(event) =>
@@ -569,6 +576,7 @@ function ModelPricingRow({
       </td>
       <td data-label="输出 ¥/1K" className="px-3 py-2">
         <Input
+          aria-label={`${row.model} 输出单价（元 / 1K token）`}
           value={form.drafts[`${row.model}:out`] ?? row.output?.price.rmb ?? ""}
           disabled={!row.output}
           onChange={(event) =>

@@ -272,6 +272,7 @@ export function CanvasCommandMenu({
                 aria-hidden
               />
               <input
+                aria-label="搜索画布命令"
                 ref={inputRef}
                 role="combobox"
                 aria-expanded="true"

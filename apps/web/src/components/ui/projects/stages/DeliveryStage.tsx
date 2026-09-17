@@ -1,7 +1,7 @@
 "use client";
 
 // 交付阶段（editorial 重构）：
-// 1) "下载全部"按钮（依次触发各图下载，避免浏览器并发拦截）
+// 1) 可停止、可重试的逐张下载；浏览器是否接受连续下载由用户设置决定。
 // 2) 单图下载：portrait 卡 + 底部 mono underline 链接（去除嵌套圆角卡）
 // 3) 重选模特 ConfirmDialog 兜底
 
@@ -16,6 +16,12 @@ import { useReopenModelSelectionMutation } from "@/lib/queries";
 import type { BackendImageMeta, WorkflowRun } from "@/lib/apiClient";
 import { ImagePreviewModal } from "../components/ImagePreviewModal";
 import { StageFrame } from "../components/StageFrame";
+import {
+  ProjectImageDownloadButton,
+  ProjectImageDownloadStatus,
+  useProjectImageDownloads,
+} from "../components/ProjectImageDownloads";
+
 import { canDownload, imageSrc, showcaseImages } from "../utils";
 
 export function DeliveryStage({ workflow }: { workflow: WorkflowRun }) {
@@ -30,49 +36,39 @@ export function DeliveryStage({ workflow }: { workflow: WorkflowRun }) {
   const [confirmReopen, setConfirmReopen] = useState(false);
   const images = showcaseImages(workflow);
 
-  const downloadAll = () => {
-    let fired = 0;
-    images.forEach((image, index) => {
-      const url = canDownload(image);
-      if (!url) return;
-      window.setTimeout(() => {
-        const anchor = document.createElement("a");
-        anchor.href = url;
-        anchor.download = "";
-        anchor.rel = "noopener";
-        document.body.appendChild(anchor);
-        anchor.click();
-        document.body.removeChild(anchor);
-      }, index * 220);
-      fired += 1;
-    });
-    if (fired) toast.success(`已开始下载 ${fired} 张图`);
-    else toast.warning("暂无可下载图片");
-  };
+  const downloads = useProjectImageDownloads(workflow.id);
+  const downloadFiles = images.flatMap((image, index) => {
+    const url = canDownload(image);
+    return url ? [{ url, filename: `showcase_${index + 1}_${image.id.slice(0, 8)}.png` }] : [];
+  });
 
   return (
     <StageFrame
       eyebrow="N°08 — 交付"
       title="交付"
-      subtitle="最终图已进入交付状态，可逐张或一键打包下载，也可继续返修。"
+      subtitle="逐张下载最终展示图，或继续返修。连续下载若被浏览器拦截，可使用每张图片下方的下载按钮。"
       actions={
         images.length > 0 ? (
           <Button
             variant="primary"
-            onClick={downloadAll}
+            onClick={() => void downloads.start(downloadFiles)}
+            disabled={!downloadFiles.length}
+            loading={downloads.busy}
             leftIcon={<Download className="h-4 w-4" />}
             className="w-full sm:w-auto"
           >
-            下载全部
+            逐张下载全部
           </Button>
         ) : null
       }
     >
+      <ProjectImageDownloadStatus downloads={downloads} />
       <section className="flex flex-wrap items-center gap-3 border-t border-[var(--border)] py-4">
         <Button
           variant="outline"
           size="sm"
           loading={reopen.isPending}
+          disabled={downloads.busy}
           onClick={() => setConfirmReopen(true)}
           leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
           className="w-full sm:w-auto"
@@ -104,6 +100,7 @@ export function DeliveryStage({ workflow }: { workflow: WorkflowRun }) {
                 <button
                   type="button"
                   onClick={() => setPreviewIndex(index)}
+                  aria-label={`预览最终展示图 ${index + 1}`}
                   className="relative block aspect-[4/5] w-full overflow-hidden bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]"
                 >
                   <Image
@@ -118,15 +115,13 @@ export function DeliveryStage({ workflow }: { workflow: WorkflowRun }) {
                     N°{String(index + 1).padStart(2, "0")}
                   </span>
                 </button>
-                <a
-                  href={canDownload(image) || "#"}
-                  download
-                  rel="noopener"
-                  className="mt-2 inline-flex h-11 w-full items-center justify-center gap-1.5 border-b border-[var(--border)] type-caption text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] md:h-10"
-                >
-                  <Download className="h-3 w-3" />
-                  下载
-                </a>
+                <div className="mt-2">
+                  <ProjectImageDownloadButton
+                    file={{ url: canDownload(image) ?? "", filename: `showcase_${index + 1}_${image.id.slice(0, 8)}.png` }}
+                    disabled={downloads.busy}
+                    label={`下载最终展示图 ${index + 1}`}
+                  />
+                </div>
               </article>
             ))}
           </div>
@@ -149,7 +144,7 @@ export function DeliveryStage({ workflow }: { workflow: WorkflowRun }) {
         tone="danger"
         confirming={reopen.isPending}
         onConfirm={async () => {
-          reopen.mutate();
+          await reopen.mutateAsync();
           setConfirmReopen(false);
         }}
       />

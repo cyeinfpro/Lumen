@@ -149,6 +149,7 @@ function AdjustmentsSection({
       </p>
       <div className="mt-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
         <input
+          aria-label="模特调整要求"
           value={controller.adjustments}
           onChange={(event) => controller.setAdjustments(event.target.value)}
           placeholder="发型再自然一点，保留脸和身材比例"
@@ -199,6 +200,7 @@ function AccessorySection({
       </div>
       <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
         <input
+          aria-label="配饰生成要求"
           value={controller.accessoryPrompt}
           onChange={(event) =>
             controller.setAccessoryPrompt(event.target.value)

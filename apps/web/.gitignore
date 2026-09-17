@@ -13,12 +13,14 @@
 # testing
 /coverage
 /test-results
+/test-results-ux
 /playwright-report
 /blob-report
 
 # next.js
 /.next/
 /.next-e2e/
+/.next-ux/
 /.next-build-check/
 /out/
 

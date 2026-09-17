@@ -36,6 +36,7 @@ export function SelectableImageGrid({
               <button
                 type="button"
                 onClick={() => onPreview(image, index)}
+                aria-label={`预览饰品 ${index + 1}`}
                 className={cn(
                   "relative block aspect-[4/5] w-full overflow-hidden bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]",
                   selected && "ring-1 ring-inset ring-accent-border",
@@ -64,8 +65,11 @@ export function SelectableImageGrid({
               type="button"
               onClick={() => onSelect(selected ? null : image.id)}
               disabled={saving}
+              aria-pressed={selected}
+              aria-busy={saving}
+              aria-label={`${selected ? "取消选择" : "选择"}饰品 ${index + 1}`}
               className={cn(
-                "mt-2 flex h-10 w-full items-center justify-center type-caption transition-colors",
+                "mt-2 flex min-h-11 w-full items-center justify-center type-caption transition-colors",
                 selected
                   ? "border-b border-accent-border text-accent"
                   : "border-b border-[var(--border)] text-[var(--fg-1)] hover:border-[var(--border-strong)] hover:text-[var(--fg-0)]",
