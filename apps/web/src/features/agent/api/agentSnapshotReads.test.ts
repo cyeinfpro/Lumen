@@ -3,6 +3,14 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
 import type { AgentSnapshotReads } from "./agentSnapshotReads";
+import type { AgentMessageList } from "../model/contracts";
+
+function snapshot(cursor: string | null = null): AgentMessageList {
+  return {
+    items: [], runs: [], next_cursor: cursor,
+    generations: [], completions: [], images: [],
+  };
+}
 
 type Call = {
   kind: string; sessionId: string; signal: AbortSignal;
@@ -49,7 +57,7 @@ test("query refetch and SSE/polling share one message read with separate observe
   await settle();
   assert.equal(h.calls.length, 1);
   assert.notEqual(h.calls[0].signal, query.signal);
-  const result = { items: [], runs: [] };
+  const result = snapshot();
   h.calls[0].resolve(result);
   const responses = await Promise.all([first, second]);
   assert.ok(responses.every((response) => response === result));
@@ -61,7 +69,7 @@ test("nullable active-run queries share a read without sharing message requests"
   await settle();
   assert.equal(h.calls.length, 2);
   h.calls[0].resolve(null);
-  h.calls[1].resolve({ items: [] });
+  h.calls[1].resolve(snapshot());
   const results = await Promise.all(pending);
   assert.equal(results[0], null);
   assert.equal(results[1], null);
@@ -77,8 +85,8 @@ test("one cancelled observer cannot abort a live observer's snapshot", async () 
   controller.abort();
   await rejected;
   assert.equal(h.calls[0].signal.aborted, false);
-  h.calls[0].resolve({ items: [] });
-  assert.deepEqual(await survivor, { items: [] });
+  h.calls[0].resolve(snapshot());
+  assert.deepEqual(await survivor, snapshot());
 });
 
 test("last-observer cancellation aborts the network; late completion cannot evict its replacement", async () => {
@@ -93,13 +101,13 @@ test("last-observer cancellation aborts the network; late completion cannot evic
   const replacement = h.reads.messages("session");
   await settle();
   assert.equal(h.calls.length, 2);
-  h.calls[0].resolve({ stale: true });
+  h.calls[0].resolve(snapshot("stale"));
   await settle();
   const joined = h.reads.messages("session");
   await settle();
   assert.equal(h.calls.length, 2);
-  h.calls[1].resolve({ fresh: true });
-  assert.deepEqual(await Promise.all([replacement, joined]), [{ fresh: true }, { fresh: true }]);
+  h.calls[1].resolve(snapshot("fresh"));
+  assert.deepEqual(await Promise.all([replacement, joined]), [snapshot("fresh"), snapshot("fresh")]);
 });
 
 test("pre-aborted requests do not launch a network read", async () => {
@@ -145,7 +153,7 @@ test("failed shared reads reject all observers and leave retries available", asy
   const retry = h.reads.messages("session");
   await settle();
   assert.equal(h.calls.length, 2);
-  h.calls[1].resolve({ items: [] });
+  h.calls[1].resolve(snapshot());
   await retry;
 });
 
@@ -161,7 +169,7 @@ test("sessions, pagination and task inclusion never coalesce", async () => {
   ];
   await settle();
   assert.equal(h.calls.length, pending.length);
-  for (const call of h.calls) call.resolve({ items: [] });
+  for (const call of h.calls) call.resolve(snapshot());
   await Promise.all(pending);
 });
 
@@ -187,7 +195,7 @@ test("in-flight account and epoch changes neither share nor publish stale privat
   const current = h.reads.messages("session");
   await settle();
   assert.equal(h.calls.length, 3);
-  for (const call of h.calls) call.resolve({ items: [] });
+  for (const call of h.calls) call.resolve(snapshot());
   await Promise.all([oldRejected, otherRejected]);
-  assert.deepEqual(await current, { items: [] });
+  assert.deepEqual(await current, snapshot());
 });
