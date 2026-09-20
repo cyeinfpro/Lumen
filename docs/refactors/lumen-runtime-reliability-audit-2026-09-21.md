@@ -23,6 +23,8 @@ The bounded API logs contained 24 slow-tokenizer warnings. Backup logs showed re
 
 Tokenizer tests now own separate production runtime instances. A cold-load thread is allowed to outlive its bounded caller, so a later test must not reset another test's live loader. This isolates test state without changing production deadlines or weakening concurrency/fallback assertions.
 
+The compatibility inventory records exactly the 24 package module names already eagerly exported by the pre-audit revision. The monotonicity audit now proves those historical package bindings against the actual base source, while rejecting added names, private or conditional imports, missing base files, and attempts to override an explicit `__all__`. No complexity or coupling threshold is increased.
+
 ## Release and acceptance requirements
 
 Run the repository's Python governance and independent backend suites, Agent Runtime checks, frontend unit/lint/type/build checks, and the seven-layout Agent reconciliation browser regression. Retain failure and cancellation receipts rather than describing interrupted runs as successful. Browser navigation timeouts during local compilation do not constitute a passing or failing business assertion.

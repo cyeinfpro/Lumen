@@ -129,3 +129,54 @@ def test_runtime_scope_expansion_only_registers_preexisting_symbols(
         "runtime ledger added new symbol: hidden.py|_NEW_RUNTIME",
         "runtime ledger total grew beyond pre-existing hidden state: allowed=1 current=2",
     ]
+
+
+def _compare_added_facade(source, exports, path="core/__init__.py"):
+    import subprocess
+
+    def runner(args, _cwd):
+        assert args == ("show", f"original:{path}")
+        return subprocess.CompletedProcess(args, 1 if source is None else 0, source or "", "")
+
+    return MODULE.compare_runtime_inventory(
+        {"findings": [], "public_api": {path: exports}},
+        {"findings": [], "public_api": {}},
+        merge_base="original",
+        runner=runner,
+    )
+
+
+def test_facade_inventory_accepts_only_preexisting_eager_package_module_exports():
+    source = "from . import models, providers as provider_api\n"
+    assert _compare_added_facade(source, ["models", "provider_api"]) == []
+    assert _compare_added_facade(source, ["models", "new_api"]) == [
+        "facade baseline added path: core/__init__.py",
+    ]
+
+
+def test_package_export_proof_respects_explicit_all_and_private_bindings():
+    sources = (
+        "from . import models\n__all__ = []\n",
+        "from . import models\n__all__ = build_exports()\n",
+        "from . import models as _private\n",
+        "from other import models\n",
+        "from .models import models\n",
+        "if condition:\n    from . import models\n",
+    )
+    for source in sources:
+        assert _compare_added_facade(source, ["models"]) == [
+            "facade baseline added path: core/__init__.py",
+        ], source
+
+
+def test_implicit_package_export_exception_does_not_apply_to_ordinary_modules():
+    assert _compare_added_facade("from . import models\n", ["models"], "core/facade.py") == [
+        "facade baseline added path: core/facade.py",
+    ]
+
+
+def test_inventory_proof_still_fails_for_missing_base_and_accepts_static_all():
+    assert _compare_added_facade(None, ["models"]) == [
+        "facade baseline added path: core/__init__.py",
+    ]
+    assert _compare_added_facade('__all__ = ["models"]\n', ["models"]) == []
