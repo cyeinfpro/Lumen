@@ -26,9 +26,9 @@ function compile(path: string, require: (id: string) => unknown): Exports {
       jsx: ts.JsxEmit.ReactJSX },
     fileName: url.pathname,
   }).outputText;
-  const module = { exports: {} as Exports };
-  new Function("require", "module", "exports", output)(require, module, module.exports);
-  return module.exports;
+  const compiled = { exports: {} as Exports };
+  new Function("require", "module", "exports", output)(require, compiled, compiled.exports);
+  return compiled.exports;
 }
 
 for (const [pageName, consoleName] of [
@@ -79,11 +79,11 @@ for (const [pageName, consoleName] of [
 }
 
 test("refresh notice is quiet when healthy and prevents duplicate retries while fetching", () => {
-  const module = compile("./components/ProjectRefreshNotice.tsx", (id) => {
+  const compiled = compile("./components/ProjectRefreshNotice.tsx", (id) => {
     if (id === "react/jsx-runtime") return { jsx, jsxs: jsx };
     throw new Error(`Unexpected dependency: ${id}`);
   });
-  const Notice = module.ProjectRefreshNotice as (props: {
+  const Notice = compiled.ProjectRefreshNotice as (props: {
     error: unknown; refreshing: boolean; onRetry: () => void;
   }) => Element | null;
   assert.equal(Notice({ error: null, refreshing: false, onRetry: () => undefined }), null);
