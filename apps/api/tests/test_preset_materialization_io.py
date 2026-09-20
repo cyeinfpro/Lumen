@@ -20,6 +20,10 @@ class FakeDb:
         self.rows = []
         self.loop_thread = threading.get_ident()
 
+    async def connection(self):
+        assert threading.get_ident() == self.loop_thread
+        return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
     async def execute(self, _statement):
         assert threading.get_ident() == self.loop_thread
         return SimpleNamespace(scalar_one_or_none=lambda: self.existing)
