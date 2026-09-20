@@ -12,9 +12,9 @@ function compile(path: string, require: (id: string) => unknown): Exports {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
     fileName: url.pathname,
   }).outputText;
-  const module = { exports: {} as Exports };
-  new Function("require", "module", "exports", output)(require, module, module.exports);
-  return module.exports;
+  const compiled = { exports: {} as Exports };
+  new Function("require", "module", "exports", output)(require, compiled, compiled.exports);
+  return compiled.exports;
 }
 
 function harness(snapshot: Snapshot, options: {
