@@ -192,7 +192,7 @@ def compare_runtime_inventory(
                 else None
             )
             if source is not None and set(exports).issubset(
-                _static_all_symbols(source)
+                _historical_facade_exports(source, path)
             ):
                 continue
             errors.append(f"facade baseline added path: {path}")
@@ -227,6 +227,33 @@ def _static_all_symbols(source: str) -> set[str]:
             and isinstance(element.value, str)
         }
     return set()
+
+
+def _historical_facade_exports(source: str, path: str) -> set[str]:
+    """Prove exports from the actual base revision, never the working tree.
+
+    Package roots historically exported eager ``from . import name`` bindings
+    even without __all__. Only those unchanged module names may be registered.
+    Explicit or dynamic __all__ remains authoritative and fails closed.
+    """
+    tree = ast.parse(source)
+    has_explicit_all = any(
+        isinstance(node, ast.Name)
+        and node.id == "__all__"
+        and isinstance(node.ctx, ast.Store)
+        for node in ast.walk(tree)
+    )
+    if not path.endswith("/__init__.py") or has_explicit_all:
+        return _static_all_symbols(source)
+    return {
+        alias.asname or alias.name
+        for statement in tree.body
+        if isinstance(statement, ast.ImportFrom)
+        and statement.level == 1
+        and statement.module is None
+        for alias in statement.names
+        if alias.name != "*" and not (alias.asname or alias.name).startswith("_")
+    }
 
 
 def compare_facade_ledger(
