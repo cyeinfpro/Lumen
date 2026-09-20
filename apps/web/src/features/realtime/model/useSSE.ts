@@ -144,7 +144,6 @@ export function useSSE(
     hasRecoveryAdapter,
     options.hiddenCloseDelayMs,
     options.maxRetryCount,
-    options.onProtocolIssue,
     scopeIdentity,
   ]);
 

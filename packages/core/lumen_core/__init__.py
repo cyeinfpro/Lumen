@@ -12,31 +12,76 @@
 - chat_tools: chat tool status normalization
 """
 
-__version__ = "1.2.169"
+__version__ = "1.2.170"
 
-from . import (  # noqa: F401
-    agent_capability,
-    agent_events,
-    canvas,
-    canvas_models,
-    canvas_schemas,
-    capacity_leases,
-    chat_tools,
-    constants,
-    context_window,
-    image_signing,
-    models,
-    pricing,
-    pricing_fallback,
-    pricing_resolver,
-    providers,
-    runtime_settings,
-    schemas,
-    sizing,
-    sse_durable,
-    storage_capacity,
-    utils,
-    video_billing,
-    video_providers,
-    volcano_assets,
+from importlib import import_module as _import_module
+from typing import TYPE_CHECKING as _TYPE_CHECKING
+
+# Preserve historical exports without loading ORM/provider modules for callers
+# that only need a version or a small, independent utility.
+__all__ = (
+    "agent_capability",
+    "agent_events",
+    "canvas",
+    "canvas_models",
+    "canvas_schemas",
+    "capacity_leases",
+    "chat_tools",
+    "constants",
+    "context_window",
+    "image_signing",
+    "models",
+    "pricing",
+    "pricing_fallback",
+    "pricing_resolver",
+    "providers",
+    "runtime_settings",
+    "schemas",
+    "sizing",
+    "sse_durable",
+    "storage_capacity",
+    "utils",
+    "video_billing",
+    "video_providers",
+    "volcano_assets",
 )
+
+if _TYPE_CHECKING:
+    from . import (  # noqa: F401
+        agent_capability,
+        agent_events,
+        canvas,
+        canvas_models,
+        canvas_schemas,
+        capacity_leases,
+        chat_tools,
+        constants,
+        context_window,
+        image_signing,
+        models,
+        pricing,
+        pricing_fallback,
+        pricing_resolver,
+        providers,
+        runtime_settings,
+        schemas,
+        sizing,
+        sse_durable,
+        storage_capacity,
+        utils,
+        video_billing,
+        video_providers,
+        volcano_assets,
+    )
+
+
+def __getattr__(name: str):
+    if name in __all__:
+        # importlib synchronizes and binds submodules on this package; avoid a
+        # second mutable cache or an alternate SQLAlchemy model registry.
+        return _import_module(f".{name}", __name__)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))

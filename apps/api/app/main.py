@@ -617,10 +617,10 @@ async def lifespan(app: FastAPI):
         app.state.runtime = runtime
         runtime.start(logger=logger)
 
-        # Opportunistic only: if tiktoken's cache is cold and the metadata download is
-        # slow, token counting falls back to a local estimate instead of blocking API
-        # request handlers.
-        logger.info("api.tiktoken_warm loaded=%s", warm_tiktoken(timeout_sec=0.2))
+        # The image carries the hash-verified vocabulary. Allow bounded startup
+        # time for ARM parsing so a cold process does not permanently downgrade
+        # token accounting; request handlers are not admitted until after yield.
+        logger.info("api.tiktoken_warm loaded=%s", warm_tiktoken(timeout_sec=2.0))
         yield
     finally:
         if runtime is not None and getattr(app.state, "runtime", None) is runtime:

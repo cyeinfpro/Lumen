@@ -24,6 +24,7 @@ RUN apt-get update \
 RUN pip install --no-cache-dir "uv==${UV_VERSION}"
 
 WORKDIR /app
+ENV TIKTOKEN_CACHE_DIR=/app/.cache/tiktoken
 
 COPY pyproject.toml uv.lock ./
 COPY packages/core/pyproject.toml packages/core/pyproject.toml
@@ -43,7 +44,10 @@ RUN mkdir -p packages/core/lumen_core apps/api/app apps/worker/app apps/tgbot/ap
              apps/tgbot/app/__init__.py \
              image-job/image_job/__init__.py
 
-RUN uv sync --frozen --no-dev --all-packages
+# Resolve the SDK's hash-checked vocabulary during the build, never on a live
+# request. A stalled download fails the build rather than hanging indefinitely.
+RUN uv sync --frozen --no-dev --all-packages \
+    && timeout 120 .venv/bin/python -c 'import tiktoken; tiktoken.get_encoding("o200k_base")'
 
 COPY packages/ packages/
 COPY apps/api/ apps/api/
@@ -98,6 +102,7 @@ RUN groupadd -g "${LUMEN_APP_GID}" lumen \
     && useradd -m -u "${LUMEN_APP_UID}" -g "${LUMEN_APP_GID}" -s /bin/bash lumen
 
 WORKDIR /app
+ENV TIKTOKEN_CACHE_DIR=/app/.cache/tiktoken
 
 COPY --from=builder --chown=lumen:lumen /app /app
 
@@ -111,5 +116,8 @@ print(f"libvips runtime OK: {pyvips.major}.{pyvips.minor}.{pyvips.micro}")
 PY
 
 USER lumen
+
+# Prove the final, unprivileged image can load its cache without network access.
+RUN --network=none python -c 'import tiktoken; assert tiktoken.get_encoding("o200k_base").encode("hello world")'
 
 CMD ["python"]

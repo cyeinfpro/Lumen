@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+from io import BytesIO
 import logging
+from pathlib import Path
 from typing import Any
 
 from PIL import Image as PILImage
@@ -89,6 +92,47 @@ def _model_library_image_metadata_from_fields(
     }
 
 
+def _copy_preset_binary_sync(
+    source: Path, destination: Path, image_key: str,
+) -> tuple[str, int, int, int]:
+    if not source.is_file():
+        raise _http("not_found", "preset image binary is missing", 404)
+    data = source.read_bytes()
+    sha = hashlib.sha256(data).hexdigest()
+    width = height = 0
+    try:
+        # Inspect the bytes actually copied, not a second possibly changed file.
+        with PILImage.open(BytesIO(data)) as image:
+            width, height = image.size
+    except Exception:
+        logger.warning("failed to inspect preset image dimensions key=%s", image_key)
+    _write_bytes_replace(destination, data)
+    return sha, width, height, len(data)
+
+
+async def _copy_preset_binary(
+    source: Path, destination: Path, image_key: str,
+) -> tuple[str, int, int, int]:
+    pending = asyncio.create_task(asyncio.to_thread(
+        _copy_preset_binary_sync, source, destination, image_key,
+    ))
+    try:
+        return await asyncio.shield(pending)
+    except asyncio.CancelledError:
+        # A thread cannot be cancelled. Drain it before the caller removes the
+        # uncommitted file, including repeated cancellation during shutdown.
+        while not pending.done():
+            try:
+                await asyncio.shield(pending)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not pending.cancelled():
+            pending.exception()
+        raise
+
+
 async def _create_user_image_from_preset(
     db: AsyncSession,
     *,
@@ -109,27 +153,13 @@ async def _create_user_image_from_preset(
         return existing
     image_key = str(item.get("image_storage_key") or "").strip()
     path = _storage_path(image_key)
-    if not path.is_file():
-        raise _http("not_found", "preset image binary is missing", 404)
-    data = path.read_bytes()
-    sha = hashlib.sha256(data).hexdigest()
-    width = 0
-    height = 0
-    try:
-        with PILImage.open(path) as im:
-            width, height = im.size
-    except Exception:
-        logger.warning(
-            "failed to inspect preset image dimensions key=%s",
-            image_key,
-        )
     image_id = new_uuid7()
     suffix = path.suffix.lower() or ".webp"
     copy_key = f"u/{user_id}/apparel-model-library/{image_id}{suffix}"
     # 先把字节落盘，再写 DB 行：避免 DB 行存在但二进制 404 的孤儿
     copy_path = _storage_path(copy_key)
-    _write_bytes_replace(copy_path, data)
     try:
+        sha, width, height, size_bytes = await _copy_preset_binary(path, copy_path, image_key)
         img = Image(
             id=image_id,
             user_id=user_id,
@@ -138,7 +168,7 @@ async def _create_user_image_from_preset(
             mime=_guess_mime(path),
             width=width,
             height=height,
-            size_bytes=copy_path.stat().st_size,
+            size_bytes=size_bytes,
             sha256=sha,
             blurhash=None,
             visibility=ImageVisibility.PRIVATE.value,
@@ -153,9 +183,10 @@ async def _create_user_image_from_preset(
         )
         db.add(img)
         await db.flush()
-    except Exception:
-        # DB flush 失败时清理刚写的孤儿文件，避免下次重试时 sha 命中残留路径
-        copy_path.unlink(missing_ok=True)
+    except BaseException:
+        # Include request cancellation: no row may outlive a missing binary and
+        # no uncommitted private copy should survive an interrupted request.
+        await asyncio.to_thread(copy_path.unlink, missing_ok=True)
         raise
     return img
 

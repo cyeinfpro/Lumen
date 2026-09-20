@@ -1,3 +1,4 @@
+import { refreshWorkflow } from "../api/workflowRefresh";
 import {
   useInfiniteQuery,
   useMutation,
@@ -16,7 +17,6 @@ import {
   deleteWorkflow,
   generateApparelModelLibrary,
   getApparelModelLibraryJobs,
-  getWorkflow,
   listApparelModelLibrary,
   listWorkflows,
   patchWorkflow,
@@ -127,7 +127,9 @@ export function useWorkflowQuery(
   const { userScope, userKeys } = useCurrentUserQueryKeys();
   return useQuery<WorkflowRun>({
     queryKey: userKeys.workflow(id ?? ""),
-    queryFn: () => getWorkflow(id as string),
+    queryFn: ({ signal }) => refreshWorkflow(id as string, signal),
+    // Do not silently replay the reconciliation command on a failed request.
+    retry: false,
     // running 5s、needs_review 30s 兜底（避免外部状态翻面后用户感知延迟）；其余不轮询
     refetchInterval: (query) => {
       const status = query.state.data?.status;

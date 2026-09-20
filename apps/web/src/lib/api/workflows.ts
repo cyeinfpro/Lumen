@@ -452,8 +452,8 @@ export function listWorkflows(
   return apiFetch<WorkflowRunListResponse>(`/workflows${suffix}`);
 }
 
-export function getWorkflow(id: string): Promise<WorkflowRun> {
-  return apiFetch<WorkflowRun>(`/workflows/${id}`);
+export function getWorkflow(id: string, signal?: AbortSignal): Promise<WorkflowRun> {
+  return apiFetch<WorkflowRun>(`/workflows/${encodeURIComponent(id)}`, { signal });
 }
 
 export function patchWorkflow(

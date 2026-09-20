@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 from collections.abc import Callable
@@ -340,9 +341,10 @@ def _tiktoken_load_timeout(default: float) -> float:
     if not raw:
         return default
     try:
-        return max(0.0, float(raw))
+        timeout = float(raw)
     except ValueError:
         return default
+    return max(0.0, timeout) if math.isfinite(timeout) else default
 
 
 def _get_tiktoken_encoding(timeout_sec: float | None = None):

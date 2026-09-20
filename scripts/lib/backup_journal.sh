@@ -110,3 +110,33 @@ lumen_backup_recover_interrupted() {
     BACKUP_JOURNAL_RECOVERED=1
     log "interrupted backup service state recovered"
 }
+
+# Success resumes writers early; EXIT finalizes the journal. Keeping the
+# journal through retention makes SIGKILL recovery restart-only, not a second
+# backup that pauses already healthy writers again.
+lumen_backup_resume_writers() {
+    local finalize="${1:-1}"
+    local journal_rc=0
+    if [ "${WRITERS_STOPPED:-0}" -eq 1 ]; then
+        log "restarting quiesced writers: ${ACTIVE_WRITER_SERVICES[*]:-<none>}"
+        if [ "${BACKUP_JOURNAL_ACTIVE:-0}" -eq 1 ]; then
+            lumen_backup_journal_write "writers_starting" || journal_rc=70
+        fi
+        if [ "${#ACTIVE_WRITER_SERVICES[@]}" -gt 0 ] \
+                && ! lumen_start_services_verified "${ACTIVE_WRITER_SERVICES[@]}"; then
+            log "ERROR: failed to restart one or more backup writers"
+            return 70
+        fi
+        # Never erase evidence when persisting the state transition failed.
+        [ "$journal_rc" -eq 0 ] || return "$journal_rc"
+        WRITERS_STOPPED=0
+        BACKUP_WRITERS_RESUMED=1
+        log "backup writers restored and readiness verified"
+    fi
+    if [ "$finalize" = "1" ] \
+            && [ "${BACKUP_WRITERS_RESUMED:-0}" = "1" ] \
+            && [ "${BACKUP_JOURNAL_ACTIVE:-0}" = "1" ]; then
+        lumen_backup_journal_clear || return 70
+    fi
+    return 0
+}

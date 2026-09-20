@@ -10,6 +10,7 @@ import {
 } from "@tanstack/react-query";
 import { useUserQueryScope } from "@/lib/queries/userScope";
 import { qk } from "@/lib/queries/queryKeys";
+import type { AgentSnapshotReads } from "./agentSnapshotReads";
 import { isPrivateIdentitySnapshotCurrent, type PrivateIdentitySnapshot } from "@/lib/auth/privateIdentityEpoch";
 import { assertAgentRequestIdentity, continueLogicalAgentRun } from "./logicalAgentRequests";
 import type {
@@ -83,7 +84,10 @@ export function useAgentSessionQuery(sessionId: string | null) {
   });
 }
 
-export function useAgentMessagesQuery(sessionId: string | null) {
+export function useAgentMessagesQuery(
+  sessionId: string | null,
+  reads?: AgentSnapshotReads,
+) {
   const userScope = useUserQueryScope();
   return useInfiniteQuery<
     AgentMessageList,
@@ -94,7 +98,7 @@ export function useAgentMessagesQuery(sessionId: string | null) {
   >({
     queryKey: qk.user(userScope.userId).agentMessages(sessionId ?? ""),
     queryFn: ({ pageParam, signal }) =>
-      listAgentMessages(sessionId as string, {
+      (reads?.messages ?? listAgentMessages)(sessionId as string, {
         cursor: pageParam,
         limit: 100,
         includeTasks: true,
@@ -111,11 +115,12 @@ export function useAgentMessagesQuery(sessionId: string | null) {
 export function useAgentActiveRunQuery(
   sessionId: string | null,
   enabled = true,
+  reads?: AgentSnapshotReads,
 ) {
   const userScope = useUserQueryScope();
   return useQuery<AgentRun | null>({
     queryKey: qk.user(userScope.userId).agentActiveRun(sessionId ?? ""),
-    queryFn: ({ signal }) => getAgentActiveRun(sessionId as string, signal),
+    queryFn: ({ signal }) => (reads?.activeRun ?? getAgentActiveRun)(sessionId as string, signal),
     enabled: userScope.enabled && enabled && Boolean(sessionId),
     staleTime: 1_000,
   });

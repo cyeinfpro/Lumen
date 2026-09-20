@@ -17,6 +17,7 @@ import {
   type AgentStatus,
 } from "../model/contracts";
 import { refreshAgentSnapshot } from "./agentSnapshot";
+import { AgentSnapshotReads } from "../api/agentSnapshotReads";
 import {
   useAgentActiveRunQuery,
   useAgentMessagesQuery,
@@ -95,6 +96,7 @@ export function AgentWorkspaceController({
   const [composerAction, setComposerAction] = useState<{ href: string; label: string } | null>(null);
   const submissionRef = useRef(false);
   const refreshCoordinator = useMemo(() => new AgentRefreshCoordinator(), []);
+  const snapshotReads = useMemo(() => new AgentSnapshotReads(), []);
   const sseTransportStatusRef = useRef<AgentRealtimeStatus>("idle");
 
   const currentSessionId = useAgentStore((state) => state.currentSessionId);
@@ -170,8 +172,8 @@ export function AgentWorkspaceController({
     });
   }, [currentSession, draftsBySession, setDraft]);
 
-  const messagesQuery = useAgentMessagesQuery(currentSessionId);
-  const activeRunQuery = useAgentActiveRunQuery(currentSessionId);
+  const messagesQuery = useAgentMessagesQuery(currentSessionId, snapshotReads);
+  const activeRunQuery = useAgentActiveRunQuery(currentSessionId, true, snapshotReads);
   const sessionImagesQuery = useAgentSessionImagesQuery(currentSessionId);
   useEffect(() => {
     const identity = getPrivateIdentitySnapshot();
@@ -205,8 +207,8 @@ export function AgentWorkspaceController({
   }, [currentSessionId, runsById]);
   const snapshotPollIntervalMs = snapshotPollInterval(Boolean(activeRun));
   const coordinatedRefresh = useCallback((signal?: AbortSignal) =>
-    refreshCoordinator.request(() => refreshAgentSnapshot(signal)),
-  [refreshCoordinator]);
+    refreshCoordinator.request(() => refreshAgentSnapshot(signal, snapshotReads)),
+  [refreshCoordinator, snapshotReads]);
   const requestRefresh = useCallback(() => {
     void coordinatedRefresh().catch(() => undefined);
   }, [coordinatedRefresh]);

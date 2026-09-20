@@ -15,6 +15,18 @@ import time
 import types
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolated_token_counter_runtime(monkeypatch):
+    import lumen_core.context_window as cw
+
+    # A real cold-load thread may legitimately outlive its bounded caller.
+    # Each case owns a fresh production runtime instead of resetting or
+    # inheriting another test's still-running loader and sticky counter mode.
+    monkeypatch.setattr(cw, "_TOKEN_COUNTER_RUNTIME", cw._TokenCounterRuntime())
+
 
 def _reset_tiktoken_state(monkeypatch, cw):
     del monkeypatch
@@ -187,3 +199,11 @@ def test_count_tokens_keeps_estimator_after_cold_slow_load(monkeypatch):
     time.sleep(0.25)
     assert cw.count_tokens(text) == first
     assert cw._TOKEN_COUNTER_RUNTIME.mode == "estimate"
+
+
+@pytest.mark.parametrize("raw", ["inf", "+Infinity", "-inf", "nan", "NaN"])
+def test_nonfinite_tiktoken_load_timeout_uses_finite_default(monkeypatch, raw):
+    import lumen_core.context_window as cw
+
+    monkeypatch.setenv("LUMEN_TIKTOKEN_LOAD_TIMEOUT_SEC", raw)
+    assert cw._tiktoken_load_timeout(0.2) == 0.2
