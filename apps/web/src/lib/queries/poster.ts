@@ -1,3 +1,4 @@
+import { refreshWorkflow } from "../api/workflowRefresh";
 import {
   useMutation,
   useQuery,
@@ -6,7 +7,6 @@ import {
 } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import {
-  getWorkflow,
   type WorkflowRun,
 } from "../api/workflows";
 import {
@@ -293,7 +293,9 @@ export function usePosterWorkflowQuery(
   const { userScope, userKeys } = useCurrentUserQueryKeys();
   return useQuery<WorkflowRun>({
     queryKey: userKeys.workflow(id ?? ""),
-    queryFn: () => getWorkflow(id as string),
+    queryFn: ({ signal }) => refreshWorkflow(id as string, signal),
+    // Do not silently replay the reconciliation command on a failed request.
+    retry: false,
     refetchInterval: (query) => {
       const status = query.state.data?.status;
       if (status === "running") return 5_000;

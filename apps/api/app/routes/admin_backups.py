@@ -363,7 +363,7 @@ _run_backup_attempt = _backup_runtime.run_backup_attempt
 
 @router.get("", response_model=BackupListOut)
 async def list_backups(_admin: AdminUser) -> BackupListOut:
-    return _backup_catalog.list_backup_items(_backup_root())
+    return await asyncio.to_thread(_backup_catalog.list_backup_items, _backup_root())
 
 
 # ---- Trigger backup now ----
@@ -405,10 +405,9 @@ async def _find_paired_backup_for_operation(
     operation_id: str,
     started_at: datetime,
 ) -> str | None:
-    binding = _backup_catalog.find_backup_pair_metadata_for_operation(
-        _backup_root(),
-        operation_id,
-        started_at,
+    binding = await asyncio.to_thread(
+        _backup_catalog.find_backup_pair_metadata_for_operation,
+        _backup_root(), operation_id, started_at,
     )
     if binding is None:
         return None

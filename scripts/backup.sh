@@ -90,6 +90,7 @@ PAIR_COMMITTED=0
 SUCCESS_RECEIPT_COMMITTED=0
 BACKUP_LOCK_OWNER_TOKEN=""
 WRITERS_STOPPED=0
+BACKUP_WRITERS_RESUMED=0
 ACTIVE_WRITER_SERVICES=()
 
 log() { printf '[backup %s] %s\n' "$(date -u +%FT%TZ)" "$*"; }
@@ -259,23 +260,11 @@ cleanup() {
     local backup_rc="$rc"
     trap - EXIT
     trap '' INT TERM HUP
-    if [ "$WRITERS_STOPPED" -eq 1 ]; then
-        log "restarting quiesced writers: ${ACTIVE_WRITER_SERVICES[*]:-<none>}"
-        if [ "${BACKUP_JOURNAL_ACTIVE:-0}" -eq 1 ]; then
-            lumen_backup_journal_write "writers_starting" || rc=70
-        fi
-        if [ "${#ACTIVE_WRITER_SERVICES[@]}" -gt 0 ] \
-                && ! lumen_start_services_verified "${ACTIVE_WRITER_SERVICES[@]}"; then
-            log "ERROR: failed to restart one or more backup writers"
-            rc=70
-        elif [ "${BACKUP_JOURNAL_ACTIVE:-0}" -eq 1 ] \
-                && ! lumen_backup_journal_clear; then
-            rc=70
-        fi
-        WRITERS_STOPPED=0
+    if ! lumen_backup_resume_writers; then
+        rc=70
     fi
     mark_backup_pending_if_retriggered
-    if [ "$BACKUP_SERVICE_MARKER_ACTIVE" = "1" ] && [ "$backup_rc" -eq 0 ]; then
+    if [ "$BACKUP_SERVICE_MARKER_ACTIVE" = "1" ] && [ "$rc" -eq 0 ]; then
         rm -f "$BACKUP_RUNNING_FILE" 2>/dev/null || true
     elif [ "$BACKUP_SERVICE_MARKER_ACTIVE" = "1" ]; then
         log "retaining host ownership marker after failed backup operation"
@@ -1205,7 +1194,9 @@ prune_paired() {
     local ts
     while IFS= read -r ts; do
         [ -z "$ts" ] && continue
-        if python3 -I "${SCRIPT_DIR}/restore_journal.py" \
+        if [ -f "$BACKUP_ROOT/.backup-pair.$ts.json" ] \
+                && [ ! -L "$BACKUP_ROOT/.backup-pair.$ts.json" ] \
+                && python3 -I "${SCRIPT_DIR}/restore_journal.py" \
                 backup-pair-bind-json "$BACKUP_ROOT" "$ts" \
                 >/dev/null 2>&1; then
             committed="${committed}${ts}"$'\n'
@@ -1230,6 +1221,14 @@ prune_paired() {
         prune_timestamp "$pg_dir" "$redis_dir" "$ts"
     done
 }
+
+# Both immutable snapshots and their binding are durable. Retention does not
+# require paused writers; prove readiness before reporting success or pruning.
+# Keep the recovery journal through retention. A crash must be consumed as
+# recovery-only, rather than triggering another full backup and writer outage.
+if ! lumen_backup_resume_writers 0; then
+    exit 70
+fi
 
 if ! record_backup_success; then
     log "ERROR: backup pair exists but last-success marker was not durably recorded"

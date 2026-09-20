@@ -16,7 +16,9 @@ export function useAgentSubmissionReconciliation(
     if (checkingRef.current) return;
     checkingRef.current = true;
     setCheckingSubmission(true);
-    void refetchMessages({ cancelRefetch: false }).finally(() => {
+    // Query state owns the visible error. Do not create an unhandled rejection
+    // from the cleanup promise when a cancelled/refused check rejects.
+    void refetchMessages({ cancelRefetch: false }).catch(() => undefined).finally(() => {
       checkingRef.current = false;
       setCheckingSubmission(false);
     });

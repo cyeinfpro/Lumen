@@ -22,6 +22,13 @@
       "status": "active"
     },
     {
+      "caller_count": 57,
+      "owner": "core",
+      "path": "packages/core/lumen_core/__init__.py",
+      "retirement_condition": "Keep the pre-existing package exports lazy until all internal and external consumers use explicit submodule imports; do not add export names or eager ORM initialization.",
+      "status": "active"
+    },
+    {
       "caller_count": 168,
       "owner": "core",
       "path": "packages/core/lumen_core/models.py",

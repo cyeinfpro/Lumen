@@ -35,6 +35,7 @@ import type { WorkflowRun } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
 import { OnlineBanner } from "./components/OnlineBanner";
 import { ProjectDeleteDialog } from "./components/ProjectDeleteDialog";
+import { ProjectRefreshNotice } from "./components/ProjectRefreshNotice";
 import {
   ProjectMobileTabBar,
   ProjectMobileTopBar,
@@ -74,12 +75,19 @@ export function PosterWorkflowDetail({ projectId }: DetailProps) {
 
       {!workflow && query.isLoading ? (
         <DetailSkeleton />
-      ) : query.isError ? (
+      ) : !workflow && query.isError ? (
         <DetailError onRetry={() => query.refetch()} />
       ) : !workflow ? (
         <div className="p-6 type-body-sm text-[var(--fg-1)]">项目加载失败</div>
       ) : (
-        <PosterConsole workflow={workflow} refreshing={query.isFetching} />
+        <>
+          <ProjectRefreshNotice
+            error={query.isError ? query.error : null}
+            refreshing={query.isFetching}
+            onRetry={() => void query.refetch()}
+          />
+          <PosterConsole workflow={workflow} refreshing={query.isFetching} />
+        </>
       )}
       <ProjectMobileTabBar />
     </div>

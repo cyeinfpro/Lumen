@@ -1268,6 +1268,8 @@ def test_backup_restart_readiness_failure_retains_journal_and_pair(
     assert process.returncode == 70, output
     assert expected_error in output
     assert (backup_root / ".recovery" / "backup.json").is_file()
+    assert (backup_root / ".backup.running").is_file()
+    assert not (backup_root / ".backup.last-success.json").exists()
     assert len(list(backup_root.glob(".backup-pair.*.json"))) == 1
     assert len(list((backup_root / "redis").glob("*.redis.tgz"))) == 1
     probed = (tmp_path / "curl.log").read_text(encoding="utf-8").splitlines()
@@ -1329,3 +1331,34 @@ def test_backup_restart_never_uses_unproven_legacy_worker_fallback(
     assert process.returncode == 70, output
     assert "Worker python -m app.worker_health check 未通过" in output
     assert len(list(backup_root.glob(".backup-pair.*.json"))) == 1
+
+
+@pytest.mark.parametrize("failpoint", ["before_retention", "after_prune_marker"])
+def test_retention_crash_keeps_verified_writers_available(
+    tmp_path: Path, failpoint: str,
+) -> None:
+    env: dict[str, str] = {}
+    process, _marker, backup_root, _maint_root, _lock_file = _start_backup(
+        tmp_path,
+        block_phase="",
+        max_keep=1,
+        existing_timestamps=("20200101-000000", "20200102-000000"),
+        failpoint=failpoint,
+        env_out=env,
+    )
+    stdout, stderr = process.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
+    assert process.returncode == -signal.SIGKILL, stdout + stderr
+    for service in APPLICATION_SERVICES:
+        assert (tmp_path / f"service-{service}").read_text() == "true"
+    journal = backup_root / ".recovery" / "backup.json"
+    assert journal.is_file()
+    assert (backup_root / ".backup.last-success.json").is_file()
+    _assert_all_markers_reference_complete_pairs(backup_root)
+    calls_before = (tmp_path / "docker.log").read_text()
+    recovery = _run_backup_recovery(tmp_path, env)
+    assert recovery.returncode == 0, recovery.stdout + recovery.stderr
+    calls_after = (tmp_path / "docker.log").read_text()
+    assert calls_after.count("pg_dump") == calls_before.count("pg_dump")
+    assert calls_after.count(" stop ") == calls_before.count(" stop ")
+    assert not journal.exists()
+    assert not (backup_root / ".backup.running").exists()

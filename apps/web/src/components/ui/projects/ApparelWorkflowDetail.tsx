@@ -27,6 +27,7 @@ import { cn } from "@/lib/utils";
 import { ConstraintDrawer, ConstraintPanel } from "./components/ConstraintPanel";
 import { OnlineBanner } from "./components/OnlineBanner";
 import { ProjectDeleteDialog } from "./components/ProjectDeleteDialog";
+import { ProjectRefreshNotice } from "./components/ProjectRefreshNotice";
 import { ProjectMobileTabBar, ProjectMobileTopBar, ProjectTopBar } from "./components/ProjectTopBar";
 import { StageErrorBoundary } from "./components/StageErrorBoundary";
 import { MobileStageStrip, StepRail } from "./components/StepRail";
@@ -64,12 +65,19 @@ export function ApparelWorkflowDetail({ projectId }: DetailProps) {
 
       {!workflow && query.isLoading ? (
         <DetailSkeleton />
-      ) : query.isError ? (
+      ) : !workflow && query.isError ? (
         <DetailError onRetry={() => query.refetch()} />
       ) : !workflow ? (
         <div className="p-6 type-body-sm text-[var(--fg-1)]">项目加载失败</div>
       ) : (
-        <ProjectConsole workflow={workflow} refreshing={query.isFetching} />
+        <>
+          <ProjectRefreshNotice
+            error={query.isError ? query.error : null}
+            refreshing={query.isFetching}
+            onRetry={() => void query.refetch()}
+          />
+          <ProjectConsole workflow={workflow} refreshing={query.isFetching} />
+        </>
       )}
       <ProjectMobileTabBar />
     </div>
