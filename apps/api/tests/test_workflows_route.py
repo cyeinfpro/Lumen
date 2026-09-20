@@ -105,6 +105,9 @@ class _Db:
         self.committed = False
         self.rolled_back = False
 
+    async def connection(self):
+        return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
     async def execute(self, statement: Any) -> _Result:
         self.statements.append(statement)
         if self.responses is not None:

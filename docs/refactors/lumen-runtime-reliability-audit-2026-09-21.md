@@ -37,3 +37,14 @@ Automated browser fixtures do not replace manual Safari/device testing or a paid
 ## Release gate execution efficiency
 
 The release workflow previously ran frontend tests, lint, type-check and build inside the step named `Python tests`, then installed frontend dependencies again and repeated type-check/build. Frontend tests and lint now have their own mandatory step; type-check/build, Node 24 semantic-idempotency compatibility, dependency audits and all runtime gates remain mandatory. Python and operations suites still use the same script entrypoint. `test_release_quality_web_coverage.py` guards this split; no assertion, test suite or budget is removed.
+
+
+## Continuation: cross-project preset race — v1.2.171
+
+Release review found an additional race in the same materialization boundary: workflow row locks protect a single project, not two different projects selecting the same owner/preset pair. Two independent transactions were reproduced against a private, temporary local PostgreSQL 17 instance using the actual adapter, ORM schema and commit boundaries. Before the fix they committed two private images and two files; a later selection raised `MultipleResultsFound`. A read-only production aggregate found zero existing duplicate groups; no production records or binaries were modified by the reproduction.
+
+The adapter now uses the existing namespaced PostgreSQL transaction-lock helper for the owner/preset key before lookup. The lock lasts through the caller's commit or rollback; unrelated users and presets do not share it. Lookup orders by creation time and image ID and takes one row, so historical duplicates can be reused deterministically without deleting user-owned data. No schema migration is needed.
+
+The new six-case mandatory concurrency regression covers overlapping projects, independent owners/presets, cancellation of a waiting request, historical duplicate reuse and lock failure before file creation. Its overlapping-project assertion failed against the previous adapter. After the fix, 186 focused workflow/materialization/facade tests and Ruff passed. The real PostgreSQL reproduction then produced exactly one private file and row, returned the same image ID to both callers and allowed a subsequent selection without error. Both temporary database instances were stopped and removed after their runs.
+
+The already-pushed `v1.2.170` tag was not moved; its unshipped release build was cancelled so this additional fix can ship as `v1.2.171` together with the earlier audit changes. Version synchronization changes workspace package versions only; external Python dependency versions remain unchanged. Formal release and production acceptance still require the gates described above, not merely these focused results.

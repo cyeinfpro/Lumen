@@ -16,6 +16,8 @@ from lumen_core.constants import ImageSource, ImageVisibility
 from lumen_core.model_image_metadata import build_model_image_metadata
 from lumen_core.models import Image, ModelLibraryItem, new_uuid7
 
+from ...idempotency.advisory import lock_user_key as _lock_user_key
+
 from ..domain.apparel_library import (
     model_library_folder_for_age as _model_library_folder_for_age,
 )  # noqa: F401
@@ -140,6 +142,9 @@ async def _create_user_image_from_preset(
     item: dict[str, Any],
 ) -> Image:
     item_id = str(item.get("id") or "").strip()
+    # Workflow row locks do not serialize selections from different projects.
+    # Keep this owner/preset lock until the caller commits or rolls back.
+    await _lock_user_key(db, "apparel-preset-image", user_id, item_id)
     existing = (
         await db.execute(
             select(Image).where(
@@ -147,6 +152,10 @@ async def _create_user_image_from_preset(
                 Image.deleted_at.is_(None),
                 Image.metadata_jsonb["apparel_model_library_item_id"].astext == item_id,
             )
+            # Reuse historical duplicates deterministically without deleting
+            # either user-owned binary or row.
+            .order_by(Image.created_at.asc(), Image.id.asc())
+            .limit(1)
         )
     ).scalar_one_or_none()
     if existing is not None:
