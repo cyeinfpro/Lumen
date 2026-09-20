@@ -322,11 +322,16 @@ jobs:
       - name: Python tests
         env:
           LUMEN_TEST_SKIP_AGENT_RUNTIME: "1"
+          LUMEN_TEST_SKIP_WEB: "1"
         run: bash scripts/test.sh
 
       - name: Web dependencies
         working-directory: apps/web
         run: npm ci
+
+      - name: Web tests and lint
+        working-directory: apps/web
+        run: npm test && npm run lint
 
       - name: Agent Runtime production dependency audit
         working-directory: apps/agent-runtime
