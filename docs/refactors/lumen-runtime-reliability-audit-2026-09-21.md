@@ -32,3 +32,8 @@ Run the repository's Python governance and independent backend suites, Agent Run
 A production update requires a successful formal version-tag Docker Release, immutable image/source provenance and the supported deployment runner. Verify API readiness, worker health, all six containers, deployed source/version, offline encoder availability, and backup recovery/receipts after the update. Keep the previous release and paired backup available for rollback. No migration, billing formula, upstream request contract, Nginx buffering rule or production user data change is part of this patch.
 
 Automated browser fixtures do not replace manual Safari/device testing or a paid real-provider generation. Those checks must not be claimed without separate execution evidence.
+
+
+## Release gate execution efficiency
+
+The release workflow previously ran frontend tests, lint, type-check and build inside the step named `Python tests`, then installed frontend dependencies again and repeated type-check/build. Frontend tests and lint now have their own mandatory step; type-check/build, Node 24 semantic-idempotency compatibility, dependency audits and all runtime gates remain mandatory. Python and operations suites still use the same script entrypoint. `test_release_quality_web_coverage.py` guards this split; no assertion, test suite or budget is removed.
