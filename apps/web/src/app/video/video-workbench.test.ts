@@ -141,12 +141,16 @@ test("director viewport is a stable real-media stage without fake progress", () 
   match(pageSource, /item: directorViewportItem/);
   match(pageSource, /loading: historyQ\.isLoading/);
   match(pageViewSource, /<VideoDirectorViewport/);
-  match(directorViewportSource, /relative aspect-video w-full/);
+  match(directorViewportSource, /relative aspect-video max-h-\[min\(50dvh,28rem\)\] w-full/);
+  match(directorViewportSource, /if \(!item\) \{/);
+  match(directorViewportSource, /data-video-preview="empty"/);
+  match(directorViewportSource, /data-video-preview="ready"/);
+  equal(pageViewSource.indexOf("data-video-composer") < pageViewSource.indexOf("<VideoDirectorViewport"), true);
   match(
     directorViewportSource,
     /<video[\s\S]*?controls[\s\S]*?playsInline[\s\S]*?preload="metadata"/,
   );
-  match(directorViewportSource, /role="status"/);
+  match(directorViewportSource, /role=\{error \? "alert" : "status"\}/);
   match(directorViewportSource, /role="alert"/);
   doesNotMatch(directorViewportSource, /progressForItem|progress_pct|animate-spin/);
 });

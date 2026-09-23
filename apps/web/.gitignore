@@ -14,6 +14,7 @@
 /coverage
 /test-results
 /test-results-ux
+/test-results-design
 /playwright-report
 /blob-report
 

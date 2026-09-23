@@ -21,10 +21,15 @@ export function StreamSearchBar({
   loadedCount,
 }: StreamSearchBarProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     const input = inputRef.current;
     if (open && input) {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active !== input && active !== document.body) {
+        returnFocusRef.current = active;
+      }
       const frame = window.requestAnimationFrame(() => input.focus());
       return () => window.cancelAnimationFrame(frame);
     }
@@ -36,17 +41,18 @@ export function StreamSearchBar({
   const closeSearch = useCallback(() => {
     inputRef.current?.blur();
     onClose();
+    if (returnFocusRef.current?.isConnected) returnFocusRef.current.focus({ preventScroll: true });
   }, [onClose]);
 
   const handleKey = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Escape") {
+    if (e.key === "Escape" && !e.nativeEvent.isComposing) {
       e.preventDefault();
       closeSearch();
     }
   };
 
   return (
-    <div className={`stream-collapse ${open ? "open" : ""}`}>
+    <div className={`stream-collapse ${open ? "open" : ""}`} inert={!open} aria-hidden={!open}>
       <div>
         <div className="sticky top-0 z-[var(--z-header)] bg-[var(--bg-0)]/88 px-3 py-2 backdrop-blur-xl md:static md:bg-transparent md:backdrop-blur-none">
           <div
@@ -70,16 +76,19 @@ export function StreamSearchBar({
               placeholder="搜索已加载作品…"
               aria-label="搜索已加载作品"
               className={[
-                "flex-1 min-h-11 bg-transparent border-none outline-none",
+                "min-w-0 flex-1 min-h-11 bg-transparent border-none outline-none",
                 "type-body text-[var(--fg-0)] placeholder:text-[var(--fg-2)]",
               ].join(" ")}
             />
             {value && (
               <button
                 type="button"
-                onClick={() => onChange("")}
+                onClick={() => {
+                  onChange("");
+                  inputRef.current?.focus();
+                }}
                 aria-label="清空"
-                className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-full text-[var(--fg-2)] hover:text-[var(--fg-0)] md:h-7 md:w-7 md:min-h-0 md:min-w-0 focus-visible:outline-none"
+                className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-full text-[var(--fg-2)] hover:text-[var(--fg-0)] md:h-7 md:w-7 md:min-h-0 md:min-w-0 focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
               >
                 <X className="w-3.5 h-3.5" />
               </button>
@@ -87,7 +96,7 @@ export function StreamSearchBar({
             <button
               type="button"
               onClick={closeSearch}
-              className="ml-1 min-h-11 cursor-pointer rounded-full px-2.5 type-body-sm text-[var(--fg-1)] hover:text-[var(--fg-0)] focus-visible:outline-none md:h-8 md:min-h-0"
+              className="ml-1 min-h-11 shrink-0 cursor-pointer rounded-full px-2.5 type-body-sm text-[var(--fg-1)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:shadow-[var(--ring)] md:h-8 md:min-h-0"
               aria-label="关闭搜索"
             >
               取消

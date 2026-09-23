@@ -70,7 +70,7 @@ function SelectionControls({
           type="button"
           onClick={onShareSelected}
           disabled={sharingSelected}
-          className="type-control inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] px-3 text-[var(--accent)] transition-colors hover:bg-[var(--bg-2)] disabled:opacity-60 focus-visible:outline-none md:h-9 md:min-h-0"
+          className="type-control inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] px-3 text-[var(--fg-0)] transition-colors hover:bg-[var(--bg-2)] disabled:opacity-60 focus-visible:outline-none focus-visible:shadow-[var(--ring)] md:h-9 md:min-h-0"
         >
           <Share2 className="h-3 w-3" />
           {sharingSelected ? "分享中" : `分享 ${selectedCount} 张`}
@@ -79,7 +79,7 @@ function SelectionControls({
           type="button"
           onClick={onClearSelection}
           aria-label="取消选择"
-          className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] focus-visible:outline-none md:h-9 md:w-9 md:min-h-0 md:min-w-0"
+          className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:shadow-[var(--ring)] md:h-9 md:w-9 md:min-h-0 md:min-w-0"
         >
           <X className="h-3.5 w-3.5" />
         </button>
@@ -93,9 +93,9 @@ function SelectionControls({
       onClick={onToggleSelectionMode}
       aria-pressed={selectionMode}
       className={cn(
-        "type-control inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border px-2.5 transition-colors focus-visible:outline-none md:h-9 md:min-h-0",
+        "type-control inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border px-2.5 transition-colors focus-visible:outline-none focus-visible:shadow-[var(--ring)] md:h-9 md:min-h-0",
         selectionMode
-          ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]"
+          ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--fg-0)]"
           : "border-[var(--border-subtle)] bg-[var(--bg-2)] text-[var(--fg-1)] hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]",
       )}
     >
@@ -138,13 +138,14 @@ function StreamToolbarActions({
 > & { hasControls: boolean }) {
   const router = useRouter();
   return (
-    <div className="flex min-w-0 items-center gap-2 overflow-x-auto pb-0.5 no-scrollbar min-[400px]:shrink-0 min-[400px]:pb-0">
+    <div className="flex min-w-0 flex-wrap items-center gap-2">
       {onToggleSearch ? (
         <IconButton
           size="sm"
           variant="outline"
           aria-label="搜索素材"
           aria-pressed={searchActive}
+          aria-expanded={searchActive}
           tooltip="搜索素材"
           tooltipSide="bottom"
           onClick={onToggleSearch}
@@ -185,7 +186,7 @@ function StreamToolbarActions({
         <button
           type="button"
           onClick={onClearFilters}
-          className="type-control inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-2.5 text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] focus-visible:outline-none md:h-9 md:min-h-0"
+          className="type-control inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-2.5 text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:shadow-[var(--ring)] md:h-9 md:min-h-0"
         >
           <Eraser className="h-3 w-3" />
           清除
@@ -203,7 +204,7 @@ function StreamToolbarActions({
         <RefreshCw className="h-3.5 w-3.5" />
       </IconButton>
       <Button
-        variant="primary"
+        variant="secondary"
         size="sm"
         onClick={() => router.push("/")}
         className="shrink-0 md:h-9"
@@ -237,7 +238,7 @@ function FilterChips({
         <button
           type="button"
           onClick={onToggleReferenceFilter}
-          className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 type-caption text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] focus-visible:outline-none md:min-h-8"
+          className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 type-caption text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:shadow-[var(--ring)] md:min-h-8"
         >
           <ImageIcon className="h-3 w-3" />
           参考图
@@ -285,20 +286,20 @@ export function StreamOverview({
     <section
       aria-label="图库工具栏"
       data-asset-content-toolbar
-      className="toolbar-shell sticky top-0 z-[var(--z-header)] bg-[var(--bg-0)]/96 px-3 backdrop-blur-xl md:static md:bg-transparent md:px-0 md:backdrop-blur-none"
+      className="toolbar-shell !grid min-w-0 grid-cols-1 sticky top-0 z-[var(--z-header)] bg-[var(--bg-0)] px-3 md:static md:bg-transparent md:px-0"
     >
-      <div className="flex flex-col gap-2 min-[400px]:flex-row min-[400px]:items-center min-[400px]:justify-between md:gap-3">
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 md:gap-3">
         <div className="type-caption flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
           <span className="inline-flex items-center gap-1.5 text-[var(--fg-1)]">
             <ImageIcon className="h-3.5 w-3.5 text-accent" />
             <span className="tabular-nums">{visibleLabel} 张</span>
           </span>
-          <span className="inline-flex items-center gap-1.5 text-[var(--fg-2)]">
+          <span className="inline-flex items-center gap-1.5 text-[var(--fg-muted-aa)]">
             <Layers3 className="h-3.5 w-3.5" />
             <span className="tabular-nums">{promptCount} 提示词</span>
           </span>
           {total > loaded && (
-            <span className="type-caption tabular-nums text-[var(--fg-2)]">
+            <span className="type-caption tabular-nums text-[var(--fg-muted-aa)]">
               共 {total}，继续下滑加载
             </span>
           )}
@@ -322,7 +323,7 @@ export function StreamOverview({
         />
       </div>
 
-      {children ? <div className="mt-2 grid gap-1">{children}</div> : null}
+      {children ? <div className="mt-2 grid min-w-0 grid-cols-1 gap-1">{children}</div> : null}
 
       {hasControls && (
         <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">

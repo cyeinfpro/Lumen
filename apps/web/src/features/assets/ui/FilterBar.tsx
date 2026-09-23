@@ -32,16 +32,15 @@ export function FilterBar({ open, filters, onChange, onClear }: FilterBarProps) 
   const active = hasAnyFilter(filters);
 
   return (
-    <div className={`stream-collapse ${open ? "open" : ""}`}>
+    <div className={`stream-collapse ${open ? "open" : ""}`} inert={!open} aria-hidden={!open}>
       <div>
         <div
-          className="w-full overflow-x-auto border-b border-[var(--border-subtle)] bg-[var(--bg-0)]/60 backdrop-blur-md no-scrollbar"
-          style={{ scrollbarWidth: "none" }}
+          className="w-full min-w-0 border-b border-[var(--border-subtle)] bg-[var(--bg-0)]"
           role="group"
           aria-label="筛选"
         >
-          <div className="flex min-w-max items-center gap-2 px-3 py-2 md:min-w-0 md:flex-wrap md:py-2.5">
-            <span className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] px-3 type-caption text-[var(--fg-2)] md:min-h-8">
+          <div className="flex min-w-0 flex-wrap items-center gap-2 px-3 py-2 md:py-2.5">
+            <span className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] px-3 type-caption text-[var(--fg-muted-aa)] md:min-h-8">
               <SlidersHorizontal className="h-3.5 w-3.5" />
               筛选
             </span>

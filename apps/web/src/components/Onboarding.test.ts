@@ -158,8 +158,15 @@ test("studio raster content matches the manually approved visual snapshots", () 
   }
 });
 
-test("studio preset cards use the shared motion-safe V2 surface", () => {
-  match(source, /group surface-card-v2/);
-  doesNotMatch(source, /whileHover|hover:-translate-y/);
-  match(source, /group-hover:scale-\[1\.02\] motion-reduce:transform-none/);
+test("studio presets are compact, motion-safe and ready for deliberate input", () => {
+  match(source, /grid-cols-2[^"]*lg:grid-cols-4/);
+  match(source, /max-w-\[var\(--content-composer\)\]/);
+  match(source, /useReducedMotion/);
+  match(source, /initial=\{reduceMotion \? false/);
+  match(source, /duration: reduceMotion \? 0 : DURATION\.normal/);
+  match(source, /ease: EASE\.develop/);
+  match(source, /lumen:composer-expand/);
+  match(source, /<details/);
+  match(source, /<summary[\s\S]*?className="flex min-h-11/);
+  doesNotMatch(source, /whileHover|group-hover:scale|hover:-translate-y|overflow-y-auto|delay:/);
 });
