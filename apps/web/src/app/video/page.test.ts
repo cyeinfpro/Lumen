@@ -896,8 +896,8 @@ test("active video polling keeps the 800ms start and 2.5s cadence", (t) => {
 test("video workspace keeps history reachable through a responsive task drawer", () => {
   doesNotMatch(source, /xl:overflow-hidden/);
   match(source, /page-scroll page-frame lumen-studio-bg/);
-  match(source, /min-\[1120px\]:grid-cols-\[minmax\(0,1fr\)_340px\]/);
-  match(source, /2xl:grid-cols-\[minmax\(0,1fr\)_360px\]/);
+  match(source, /min-\[1120px\]:grid-cols-\[minmax\(0,1fr\)_300px\]/);
+  match(source, /2xl:grid-cols-\[minmax\(0,1fr\)_320px\]/);
   match(source, /function VideoTaskDrawer\(/);
   match(source, /useBodyScrollLock\(isTaskPanelOpen/);
   match(
@@ -929,7 +929,7 @@ test("video parameters use the same controlled panel in a desktop inspector or m
   match(source, /resize-none overflow-y-hidden/);
   match(
     source,
-    /className="scroll-mt-20 min-\[1120px\]:sticky min-\[1120px\]:top-\[76px\]"/,
+    /className="scroll-mt-6 min-\[1120px\]:sticky min-\[1120px\]:top-4"/,
   );
   match(source, /id="video-generation-settings"/);
   match(pageSource, /onOpenParameters: scrollParametersIntoView/);

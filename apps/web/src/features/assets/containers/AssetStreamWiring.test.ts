@@ -60,12 +60,12 @@ test("mobile asset header has no private feed controls", () => {
   doesNotMatch(topBar, /onToggleSearch|onToggleFilter|countLabel/);
 });
 
-test("asset toolbar delegates its primary create action to Button", () => {
+test("asset toolbar delegates its secondary create action to Button", () => {
   const overview = readFileSync(
     new URL("../ui/StreamOverview.tsx", import.meta.url),
     "utf8",
   );
   match(overview, /import \{ Button, IconButton \} from "@\/components\/ui\/primitives"/);
-  match(overview, /<Button\s+variant="primary"[\s\S]*?>\s*创作\s*<\/Button>/);
+  match(overview, /<Button\s+variant="secondary"[\s\S]*?>\s*创作\s*<\/Button>/);
   doesNotMatch(overview, /<button[\s\S]{0,240}bg-\[var\(--accent\)\][\s\S]{0,120}创作/);
 });

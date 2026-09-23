@@ -85,7 +85,7 @@ function SelectField({
   return (
     <label className="block min-w-0 space-y-1.5">
       {label && (
-        <span className="type-caption text-[var(--fg-2)]">{label}</span>
+        <span className="type-caption text-[var(--fg-muted-aa)]">{label}</span>
       )}
       <Select
         value={value}
@@ -155,7 +155,7 @@ function VisualAspectRatioPicker({
       <div className="flex items-center justify-between gap-3">
         <span
           id="video-aspect-ratio-label"
-          className="type-caption text-[var(--fg-2)]"
+          className="type-caption text-[var(--fg-muted-aa)]"
         >
           画面比例
         </span>
@@ -182,10 +182,10 @@ function VisualAspectRatioPicker({
               aria-pressed={isSelected}
               onClick={() => onChange(option)}
               className={cn(
-                "flex min-h-14 min-w-0 flex-col items-center justify-center gap-1.5 rounded-[var(--radius-control)] border px-2 py-2 text-center transition-[background-color,border-color,color,box-shadow,transform] duration-150",
+                "flex min-h-11 min-w-0 items-center justify-center gap-2 rounded-[var(--radius-control)] border px-2 py-2 text-center transition-colors duration-[var(--dur-quick)]",
                 isSelected
-                  ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)] shadow-[var(--shadow-amber)]"
-                  : "border-[var(--border)] bg-[var(--bg-0)]/80 text-[var(--fg-2)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
+                  ? "border-[var(--accent)] bg-[var(--bg-2)] text-[var(--fg-0)]"
+                  : "border-[var(--border)] bg-[var(--bg-0)]/80 text-[var(--fg-muted-aa)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
               )}
             >
               <AspectRatioShape ratio={option} />
@@ -213,7 +213,7 @@ function VisualResolutionSelector({
     <div className="space-y-1.5">
       <span
         id="video-resolution-label"
-        className="type-caption text-[var(--fg-2)]"
+        className="type-caption text-[var(--fg-muted-aa)]"
       >
         分辨率
       </span>
@@ -238,8 +238,8 @@ function VisualResolutionSelector({
               className={cn(
                 "min-h-11 min-w-14 flex-1 rounded-[var(--radius-xs)] px-2.5 py-1.5 text-center type-caption font-medium transition-[background-color,border-color,color,box-shadow] duration-150 sm:min-h-8",
                 isSelected
-                  ? "border border-[var(--border-strong)] bg-[var(--bg-2)] font-semibold text-[var(--accent)] shadow-[var(--shadow-1)]"
-                  : "border border-transparent text-[var(--fg-2)] hover:bg-[var(--bg-2)]/50 hover:text-[var(--fg-0)]",
+                  ? "border border-[var(--border-strong)] bg-[var(--bg-2)] font-semibold text-[var(--fg-0)]"
+                  : "border border-transparent text-[var(--fg-muted-aa)] hover:bg-[var(--bg-2)]/50 hover:text-[var(--fg-0)]",
               )}
             >
               <span className="break-words">{option || "自动"}</span>
@@ -270,7 +270,7 @@ function SubmitPanel({
         aria-live="polite"
         className={cn(
           "flex min-w-0 items-start gap-2 type-caption leading-5",
-          canSubmit ? "text-success" : "text-[var(--fg-2)]",
+          canSubmit ? "text-success" : "text-[var(--fg-muted-aa)]",
         )}
       >
         <span
@@ -342,10 +342,7 @@ export function VideoParameterPanelView({
           </span>
           <div className="min-w-0">
             <p className="type-card-title">{children}</p>
-            <p className="mt-0.5 truncate type-caption text-[var(--fg-2)]">
-              {selectedModel || "未选择模型"}
-            </p>
-            <p className="mt-1 type-caption text-[var(--fg-2)]">仅用于下一次提交</p>
+            <p className="mt-1 type-caption text-[var(--fg-muted-aa)]">仅用于下一次生成</p>
           </div>
         </div>
         <span
@@ -354,7 +351,7 @@ export function VideoParameterPanelView({
             canSubmit
               ? "border-success-border bg-success-soft text-success"
               : sourceReady
-                ? "border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-2)]"
+                ? "border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-muted-aa)]"
                 : "border-warning-border bg-warning-soft text-[var(--warning-fg)]",
           )}
         >
@@ -364,12 +361,6 @@ export function VideoParameterPanelView({
 
       <div className="min-w-0 flex-1 space-y-4 p-3 sm:p-3.5">
         <section className="space-y-2.5">
-          <div className="flex items-center justify-between gap-2">
-            <p className="type-caption text-[var(--fg-2)]">模型</p>
-            <span className="type-caption text-[var(--fg-2)]">
-              自动匹配当前生成方式
-            </span>
-          </div>
           <SelectField
             label="模型"
             value={selectedModel}
@@ -380,7 +371,7 @@ export function VideoParameterPanelView({
         </section>
 
         <section className="space-y-3">
-          <p className="type-caption text-[var(--fg-2)]">画面与时长</p>
+          <p className="type-caption text-[var(--fg-muted-aa)]">画面与时长</p>
           <VisualAspectRatioPicker
             value={aspectRatio}
             onChange={onAspectRatioChange}
@@ -412,7 +403,7 @@ export function VideoParameterPanelView({
             <span className="block type-body-sm font-medium text-[var(--fg-0)]">
               生成音频
             </span>
-            <span className="mt-0.5 block type-caption text-[var(--fg-2)]">
+            <span className="mt-0.5 block type-caption text-[var(--fg-muted-aa)]">
               {audioSupported
                 ? "同步生成环境声或对白"
                 : "当前模型与生成方式不支持音频"}
@@ -425,7 +416,7 @@ export function VideoParameterPanelView({
             onChange={(event) => onGenerateAudioChange(event.target.checked)}
             className="peer sr-only"
           />
-          <span className="relative h-6 w-10 shrink-0 rounded-full border border-[var(--border-strong)] bg-[var(--bg-2)] transition-colors peer-checked:border-[var(--accent-border)] peer-checked:bg-[var(--accent)] peer-checked:[&>span]:translate-x-4">
+          <span className="relative h-6 w-10 shrink-0 rounded-full border border-[var(--border-strong)] bg-[var(--bg-2)] transition-colors peer-checked:border-[var(--accent-border)] peer-checked:bg-[var(--accent)] peer-checked:[&>span]:translate-x-4 peer-focus-visible:shadow-[var(--ring)]">
             <span className="absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--fg-0)] shadow-[var(--shadow-1)] transition-transform" />
           </span>
         </label>
@@ -437,7 +428,7 @@ export function VideoParameterPanelView({
           </summary>
           <div className="border-t border-[var(--border-subtle)] p-3">
             <label className="block min-w-0 space-y-1.5">
-              <span className="type-caption text-[var(--fg-2)]">种子</span>
+              <span className="type-caption text-[var(--fg-muted-aa)]">种子</span>
               <input
                 value={seed}
                 onChange={(event) => onSeedChange(event.target.value)}
@@ -446,7 +437,7 @@ export function VideoParameterPanelView({
                 className="h-11 w-full min-w-0 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 font-mono type-body text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--accent)]/60 sm:h-10 "
               />
             </label>
-            <p className="mt-2 type-caption leading-5 text-[var(--fg-2)]">
+            <p className="mt-2 type-caption leading-5 text-[var(--fg-muted-aa)]">
               使用相同种子可提高同一模型与参数下的结果可复现性。
             </p>
           </div>
@@ -457,7 +448,7 @@ export function VideoParameterPanelView({
         <div className="mb-3 py-1">
           <div className="grid grid-cols-1 gap-3 min-[340px]:grid-cols-2">
             <div className="min-w-0">
-              <span className="type-caption text-[var(--fg-2)]">预计预扣</span>
+              <span className="type-caption text-[var(--fg-muted-aa)]">预计预扣</span>
               <p
                 className="mt-1 break-all font-mono type-body font-semibold tabular-nums text-[var(--fg-0)]"
                 title={estimate ? formatMicroRmb(estimate.micro) : undefined}
@@ -466,7 +457,7 @@ export function VideoParameterPanelView({
               </p>
             </div>
             <div className="min-w-0 border-t border-[var(--border-subtle)] pt-3 min-[340px]:border-l min-[340px]:border-t-0 min-[340px]:pl-3 min-[340px]:pt-0">
-              <span className="type-caption text-[var(--fg-2)]">计费单价</span>
+              <span className="type-caption text-[var(--fg-muted-aa)]">计费单价</span>
               <p
                 className="mt-1 break-all font-mono type-body-sm font-semibold tabular-nums text-[var(--fg-0)]"
                 title={
@@ -485,7 +476,7 @@ export function VideoParameterPanelView({
             </div>
           </div>
           {estimate && (
-            <div className="mt-2.5 grid grid-cols-[auto_minmax(0,1fr)] gap-3 border-t border-[var(--border-subtle)] pt-2 type-caption tabular-nums text-[var(--fg-2)]">
+            <div className="mt-2.5 grid grid-cols-[auto_minmax(0,1fr)] gap-3 border-t border-[var(--border-subtle)] pt-2 type-caption tabular-nums text-[var(--fg-muted-aa)]">
               <span>Token 上限</span>
               <span className="min-w-0 break-words text-right font-medium text-[var(--fg-1)]">
                 {estimate.tokens.toLocaleString()}
@@ -495,7 +486,7 @@ export function VideoParameterPanelView({
           )}
         </div>
         {!estimate && (
-          <p className="mb-3 break-words type-caption tabular-nums text-[var(--fg-2)]">
+          <p className="mb-3 break-words type-caption tabular-nums text-[var(--fg-muted-aa)]">
             价格与预扣由服务端配置返回
           </p>
         )}
@@ -551,7 +542,7 @@ export function VideoWorkbenchHeader({
                 "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 type-caption font-medium",
                 enabled
                   ? "border-success-border bg-success-soft text-success"
-                  : "border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-2)]",
+                  : "border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-muted-aa)]",
               )}
             >
               <span
@@ -566,7 +557,7 @@ export function VideoWorkbenchHeader({
               <MobileRuntimeResilienceStatus />
             </div>
           </div>
-          <p className="mt-1 truncate type-caption text-[var(--fg-2)]">
+          <p className="mt-1 truncate type-caption text-[var(--fg-muted-aa)]">
             {loading ? "视频服务读取中" : serviceSummary}
           </p>
         </div>
@@ -574,10 +565,10 @@ export function VideoWorkbenchHeader({
       <div className="grid min-w-0 grid-cols-2 gap-2 min-[390px]:flex min-[390px]:flex-1 min-[390px]:items-center min-[390px]:justify-end sm:flex-none">
         <div className="hidden items-center gap-1.5 lg:flex">
           <span className="inline-flex items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/72 px-2.5 py-1.5 type-caption text-[var(--fg-1)]">
-            <Film className="h-3.5 w-3.5 text-[var(--fg-2)]" />
+            <Film className="h-3.5 w-3.5 text-[var(--fg-muted-aa)]" />
             {mode}
           </span>
-          <span className="max-w-[160px] truncate px-1 type-caption text-[var(--fg-2)]">
+          <span className="max-w-[160px] truncate px-1 type-caption text-[var(--fg-muted-aa)]">
             {audio ? "含音频" : "无音频"} · {submitState}
           </span>
         </div>
@@ -645,7 +636,7 @@ export function ModeCard({
           "hidden h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border sm:flex",
           selected
             ? "border-[var(--accent-border)] bg-[var(--bg-0)] text-[var(--accent)]"
-            : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-2)]",
+            : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-muted-aa)]",
         )}
       >
         {icon}
@@ -654,7 +645,7 @@ export function ModeCard({
         <span className="block truncate type-body-sm font-semibold text-[var(--fg-0)] ">
           {copy.title}
         </span>
-        <span className="mt-0.5 hidden truncate type-caption text-[var(--fg-2)] md:block">
+        <span className="mt-0.5 hidden truncate type-caption text-[var(--fg-muted-aa)] md:block">
           {copy.eyebrow}
         </span>
       </span>

@@ -63,6 +63,7 @@ const eslintConfig = defineConfig([
     ".next-build-check/**",
     "test-results/**",
     "test-results-ux/**",
+    "test-results-design/**",
     "playwright-report/**",
     "blob-report/**",
     "out/**",

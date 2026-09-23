@@ -205,17 +205,7 @@ function ModeSelector({
 }) {
   return (
     <div className="shrink-0 border-b border-[var(--border-subtle)] p-2.5 sm:p-3">
-      <div className="mb-2 flex flex-wrap items-end justify-between gap-2 px-1">
-        <div>
-          <p className="type-body-sm font-semibold text-[var(--fg-0)]">生成方式</p>
-          <p className="mt-0.5 type-caption text-[var(--fg-2)]">
-            {MODE_COPY[action].description}
-          </p>
-        </div>
-        <span className="type-caption font-medium text-[var(--fg-1)]">
-          {MODE_COPY[action].requirement}
-        </span>
-      </div>
+      <p className="mb-2 px-1 type-body-sm font-medium text-[var(--fg-0)]">生成方式</p>
       <div
         className="grid min-w-0 gap-1 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/74 p-1"
         style={{
@@ -237,6 +227,7 @@ function ModeSelector({
           </span>
         )}
       </div>
+      <p className="mt-2 px-1 type-caption leading-5 text-[var(--fg-muted-aa)]">{MODE_COPY[action].description} · {MODE_COPY[action].requirement}</p>
     </div>
   );
 }
@@ -591,7 +582,7 @@ export function VideoPageView({ model }: { model: VideoPageViewModel }) {
   const parameterPanel = (
     <VideoParameterPanel
       {...model.parameters}
-      className="scroll-mt-20 min-[1120px]:sticky min-[1120px]:top-[76px]"
+      className="scroll-mt-6 min-[1120px]:sticky min-[1120px]:top-4"
       onSubmit={() => {
         setParametersOpen(false);
         model.parameters.onSubmit();
@@ -617,19 +608,9 @@ export function VideoPageView({ model }: { model: VideoPageViewModel }) {
           onOpenParameters={openParameters}
           onOpenTasks={model.header.onOpenTasks}
         />
-        <div className="grid gap-4 min-[1120px]:grid-cols-[minmax(0,1fr)_340px] min-[1120px]:items-start 2xl:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="grid gap-4 min-[1120px]:grid-cols-[minmax(0,1fr)_300px] min-[1120px]:items-start 2xl:grid-cols-[minmax(0,1fr)_320px]">
           <section className="min-w-0 space-y-4">
-            <VideoDirectorViewport
-              item={model.viewport.item}
-              loading={model.viewport.loading}
-              error={model.viewport.error}
-              onRetry={model.viewport.onRetry}
-              action={model.composer.action}
-              prompt={model.composer.prompt.value}
-              sourceReady={model.parameters.sourceReady}
-              onPreview={model.viewport.onPreview}
-            />
-            <div className="flex flex-col overflow-hidden border-y border-[var(--border)] bg-transparent">
+            <div data-video-composer className="flex flex-col overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-[var(--bg-1)]">
               <ModeSelector
                 action={model.composer.action}
                 actionOptions={model.composer.actionOptions}
@@ -650,13 +631,23 @@ export function VideoPageView({ model }: { model: VideoPageViewModel }) {
                     </div>
                     <div className="flex items-center gap-2">
                       <Button variant="outline" onClick={openParameters} aria-haspopup="dialog" leftIcon={<Settings2 className="h-4 w-4" />}>参数</Button>
-                      <Button className="min-w-0 flex-1" disabled={!model.parameters.canSubmit} loading={model.parameters.loading} onClick={model.parameters.onSubmit} leftIcon={<Send className="h-4 w-4" />}>{model.parameters.loading ? "提交中" : "生成视频"}</Button>
+                      <Button variant="primary" aria-describedby="video-mobile-submit-status" className="min-w-0 flex-1" disabled={!model.parameters.canSubmit} loading={model.parameters.loading} onClick={model.parameters.onSubmit} leftIcon={<Send className="h-4 w-4" />}>{model.parameters.loading ? "提交中" : "生成视频"}</Button>
                     </div>
-                    {model.parameters.reason && <p role="status" className="break-words type-caption text-[var(--fg-2)]">{model.parameters.reason}</p>}
+                    <p id="video-mobile-submit-status" role="status" className="break-words type-caption text-[var(--fg-muted-aa)]">{model.parameters.reason}</p>
                   </div>
                 )}
               </div>
             </div>
+            <VideoDirectorViewport
+              item={model.viewport.item}
+              loading={model.viewport.loading}
+              error={model.viewport.error}
+              onRetry={model.viewport.onRetry}
+              action={model.composer.action}
+              prompt={model.composer.prompt.value}
+              sourceReady={model.parameters.sourceReady}
+              onPreview={model.viewport.onPreview}
+            />
           </section>
           {wide ? parameterPanel : null}
         </div>
