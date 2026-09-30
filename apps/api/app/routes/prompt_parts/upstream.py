@@ -6,11 +6,12 @@ import json
 import logging
 from collections.abc import Awaitable
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Literal
 
 import httpx
 
 from lumen_core.providers import ProviderDefinition
+from lumen_core.text_model_capabilities import normalize_responses_model_body
 
 from ...proxy_pool import resolve_provider_proxy_url
 from ...task_billing import EnhanceUsageCapture, enhance_pricing_snapshot_key
@@ -51,6 +52,27 @@ ENHANCE_ATTEMPTS = (
         service_tier=None,
     ),
 )
+
+
+EnhancementModel = Literal["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]
+
+# Explicit opt-in: retain the legacy default/failover chain and never silently
+# substitute a different model after a user selects a GPT-6 enhancement model.
+GPT6_ENHANCE_ATTEMPTS = tuple(
+    EnhanceAttempt(name=f"selected-{model}", model=model, service_tier=None)
+    for model in ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna")
+)
+
+
+def enhance_attempts_for_model(
+    model: str | None, defaults: tuple[EnhanceAttempt, ...] = ENHANCE_ATTEMPTS
+) -> tuple[EnhanceAttempt, ...]:
+    if model is None:
+        return defaults
+    selected = tuple(attempt for attempt in GPT6_ENHANCE_ATTEMPTS if attempt.model == model)
+    if not selected:
+        raise ValueError("unsupported prompt enhancement model")
+    return selected
 
 
 @dataclass(frozen=True)
@@ -132,7 +154,7 @@ def build_enhance_body(
         body["reasoning"] = {"effort": attempt.reasoning_effort}
     if attempt.service_tier:
         body["service_tier"] = attempt.service_tier
-    return body
+    return normalize_responses_model_body(body)
 
 
 def is_retryable_upstream_error(status_code: int, raw: bytes) -> bool:

@@ -41,6 +41,7 @@ export type MobileComposerPanel =
   | "reasoning";
 
 interface MobileComposerOverlaysProps {
+  promptEnhancementSettings?: React.ReactNode;
   panel: MobileComposerPanel;
   attachmentMenuIndex: number;
   attachmentMenuId: string | null;
@@ -118,6 +119,7 @@ function buildAttachmentMenuActions(input: {
 }
 
 export function MobileComposerOverlays({
+  promptEnhancementSettings,
   panel,
   attachmentMenuIndex,
   attachmentMenuId,
@@ -183,6 +185,7 @@ export function MobileComposerOverlays({
         snapPoints={["80%"]}
       >
         <MobileAdvancedSettings
+          promptEnhancementSettings={promptEnhancementSettings}
           mode={mode}
           quality={quality}
           onQualityChange={onQualityChange}

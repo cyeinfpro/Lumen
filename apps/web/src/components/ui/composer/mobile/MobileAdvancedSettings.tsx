@@ -39,6 +39,7 @@ const QUALITY_OPTIONS: ReadonlyArray<{ value: Quality; label: string }> = [
 ];
 
 interface MobileAdvancedSettingsProps {
+  promptEnhancementSettings?: React.ReactNode;
   mode: "chat" | "image";
   quality: Quality;
   onQualityChange: (value: Quality) => void;
@@ -65,6 +66,7 @@ interface MobileAdvancedSettingsProps {
 }
 
 export function MobileAdvancedSettings({
+  promptEnhancementSettings,
   mode,
   quality,
   onQualityChange,
@@ -103,6 +105,7 @@ export function MobileAdvancedSettings({
         </p>
       </div>
 
+      <div className="pt-4">{promptEnhancementSettings}</div>
       {imageMode ? (
         <div className="grid gap-4 pt-4">
           <ImageModelSelect />

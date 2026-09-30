@@ -428,8 +428,10 @@ export function enhancePrompt(
   text: string,
   onDelta: (text: string) => void,
   signal?: AbortSignal,
+  enhancementModel?: import("../textModelCapabilities").PromptEnhancementModel,
 ): Promise<void> {
-  return streamPromptEnhancement("/prompts/enhance", { text }, onDelta, signal);
+  const body = { text, ...(enhancementModel ? { enhancement_model: enhancementModel } : {}) };
+  return streamPromptEnhancement("/prompts/enhance", body, onDelta, signal);
 }
 
 export function enhanceVideoPrompt(

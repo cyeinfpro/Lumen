@@ -17,6 +17,10 @@ OPENAI_STANDARD_CHAT_PRICES: Final[
     tuple[tuple[str, str, str], ...]
 ] = (
     ("gpt-5.6-sol", "5.00", "30.00"),
+    # Verified 2026-09-29: developers.openai.com/api/docs/models/gpt-6-{family}
+    ("gpt-6-astra", "10.00", "50.00"),
+    ("gpt-6-sol", "2.00", "10.00"),
+    ("gpt-6-luna", "0.10", "0.50"),
     ("gpt-5.6-terra", "2.00", "12.00"),
     ("gpt-5.6-luna", "0.20", "1.20"),
     ("gpt-5.6", "5.00", "30.00"),

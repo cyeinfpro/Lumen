@@ -544,6 +544,7 @@ def durable_prompt_stream(
     runtime: PromptDurabilityRuntime,
     system_prompt: str,
     content: list[dict[str, Any]] | None = None,
+    enhancement_model: str | None = None,
 ) -> tuple[AsyncIterator[str], asyncio.Task[None]]:
     attempt = required_operation_attempt(reservation)
 
@@ -599,6 +600,7 @@ def durable_prompt_stream(
             record_candidate_outcome=candidate_outcome,
             checkpoint_finalization=finalization_checkpoint,
             require_billing_confirmation=True,
+            **({"enhancement_model": enhancement_model} if enhancement_model else {}),
         )
 
     async def recovery_handler(
@@ -638,7 +640,8 @@ def durable_prompt_response(
     prompt_runtime: Any,
     runtime: PromptDurabilityRuntime,
     system_prompt: str,
-    content: list[dict[str, Any]] | None,
+    content: list[dict[str, Any]] | None = None,
+    enhancement_model: str | None = None,
     with_keepalive: Callable[[AsyncIterator[str]], AsyncIterator[str]],
 ) -> StreamingResponse:
     source, _task = durable_prompt_stream(
@@ -651,6 +654,7 @@ def durable_prompt_response(
         runtime=runtime,
         system_prompt=system_prompt,
         content=content,
+        **({"enhancement_model": enhancement_model} if enhancement_model else {}),
     )
     return StreamingResponse(
         with_keepalive(source),

@@ -34,6 +34,7 @@ import {
   SendButton,
 } from "./DesktopComposerButtons";
 import { AdvancedComposerSettings } from "./DesktopComposerAdvancedSettings";
+import { PromptEnhancementModelSelect } from "../shared/PromptEnhancementModelSelect";
 import { DesktopComposerAttachmentTray } from "./DesktopComposerAttachmentTray";
 import { MAX_COMPOSER_ATTACHMENTS } from "../shared/attachments";
 import { useComposerAttachmentDnd } from "../shared/useComposerAttachmentDnd";
@@ -741,6 +742,8 @@ export function DesktopComposerPill({
             className="w-[min(720px,calc(100vw-32px))] p-0"
           >
             <AdvancedComposerSettings
+              promptEnhancementSettings={<PromptEnhancementModelSelect model={promptEnhancement.model}
+                onChange={promptEnhancement.setModel} disabled={isEnhancing} />}
               mode={mode}
               quality={quality}
               onQualityChange={setQuality}

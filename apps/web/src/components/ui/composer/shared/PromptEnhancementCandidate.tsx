@@ -7,6 +7,7 @@ import { pushMobileToast } from "@/components/ui/primitives/mobile";
 import type { HapticKind } from "@/hooks/useHaptic";
 import { enhancePrompt } from "@/lib/apiClient";
 import { logError } from "@/lib/logger";
+import type { PromptEnhancementModel } from "@/lib/textModelCapabilities";
 
 type PromptEnhancementStatus = "idle" | "streaming" | "ready";
 type ComposerScope = "desktop-composer" | "mobile-composer";
@@ -35,6 +36,7 @@ export function usePromptEnhancementCandidate({
   scope,
 }: UsePromptEnhancementCandidateOptions) {
   const [state, setState] = useState<PromptEnhancementState>(IDLE_STATE);
+  const [model, setModel] = useState<PromptEnhancementModel | undefined>();
   const abortRef = useRef<AbortController | null>(null);
   const requestIdRef = useRef(0);
   const sourceTextRef = useRef<string | null>(null);
@@ -95,6 +97,7 @@ export function usePromptEnhancementCandidate({
             setState({ status: "streaming", candidate: accumulated });
           },
           controller.signal,
+          model,
         );
         if (!isCurrentRequest()) return;
         if (!accumulated.trim()) {
@@ -115,7 +118,7 @@ export function usePromptEnhancementCandidate({
         }
       }
     },
-    [haptic, scope],
+    [haptic, scope, model],
   );
 
   const cancel = useCallback(() => {
@@ -151,6 +154,8 @@ export function usePromptEnhancementCandidate({
   );
 
   return {
+    model,
+    setModel,
     status: state.status,
     candidate: state.candidate,
     isEnhancing: state.status === "streaming",

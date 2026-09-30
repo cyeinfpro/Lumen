@@ -69,7 +69,7 @@ function isRetryableIdentityError(error: unknown): boolean {
   if (isUnauthorizedIdentityError(error)) return false;
   if (error instanceof Error && error.name === "AbortError") return false;
   if (!(error instanceof ApiError)) return true;
-  return error.status === 0 || (error.status >= 500 && error.status <= 599);
+  return error.status === 0 || error.status === 408 || error.status === 429 || (error.status >= 500 && error.status <= 599);
 }
 
 function canRetainConfirmedIdentity(
@@ -443,7 +443,8 @@ export function useIdentityRevalidation({
       const generation = state.generation;
       state.retainedUserId = retainedUserId;
       state.handledError = null;
-      setIdentityStatus("revalidating");
+      // Background focus/visibility checks keep a confirmed identity writable; invalidated/degraded sessions still fail closed.
+      if (!currentUserId || state.requiresFreshIdentity) setIdentityStatus("revalidating");
 
       let request: Promise<IdentityRefetchResult>;
       try {

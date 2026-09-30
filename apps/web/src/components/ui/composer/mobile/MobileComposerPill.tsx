@@ -37,6 +37,7 @@ import {
 } from "../shared/composerViewState";
 import { useComposerCostEstimate } from "../shared/useComposerCostEstimate";
 import { usePromptEnhancementCandidate } from "../shared/PromptEnhancementCandidate";
+import { PromptEnhancementModelSelect } from "../shared/PromptEnhancementModelSelect";
 import {
   canSubmitMobileComposer,
   deriveMobileComposerLayout,
@@ -670,6 +671,8 @@ export function MobileComposerPill({
       </div>
 
       <MobileComposerOverlays
+        promptEnhancementSettings={<PromptEnhancementModelSelect model={promptEnhancement.model}
+          onChange={promptEnhancement.setModel} disabled={isEnhancing} />}
         panel={panel}
         attachmentMenuIndex={attachmentMenuIndex}
         attachmentMenuId={attachmentMenuId}

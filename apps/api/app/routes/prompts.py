@@ -15,7 +15,6 @@ from typing import Annotated, Any, AsyncIterator, Awaitable, Callable
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
@@ -56,6 +55,7 @@ from .prompt_parts import failover as _prompt_failover
 from .prompt_parts import idempotency as _prompt_idempotency
 from .prompt_parts import keepalive as _prompt_keepalive
 from .prompt_parts import responses as _prompt_responses
+from .prompt_parts import request_models as _prompt_models
 from .prompt_parts import upstream as _prompt_upstream
 from .prompt_parts.enhance_content import (
     PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES as _PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES,  # noqa: F401 - test-facing re-export
@@ -156,11 +156,9 @@ _EnhanceProviderError = _prompt_upstream.EnhanceProviderError
 _ENHANCE_ATTEMPTS = _prompt_upstream.ENHANCE_ATTEMPTS
 
 
-class EnhanceIn(BaseModel):
-    text: str = Field(min_length=1, max_length=10000)
-
-
+EnhanceIn = _prompt_models.EnhanceIn
 VideoEnhanceIn = _prompt_content.VideoEnhanceIn
+_enhance_request_payload = _prompt_models.enhance_request_payload
 
 
 def _responses_url(base_url: str) -> str:
@@ -207,21 +205,9 @@ async def _resolve_provider_order(
     return weighted_priority_order(providers, runtime.provider_round_robin)
 
 
-def _build_enhance_body(
-    text: str,
-    attempt: _EnhanceAttempt,
-    *,
-    system_prompt: str = ENHANCE_SYSTEM_PROMPT,
-    content: list[dict[str, Any]] | None = None,
-    metadata: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    return _prompt_upstream.build_enhance_body(
-        text,
-        attempt,
-        system_prompt=system_prompt,
-        content=content,
-        metadata=metadata,
-    )
+_build_enhance_body = partial(
+    _prompt_upstream.build_enhance_body, system_prompt=ENHANCE_SYSTEM_PROMPT
+)
 
 
 async def _setting_raw(db: AsyncSession, key: str) -> str | None:
@@ -257,9 +243,9 @@ async def _billing_allow_negative(db: AsyncSession) -> bool:
     )
 
 
-def _prompt_billing_runtime() -> _prompt_billing.BillingRuntime:
+def _prompt_billing_runtime(enhancement_model: str | None = None) -> _prompt_billing.BillingRuntime:
     return _prompt_billing.BillingRuntime(
-        attempts=_ENHANCE_ATTEMPTS,
+        attempts=_prompt_upstream.enhance_attempts_for_model(enhancement_model, _ENHANCE_ATTEMPTS),
         billing_enabled=_billing_enabled,
         billing_cache_aware=_billing_cache_aware,
         billing_allow_negative=_billing_allow_negative,
@@ -279,11 +265,12 @@ async def _prepare_prompt_enhance_billing(
     *,
     request_id: str | None = None,
     commit: bool = True,
+    enhancement_model: str | None = None,
 ) -> _EnhanceBillingContext | None:
     return await _prompt_billing.prepare_prompt_enhance_billing(
         db,
         user,
-        runtime=_prompt_billing_runtime(),
+        runtime=_prompt_billing_runtime(enhancement_model),
         request_id=request_id,
         commit=commit,
     )
@@ -490,6 +477,7 @@ async def _stream_enhance(
     record_candidate_outcome: Callable[[bool], Awaitable[None]] | None = None,
     checkpoint_finalization: Callable[..., Awaitable[None]] | None = None,
     require_billing_confirmation: bool = False,
+    enhancement_model: str | None = None,
 ) -> AsyncIterator[str]:
     active_runtime = runtime or _PromptRuntime()
 
@@ -531,7 +519,7 @@ async def _stream_enhance(
         text,
         providers,
         billing,
-        attempts=_ENHANCE_ATTEMPTS,
+        attempts=_prompt_upstream.enhance_attempts_for_model(enhancement_model, _ENHANCE_ATTEMPTS),
         runtime=stream_runtime,
         default_system_prompt=ENHANCE_SYSTEM_PROMPT,
         system_prompt=system_prompt,
@@ -555,11 +543,15 @@ _stream_with_keepalive = partial(
 
 def _durability_runtime(
     runtime: _PromptRuntime,
+    enhancement_model: str | None = None,
 ) -> _prompt_responses.PromptDurabilityRuntime:
     return _prompt_responses.PromptDurabilityRuntime(
         session_factory=SessionLocal,
         logger=logger,
-        prepare_billing=_prepare_prompt_enhance_billing,
+        prepare_billing=(
+            partial(_prepare_prompt_enhance_billing, enhancement_model=enhancement_model)
+            if enhancement_model else _prepare_prompt_enhance_billing
+        ),
         charge=_charge_prompt_enhance,
         settle_default=_settle_prompt_enhance_default_hold,
         release=_release_prompt_enhance_hold,
@@ -571,10 +563,11 @@ def _durability_runtime(
 async def _prepare_reserved_billing(
     *args: Any,
     runtime: _PromptRuntime,
+    enhancement_model: str | None = None,
 ) -> tuple[_EnhanceBillingContext | None, bool]:
     return await _prompt_responses.prepare_reserved_billing(
         *args,
-        runtime=_durability_runtime(runtime),
+        runtime=_durability_runtime(runtime, enhancement_model),
     )
 
 
@@ -641,7 +634,7 @@ async def enhance_prompt(
         user_id=user.id,
         idempotency_key=client_key,
         operation_namespace=_prompt_idempotency.TEXT_PROMPT_ENHANCE_OPERATION,
-        payload=body.model_dump(mode="json"),
+        payload=_enhance_request_payload(body),
     )
     reservation = await _prompt_active_user.reserve_active_prompt_operation(
         db,
@@ -682,6 +675,7 @@ async def enhance_prompt(
         operation,
         reservation,
         runtime=runtime,
+        **({"enhancement_model": body.enhancement_model} if body.enhancement_model else {}),
     )
     commit = getattr(db, "commit", None)
     if callable(commit):
@@ -696,6 +690,7 @@ async def enhance_prompt(
         providers=providers,
         billing=billing,
         runtime=runtime,
+        **({"enhancement_model": body.enhancement_model} if body.enhancement_model else {}),
     )
 
 
@@ -725,7 +720,7 @@ async def enhance_video_prompt(
         user_id=user.id,
         idempotency_key=client_key,
         operation_namespace=_prompt_idempotency.VIDEO_PROMPT_ENHANCE_OPERATION,
-        payload=body.model_dump(mode="json"),
+        payload=_enhance_request_payload(body),
     )
     reservation = await _prompt_active_user.reserve_active_prompt_operation(
         db,
@@ -774,6 +769,7 @@ async def enhance_video_prompt(
         operation,
         reservation,
         runtime=runtime,
+        **({"enhancement_model": body.enhancement_model} if body.enhancement_model else {}),
     )
     commit = getattr(db, "commit", None)
     if callable(commit):
@@ -796,4 +792,5 @@ async def enhance_video_prompt(
         runtime=runtime,
         system_prompt=_video_enhance_system_prompt(body.variant_count),
         content=content,
+        **({"enhancement_model": body.enhancement_model} if body.enhancement_model else {}),
     )

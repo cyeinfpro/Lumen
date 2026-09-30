@@ -84,6 +84,11 @@ const ERROR_PRESENTATIONS: Record<string, AgentErrorPresentation> = {
     detail: "当前文本和图片超过 Agent 运行时传输上限。",
     recoverable: false,
   },
+  agent_provider_api_unsupported: {
+    title: "模型连接协议不兼容",
+    detail: "GPT-6 Agent 工具调用需要 Responses API。请在连接设置中选择兼容通道后再提交。",
+    recoverable: false,
+  },
   agent_provider_unavailable: {
     title: "对话通道不可用",
     detail: "没有可用的 Agent 对话供应商。",
