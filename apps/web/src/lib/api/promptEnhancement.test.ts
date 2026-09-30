@@ -80,25 +80,6 @@ function stalledStreamResponse(onCancel: () => void): Response {
   );
 }
 
-function delayedStreamResponse(chunks: string[], delayMs: number): Response {
-  const encoder = new TextEncoder();
-  return new Response(
-    new ReadableStream<Uint8Array>({
-      async start(controller) {
-        for (const chunk of chunks) {
-          await new Promise((resolve) => setTimeout(resolve, delayMs));
-          controller.enqueue(encoder.encode(chunk));
-        }
-        controller.close();
-      },
-    }),
-    {
-      status: 200,
-      headers: { "Content-Type": "text/event-stream" },
-    },
-  );
-}
-
 function markDefinitiveRequestFailure<T extends object>(error: T): T {
   Object.defineProperty(error, "semanticIdempotencyDisposition", {
     configurable: true,
@@ -428,30 +409,38 @@ test("stalled prompt stream aborts and cancels while retaining its semantic key"
   assert.equal(harness.failures[0]?.key, "semantic-key-1");
 });
 
-test("regular chunks reset the idle timeout until terminal completion", async () => {
-  const harness = loadPromptEnhancement([
-    delayedStreamResponse(
-      [
-        'data: {"text":"better "}\n\n',
-        'data: {"text":"prompt"}\n\n',
-        "data: [DONE]\n\n",
-      ],
-      5,
-    ),
-  ]);
+test("regular chunks reset the idle timeout until terminal completion", async (context) => {
+  // Use a controlled clock: wall-clock scheduling under load must not consume
+  // the entire 100 ms deadline before the fixture delivers its next chunk.
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  let streamController!: ReadableStreamDefaultController<Uint8Array>;
+  const response = new Response(new ReadableStream<Uint8Array>({
+    start(controller) { streamController = controller; },
+  }), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+  const harness = loadPromptEnhancement([response]);
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+  const encoder = new TextEncoder();
   let output = "";
-
-  await harness.promptEnhancementApi.streamPromptEnhancement(
+  const completion = harness.promptEnhancementApi.streamPromptEnhancement(
     "/prompts/enhance",
     { text: "prompt" },
-    (delta) => {
-      output += delta;
-    },
+    (delta) => { output += delta; },
     undefined,
     { totalMs: 100, idleMs: 20 },
   );
-
-  assert.equal(output, "better prompt");
+  await flush();
+  // Each gap is below the idle deadline, while total elapsed time exceeds it.
+  for (const [chunk, expected] of [
+    ['data: {"text":"better "}\n\n', "better "],
+    ['data: {"text":"prompt"}\n\n', "better prompt"],
+    ["data: [DONE]\n\n", "better prompt"],
+  ]) {
+    context.mock.timers.tick(15);
+    streamController.enqueue(encoder.encode(chunk));
+    await flush();
+    assert.equal(output, expected);
+    assert.deepEqual(harness.failures, []);
+  }
+  await completion;
   assert.deepEqual(harness.confirmed, ["semantic-key-1"]);
-  assert.deepEqual(harness.failures, []);
 });

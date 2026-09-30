@@ -26,6 +26,7 @@ from lumen_core.agent_history_selection import (
     semantic_agent_message,
 )
 from lumen_core.agent_model_profiles import default_agent_context_window
+from lumen_core.text_model_capabilities import agent_model_api_supported
 from lumen_core.agent_wire_budget import (
     DEFAULT_AGENT_RUNTIME_MAX_REQUEST_BYTES,
     encoded_json_bytes,
@@ -489,6 +490,18 @@ async def resolve_execution_pin(
                 412,
             )
         model = body.model or credential.default_chat_model
+        capabilities = credential.capabilities_jsonb
+        agent_api = (
+            str(capabilities.get("agent_api") or "openai-responses").strip().lower()
+            if isinstance(capabilities, dict)
+            else "openai-responses"
+        )
+        if not agent_model_api_supported(model, agent_api):
+            raise http_error(
+                "agent_provider_api_unsupported",
+                "GPT-6 Agent tools require a Responses API connection",
+                412,
+            )
         context_window = _capability_int(
             credential.capabilities_jsonb,
             "agent_context_window",

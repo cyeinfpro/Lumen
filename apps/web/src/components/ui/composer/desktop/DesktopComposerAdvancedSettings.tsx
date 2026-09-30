@@ -40,6 +40,7 @@ const REASONING_OPTIONS: {
 ];
 
 interface AdvancedComposerSettingsProps {
+  promptEnhancementSettings?: ReactNode;
   mode: ComposerMode;
   quality: Quality;
   onQualityChange: (value: Quality) => void;
@@ -67,6 +68,7 @@ interface AdvancedComposerSettingsProps {
 }
 
 export function AdvancedComposerSettings({
+  promptEnhancementSettings,
   mode,
   quality,
   onQualityChange,
@@ -115,6 +117,7 @@ export function AdvancedComposerSettings({
       </div>
 
       <div className="min-h-0 overflow-y-auto p-4">
+        {promptEnhancementSettings}
         {imageMode ? (
           <div className="grid gap-5 lg:grid-cols-[minmax(220px,0.72fr)_minmax(360px,1.28fr)]">
             <div className="grid content-start gap-4">

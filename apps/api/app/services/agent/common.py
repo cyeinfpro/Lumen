@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from lumen_core.text_model_capabilities import agent_model_api_supported
+
 import logging
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -147,6 +149,9 @@ async def wallet_chat_provider_preflight(
             or provider.responses_supported is not False
         )
         and (not provider.agent_models or model in provider.agent_models)
+        and agent_model_api_supported(
+            model, getattr(provider, "agent_api", "openai-responses")
+        )
     ]
     if not eligible:
         raise http_error(

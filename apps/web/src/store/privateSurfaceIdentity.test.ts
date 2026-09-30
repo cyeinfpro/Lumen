@@ -115,7 +115,7 @@ function useIdentityRevalidationHarness(
 function useIdentityRevalidationHarnessWithEffects(
   queryClient: QueryClient,
   query: IdentityQueryForTest,
-): () => void {
+): (() => void) & { identityStatus: () => unknown } {
   const internals = (
     React as unknown as {
       __CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE: {
@@ -167,9 +167,9 @@ function useIdentityRevalidationHarnessWithEffects(
     const cleanup = effect();
     if (typeof cleanup === "function") cleanups.push(cleanup);
   }
-  return () => {
+  return Object.assign(() => {
     for (const cleanup of cleanups.reverse()) cleanup();
-  };
+  }, { identityStatus: () => stateValues[1] });
 }
 
 test("private surfaces reset synchronously and reject stale lightbox epochs", async () => {
@@ -399,6 +399,7 @@ test("session invalidation hides user A until a fresh user B identity resolves",
     requestSessionInvalidation("realtime_auth_invalidated");
 
     assert.equal(refetches, 1);
+    assert.equal(unmount.identityStatus(), "revalidating");
     assert.equal(useChatStore.getState().currentUserId, null);
     assert.equal(queryClient.getQueryData(["user", "user-a", "tasks"]), undefined);
     assert.equal(getPrivateIdentitySnapshot().userId, null);
@@ -408,6 +409,7 @@ test("session invalidation hides user A until a fresh user B identity resolves",
     await Promise.resolve();
     await Promise.resolve();
 
+    assert.equal(unmount.identityStatus(), "authenticated");
     assert.equal(useChatStore.getState().currentUserId, "user-b");
     assert.equal(getPrivateIdentitySnapshot().userId, "user-b");
     unmount();
@@ -434,3 +436,127 @@ test("session invalidation hides user A until a fresh user B identity resolves",
     }
   }
 });
+
+type IdentityResultForTest = Awaited<ReturnType<IdentityQueryForTest["refetch"]>>;
+
+function deferredIdentity() {
+  let resolve!: (result: IdentityResultForTest) => void;
+  const promise = new Promise<IdentityResultForTest>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+async function withVisibleIdentityBrowser(
+  run: (browser: {
+    windowTarget: EventTarget;
+    documentTarget: EventTarget;
+    timers: Map<number, () => void>;
+  }) => Promise<void>,
+) {
+  const keys = ["window", "document", "BroadcastChannel"] as const;
+  const originals = keys.map((key) => Object.getOwnPropertyDescriptor(globalThis, key));
+  const timers = new Map<number, () => void>();
+  let nextTimer = 0;
+  const windowTarget = Object.assign(new EventTarget(), {
+    location: { pathname: "/video" },
+    setTimeout(callback: () => void) {
+      const id = ++nextTimer;
+      timers.set(id, callback);
+      return id;
+    },
+    clearTimeout(id: number) { timers.delete(id); },
+  });
+  const documentTarget = Object.assign(new EventTarget(), { visibilityState: "visible" });
+  for (const [key, value] of [
+    ["window", windowTarget], ["document", documentTarget], ["BroadcastChannel", undefined],
+  ] as const) {
+    Object.defineProperty(globalThis, key, { configurable: true, value });
+  }
+  try {
+    await activatePrivateClientState("user-a");
+    useChatStore.getState().setCurrentUser("user-a");
+    await run({ windowTarget, documentTarget, timers });
+  } finally {
+    await clearPrivateClientState();
+    keys.forEach((key, index) => {
+      const original = originals[index];
+      if (original) Object.defineProperty(globalThis, key, original);
+      else Reflect.deleteProperty(globalThis, key);
+    });
+  }
+}
+
+for (const trigger of ["focus", "online", "visibilitychange"] as const) {
+  test(`confirmed identity remains writable during slow ${trigger} revalidation`, async () => {
+    await withVisibleIdentityBrowser(async ({ windowTarget, documentTarget }) => {
+      const pending = deferredIdentity();
+      let refetches = 0;
+      const client = new QueryClient();
+      const unmount = useIdentityRevalidationHarnessWithEffects(client, {
+        data: { id: "user-a" }, error: null, isFetching: false,
+        refetch: () => { refetches += 1; return pending.promise; },
+      });
+      try {
+        assert.equal(unmount.identityStatus(), "authenticated");
+        (trigger === "visibilitychange" ? documentTarget : windowTarget)
+          .dispatchEvent(new Event(trigger));
+        assert.equal(refetches, 1);
+        assert.equal(unmount.identityStatus(), "authenticated");
+        assert.equal(getPrivateIdentitySnapshot().userId, "user-a");
+        // Duplicate picker focus/visibility events must share the same flight.
+        windowTarget.dispatchEvent(new Event("focus"));
+        assert.equal(refetches, 1);
+        pending.resolve({ data: { id: "user-a" }, status: "success" });
+        await Promise.resolve();
+        assert.equal(unmount.identityStatus(), "authenticated");
+      } finally {
+        unmount();
+        client.clear();
+      }
+    });
+  });
+}
+
+for (const status of [0, 408, 429, 503, 401]) {
+  test(`identity verification handles HTTP ${status} without a stuck recovery`, async () => {
+    await withVisibleIdentityBrowser(async ({ windowTarget, timers }) => {
+      const first = deferredIdentity();
+      const second = deferredIdentity();
+      let refetches = 0;
+      const client = new QueryClient();
+      const unmount = useIdentityRevalidationHarnessWithEffects(client, {
+        data: { id: "user-a" }, error: null, isFetching: false,
+        refetch: () => (++refetches === 1 ? first.promise : second.promise),
+      });
+      try {
+        windowTarget.dispatchEvent(new Event("focus"));
+        first.resolve({ status: "error", error: new ApiError({ code: "test", message: "test", status }) });
+        await Promise.resolve();
+        await Promise.resolve();
+        if (status === 401) {
+          assert.equal(unmount.identityStatus(), "unauthorized");
+          assert.equal(getPrivateIdentitySnapshot().userId, null);
+          assert.equal(timers.size, 0);
+          return;
+        }
+        assert.equal(unmount.identityStatus(), "degraded");
+        assert.equal(getPrivateIdentitySnapshot().userId, "user-a");
+        assert.equal(timers.size, 1);
+        const [id, retry] = [...timers.entries()][0]!;
+        timers.delete(id);
+        retry();
+        assert.equal(refetches, 2);
+        // A retry must never promote an already degraded identity before success.
+        assert.equal(unmount.identityStatus(), "degraded");
+        second.resolve({ status: "success", data: { id: "user-a" } });
+        await Promise.resolve();
+        await Promise.resolve();
+        assert.equal(unmount.identityStatus(), "authenticated");
+        assert.equal(getPrivateIdentitySnapshot().userId, "user-a");
+        assert.equal(timers.size, 0);
+      } finally {
+        unmount();
+        client.clear();
+      }
+    });
+  });
+}

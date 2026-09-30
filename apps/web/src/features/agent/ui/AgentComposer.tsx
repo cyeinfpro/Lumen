@@ -264,7 +264,7 @@ export function AgentComposer({
     (draft.text.trim().length > 0 ||
       draft.attachments.length > 0 ||
       draft.files.length > 0);
-  const summary = agentDraftSummary(draft, imageGenerationAvailable);
+  const summary = agentDraftSummary(draft, imageGenerationAvailable, defaultModel);
   const imageExecutionEnabled = draft.allowImage && imageGenerationAvailable;
   const costEstimate = useComposerCostEstimate({
     mode: imageExecutionEnabled ? "image" : "chat",

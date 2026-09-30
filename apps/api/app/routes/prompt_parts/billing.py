@@ -18,6 +18,7 @@ from lumen_core.pricing import UsageTokens, parse_usage
 
 from ...audit import AuditPersistenceError
 from ...task_billing import EnhanceBillingContext, EnhanceUsageCapture
+from .upstream import GPT6_ENHANCE_ATTEMPTS
 
 _DEFAULT_SETTLE_ATTEMPTS = 3
 _DEFAULT_SETTLE_RETRY_BASE_SECONDS = 0.1
@@ -508,6 +509,20 @@ async def _audit_default_settlement(
     )
 
 
+def _pinned_enhancement_model(
+    billing: EnhanceBillingContext, runtime: BillingRuntime
+) -> str | None:
+    # The frozen single-model policy survives durable restore and detached
+    # settlement. Never infer a selected model from the current global default.
+    if len(billing.pricing_snapshots) != 1:
+        return None
+    for attempt in GPT6_ENHANCE_ATTEMPTS:
+        key = runtime.pricing_snapshot_key(attempt.model, "standard")
+        if key in billing.pricing_snapshots:
+            return attempt.model
+    return None
+
+
 async def charge_prompt_enhance(
     billing: EnhanceBillingContext,
     capture: EnhanceUsageCapture,
@@ -522,7 +537,11 @@ async def charge_prompt_enhance(
             reason="missing_usage",
             runtime=runtime,
         )
-    model = capture.model or runtime.attempts[0].model
+    model = (
+        capture.model
+        or _pinned_enhancement_model(billing, runtime)
+        or runtime.attempts[0].model
+    )
     usage = _normalize_usage_for_billing(
         parse_usage(model, capture.usage),
         cache_aware=billing.cache_aware,
@@ -594,7 +613,9 @@ async def settle_prompt_enhance_default_hold(
     # 结算尝试标记:链外孤儿兜底释放据此跳过(见 EnhanceSettleOutcome)。
     billing.settle_outcome.attempted = True
     for attempt in range(1, _DEFAULT_SETTLE_ATTEMPTS + 1):
-        model = runtime.attempts[0].model if runtime.attempts else None
+        model = _pinned_enhancement_model(billing, runtime) or (
+            runtime.attempts[0].model if runtime.attempts else None
+        )
         try:
             transaction = await _settle_or_charge(
                 billing,

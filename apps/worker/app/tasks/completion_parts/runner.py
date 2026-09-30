@@ -40,6 +40,10 @@ from lumen_core.constants import (
 )
 from lumen_core.chat_tools import ToolStatus, normalize_tool_idle_timeout_seconds
 from lumen_core.models import Completion
+from lumen_core.text_model_capabilities import (
+    normalize_model_reasoning,
+    normalize_responses_model_body,
+)
 from lumen_core.upstream_billing import has_stable_provider_idempotency_key
 
 from ...reconciliation.task_domains import (
@@ -329,7 +333,9 @@ async def prepare_completion_request(state: CompletionExecution) -> None:
     await load_request_context(state)
     state.preparation.reasoning_effort = (
         state.ports.upstream._normalize_reasoning_effort_for_upstream(
-            state.preparation.reasoning_effort
+            normalize_model_reasoning(
+                state.preparation.chat_model, state.preparation.reasoning_effort
+            )
         )
     )
     state.streaming.body = {
@@ -349,6 +355,7 @@ async def prepare_completion_request(state: CompletionExecution) -> None:
         }
     if state.preparation.fast_mode:
         state.streaming.body["service_tier"] = "priority"
+    state.streaming.body = normalize_responses_model_body(state.streaming.body)
     state.streaming.max_tool_invocations = max(
         1,
         await state.ports.context.runtime_settings.resolve_int(

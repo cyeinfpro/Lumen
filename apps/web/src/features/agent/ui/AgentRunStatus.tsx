@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import type { AgentRun } from "../model/contracts";
 import { agentRunErrorPresentation } from "../model/errors";
 import { agentRunPresentation } from "./agentPresentation";
+import { AgentRunMetrics } from "./AgentRunMetrics";
 
 export function AgentRunStatus({
   run,
@@ -42,6 +43,7 @@ export function AgentRunStatus({
         {error ? <span className="text-[var(--fg-1)]">{error.detail}</span> : null}
       </div>
       <RunRecoveryActions error={error} failed={failed} onContinue={onContinue} />
+      <AgentRunMetrics key={run.id} run={run} />
     </div>
   );
 }

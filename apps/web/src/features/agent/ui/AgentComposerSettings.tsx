@@ -4,6 +4,8 @@ import { FileText, Globe2, ImageIcon } from "lucide-react";
 import { useState } from "react";
 import { AspectRatioPicker } from "@/components/ui/composer/shared/AspectRatioPicker";
 import { Button, Select, Switch } from "@/components/ui/primitives";
+import { normalizeTextReasoning, textModelLabel, textReasoningOptions } from "@/lib/textModelCapabilities";
+import { AgentReasoningPresets } from "./AgentReasoningPresets";
 import type {
   AgentDraft,
   AgentImageDefaults,
@@ -62,12 +64,13 @@ export function AgentQuickSettings({
                 return;
               }
               onModelChange(model);
+              onReasoningEffortChange(normalizeTextReasoning(model ?? defaultModel, draft.reasoningEffort ?? "auto"));
             }}
             disabled={disabled}
             aria-label="Agent 模型"
           >
             <option value="">
-              自动{defaultModel ? ` · ${defaultModel}` : ""}
+              自动{defaultModel ? ` · ${textModelLabel(defaultModel)}` : ""}
             </option>
             {modelOptions.map((option) => (
               <option key={option.model} value={option.model}>
@@ -78,7 +81,7 @@ export function AgentQuickSettings({
         </SettingField>
         <SettingField label="推理强度">
           <Select
-            value={draft.reasoningEffort ?? "auto"}
+            value={normalizeTextReasoning(selectedModel, draft.reasoningEffort ?? "auto")}
             onChange={(event) =>
               onReasoningEffortChange(
                 event.target.value as AgentReasoningEffort,
@@ -87,19 +90,16 @@ export function AgentQuickSettings({
             disabled={reasoningDisabled}
             aria-label="Agent 推理强度"
           >
-            <option value="auto">自动</option>
-            <option value="none">关闭</option>
-            <option value="minimal">极低</option>
-            <option value="low">低</option>
-            <option value="medium">中</option>
-            <option value="high">高</option>
-            <option value="xhigh">超高</option>
-            <option value="max">最大</option>
+            {textReasoningOptions(selectedModel).map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
           </Select>
         </SettingField>
       </div>
 
       <ReasoningCapabilityNotice supported={selectedOption?.reasoning_supported} effort={draft.reasoningEffort} />
+      <AgentReasoningPresets model={selectedModel} effort={draft.reasoningEffort ?? "auto"}
+        disabled={reasoningDisabled} onChange={onReasoningEffortChange} />
       {pendingModel ? (
         <div role="group" aria-label="确认模型变更" className="grid gap-2 border-l-2 border-warning-border pl-3">
           <p role="status" className="break-words type-caption text-[var(--warning-fg)]">

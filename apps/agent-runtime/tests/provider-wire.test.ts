@@ -120,6 +120,53 @@ function sse(api: string, includeUsage = true): string {
 }
 
 describe("production provider wire adapters", () => {
+  it.each([
+    { effort: null, expected: undefined },
+    { effort: "off", expected: "low" },
+    { effort: "minimal", expected: "low" },
+    { effort: "max", expected: "max" },
+  ] as const)("sends GPT-6 Astra $effort through the real SDK adapter", async ({ effort, expected }) => {
+    const bodies: Record<string, unknown>[] = [];
+    const server = createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", () => {
+        bodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>);
+        response.writeHead(200, { "content-type": "text/event-stream", connection: "close" });
+        response.end(sse("openai-responses"));
+      });
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address() as AddressInfo;
+    try {
+      const request = runtimeRequestV3({
+        allowed_tools: [], tool_gateway_url: null, tool_capability: null,
+        reasoning_effort: effort,
+        provider: {
+          ...runtimeRequestV3().provider, api: "openai-responses",
+          base_url: `http://127.0.0.1:${String(address.port)}`,
+          model: "gpt-6-astra", reasoning_supported: true,
+          thinking_level_map: { off: "none" },
+        },
+      });
+      const writer = new CollectingEventWriter(request.run_id, request.execution_epoch);
+      const result = await executeAgentRun(request, writer, new AbortController().signal);
+      expect(result.outcome).toBe("succeeded");
+      expect(bodies).toHaveLength(1);
+      if (expected === undefined) expect(bodies[0]?.reasoning).toBeUndefined();
+      else expect(bodies[0]?.reasoning).toMatchObject({ effort: expected });
+      for (const body of bodies) {
+        expect(body.model).toBe("gpt-6-astra");
+        expect(body.temperature).toBeUndefined();
+        expect(body.top_p).toBeUndefined();
+      }
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   for (const [api, suffix] of [
     ["openai-responses", "/responses"],
     ["openai-completions", "/chat/completions"],

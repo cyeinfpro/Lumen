@@ -222,6 +222,7 @@ export interface VideoCreateIn {
 }
 
 export interface VideoPromptEnhanceIn {
+  enhancement_model?: import("./textModelCapabilities").PromptEnhancementModel;
   text?: string;
   action?: VideoAction;
   model?: string;

@@ -14,6 +14,7 @@ from fnmatch import fnmatchcase
 
 from .pricing import ModelPricing, PRICING_SOURCE_FALLBACK
 from .immutables import immutable_mapping
+from .text_model_capabilities import gpt6_model_family
 
 
 DEFAULT_USD_TO_CNY = Decimal("7.2")
@@ -73,6 +74,20 @@ def _pricing(
 
 FALLBACK_PRICING: Mapping[str, ModelPricing] = immutable_mapping(
     {
+        # OpenAI GPT-6 standard tier; cache read/write use 0.10/1.25 above.
+        # Long context: >272K input costs 2x input and 1.5x output, not 2x both.
+        "gpt-6-astra": _pricing(
+            "0.010", "0.050", threshold=272_000,
+            long_input_x=20_000, long_output_x=15_000,
+        ),
+        "gpt-6-sol": _pricing(
+            "0.002", "0.010", threshold=272_000,
+            long_input_x=20_000, long_output_x=15_000,
+        ),
+        "gpt-6-luna": _pricing(
+            "0.0001", "0.0005", threshold=272_000,
+            long_input_x=20_000, long_output_x=15_000,
+        ),
         # OpenAI family
         "gpt-5.6-sol": _pricing(
             "0.005",
@@ -172,6 +187,9 @@ def fallback_pricing_for(model: str) -> ModelPricing | None:
     exact = FALLBACK_PRICING.get(normalized)
     if exact is not None:
         return exact
+    family = gpt6_model_family(normalized)
+    if family is not None:
+        return FALLBACK_PRICING[f"gpt-6-{family}"]
     lowered = normalized.lower()
     for pattern, pricing in FALLBACK_PRICING.items():
         if "*" in pattern and fnmatchcase(lowered, pattern.lower()):

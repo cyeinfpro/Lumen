@@ -12,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumen_core.models import Image, Video
 from lumen_core.schemas import VideoReferenceMediaIn
 
+from .upstream import EnhancementModel
+
 
 class VideoEnhanceIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -19,6 +21,7 @@ class VideoEnhanceIn(BaseModel):
     text: str = Field(default="", max_length=10000)
     action: str = Field(default="t2v", max_length=32)
     model: str = Field(default="", max_length=128)
+    enhancement_model: EnhancementModel | None = None
     duration_s: int | None = Field(default=None, ge=-1, le=60)
     resolution: str | None = Field(default=None, max_length=32)
     aspect_ratio: str | None = Field(default=None, max_length=32)

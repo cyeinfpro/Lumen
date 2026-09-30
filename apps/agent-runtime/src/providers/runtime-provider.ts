@@ -11,6 +11,7 @@ import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.l
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import type { RuntimeRequest } from "../contracts.js";
+import { gpt6ModelFamily, normalizeGpt6Payload } from "./model-compatibility.js";
 import { createProviderTransport, type ProviderTransport } from "./transport.js";
 
 export interface PreparedProviderRuntime {
@@ -35,8 +36,16 @@ export function runtimeModel(request: RuntimeRequest): Model<string> {
   // Keep capability metadata truthful for role and history conversion. Pi must
   // still be able to hold an internal Off state even when the provider's native
   // off mapping is omission/null; payload omission is enforced below.
+  const family = gpt6ModelFamily(request.provider.model);
   const configuredMap = request.provider.reasoning_supported
-    ? request.provider.thinking_level_map
+    ? {
+        ...(family ? {
+          off: family === "astra" ? "low" : "none",
+          minimal: "low", low: "low", medium: "medium",
+          high: "high", xhigh: "xhigh", max: "max",
+        } : {}),
+        ...request.provider.thinking_level_map,
+      }
     : undefined;
   const thinkingLevelMap = request.provider.reasoning_supported
     ? { ...configuredMap, off: configuredMap?.off ?? "none" }
@@ -76,7 +85,7 @@ export function omitAutomaticReasoningControls(
     request.reasoning_effort !== null &&
     !explicitOffUsesOmission
   ) {
-    return payload;
+    return normalizeGpt6Payload(request.provider.model, payload);
   }
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
     return payload;
@@ -101,13 +110,16 @@ export function omitAutomaticReasoningControls(
       );
     }
   }
-  return output;
+  return normalizeGpt6Payload(request.provider.model, output);
 }
 
 export async function prepareProviderRuntime(
   request: RuntimeRequest,
   onDispatch: (signal?: AbortSignal) => Promise<void>,
 ): Promise<PreparedProviderRuntime> {
+  if (gpt6ModelFamily(request.provider.model) && request.provider.api !== "openai-responses") {
+    throw new Error("GPT-6 Agent tools require an openai-responses provider");
+  }
   const credentials = new InMemoryCredentialStore();
   const modelRuntime = await ModelRuntime.create({
     credentials,

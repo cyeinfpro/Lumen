@@ -3,6 +3,7 @@ import type {
   ProviderModelProfileSource,
 } from "@/lib/types";
 import type { Draft } from "./model";
+import { gpt6ModelFamily } from "../../../../lib/textModelCapabilities.ts";
 
 export interface ProviderModelDiscoveryState {
   status: "idle" | "loading" | "ready" | "error";
@@ -36,7 +37,9 @@ export function modelProfilePatch(
   }
   return {
     agent_models: modelIds,
-    agent_api: model.profile.agent_api,
+    // Applying a GPT-6 profile recommends Responses for reasoning + tools.
+    // Preserve the provider's capability evidence; selection is not a live probe.
+    agent_api: gpt6ModelFamily(model.id) ? "openai-responses" : model.profile.agent_api,
     responses_supported: model.profile.responses_supported,
     vision_supported: model.profile.vision_supported,
     agent_context_window: model.profile.context_window,
@@ -55,6 +58,8 @@ export function modelProfileSourceLabel(
 
 function modelRank(modelId: string): number {
   const value = modelId.toLowerCase();
+  const family = gpt6ModelFamily(modelId);
+  if (family) return { astra: 700, sol: 680, luna: 650 }[family];
   if (value.includes("gpt-5.6")) return 600;
   if (value.includes("gpt-5.5")) return 550;
   if (value.startsWith("gpt-5")) return 500;

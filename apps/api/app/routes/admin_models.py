@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.agent_model_profiles import GPT_56_AGENT_CONTEXT_WINDOW
+from lumen_core.text_model_capabilities import gpt6_model_family
 from lumen_core.agent_provider_contract import agent_endpoint_contract
 from lumen_core.providers import (
     DEFAULT_LEGACY_PROVIDER_BASE_URL,
@@ -135,6 +136,10 @@ def _known_model_family(
 ) -> tuple[bool | None, bool, int, int] | None:
     value = model_id.strip().lower()
     canonical = value.rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+    if gpt6_model_family(model_id) is not None:
+        # A conservative gateway budget, not a claim of a verified 1M context.
+        # Explicit provider metadata below remains authoritative.
+        return True, True, GPT_56_AGENT_CONTEXT_WINDOW, 16_384
     if canonical.startswith("gpt-5.6"):
         return True, True, GPT_56_AGENT_CONTEXT_WINDOW, 16_384
     if canonical.startswith(("gpt-5", "gpt-4.1", "gpt-4o")):

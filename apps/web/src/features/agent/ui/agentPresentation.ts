@@ -1,7 +1,10 @@
 import type { AgentDraft, AgentMessage, AgentRun } from "../model/contracts";
+import { textModelLabel, textReasoningLabel } from "../../../lib/textModelCapabilities.ts";
 
-export function agentDraftSummary(draft: AgentDraft, imageGenerationAvailable: boolean): string {
+export function agentDraftSummary(draft: AgentDraft, imageGenerationAvailable: boolean, defaultModel?: string | null): string {
   const tools: string[] = [];
+  const model = draft.model ?? defaultModel;
+  if (model) tools.push(textModelLabel(model), `推理${textReasoningLabel(model, draft.reasoningEffort ?? "auto")}`);
   if (draft.attachments.length > 0) tools.push(`本轮输入 ${draft.attachments.length} 张`);
   if (draft.allowWebSearch) tools.push("联网");
   if (draft.files.length > 0) tools.push(`文件 ${draft.files.length}`);
@@ -40,7 +43,15 @@ export function agentRunPresentation(run: AgentRun): {
     queued: "等待运行", running: "Agent 运行中", succeeded: "运行完成",
     partial: "部分完成", failed: "运行失败", cancelled: "已取消",
   };
-  return { kind: run.status, label: labels[run.status] };
+  const activeTool = run.status === "running"
+    ? run.tool_calls.find((tool) => tool.status === "running") : undefined;
+  const toolLabels: Record<string, string> = {
+    web_search: "正在搜索资料", file_list: "正在查看文件列表",
+    file_read: "正在读取文件", file_search: "正在检索文件",
+    text_to_image: "正在提交生图任务", image_to_image: "正在提交图片编辑任务",
+  };
+  const label = activeTool ? toolLabels[activeTool.mode ?? ""] ?? "正在执行工具" : labels[run.status];
+  return { kind: run.status, label };
 }
 
 export function currentAgentOperationLabel(input: {
@@ -54,6 +65,15 @@ export function currentAgentOperationLabel(input: {
   if (input.stopping) return "停止请求中";
   if (hasAgentSubmissionUncertain(input.messages, input.runsById)) return "提交待确认";
   return null;
+}
+
+export function agentRunElapsedLabel(run: AgentRun, now: number | null): string | null {
+  const active = run.status === "queued" || run.status === "running";
+  const start = Date.parse(run.started_at ?? "");
+  const end = active ? now : Date.parse(run.finished_at ?? "");
+  if (end === null || !Number.isFinite(start) || !Number.isFinite(end)) return null;
+  const seconds = Math.max(0, Math.floor((end - start) / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
 export function agentEstimateLabel(label: string | null): string | null {

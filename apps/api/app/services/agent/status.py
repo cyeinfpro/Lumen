@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.providers_parts.config import parse_provider_json
+from lumen_core.text_model_capabilities import agent_model_api_supported
 from lumen_core.runtime_settings import get_spec
 from lumen_core.schema_models import AgentModelOptionOut, AgentStatusOut
 
@@ -37,6 +38,10 @@ def _wallet_model_options(
             if not isinstance(model, str) or not model.strip():
                 continue
             normalized = model.strip()[:128]
+            if not agent_model_api_supported(
+                normalized, str(getattr(provider, "agent_api", "openai-responses"))
+            ):
+                continue
             previous = capabilities.get(normalized, (False, False))
             capabilities[normalized] = (
                 previous[0] or getattr(provider, "vision_supported", None) is True,

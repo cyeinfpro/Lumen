@@ -544,8 +544,9 @@ export async function enhancePrompt(
   text: string,
   onDelta: (text: string) => void,
   signal?: AbortSignal,
+  enhancementModel?: import("./textModelCapabilities").PromptEnhancementModel,
 ): Promise<void> {
-  return runEnhancePrompt(text, onDelta, signal);
+  return runEnhancePrompt(text, onDelta, signal, enhancementModel);
 }
 
 export async function enhanceVideoPrompt(
