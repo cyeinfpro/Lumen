@@ -321,8 +321,19 @@ test("project badges meet AA and progress rings render authoritative API values"
       .toHaveAttribute("aria-valuenow", String(value));
   }
 
-  for (const label of ["正式", "自由", "运行中"]) {
-    const contrast = await page.getByText(label, { exact: true }).first().evaluate((node) => {
+  // Task-first cards deliberately removed the decorative 正式/自由 labels.
+  // Check every rendered status plus the remaining beta badge instead.
+  const badges = [
+    page.locator('[data-workflow-card]').getByText("测试", { exact: true }),
+    ...["draft", "running", "completed"].map((status) =>
+      page.locator(`[data-project-status="${status}"]`),
+    ),
+  ];
+  for (const badge of badges) {
+    await expect(badge).toHaveCount(1);
+    await expect(badge).toBeVisible();
+    const label = await badge.innerText();
+    const contrast = await badge.evaluate((node) => {
       const parse = (value: string) => {
         const canvas = document.createElement("canvas");
         canvas.width = 1;

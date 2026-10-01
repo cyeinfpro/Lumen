@@ -240,7 +240,7 @@ function FeatureMatrixCard({
           <Icon className="h-5 w-5" strokeWidth={1.8} aria-hidden />
         </span>
         <h3 className="min-w-0 flex-1 type-card-title text-[var(--fg-0)]">{feature.title}</h3>
-        {feature.badge === "测试" && <span className="rounded-full border border-[var(--border-subtle)] bg-[var(--bg-2)] px-2 py-0.5 type-caption text-[var(--fg-1)]">测试</span>}
+        {feature.badge === "测试" && <span className="rounded-full border border-[var(--border-subtle)] bg-[var(--bg-2)] px-2 py-0.5 type-caption text-[var(--fg-0)]">测试</span>}
       </div>
       <p className="mt-3 min-w-0 text-pretty type-body-sm leading-6 text-[var(--fg-1)]">{feature.description}</p>
       <div className="mt-3">
@@ -549,7 +549,7 @@ function projectStatusTone(status: string): string {
   if (status === "needs_review" || status === "waiting_input") {
     return "border-warning-border bg-warning-soft !text-[var(--warning-fg)]";
   }
-  return "border-[var(--border-subtle)] bg-[var(--bg-2)] !text-[var(--fg-2)]";
+  return "border-[var(--border-subtle)] bg-[var(--bg-2)] !text-[var(--fg-1)]";
 }
 
 function workflowTypeInfo(type: string): {

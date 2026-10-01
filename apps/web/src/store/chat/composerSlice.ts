@@ -41,6 +41,7 @@ const DEFAULT_COMPOSER: ComposerState = {
 export type ComposerActions = Pick<
   ChatState,
   | "setComposerError"
+  | "setComposerExpanded"
   | "setText"
   | "setMode"
   | "setForceIntent"
@@ -234,6 +235,9 @@ export function createComposerActions(
 ): ComposerActions {
   return {
     setComposerError: (error) => set({ composerError: error }),
+    setComposerExpanded: (value) => set((state) => ({
+      composerExpanded: typeof value === "function" ? value(state.composerExpanded) : value,
+    })),
     setText: (text) =>
       set((state) => ({ composer: { ...state.composer, text } })),
     setMode: (mode) =>

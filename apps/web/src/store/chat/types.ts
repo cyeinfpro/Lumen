@@ -78,6 +78,8 @@ export interface ChatState {
   setComposerError: (error: string | null) => void;
 
   composer: ComposerState;
+  composerExpanded: boolean;
+  setComposerExpanded: (value: boolean | ((previous: boolean) => boolean)) => void;
   setText: (text: string) => void;
   setMode: (mode: ComposerMode) => void;
   setForceIntent: (value: ComposerState["forceIntent"]) => void;
@@ -168,6 +170,7 @@ export type ChatDataSlice = Pick<
   | "messagesError"
   | "composerError"
   | "composer"
+  | "composerExpanded"
 >;
 
 export type ChatStateGetter = () => ChatState;

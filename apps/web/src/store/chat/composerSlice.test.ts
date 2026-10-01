@@ -66,3 +66,27 @@ test("extracted composer actions preserve preferences while clearing drafts", ()
   assert.equal(state.composer.codeInterpreter, true);
   assert.equal(state.composer.imageGeneration, true);
 });
+
+test("composer expansion survives consumer remounts without changing the draft", () => {
+  let state = {
+    composer: { ...createComposerState(null), text: "Keep the draft" },
+    composerExpanded: false,
+  } as unknown as ChatState;
+  const set: ChatStateSetter = (partial) => {
+    state = { ...state, ...(typeof partial === "function" ? partial(state) : partial) };
+  };
+  const get: ChatStateGetter = () => state;
+  const createActions = () => createComposerActions(set, get, {
+    createInitialComposer: () => createComposerState(null),
+    markFastTouched() {},
+  });
+
+  // A preset can open the editor even while history loading has unmounted it.
+  createActions().setComposerExpanded(true);
+  assert.equal(state.composerExpanded, true);
+  const remountedActions = createActions();
+  assert.equal(state.composerExpanded, true);
+  remountedActions.setComposerExpanded((previous: boolean) => !previous);
+  assert.equal(state.composerExpanded, false);
+  assert.equal(state.composer.text, "Keep the draft");
+});

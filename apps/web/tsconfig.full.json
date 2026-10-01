@@ -2,7 +2,18 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "incremental": false,
-    "skipLibCheck": false
+    "skipLibCheck": false,
+    "types": [
+      "node", "react", "react-dom", "next", "next/image-types/global",
+      "urlpattern-polyfill"
+    ]
   },
-  "exclude": ["node_modules", ".next/dev/types"]
+  "include": [
+    "**/*.ts", "**/*.tsx", "**/*.mts",
+    ".next-build-check/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules", "next-env.d.ts", ".next", ".next-e2e", ".next-ux",
+    ".next-build-check/dev"
+  ]
 }
