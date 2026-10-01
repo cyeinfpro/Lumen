@@ -13,7 +13,7 @@
     ".next-build-check/types/**/*.ts"
   ],
   "exclude": [
-    "node_modules", "next-env.d.ts", ".next", ".next-e2e", ".next-ux",
+    "node_modules", "next-env.d.ts", ".next", ".next/dev/types", ".next-e2e", ".next-ux",
     ".next-build-check/dev"
   ]
 }
