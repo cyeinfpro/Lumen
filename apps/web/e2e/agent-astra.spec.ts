@@ -42,7 +42,18 @@ test("Astra settings preserve drafts, migrate off, and submit the selected reaso
   const input = page.getByRole("textbox", { name: "发送给 Agent" });
   await input.fill("请分析这份需求，保留原始草稿");
   const summary = page.getByTestId("agent-execution-summary");
-  await summary.getByRole("button", { name: /调整执行参数/u }).click();
+  const compactLandscape = await page.evaluate(() =>
+    window.matchMedia("(orientation: landscape) and (max-height: 480px)").matches,
+  );
+  // Compact landscape hides the summary, not the input-row settings control.
+  // Assert the intended layout explicitly instead of falling back on failure.
+  if (compactLandscape) await expect(summary).toBeHidden();
+  else await expect(summary).toBeVisible();
+  const settingsTrigger = compactLandscape
+    ? page.getByTestId("agent-composer").getByRole("button", { name: "Agent 设置", exact: true })
+    : summary.getByRole("button", { name: /调整执行参数/u });
+  await expect(settingsTrigger).toBeVisible();
+  await settingsTrigger.click();
   const reasoning = page.getByRole("combobox", { name: "Agent 推理强度" });
   await reasoning.selectOption("none");
   await page.getByRole("combobox", { name: "Agent 模型" }).selectOption("gpt-6-astra");
@@ -53,6 +64,8 @@ test("Astra settings preserve drafts, migrate off, and submit the selected reaso
   await expect(page.getByRole("button", { name: "深入", exact: true })).toHaveAttribute("aria-pressed", "true");
   await page.screenshot({ path: testInfo.outputPath("astra-settings.png"), fullPage: true });
   await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "Agent 设置", exact: true })).toHaveCount(0);
+  await expect(settingsTrigger).toBeFocused();
   await expect(input).toHaveValue("请分析这份需求，保留原始草稿");
   await expect(summary).toContainText("GPT-6 Astra");
   await expect(summary).toContainText("推理高");

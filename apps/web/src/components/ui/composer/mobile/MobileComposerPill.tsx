@@ -126,7 +126,8 @@ export function MobileComposerPill({
   const composerError = useChatStore((s) => s.composerError);
   const setComposerError = useChatStore((s) => s.setComposerError);
 
-  const [expanded, setExpanded] = useState(false);
+  const expanded = useChatStore((state) => state.composerExpanded);
+  const setExpanded = useChatStore((state) => state.setComposerExpanded);
   const [isUploading, setIsUploading] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
   const [isSending, setIsSending] = useState(false);
@@ -170,7 +171,7 @@ export function MobileComposerPill({
   const isComposingRef = useRef(false);
   const submittingRef = useRef(false);
   const didMountRef = useRef(false);
-  const focusExpandedOnOpenRef = useRef(false);
+  const focusExpandedOnOpenRef = useRef(expanded);
   const shutterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragDepthRef = useRef(0);
 
@@ -191,7 +192,7 @@ export function MobileComposerPill({
     };
     window.addEventListener("lumen:composer-expand", onExpand);
     return () => window.removeEventListener("lumen:composer-expand", onExpand);
-  }, []);
+  }, [setExpanded]);
 
   useLayoutEffect(() => {
     if (!expanded || !focusExpandedOnOpenRef.current) return;
@@ -286,7 +287,7 @@ export function MobileComposerPill({
 
     document.addEventListener("pointerdown", onPointerDown, true);
     return () => document.removeEventListener("pointerdown", onPointerDown, true);
-  }, [expanded, panel]);
+  }, [expanded, panel, setExpanded]);
 
   useEffect(() => {
     if (promptTooLong) {
@@ -453,7 +454,7 @@ export function MobileComposerPill({
         target.setSelectionRange(result.selectionStart, result.selectionEnd);
       });
     },
-    [setText],
+    [setText, setExpanded],
   );
 
   const handleCollapsedFocus = () => {

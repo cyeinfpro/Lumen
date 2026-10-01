@@ -99,6 +99,7 @@ function createInitialChatData(): ChatDataSlice {
     messagesError: null,
     composerError: null,
     composer: createInitialComposer(),
+    composerExpanded: false,
   };
 }
 

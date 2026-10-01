@@ -3,7 +3,17 @@
 import { useEffect } from "react";
 
 import type { ConversationSummary } from "@/lib/apiClient";
+import { useChatStore } from "@/store/useChatStore";
 import { firstActiveConversation } from "./conversationSelection";
+
+function hasStartedStudioWork(): boolean {
+  // Read at effect execution, not render: a late list response must not
+  // replace a conversation or draft the user has just started editing.
+  const { currentConvId, composer, composerExpanded } = useChatStore.getState();
+  return Boolean(
+    currentConvId || composerExpanded || composer.text || composer.attachments.length || composer.mask,
+  );
+}
 
 interface UseDefaultConversationSelectionOptions {
   currentConvId: string | null;
@@ -28,6 +38,7 @@ export function useDefaultConversationSelection({
 }: UseDefaultConversationSelectionOptions): void {
   useEffect(() => {
     if (currentConvId || urlConversationId) return;
+    if (hasStartedStudioWork()) return;
 
     const first = firstActiveConversation(conversations);
     if (!first) return;
@@ -44,6 +55,7 @@ export function useDefaultConversationSelection({
 
   useEffect(() => {
     if (currentConvId || urlConversationId) return;
+    if (hasStartedStudioWork()) return;
     if (!hasNextPage || isFetchingNextPage) return;
     if (firstActiveConversation(conversations)) return;
 

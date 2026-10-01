@@ -1,13 +1,19 @@
 "use client";
 
+import { useSyncExternalStore } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import { ArrowRight, ChevronDown } from "lucide-react";
 import Image from "next/image";
 
 import { Button } from "@/components/ui/primitives/Button";
 import { DURATION, EASE } from "@/lib/motion";
+import { useChatStore } from "@/store/useChatStore";
 
 type ComposerMode = "image" | "chat";
+
+const subscribeHydration = () => () => {};
+const clientHydrationSnapshot = () => true;
+const serverHydrationSnapshot = () => false;
 
 const PRESETS: readonly {
   title: string;
@@ -66,6 +72,18 @@ export function Onboarding({
   loading?: boolean;
 }) {
   const reduceMotion = useReducedMotion();
+  const setComposerExpanded = useChatStore((state) => state.setComposerExpanded);
+  const expandComposer = () => {
+    // A history response may temporarily unmount the composer. Record intent
+    // in the session store before sending the immediate-focus event.
+    setComposerExpanded(true);
+    window.dispatchEvent(new CustomEvent("lumen:composer-expand"));
+  };
+  // The server-selected shell can still be replaced at the client breakpoint.
+  // Keep its controls inert until handlers and the live shell are ready.
+  const hydrated = useSyncExternalStore(
+    subscribeHydration, clientHydrationSnapshot, serverHydrationSnapshot,
+  );
 
   return (
     <motion.section
@@ -86,9 +104,9 @@ export function Onboarding({
         </p>
         <Button
           variant="secondary"
-          disabled={loading}
+          disabled={loading || !hydrated}
           rightIcon={<ArrowRight className="h-4 w-4" aria-hidden />}
-          onClick={() => window.dispatchEvent(new CustomEvent("lumen:composer-expand"))}
+          onClick={expandComposer}
         >
           开始创作
         </Button>
@@ -106,11 +124,11 @@ export function Onboarding({
               type="button"
               data-studio-preset
               aria-label={`应用预设：${preset.title}`}
-              disabled={loading}
+              disabled={loading || !hydrated}
               onClick={() => {
                 if (loading) return;
                 onPick(preset.text, preset.mode);
-                window.dispatchEvent(new CustomEvent("lumen:composer-expand"));
+                expandComposer();
               }}
               className="group flex min-h-11 min-w-0 flex-col overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)] text-left transition-colors duration-[var(--dur-quick)] hover:border-[var(--border-strong)] focus-visible:outline-offset-4 disabled:cursor-wait disabled:opacity-50"
             >
@@ -140,10 +158,10 @@ export function Onboarding({
         </summary>
         <div className="grid gap-1 pb-2" role="group" aria-label="对话灵感">
           {CHAT_STARTERS.map((text) => (
-            <Button key={text} variant="ghost" disabled={loading} onClick={() => {
+            <Button key={text} variant="ghost" disabled={loading || !hydrated} onClick={() => {
               if (loading) return;
               onPick(text, "chat");
-              window.dispatchEvent(new CustomEvent("lumen:composer-expand"));
+              expandComposer();
             }} className="h-auto min-h-11 justify-start px-2 py-2 text-left">
               <span className="min-w-0 break-words type-body-sm">{text}</span>
             </Button>

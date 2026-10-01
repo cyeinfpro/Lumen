@@ -27,6 +27,7 @@ import { insertImageMentionToken } from "@/lib/promptImageMentions";
 import { useHaptic } from "@/hooks/useHaptic";
 import { DURATION, EASE } from "@/lib/motion";
 import { DesktopPopover } from "./DesktopPopover";
+import { useDesktopComposerExpansion } from "./useDesktopComposerExpansion";
 import { ComposerExecutionControls } from "./DesktopComposerExecutionControls";
 import {
   IconBtn,
@@ -108,7 +109,6 @@ export function DesktopComposerPill({
   const setComposerError = useChatStore((s) => s.setComposerError);
   const addAttachment = useChatStore((s) => s.addAttachment);
   const uploadAttachment = useChatStore((s) => s.uploadAttachment);
-  const [expanded, setExpanded] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
   const [isSending, setIsSending] = useState(false);
@@ -131,6 +131,7 @@ export function DesktopComposerPill({
 
   const rootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const { expanded, setExpanded } = useDesktopComposerExpansion(textareaRef);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const advancedTriggerRef = useRef<HTMLDivElement | null>(null);
   const isComposingRef = useRef(false);
@@ -171,16 +172,6 @@ export function DesktopComposerPill({
       didMountRef.current = true;
     }
   }, [expanded, haptic]);
-
-  // ———— 监听外部 "lumen:composer-expand"（SuggestionCard / 全局 / 键触发） ————
-  useEffect(() => {
-    const onExpand = () => {
-      setExpanded(true);
-      requestAnimationFrame(() => textareaRef.current?.focus());
-    };
-    window.addEventListener("lumen:composer-expand", onExpand);
-    return () => window.removeEventListener("lumen:composer-expand", onExpand);
-  }, []);
 
   // ———— textarea 自动增高（展开态，max 200） ————
   // BUG-008: 用 rAF 批处理 height 读写，避免每次 keystroke 直接触发强制 layout。
@@ -230,7 +221,7 @@ export function DesktopComposerPill({
 
     document.addEventListener("pointerdown", onPointerDown, true);
     return () => document.removeEventListener("pointerdown", onPointerDown, true);
-  }, [expanded]);
+  }, [expanded, setExpanded]);
 
   useEffect(() => {
     if (promptTooLong) {
@@ -385,7 +376,7 @@ export function DesktopComposerPill({
       submittingRef.current = false;
       setIsSending(false);
     }
-  }, [onSubmit, setComposerError, setForceIntent, setText, haptic]);
+  }, [onSubmit, setComposerError, setForceIntent, setText, setExpanded, haptic]);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (isComposingRef.current || e.nativeEvent.isComposing || e.repeat || !canSubmit) return;
@@ -414,7 +405,7 @@ export function DesktopComposerPill({
         target.setSelectionRange(result.selectionStart, result.selectionEnd);
       });
     },
-    [setText],
+    [setText, setExpanded],
   );
 
   const handleAttachmentDragStart = useCallback(

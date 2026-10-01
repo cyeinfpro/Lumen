@@ -58,6 +58,7 @@ export function DesktopPopover({
   className,
 }: DesktopPopoverProps) {
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
   const [position, setPosition] = useState<{
     left: number;
@@ -94,14 +95,26 @@ export function DesktopPopover({
     );
   }, [align, anchorRef]);
 
-  // 非模态 popover 仍响应 Escape，但不接管页面焦点或背景交互。
+  useLayoutEffect(() => {
+    returnFocusRef.current = open && document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+  }, [open]);
+
+  // 非模态 popover 不抢初始焦点；Escape 从面板内退出时返回真实触发器。
+  // 点外关闭仍由用户选择新焦点，不把焦点拉回旧按钮。
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
+        const returnTarget = returnFocusRef.current;
+        const focusWasInside = panelRef.current?.contains(document.activeElement);
         onCloseRef.current();
+        if (focusWasInside && returnTarget?.isConnected) {
+          returnTarget.focus({ preventScroll: true });
+        }
       }
     };
     window.addEventListener("keydown", onKey);

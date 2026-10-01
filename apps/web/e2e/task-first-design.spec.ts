@@ -127,10 +127,22 @@ test("video keeps creation before a content-sized empty preview", async ({ page 
   const preview = page.locator('[data-video-preview="empty"]');
   await expect(composer).toBeVisible();
   await expect(preview).toBeVisible();
-  const composerBox = await composer.boundingBox();
-  const previewBox = await preview.boundingBox();
-  expect(previewBox!.y).toBeGreaterThanOrEqual(composerBox!.y + composerBox!.height - 1);
-  expect(previewBox!.height).toBeLessThan(240);
+  // Hydration swaps the mobile action footer for the desktop parameter rail.
+  // Read both rectangles in one browser task so a breakpoint update cannot
+  // leave us comparing the old composer height with the new preview position.
+  await expect(async () => {
+    const geometry = await page.evaluate(() => {
+      const composerNode = document.querySelector("[data-video-composer]");
+      const previewNode = document.querySelector('[data-video-preview="empty"]');
+      if (!composerNode || !previewNode) throw new Error("Video creation and preview must both be mounted");
+      const composerRect = composerNode.getBoundingClientRect();
+      const previewRect = previewNode.getBoundingClientRect();
+      return { composerBottom: composerRect.bottom, previewTop: previewRect.top, previewHeight: previewRect.height };
+    });
+    expect(geometry.previewTop, JSON.stringify(geometry)).toBeGreaterThanOrEqual(geometry.composerBottom - 1);
+    expect(geometry.previewHeight).toBeGreaterThan(0);
+    expect(geometry.previewHeight).toBeLessThan(240);
+  }).toPass({ timeout: 8_000 });
   await expect(preview.locator("video")).toHaveCount(0);
   await expect(preview.getByRole("heading", { name: "成片预览" })).toBeVisible();
   await recordLayout(page, testInfo, "video-input-first");
