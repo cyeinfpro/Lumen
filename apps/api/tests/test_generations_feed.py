@@ -104,7 +104,7 @@ def test_generation_feed_cursor_carries_total_and_filter_signature_for_next_page
         ratio="1:1",
         has_ref=True,
         q="cat",
-        visible_after=None,
+        retention_key="",
     )
 
     cursor = generations._encode_cursor(

@@ -132,7 +132,7 @@ def _feed_filter_signature(
     ratio: str | None,
     has_ref: bool,
     q: str | None,
-    visible_after: datetime | None,
+    retention_key: str = "",
 ) -> str:
     payload = {
         "user_id": user_id,
@@ -141,11 +141,9 @@ def _feed_filter_signature(
         "ratio": ratio or "",
         "has_ref": bool(has_ref),
         "q": (q or "").strip(),
-        "visible_after": (
-            visible_after.astimezone(timezone.utc).isoformat()
-            if visible_after is not None
-            else ""
-        ),
+        # Bind the effective policy, never its continuously moving UTC cutoff.
+        # Keep this field empty for wallet accounts to preserve their v3 cursors.
+        "visible_after": retention_key,
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
@@ -292,16 +290,21 @@ def _apply_filters(
     return stmt
 
 
-async def _feed_visible_after(
+async def _feed_visibility(
     user: CurrentUser,
     db: AsyncSession,
-) -> datetime | None:
+) -> tuple[datetime | None, str]:
     if not byok_retention_applies_to_user(user):
-        return None
+        return None, ""
     policy = retention_policy_from_settings(await read_byok_settings_cached(db))
-    if not policy.hide_enabled:
-        return None
-    return byok_retention_cutoffs(policy=policy).visible_after
+    retention_key = (
+        f"byok-v1:{int(policy.hide_enabled)}:{policy.hide_days}:"
+        f"{int(policy.delete_enabled)}:{policy.delete_days}"
+    )
+    visible_after = (
+        byok_retention_cutoffs(policy=policy).visible_after if policy.hide_enabled else None
+    )
+    return visible_after, retention_key
 
 
 async def _generation_feed_total(
@@ -314,8 +317,10 @@ async def _generation_feed_total(
     q: str | None,
     visible_after: datetime | None,
 ) -> int:
-    if trusted_cursor_total is not None:
+    if trusted_cursor_total is not None and visible_after is None:
         return trusted_cursor_total
+    # Expiring feeds must count against this request's cutoff; a stable cursor
+    # signature does not make the first page's total perpetually current.
     count_stmt: Select = select(Generation.id)  # type: ignore[assignment]
     count_stmt = _apply_filters(
         count_stmt,
@@ -601,14 +606,14 @@ async def list_generation_feed(
     if cursor:
         cur_ts, cur_id, cursor_total, cursor_filter_sig = _decode_cursor(cursor)
 
-    visible_after = await _feed_visible_after(user, db)
+    visible_after, retention_key = await _feed_visibility(user, db)
 
     current_filter_sig = _feed_filter_signature(
         user_id=user.id,
         ratio=ratio,
         has_ref=has_ref,
         q=q,
-        visible_after=visible_after,
+        retention_key=retention_key,
     )
 
     # ---- total（不包括 cursor 分页条件；包括所有过滤）----
