@@ -70,7 +70,7 @@ async def generate_poster_masters(
                 candidate_index=candidate_index,
             ),
             attachment_ids=attachment_ids,
-            idempotency_key=f"wf:{command.run_id[:22]}:m:{candidate_index}",
+            idempotency_key=f"wf:{command.run_id}:m:{candidate_index}",
             quality_mode=command.quality_mode,
             size_mode=command.size_mode,
             size=command.size,
@@ -97,7 +97,7 @@ async def generate_poster_renders(
     generation_ids: list[str] = []
     attachment_ids = tuple(command.reference_image_ids)
     intent = "image_to_image" if attachment_ids else "text_to_image"
-    for task_index, aspect in enumerate(command.pending_aspects, start=1):
+    for aspect in command.pending_aspects:
         task = PosterRenderTask(
             master_id=command.master_id,
             aspect_ratio=aspect,
@@ -109,7 +109,7 @@ async def generate_poster_renders(
                 adjustments=command.adjustments,
             ),
             attachment_ids=attachment_ids,
-            idempotency_key=(f"wf:{command.run_id[:18]}:r:{task_index}:{aspect}"),
+            idempotency_key=(f"wf:{command.run_id}:r:{command.master_id}:{aspect}"),
             quality_mode=command.quality_mode,
             use_master_as_reference=command.use_master_as_reference,
             workflow_meta={

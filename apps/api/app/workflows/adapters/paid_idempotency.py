@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -96,6 +99,20 @@ def record_current_paid_operation(
         )
 
 
+def current_paid_operation_subtask_key(db: AsyncSession, identity: str) -> str:
+    """Bind a full subtask identity to the durable outer operation, within 64 chars.
+
+    Direct/internal calls without an outer operation are independent attempts.
+    Never truncate UUIDs: their shared time prefix is not a unique identifier.
+    """
+    request = _current_paid_operation(db)
+    operation = (
+        paid_operation_task_metadata(request) if request is not None else str(uuid4())
+    )
+    payload = json.dumps([operation, identity], sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def current_paid_operation_task_metadata(
     db: AsyncSession,
 ) -> dict[str, str]:
@@ -106,5 +123,6 @@ def current_paid_operation_task_metadata(
 __all__ = [
     "SQLAlchemyPaidOperationPort",
     "current_paid_operation_task_metadata",
+    "current_paid_operation_subtask_key",
     "record_current_paid_operation",
 ]

@@ -117,6 +117,8 @@ async def _load_full_config(db: AsyncSession) -> dict:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return {"providers": [], "proxies": []}
+    if isinstance(data, list):
+        return {"providers": data, "proxies": []}
     if not isinstance(data, dict):
         return {"providers": [], "proxies": []}
     if "providers" not in data:

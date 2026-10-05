@@ -607,18 +607,24 @@ def test_storyboard_concat_cleans_tempdir_when_ffmpeg_times_out(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    monkeypatch.setattr(storyboard_assembly.tempfile, "tempdir", str(tmp_path))
+    from app import storyboard_concat
+
+    monkeypatch.setattr(storyboard_concat.tempfile, "tempdir", str(tmp_path))
     monkeypatch.setattr(
-        storyboard_assembly.shutil, "which", lambda _name: "/bin/ffmpeg"
+        storyboard_concat.shutil, "which", lambda _name: "/bin/ffmpeg"
     )
+    monkeypatch.setattr(storyboard_concat, "_probe", lambda *_args: {
+        "streams": [{"codec_type": "video", "width": 64, "height": 64, "duration": "1"}],
+    })
 
     def timeout_run(*args: Any, **kwargs: Any):
+        assert len(list(tmp_path.glob("lumen-storyboard-*"))) == 1
         raise subprocess.TimeoutExpired(
             cmd=args[0],
             timeout=kwargs.get("timeout"),
         )
 
-    monkeypatch.setattr(storyboard_assembly.subprocess, "run", timeout_run)
+    monkeypatch.setattr(storyboard_concat.subprocess, "run", timeout_run)
 
     with pytest.raises(subprocess.TimeoutExpired):
         storyboard_assembly._concat_segments_sync([tmp_path / "segment.mp4"])  # noqa: SLF001

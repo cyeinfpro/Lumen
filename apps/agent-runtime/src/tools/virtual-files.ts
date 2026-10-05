@@ -115,6 +115,31 @@ function readFileTool(
   });
 }
 
+function matchingSnippet(line: string, query: string) {
+  // Folding may change length (for example İ); retain original UTF-16 offsets.
+  // Fold the whole string so contextual casing (Greek final sigma) is retained.
+  const folded = line.toLocaleLowerCase();
+  const offsets: number[] = [];
+  let originalOffset = 0;
+  for (const point of line) {
+    const lower = point.toLocaleLowerCase();
+    for (let i = 0; i < lower.length; i += 1) offsets.push(originalOffset);
+    originalOffset += point.length;
+  }
+  const hit = folded.indexOf(query);
+  if (hit < 0) return undefined;
+  const column = offsets[hit] ?? 0;
+  const start = safeTextEnd(line, Math.max(0, column - 120));
+  const end = safeTextEnd(line, Math.min(line.length, start + 500));
+  return {
+    text: line.slice(start, end),
+    char_start: start,
+    char_end: end,
+    match_column: column,
+    line_truncated: start > 0 || end < line.length,
+  };
+}
+
 function searchFilesTool(
   request: RuntimeRequest,
   state: ToolRuntimeState,
@@ -150,25 +175,26 @@ function searchFilesTool(
       const candidates = selectedFile ? [selectedFile] : filesFor(request);
       const maximum = params.max_matches ?? 20;
       const normalized = query.toLocaleLowerCase();
-      const matches: Array<{ name: string; line: number; text: string }> = [];
+      const matches: Array<{ name: string; line: number } & NonNullable<ReturnType<typeof matchingSnippet>>> = [];
+      let truncated = false;
       for (const file of candidates) {
         for (const [index, line] of file.content.split(/\r?\n/u).entries()) {
-          if (!line.toLocaleLowerCase().includes(normalized)) continue;
-          const snippet = line.trim();
+          const snippet = matchingSnippet(line, normalized);
+          if (!snippet) continue;
+          if (matches.length >= maximum) { truncated = true; break; }
           matches.push({
             name: file.name,
             line: index + 1,
-            text: snippet.slice(0, safeTextEnd(snippet, 500)),
+            ...snippet,
           });
-          if (matches.length >= maximum) break;
         }
-        if (matches.length >= maximum) break;
+        if (truncated) break;
       }
       return complete(state, ordinal, "file_search", {
         query,
         searched_files: candidates.map((file) => file.name),
         matches,
-        truncated: matches.length >= maximum,
+        truncated,
       });
     },
   });

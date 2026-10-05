@@ -16,13 +16,16 @@ def _extract_url_citations(response: dict[str, Any]) -> list[dict[str, Any]]:
     output = response.get("output")
     if not isinstance(output, list):
         return citations
+    offset = 0
     for item in output:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or item.get("type") != "message":
             continue
         for part in item.get("content") or []:
             if not isinstance(part, dict):
                 continue
             text = part.get("text")
+            if part.get("type") != "output_text" or not isinstance(text, str):
+                continue
             for annotation in part.get("annotations") or []:
                 if not isinstance(annotation, dict):
                     continue
@@ -34,15 +37,22 @@ def _extract_url_citations(response: dict[str, Any]) -> list[dict[str, Any]]:
                 ):
                     continue
                 title = raw.get("title") if isinstance(raw, dict) else None
+                start = raw.get("start_index", annotation.get("start_index"))
+                end = raw.get("end_index", annotation.get("end_index"))
+                valid_span = (
+                    isinstance(start, int) and isinstance(end, int)
+                    and 0 <= start < end <= len(text)
+                )
                 citations.append(
                     {
                         "url": url,
                         "title": title if isinstance(title, str) and title else url,
                         "text": text if isinstance(text, str) else None,
-                        "start_index": annotation.get("start_index"),
-                        "end_index": annotation.get("end_index"),
+                        "start_index": offset + start if valid_span else None,
+                        "end_index": offset + end if valid_span else None,
                     }
                 )
+            offset += len(text)
     return citations
 
 
@@ -62,6 +72,9 @@ def _apply_url_citations(text: str, citations: list[dict[str, Any]]) -> str:
         label = text[start:end].strip()
         if not label:
             continue
+        if any(start < other_end and end > other_start
+               for other_start, other_end, _link in replacements):
+            continue
         replacements.append((start, end, _markdown_link(label, url)))
         seen_urls.add(url)
     if replacements:
@@ -72,7 +85,7 @@ def _apply_url_citations(text: str, citations: list[dict[str, Any]]) -> str:
             reverse=True,
         ):
             text = f"{text[:start]}{link}{text[end:]}"
-    if not seen_urls:
+    if any(citation["url"] not in seen_urls for citation in citations):
         unique: list[dict[str, Any]] = []
         for citation in citations:
             if citation["url"] in seen_urls:
@@ -114,7 +127,12 @@ def _finalize_completion_text(text: str, response: dict[str, Any] | None) -> str
         return text
     completed_text = _extract_completed_output_text(response)
     base = completed_text or text
-    return _apply_url_citations(base, _extract_url_citations(response))
+    citations = _extract_url_citations(response)
+    structured_text = _extract_completed_output_text({**response, "output_text": None})
+    if structured_text and structured_text != base:
+        # A provider aggregate may use different separators; do not guess offsets.
+        citations = [{**item, "start_index": None, "end_index": None} for item in citations]
+    return _apply_url_citations(base, citations)
 
 
 # Public contract consumed by the Completion runtime modules.

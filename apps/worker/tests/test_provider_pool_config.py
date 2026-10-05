@@ -37,8 +37,9 @@ def test_worker_non_dev_rejects_byok_dev_fallback_secret() -> None:
         )
 
 
-def test_worker_default_redis_url_matches_password_protected_dev_redis() -> None:
-    assert Settings().redis_url == "redis://:lumen-redis-dev-password@localhost:6379/0"
+def test_worker_default_redis_url_matches_password_protected_dev_redis(monkeypatch) -> None:
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    assert Settings(_env_file=None).redis_url == "redis://:lumen-redis-dev-password@localhost:6379/0"
 
 
 def test_agent_runtime_idle_budget_has_heartbeat_failure_margin() -> None:

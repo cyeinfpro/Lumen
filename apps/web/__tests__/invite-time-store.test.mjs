@@ -1,0 +1,40 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createInviteTimeStore } from "../src/app/admin/_panels/inviteTimeStore.ts";
+
+test("invite clock snapshots stay cached between notifications and stop after unmount", (t) => {
+  let now = 100;
+  let tick;
+  let starts = 0;
+  let stops = 0;
+  t.mock.method(Date, "now", () => now);
+  t.mock.method(globalThis, "setInterval", (fn, delay) => {
+    assert.equal(delay, 60_000);
+    starts += 1;
+    tick = fn;
+    return 1;
+  });
+  t.mock.method(globalThis, "clearInterval", () => { stops += 1; });
+  const store = createInviteTimeStore();
+  assert.equal(store.getServerSnapshot(), 0);
+  let notifications = 0;
+  const stop1 = store.subscribe(() => { notifications += 1; });
+  assert.equal(store.getSnapshot(), 100);
+  now = 200;
+  assert.equal(store.getSnapshot(), 100);
+  assert.equal(store.getSnapshot(), 100);
+  const stop2 = store.subscribe(() => { notifications += 1; });
+  assert.equal(starts, 1);
+  tick();
+  assert.equal(store.getSnapshot(), 200);
+  assert.equal(notifications, 3);
+  stop1();
+  assert.equal(stops, 0);
+  stop2();
+  assert.equal(stops, 1);
+  now = 300;
+  const stop3 = store.subscribe(() => {});
+  assert.equal(store.getSnapshot(), 300);
+  assert.equal(starts, 2);
+  stop3();
+});

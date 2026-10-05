@@ -7,6 +7,7 @@
 // - 三态 loading/empty/error；ApiError 分支细化文案
 
 import { useMemo, useState, useSyncExternalStore } from "react";
+import { inviteTimeStore } from "./inviteTimeStore";
 import { AnimatePresence, motion } from "framer-motion";
 import { format } from "date-fns";
 import {
@@ -48,7 +49,7 @@ function statusOf(row: InviteLinkOut, now: number = Date.now()): InviteStatus {
   if (row.used_at) return "used";
   if (row.expires_at) {
     const exp = new Date(row.expires_at).getTime();
-    if (Number.isFinite(exp) && exp < now) return "expired";
+    if (Number.isFinite(exp) && exp <= now) return "expired";
   }
   return "valid";
 }
@@ -129,7 +130,7 @@ export function InvitesPanel() {
   };
 
   const rows = useMemo(() => q.data?.items ?? [], [q.data]);
-  const now = useSyncExternalStore(subscribeTime, getNow, getNowSSR);
+  const now = useSyncExternalStore(inviteTimeStore.subscribe, inviteTimeStore.getSnapshot, inviteTimeStore.getServerSnapshot);
 
   return (
     <section className="space-y-5">
@@ -238,6 +239,7 @@ export function InvitesPanel() {
                   {copiedKey === `new:${created.id}` ? copy.state.copied : copy.action.copy}
                 </Button>
               </div>
+              <p className="type-caption text-[var(--fg-2)]">链接仅在生成时显示，请立即复制保存；关闭或刷新后无法再次查看。</p>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 type-caption">
                 <Field label="令牌">
                   <span className="font-mono text-[var(--fg-1)]">
@@ -292,27 +294,7 @@ export function InvitesPanel() {
                   key={row.id}
                   className="p-3 border border-[var(--border)] rounded-[var(--radius-card)] space-y-3"
                 >
-                  <div className="flex flex-col gap-2">
-                    <code className="w-full min-w-0 px-2 py-2 rounded-[var(--radius-control)] bg-[var(--bg-0)]/70 border border-[var(--border)] type-caption font-mono text-[var(--fg-0)] break-all leading-relaxed">
-                      {row.url}
-                    </code>
-                    <Button
-                      variant="secondary"
-                      size="md"
-                      fullWidth
-                      onClick={() => onCopy(`row:${row.id}`, row.url)}
-                      aria-label="复制链接"
-                      leftIcon={
-                        copiedKey === `row:${row.id}` ? (
-                          <Check className="w-3.5 h-3.5 text-success" />
-                        ) : (
-                          <Copy className="w-3.5 h-3.5" />
-                        )
-                      }
-                    >
-                      {copiedKey === `row:${row.id}` ? copy.state.copied : "复制链接"}
-                    </Button>
-                  </div>
+                  <p className="type-caption text-[var(--fg-2)]">链接已隐藏，仅生成时可复制</p>
                   <div className="grid grid-cols-2 gap-2 type-caption">
                     <div>
                       <div className="type-overline text-[var(--fg-2)]">
@@ -427,30 +409,7 @@ export function InvitesPanel() {
                       className="border-t border-[var(--border-subtle)] hover:bg-[var(--bg-3)] transition-colors align-middle"
                     >
                       <td className="py-3 px-4 max-w-[280px]">
-                        <div className="flex items-center gap-2">
-                          <code className="type-caption font-mono text-[var(--fg-1)] truncate">
-                            {row.url}
-                          </code>
-                          {/* 24px 紧凑内联按钮无法用 Button primitive sm（h-8 太大） */}
-                          <button
-                            type="button"
-                            onClick={() => onCopy(`row:${row.id}`, row.url)}
-                            className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[var(--radius-control)] type-caption text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-3)] transition-colors"
-                            aria-label="复制链接"
-                          >
-                            {copiedKey === `row:${row.id}` ? (
-                              <>
-                                <Check className="w-3 h-3 text-success" />
-                                {copy.state.copied}
-                              </>
-                            ) : (
-                              <>
-                                <Copy className="w-3 h-3" />
-                                {copy.action.copy}
-                              </>
-                            )}
-                          </button>
-                        </div>
+                        <span className="type-caption text-[var(--fg-2)]">链接已隐藏，仅生成时可复制</span>
                       </td>
                       <td className="py-3 px-4 text-[var(--fg-1)]">
                         {row.email ?? "—"}
@@ -619,20 +578,4 @@ function formatISODate(s: string): string {
   } catch {
     return s;
   }
-}
-
-// ——— "now" 外部数据源（避免 react-hooks/purity 报错） ———
-
-function subscribeTime(onChange: () => void): () => void {
-  // P2-3：从 30s 降为 60s，减少不必要的 re-render 风暴；过期时间边界仍可由用户手动刷新感知
-  const t = setInterval(onChange, 60_000);
-  return () => clearInterval(t);
-}
-
-function getNow(): number {
-  return Date.now();
-}
-
-function getNowSSR(): number {
-  return 0;
 }

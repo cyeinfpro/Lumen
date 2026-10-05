@@ -87,6 +87,7 @@ def _mark_cleanup_pending(
     deleted_at: datetime,
     token: str,
 ) -> None:
+    claimed_at = datetime.now(timezone.utc)
     metadata = dict(video.metadata_jsonb or {})
     previous = metadata.get(VIDEO_STORAGE_CLEANUP_METADATA_KEY)
     previous_cleanup = previous if isinstance(previous, dict) else {}
@@ -95,7 +96,7 @@ def _mark_cleanup_pending(
     quarantine_token = previous_cleanup.get("quarantine_token")
     metadata[VIDEO_STORAGE_CLEANUP_METADATA_KEY] = {
         "state": "pending",
-        "attempted_at": deleted_at.isoformat(),
+        "attempted_at": claimed_at.isoformat(),
         "remaining_artifact_count": (
             max(1, int(remaining_artifacts))
             if isinstance(remaining_artifacts, int)
@@ -113,7 +114,7 @@ def _mark_cleanup_pending(
         )
     metadata[_VIDEO_CLEANUP_CLAIM_KEY] = {
         "token": token,
-        "claimed_at": deleted_at.isoformat(),
+        "claimed_at": claimed_at.isoformat(),
     }
     video.metadata_jsonb = metadata
 

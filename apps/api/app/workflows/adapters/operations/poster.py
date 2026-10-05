@@ -21,7 +21,6 @@ from lumen_core.models import (
     PosterRender,
     User,
     WorkflowRun,
-    new_uuid7,
 )
 from lumen_core.schemas import (
     ChatParamsIn,
@@ -57,6 +56,7 @@ from ...application.poster_design import (
 )
 from ..paid_idempotency import (
     current_paid_operation_task_metadata,
+    current_paid_operation_subtask_key,
     record_current_paid_operation,
 )
 from ...domain.workflow_contracts import PublishBundle
@@ -167,7 +167,9 @@ async def _create_poster_workflow_task(
         conv=context.conversation,
         user_msg=user_msg,
         intent=request.intent,
-        idempotency_key=request.idempotency_key[:64],
+        idempotency_key=current_paid_operation_subtask_key(
+            context.db, request.idempotency_key
+        ),
         image_params=request.image_params or ImageParamsIn(),
         chat_params=request.chat_params or ChatParamsIn(),
         system_prompt=None,
@@ -848,7 +850,7 @@ async def revise_poster_render(
                 scope=body.scope,
             ),
             attachment_ids=ref_ids,
-            idempotency_key=(f"wf:{run.id[:18]}:rv:{render.id[:8]}:{new_uuid7()[:8]}"),
+            idempotency_key=(f"wf:{run.id}:rv:{render.id}"),
             workflow_run_id=run.id,
             workflow_step_key="multi_size_generation",
             image_params=image_params,
@@ -924,7 +926,7 @@ async def _do_poster_inpaint(
             intent=Intent.IMAGE_TO_IMAGE,
             text=instruction.strip(),
             attachment_ids=ref_ids,
-            idempotency_key=(f"wf:{run.id[:18]}:in:{render.id[:8]}:{new_uuid7()[:8]}"),
+            idempotency_key=(f"wf:{run.id}:in:{render.id}"),
             workflow_run_id=run.id,
             workflow_step_key="multi_size_generation",
             image_params=image_params,

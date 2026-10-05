@@ -5,9 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import shutil
-import subprocess
-import tempfile
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -26,6 +23,7 @@ from ..artifact_commit import (
     commit_with_adoption_probe,
     rollback_artifact_transaction,
 )
+from ..storyboard_concat import concat_segments
 from ..db import SessionLocal, affected_rows
 from ..sse_publish import publish_event
 from ..storage import storage
@@ -921,62 +919,4 @@ async def run_storyboard_assembly(
 
 
 def _concat_segments_sync(segment_paths: list[Path]) -> bytes:
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError("ffmpeg_missing")
-    with tempfile.TemporaryDirectory(prefix="lumen-storyboard-") as tmp:
-        tmpdir = Path(tmp)
-        concat_list = tmpdir / "concat.txt"
-        output = tmpdir / "assembly.mp4"
-        concat_list.write_text(
-            "\n".join(_concat_file_line(path) for path in segment_paths) + "\n",
-            encoding="utf-8",
-        )
-        base_args = [
-            ffmpeg,
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(concat_list),
-        ]
-        copy_proc = subprocess.run(
-            [*base_args, "-c", "copy", str(output)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=300,
-            check=False,
-        )
-        if copy_proc.returncode != 0 or not output.is_file():
-            output.unlink(missing_ok=True)
-            transcode_proc = subprocess.run(
-                [
-                    *base_args,
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "veryfast",
-                    "-crf",
-                    "18",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-c:a",
-                    "aac",
-                    "-movflags",
-                    "+faststart",
-                    str(output),
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=600,
-                check=False,
-            )
-            if transcode_proc.returncode != 0 or not output.is_file():
-                stderr = transcode_proc.stderr.decode("utf-8", "replace")[-1200:]
-                copy_stderr = copy_proc.stderr.decode("utf-8", "replace")[-600:]
-                raise RuntimeError(
-                    f"ffmpeg_concat_failed: copy={copy_stderr}; transcode={stderr}"
-                )
-        return output.read_bytes()
+    return concat_segments(segment_paths)

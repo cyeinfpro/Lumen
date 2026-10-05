@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -114,3 +115,27 @@ async def test_list_invites_uses_admin_scope_not_creator_scope(
     assert out == {"items": []}
     rendered = str(db.statements[0])
     assert "WHERE invite_links.created_by" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_list_invites_redacts_tokens_but_creation_snapshot_can_reveal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_base_url(_request: Request, _db: Any) -> str:
+        return "https://lumen.example"
+
+    monkeypatch.setattr(invites, "resolve_public_base_url", fake_base_url)
+    inv = SimpleNamespace(
+        id="invite-1", token="secret-invite-token", email=None, role="member",
+        expires_at=None, used_at=None, revoked_at=None,
+        created_at=datetime.now(timezone.utc),
+    )
+    out = await invites.list_invite_links(
+        SimpleNamespace(id="admin-1", email="admin@example.test"),
+        _request(), _Db([(inv, None)]),  # type: ignore[arg-type]
+    )
+    listed = out["items"][0]
+    assert listed.token == "redacted"
+    assert "secret-invite-token" not in listed.model_dump_json()
+    created = invites._to_out(inv, None, public_base_url="https://lumen.example")
+    assert created.url == "https://lumen.example/invite/secret-invite-token"
