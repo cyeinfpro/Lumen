@@ -170,7 +170,7 @@ describe("production provider wire adapters", () => {
   for (const [api, suffix] of [
     ["openai-responses", "/responses"],
     ["openai-completions", "/chat/completions"],
-    ["anthropic-messages", "/v1/messages"],
+    ["anthropic-messages", "/v1/messages?beta=true"],
   ] as const) {
     it(`uses the configured ${api} SDK base, model, prompt, and terminal SSE`, async () => {
       const captures: Capture[] = [];
@@ -355,7 +355,7 @@ describe("production provider wire adapters", () => {
   it.each([
     ["openai-responses", "/responses"],
     ["openai-completions", "/chat/completions"],
-    ["anthropic-messages", "/v1/messages"],
+    ["anthropic-messages", "/v1/messages?beta=true"],
   ] as const)(
     "keeps terminal %s usage unknown when the provider omits its receipt",
     async (api, suffix) => {

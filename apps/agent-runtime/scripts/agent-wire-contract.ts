@@ -26,7 +26,7 @@ function runtimeEvents(): unknown[] {
   return [
     event("run.started", 1, {
       tools: ["lumen_create_image"],
-      runtime_version: "pi-0.84.4",
+      runtime_version: "pi-1.0.4",
       reasoning_effort: null,
     }),
     event("run.heartbeat", 2),
@@ -47,7 +47,7 @@ function runtimeEvents(): unknown[] {
     }),
     event("compaction.completed", 8, {
       checkpoint_version: 2,
-      pi_runtime_version: "pi-0.84.4",
+      pi_runtime_version: "pi-1.0.4",
       summary: "summary",
       first_kept_message_id: "message-1",
       next_message_id: "message-2",

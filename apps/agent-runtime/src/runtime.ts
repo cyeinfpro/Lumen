@@ -3,6 +3,8 @@ import {
   InMemoryCredentialStore,
   InMemoryModelsStore,
   fauxProvider,
+  getCurrentTools,
+  type JsonObject,
   type AssistantMessage,
   type ImageContent,
   type Message,
@@ -256,7 +258,8 @@ function orderedHistoryMessages(
           type: "toolCall",
           id: block.id,
           name: block.name,
-          arguments: block.arguments,
+          // Runtime history is decoded from the JSON-only request envelope.
+          arguments: block.arguments as JsonObject,
         });
       } else {
         toolResults.push(block);
@@ -317,7 +320,7 @@ function historyMessages(
     type: "toolCall" as const,
     id: toolCall.id,
     name: toolCall.name,
-    arguments: toolCall.arguments,
+    arguments: toolCall.arguments as JsonObject,
   }));
   const assistant: AssistantMessage = {
     role: "assistant",
@@ -857,13 +860,6 @@ export async function executeAgentRun(
     settingsManager: settings,
   });
   const authoritativePrompt = request.system_prompt;
-  const sessionInternals = session as unknown as {
-    _baseSystemPrompt?: string;
-    _systemPromptOverride?: string;
-  };
-  sessionInternals._baseSystemPrompt = authoritativePrompt;
-  sessionInternals._systemPromptOverride = authoritativePrompt;
-  session.agent.state.systemPrompt = authoritativePrompt;
 
   pendingSessionCleanup = async () => {
     const [result] = await Promise.allSettled([
@@ -905,7 +901,18 @@ export async function executeAgentRun(
     ? 2_147_483_647
     : httpIdleTimeoutMs;
   session.agent.streamFunction = (model, context, options) =>
-    prepared.modelRuntime.streamSimple(model, context, {
+    prepared.modelRuntime.streamSimple(model, {
+      ...context,
+      // Pi 1.x declares prompts and tools in transcript system messages.
+      // Project the trusted Lumen prompt at the provider boundary, retaining
+      // the current Pi tool declarations without relying on private fields.
+      messages: [{
+        role: "system",
+        content: authoritativePrompt,
+        toolsAdded: getCurrentTools(context.messages),
+        timestamp: 0,
+      }, ...context.messages.filter((message) => message.role !== "system")],
+    }, {
       ...options,
       apiKey: request.provider.api_key,
       headers: request.provider.headers,
@@ -943,10 +950,20 @@ export async function executeAgentRun(
       terminate: true,
     };
   };
-  session.agent.shouldStopAfterTurn = () => {
-    if (turnCount >= safetyPolicy.maxTurns) tripSafety("turns");
-    if (usage.total_tokens >= safetyPolicy.maxTotalTokens) tripSafety("tokens");
-    return safetyState.reason !== null;
+  const previousFinishTurn = session.agent.finishTurn;
+  session.agent.finishTurn = async (turn, turnSignal) => {
+    const previous = (await previousFinishTurn?.(turn, turnSignal)) ?? undefined;
+    if (turn.message.stopReason === "error" || turn.message.stopReason === "aborted") {
+      return previous;
+    }
+    // finishTurn precedes turn_end, where normal accounting is committed.
+    const message = assistantMessage(turn.message);
+    const currentUsage = message === null ? zeroUsage() : boundedTurnUsage(message.usage, request);
+    if (turnCount + 1 >= safetyPolicy.maxTurns) tripSafety("turns");
+    if (usage.total_tokens + currentUsage.total_tokens >= safetyPolicy.maxTotalTokens) {
+      tripSafety("tokens");
+    }
+    return safetyState.reason !== null ? { action: "end" } : previous;
   };
   const safetyTimer = setTimeout(() => {
     tripSafety("wall_clock");
@@ -1031,10 +1048,8 @@ export async function executeAgentRun(
 
   const previousPrepare = session.agent.prepareNextTurnWithContext;
   session.agent.prepareNextTurnWithContext = async (context, turnSignal) => {
-    const previous = await previousPrepare?.(context, turnSignal);
-    const baseContext = previous?.context ?? context.context;
-    const baseTools = baseContext.tools ?? [];
-    if (context.toolResults.length === 0) return previous;
+    if (context.toolResults.length === 0) return previousPrepare?.(context, turnSignal);
+    const baseTools = session.agent.state.tools;
     const disabled = new Set<string>();
     if (tools.calls >= toolPolicy.max_tool_calls) {
       baseTools.forEach((tool) => disabled.add(tool.name));
@@ -1053,14 +1068,14 @@ export async function executeAgentRun(
         AGENT_FILE_TOOLS.forEach((tool) => disabled.add(tool));
       }
     }
-    if (disabled.size === 0) return previous;
-    return {
-      ...previous,
-      context: {
-        ...baseContext,
-        tools: baseTools.filter((tool) => !disabled.has(tool.name)),
-      },
-    };
+    if (disabled.size > 0) {
+      // Update the canonical session loadout. A context-only override would be
+      // overwritten by Pi's prepareRequest history projection in 1.x.
+      session.setActiveToolsByName(
+        session.getActiveToolNames().filter((name) => !disabled.has(name)),
+      );
+    }
+    return previousPrepare?.(context, turnSignal);
   };
 
   const unsubscribe = session.agent.subscribe(async (event: AgentEvent) => {

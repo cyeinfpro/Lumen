@@ -253,5 +253,5 @@ export function loadConfig(): RuntimeConfig {
   }, { allowDisabledSecret: true });
 }
 
-export const RUNTIME_VERSION = "pi-0.84.4";
+export const RUNTIME_VERSION = "pi-1.0.4";
 export const MIN_RUNTIME_SHARED_SECRET_BYTES = MIN_SHARED_SECRET_BYTES;

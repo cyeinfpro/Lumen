@@ -4,6 +4,15 @@ Private Node service that executes one Pi-native agent run for the Python
 Worker. PostgreSQL remains the product state source; this service uses only
 in-memory Pi sessions, settings, credentials, and model catalogs.
 
+## Pi SDK compatibility
+
+The embedded Pi packages are pinned to 1.0.4 with TypeBox 1.3.27 (Node >=22.19).
+SessionManager remains the canonical in-memory history. Provider requests project
+the authoritative Lumen prompt and current tool declarations from the Pi 1.x
+transcript; tool-budget changes update the canonical session loadout. Safety
+budgets use `finishTurn` before `turn_end`, preserving Pi's own boundary hook.
+No Pi built-ins, resource discovery, or persisted credentials/sessions are enabled.
+
 ## Local gates
 
 ```bash

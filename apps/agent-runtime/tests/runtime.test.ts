@@ -5,6 +5,8 @@ import {
   fauxProvider,
   fauxText,
   fauxToolCall,
+  getCurrentSystemPrompt,
+  getCurrentTools,
   lazyStream,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -249,7 +251,7 @@ describe("Pi Runtime execution", () => {
       (event) => event.type === "compaction.completed",
     );
     expect(checkpoint?.checkpoint_version).toBe(1);
-    expect(checkpoint?.pi_runtime_version).toBe("pi-0.84.4");
+    expect(checkpoint?.pi_runtime_version).toBe("pi-1.0.4");
     expect(String(checkpoint?.summary)).toContain(
       "Preserve the full creative session",
     );
@@ -633,7 +635,7 @@ describe("Pi Runtime execution", () => {
     const dependencies = await fakeDependencies(
       [
         (context) => {
-          prompts.push(context.systemPrompt || "");
+          prompts.push(getCurrentSystemPrompt(context.messages));
           return fauxAssistantMessage(
             fauxToolCall(
               "lumen_create_image",
@@ -644,7 +646,7 @@ describe("Pi Runtime execution", () => {
           );
         },
         (context) => {
-          prompts.push(context.systemPrompt || "");
+          prompts.push(getCurrentSystemPrompt(context.messages));
           const result = context.messages.find((message) => message.role === "toolResult");
           toolResultText =
             result?.role === "toolResult" && result.content[0]?.type === "text"
@@ -1079,10 +1081,16 @@ describe("Pi Runtime execution", () => {
           fauxToolCall("lumen_create_image", { prompt: "first" }, { id: "tool-1" }),
           { stopReason: "toolUse" },
         ),
-        fauxAssistantMessage(
-          fauxToolCall("lumen_create_image", { prompt: "second" }, { id: "tool-2" }),
-          { stopReason: "toolUse" },
-        ),
+        (context) => {
+          // Pi 1.x must remove the declaration from canonical transcript
+          // projection, not only from a transient context.tools array.
+          expect(getCurrentTools(context.messages)).toEqual([]);
+          expect(context.messages.some((message) => message.role === "toolResult")).toBe(true);
+          return fauxAssistantMessage(
+            fauxToolCall("lumen_create_image", { prompt: "second" }, { id: "tool-2" }),
+            { stopReason: "toolUse" },
+          );
+        },
         fauxAssistantMessage("Only the first request was submitted."),
       ],
       async (_id, _ordinal, arguments_) => {
