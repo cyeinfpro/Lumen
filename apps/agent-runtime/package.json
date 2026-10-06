@@ -1,6 +1,6 @@
 {
   "name": "@lumen/agent-runtime",
-  "version": "1.2.176",
+  "version": "1.2.177",
   "private": true,
   "type": "module",
   "engines": {
