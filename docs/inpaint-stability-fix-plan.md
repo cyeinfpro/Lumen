@@ -433,7 +433,7 @@ def _pool_select_compat(*, has_mask: bool, ...) -> list[Provider]:
 
 ## 附录：现网日志取证（v1.1.17，2026-05-13）
 
-完整 6h worker 日志摘抄存档于 `docs/internal/inpaint-stability-evidence-2026-05-13.log`（待生成；如未生成则 ssh 到 203.0.113.10 跑 `docker logs --since 6h lumen-worker 2>&1 | grep -iE "inpaint|mask|edit"`）。
+完整 6h worker 日志摘抄存档于 `docs/internal/inpaint-stability-evidence-2026-05-13.log`（待生成；如未生成则 ssh 到 <deployment-host> 跑 `docker logs --since 6h lumen-worker 2>&1 | grep -iE "inpaint|mask|edit"`）。
 
 关键样本：
 

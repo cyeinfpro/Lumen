@@ -394,7 +394,7 @@ def test_docker_release_main_and_release_promotion_are_explicit() -> None:
     publication_run = publication["run"]
     assert isinstance(publication_run, str)
 
-    assert "if" not in promote
+    assert promote["if"] == "${{ github.event_name != 'push' || !github.event.forced }}"
     assert (
         publication["if"] == "needs.resolve-ref.outputs.is_release == 'true' || "
         "needs.resolve-ref.outputs.is_main_push == 'true'"
@@ -407,7 +407,10 @@ def test_docker_release_main_and_release_promotion_are_explicit() -> None:
     assert 'release_args=(--release-tag "${RELEASE_TAG}")' in publication_run
     assert "GH_TOKEN" in publication["env"]
     assert promote["permissions"] == {"contents": "read", "packages": "write"}
-    assert jobs["release"]["if"] == "needs.resolve-ref.outputs.is_release == 'true'"
+    assert jobs["release"]["if"] == (
+        "${{ (github.event_name != 'push' || !github.event.forced) && "
+        "(needs.resolve-ref.outputs.is_release == 'true') }}"
+    )
     assert jobs["release"]["permissions"] == {
         "contents": "write",
         "packages": "read",
@@ -447,8 +450,9 @@ def test_github_release_and_manifest_gate_stable_shared_aliases() -> None:
     shared = jobs["promote-shared"]
     assert set(shared["needs"]) == {"resolve-ref", "promote", "release"}
     assert shared["if"] == (
-        "needs.resolve-ref.outputs.is_release == 'true' && "
-        "needs.promote.outputs.is_prerelease == 'false'"
+        "${{ (github.event_name != 'push' || !github.event.forced) && "
+        "(needs.resolve-ref.outputs.is_release == 'true' && "
+        "needs.promote.outputs.is_prerelease == 'false') }}"
     )
     assert shared["permissions"] == {"contents": "write", "packages": "write"}
     shared_step = _step(shared, "Publish stable shared aliases")

@@ -51,7 +51,7 @@
 
 值得注意的是，它不是非法就简单报错，而是会做归一化：先 round 到 16 倍数，再多轮 scale-to-fit 或 scale-to-fill。这个策略适合用户输入自由尺寸时使用，可以减少"用户以为能生成，实际 API 拒绝"的情况。
 
-**Lumen 现状**：[apps/web/src/lib/sizing.ts](../apps/web/src/lib/sizing.ts:1) 已经有显式 fixed size 校验、4K 预设、像素边界、长宽比限制和前后端对称实现，整体比 playground 更严谨。Lumen 走的是"非法即报错"路线，符合生产级 API 的安全感。
+**Lumen 现状**：[apps/web/src/lib/sizing.ts](../apps/web/src/lib/sizing.ts#L1) 已经有显式 fixed size 校验、4K 预设、像素边界、长宽比限制和前后端对称实现，整体比 playground 更严谨。Lumen 走的是"非法即报错"路线，符合生产级 API 的安全感。
 
 **建议**：保留现有严谨策略；唯一可吸收的是"自由输入自动规整提示"——如果未来开放自定义尺寸输入框，可以在输入旁加一行轻量提示"将自动调整到 16 对齐尺寸（例：1024×1536）"，但仍以服务端校验为准。**优先级 P3，纯 UX**。
 
@@ -67,7 +67,7 @@
 
 这类逻辑的重点不是某个数值本身，而是"用户选择"和"真实上游能力"之间有一个显式兼容层。
 
-**Lumen 现状**：[apps/web/src/store/useChatStore.ts](../apps/web/src/store/useChatStore.ts:2218) 已会把 composer 参数解析为 `image_params`，并联动 `quality`、`size`、`output_format`、`output_compression`、`moderation`。服务端 Provider Pool 也会按 provider capability 做转换。
+**Lumen 现状**：[apps/web/src/store/useChatStore.ts](../apps/web/src/store/useChatStore.ts#L2218) 已会把 composer 参数解析为 `image_params`，并联动 `quality`、`size`、`output_format`、`output_compression`、`moderation`。服务端 Provider Pool 也会按 provider capability 做转换。
 
 **建议**：补一个"参数差异回显"——把"用户选择"和"上游实际生效"的差异在图片详情里 diff 出来，让用户知道系统帮他改了什么。这是 P0 微增量之一（详见 5.1）。
 
@@ -168,7 +168,7 @@ Store 层还有一套内存 LRU 和缩略图 backfill，见 [/tmp/gpt_image_play
 **Lumen 现状（核实结果）**：
 
 - `submitInpaintTask` 在 `useChatStore.ts` 已会在 `image_to_image + 单张参考图 + mask target 仍指向第一张` 时才发送 `mask_image_id`，方向一致。
-- [apps/web/src/components/ui/inpaint/InpaintModal.tsx:40](../apps/web/src/components/ui/inpaint/InpaintModal.tsx:40) 定义 `FULL_COVERAGE_WARN = 0.95`，[InpaintModal.tsx:299-303](../apps/web/src/components/ui/inpaint/InpaintModal.tsx:299) 会在涂抹覆盖率超过 95% 时弹"接近整图重画"警告（虽然是 warning 提示而非二次确认弹窗）。
+- [apps/web/src/components/ui/inpaint/InpaintModal.tsx:40](../apps/web/src/components/ui/inpaint/InpaintModal.tsx#L40) 定义 `FULL_COVERAGE_WARN = 0.95`，[InpaintModal.tsx:299-303](../apps/web/src/components/ui/inpaint/InpaintModal.tsx#L299) 会在涂抹覆盖率超过 95% 时弹"接近整图重画"警告（虽然是 warning 提示而非二次确认弹窗）。
 - mask 导出做了 alpha 全分辨率二值化（见 `MaskBoard.tsx`）。
 
 **结论**：playground 的"提交前用户确认"和"mask 覆盖分类"思路 **Lumen 已基本完成**。差距是确认弹窗强度——目前 Lumen 是允许直接提交并附带 warning 文案，没有阻断式 modal。这是 UX 取向问题，不是缺陷。
@@ -191,7 +191,7 @@ Store 层还有一套内存 LRU 和缩略图 backfill，见 [/tmp/gpt_image_play
 - 避免上游因文件体积或格式拒绝。
 - 让局部修改和官方尺寸限制保持一致。
 
-**Lumen 现状**：[apps/web/src/components/ui/inpaint/MaskBoard.tsx](../apps/web/src/components/ui/inpaint/MaskBoard.tsx:1) 已经在交互层做得更细：stroke 抽稀、实时覆盖采样、暗图颜色自适应、导出时二值化 alpha（见 MaskBoard.tsx:490）。比 playground 更适合生产。
+**Lumen 现状**：[apps/web/src/components/ui/inpaint/MaskBoard.tsx](../apps/web/src/components/ui/inpaint/MaskBoard.tsx#L1) 已经在交互层做得更细：stroke 抽稀、实时覆盖采样、暗图颜色自适应、导出时二值化 alpha（见 MaskBoard.tsx:490）。比 playground 更适合生产。
 
 **待评估**：是否需要在"进入 inpaint 前"加一层独立的工作图预处理？目前 MaskBoard 直接基于原图自然尺寸导出 mask，桌面端体验最佳，但 4K 原图在移动端或弱设备上可能压力较大。可考虑的折中：
 
@@ -226,7 +226,7 @@ Store 层还有一套内存 LRU 和缩略图 backfill，见 [/tmp/gpt_image_play
 **Lumen 现状（核实结果）**：
 
 - inpaint 时会根据源图宽高推断 aspect ratio，避免默认 16:9 导致 mask 和输出构图错位。
-- [InpaintModal.tsx:538-549](../apps/web/src/components/ui/inpaint/InpaintModal.tsx:538) 已在 prompt 输入区右上角展示比例胶囊，title 文案为 "按原图比例生成（避免构图变形）"。
+- [InpaintModal.tsx:538-549](../apps/web/src/components/ui/inpaint/InpaintModal.tsx#L538) 已在 prompt 输入区右上角展示比例胶囊，title 文案为 "按原图比例生成（避免构图变形）"。
 
 **结论**：这点 Lumen 已经做了。不再列为待办。
 
@@ -302,7 +302,7 @@ Store 层还有一套内存 LRU 和缩略图 backfill，见 [/tmp/gpt_image_play
 
 **Lumen 已有**：
 
-- 图片详情面板 [LightboxParamsPanel.tsx:37-160](../apps/web/src/components/ui/lightbox/LightboxParamsPanel.tsx:37) + `buildLightboxMetadataSections()` 已展示尺寸、比例、Seed、质量、模式、模型。
+- 图片详情面板 [LightboxParamsPanel.tsx:37-160](../apps/web/src/components/ui/lightbox/LightboxParamsPanel.tsx#L37) + `buildLightboxMetadataSections()` 已展示尺寸、比例、Seed、质量、模式、模型。
 - 错误码映射表 `apps/web/src/lib/errors.ts`（network_error / upstream_timeout / quota_exceeded 等），`useChatStore.ts` 调用 `errorCodeToFullText()` 展示。
 
 **待补的三件套**：
@@ -360,7 +360,7 @@ Store 层还有一套内存 LRU 和缩略图 backfill，见 [/tmp/gpt_image_play
 
 ### P2.1 — 图库批量操作扩展
 
-**Lumen 现状**：[ConversationImageGallery.tsx:242-296](../apps/web/src/components/ui/chat/desktop/ConversationImageGallery.tsx:242) 已有多选 + 批量分享（createMultiShareMutation）。
+**Lumen 现状**：[ConversationImageGallery.tsx:242-296](../apps/web/src/components/ui/chat/desktop/ConversationImageGallery.tsx#L242) 已有多选 + 批量分享（createMultiShareMutation）。
 
 **待补**：批量删除、批量收藏、批量加入项目、批量导出。桌面端可加框选 + 边缘自动滚动；移动端长按进入选择模式。
 
