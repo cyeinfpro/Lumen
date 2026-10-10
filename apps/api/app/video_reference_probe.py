@@ -8,6 +8,7 @@ import math
 import subprocess
 from pathlib import Path
 from typing import Any
+from .media_process import run_media_process
 
 
 VIDEO_REFERENCE_VIDEO_KIND = "video_ref_seedance_r2v_mp4"
@@ -97,9 +98,9 @@ def _fit_even_dimensions(
     return target_width, target_height
 
 
-def _probe_video(ffprobe: str, path: Path) -> dict[str, Any]:
+def _probe_video(ffprobe: str, path: Path, *, cancel_event=None) -> dict[str, Any]:
     try:
-        proc = subprocess.run(
+        proc = run_media_process(
             [
                 ffprobe,
                 "-v",
@@ -117,6 +118,7 @@ def _probe_video(ffprobe: str, path: Path) -> dict[str, Any]:
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            cancel_event=cancel_event,
             timeout=VIDEO_REFERENCE_VIDEO_FFPROBE_TIMEOUT_SECONDS,
             check=False,
         )

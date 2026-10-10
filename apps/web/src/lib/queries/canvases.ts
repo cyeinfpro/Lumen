@@ -7,6 +7,9 @@ import {
   type UseMutationOptions,
 } from "@tanstack/react-query";
 import { useRef } from "react";
+import { getPrivateIdentitySnapshot, isPrivateIdentitySnapshotCurrent } from "@/lib/auth/privateIdentityEpoch";
+import { hasPreparingCanvasAssets } from "@/lib/canvas/assets";
+import { useUserQueryScope } from "./userScope";
 
 import {
   createCanvas,
@@ -47,15 +50,27 @@ export function useCanvasesQuery(options: ListCanvasesOptions = {}) {
 
 export function useCanvasQuery(canvasId: string) {
   const client = useQueryClient();
+  const userScope = useUserQueryScope();
   const queryKey = canvasQueryKeys.detail(canvasId);
+  const requestGeneration = useRef(0);
   return useQuery({
     queryKey,
-    queryFn: async () =>
-      mergeCanvasDocumentByRevision(
-        client.getQueryData<CanvasDocument>(queryKey),
-        await getCanvas(canvasId),
-      ),
-    enabled: Boolean(canvasId),
+    queryFn: async ({ signal }) => {
+      const identity = getPrivateIdentitySnapshot();
+      // A cold route must wait for the existing /auth/me bootstrap. Starting
+      // before identity activation would turn its first valid response stale.
+      if (!identity.userId) throw new DOMException("Canvas identity is not ready", "AbortError");
+      const generation = ++requestGeneration.current;
+      const incoming = await getCanvas(canvasId, signal);
+      signal.throwIfAborted();
+      if (generation !== requestGeneration.current || !isPrivateIdentitySnapshotCurrent(identity)) {
+        throw new DOMException("Stale canvas snapshot", "AbortError");
+      }
+      return mergeCanvasDocumentByRevision(
+        client.getQueryData<CanvasDocument>(queryKey), incoming,
+      );
+    },
+    enabled: Boolean(canvasId) && userScope.enabled,
     refetchInterval(query) {
       const data = query.state.data;
       const hasActiveRun = data?.active_runs.some((run) =>
@@ -68,7 +83,9 @@ export function useCanvasQuery(canvasId: string) {
           execution.status,
         ),
       );
-      return hasActiveRun || hasActiveExecution ? 2000 : false;
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return false;
+      return hasActiveRun || hasActiveExecution ? 2000
+        : hasPreparingCanvasAssets(data?.assets) ? 4000 : false;
     },
   });
 }
@@ -141,6 +158,7 @@ export function useSelectCanvasOutputMutation(canvasId: string) {
   const client = useQueryClient();
   const queueRef = useRef(new Map<string, Promise<void>>());
   const revisionRef = useRef(new Map<string, number>());
+  const acknowledgedIdentityRef = useRef(new WeakMap<CanvasNodeSelection, ReturnType<typeof getPrivateIdentitySnapshot>>());
   return useMutation<
     CanvasNodeSelection,
     Error,
@@ -157,9 +175,12 @@ export function useSelectCanvasOutputMutation(canvasId: string) {
       outputIndex,
       selectionRevision,
     }) => {
-      const queueKey = nodeId || executionId;
+      const identity = getPrivateIdentitySnapshot();
+      if (!identity.userId) throw new DOMException("Canvas identity is not ready", "AbortError");
+      const queueKey = JSON.stringify([identity.userId, identity.epoch, canvasId, nodeId || executionId]);
       const previous = queueRef.current.get(queueKey) ?? Promise.resolve();
       const task = previous.catch(() => undefined).then(async () => {
+        if (!isPrivateIdentitySnapshotCurrent(identity)) throw new DOMException("Stale selection identity", "AbortError");
         const requestedRevision = normalizeCanvasSelectionRevision(
           selectionRevision,
         );
@@ -172,6 +193,8 @@ export function useSelectCanvasOutputMutation(canvasId: string) {
             outputIndex,
             revision,
           );
+          if (!isPrivateIdentitySnapshotCurrent(identity)) throw new DOMException("Stale selection identity", "AbortError");
+          acknowledgedIdentityRef.current.set(selection, identity);
           revisionRef.current.set(
             queueKey,
             selection.revision ?? revision + 1,
@@ -196,6 +219,13 @@ export function useSelectCanvasOutputMutation(canvasId: string) {
       }
     },
     onSuccess(selection) {
+      const identity = acknowledgedIdentityRef.current.get(selection);
+      if (!identity || !isPrivateIdentitySnapshotCurrent(identity)) return;
+      // Selection changes invalidate saved input freshness before the next GET.
+      // Keep task status, billing, graph and selection CAS behavior untouched.
+      client.setQueryData<CanvasDocument>(canvasQueryKeys.detail(canvasId), (current) => current ? {
+        ...current, execution_freshness: undefined, stale_node_ids: undefined,
+      } : current);
       if (typeof BroadcastChannel !== "undefined") {
         try {
           const channel = createBroadcastChannel(`lumen:canvas:${canvasId}`);

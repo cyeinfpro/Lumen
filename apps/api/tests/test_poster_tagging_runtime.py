@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 import io
 import json
@@ -13,6 +12,7 @@ from PIL import Image as PILImage
 
 from app.services.poster_styles import tagging
 from app.services.poster_styles.capacity import RedisCapacityLease
+from lumen_core.capacity_leases import CapacityLeaseLost
 from app.services.poster_styles.tagging import (
     POSTER_TAGGING_PREVIEW_MAX_BYTES,
     POSTER_TAGGING_PREVIEW_MAX_SIDE,
@@ -355,13 +355,13 @@ async def test_hold_interrupts_guard_body_when_lease_lost() -> None:
             return 0
 
     capacity = RedisCapacityLease(Redis(), limit=1, ttl_seconds=1)
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(CapacityLeaseLost):
         async with capacity.hold():
-            await asyncio.sleep(30)
+            pytest.fail("unconfirmed lease entered guarded work")
 
 
 @pytest.mark.asyncio
-async def test_hold_survives_transient_renewal_error() -> None:
+async def test_hold_fails_closed_when_initial_lease_cannot_be_confirmed() -> None:
     calls = 0
 
     class Redis:
@@ -385,10 +385,8 @@ async def test_hold_survives_transient_renewal_error() -> None:
 
     capacity = RedisCapacityLease(Redis(), limit=1, ttl_seconds=1)
     entered = False
-    async with capacity.hold():
-        entered = True
-        # Span two renewal intervals: the first renew fails transiently, the
-        # guarded body must still run to completion instead of being aborted.
-        await asyncio.sleep(2.2)
-    assert entered
-    assert calls >= 2
+    with pytest.raises(CapacityLeaseLost):
+        async with capacity.hold():
+            entered = True
+    assert not entered
+    assert calls >= 2  # Failed confirmation followed by bounded release.

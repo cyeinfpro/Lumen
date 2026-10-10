@@ -469,6 +469,7 @@ export function DesktopComposerPill({
     <>
     <div
       ref={rootRef}
+      data-lumen-toast-obstacle
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}

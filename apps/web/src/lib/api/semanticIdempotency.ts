@@ -273,6 +273,27 @@ export class SemanticIdempotencyStore {
     this.activationDurabilityError = null;
   }
 
+  // Read-only recovery: never allocate an intent merely to inspect pending work.
+  async pendingKey(scope: unknown, payload: unknown): Promise<string | null> {
+    const identity = this.identity;
+    const epoch = this.identityEpoch;
+    if (this.identityActivation) await this.identityActivation;
+    this.assertIdentityCurrent(identity, epoch);
+    const canonical = semanticRequestFingerprint(scope, payload);
+    let fingerprint = canonical;
+    try {
+      const digest = await this.digest(`request:${canonical}`);
+      if (!isDigest(digest)) throw new Error("invalid request digest");
+      fingerprint = digest;
+    } catch (error) {
+      if (this.requiresDurability()) throw durabilityError("request hashing failed", error);
+    }
+    this.assertIdentityCurrent(identity, epoch);
+    if (!this.requiresDurability()) return this.entries.get(fingerprint)?.key ?? null;
+    this.throwActivationError();
+    return this.reloadRootForOperation(identity, epoch).root.pending[fingerprint]?.key ?? null;
+  }
+
   async acquire(
     scope: unknown,
     payload: unknown,

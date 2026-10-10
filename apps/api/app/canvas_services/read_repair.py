@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from lumen_core.canvas_output_selection import canvas_auto_select_output_index
+
 from datetime import datetime, timezone
 from typing import Any
 
@@ -31,6 +33,8 @@ from lumen_core.models import Generation, Image, Video, VideoGeneration
 from .graph_resolution import find_node
 from .identity_fence import lock_canvas_write_identity
 from .run_event_service import append_run_event
+from .event_commit import commit_canvas_events
+from .progress_events import record_canvas_progress
 
 
 _ACTIVE_EXECUTION_STATUSES = (
@@ -301,7 +305,10 @@ async def _auto_select(
     execution: CanvasNodeExecution,
     outputs: list[dict[str, Any]],
 ) -> bool:
-    if not outputs:
+    output_index = canvas_auto_select_output_index(
+        execution.config_snapshot_jsonb, outputs
+    )
+    if output_index is None:
         return False
     metadata = execution.config_snapshot_jsonb.get("_canvas", {})
     if not isinstance(metadata, dict) or not metadata.get("auto_select_on_success"):
@@ -362,10 +369,32 @@ async def _auto_select(
     ):
         return False
     selection.execution_id = execution.id
-    selection.output_index = 0
+    selection.output_index = output_index
     selection.revision = expected_revision + 1
     selection.updated_at = datetime.now(timezone.utc)
     return True
+
+
+def _update_single_run_status(run, execution, next_status):
+    if run.kind == "single":
+        run.status = (
+            "succeeded"
+            if next_status in {"succeeded", "reused", "skipped"}
+            else next_status
+            if next_status
+            in {
+                "partial_failed",
+                "failed",
+                "canceled",
+                "running",
+                "reconciling",
+                "canceling",
+                "queued",
+            }
+            else run.status
+        )
+        if next_status not in _ACTIVE_EXECUTION_STATUSES:
+            run.finished_at = execution.finished_at or datetime.now(timezone.utc)
 
 
 async def _reconcile_execution(
@@ -452,6 +481,17 @@ async def _reconcile_execution(
         changed = changed or asset_refs_added or selection_updated
     else:
         selection_updated = False
+    changed = any(
+        (
+            changed,
+            await record_canvas_progress(
+                db,
+                execution=execution,
+                owners=real_rows,
+                emit=not changed,
+            ),
+        )
+    )
     if not changed:
         return False
     run = (
@@ -460,24 +500,7 @@ async def _reconcile_execution(
         )
     ).scalar_one_or_none()
     if run is not None:
-        run.status = (
-            "succeeded"
-            if next_status in {"succeeded", "reused", "skipped"}
-            else next_status
-            if next_status
-            in {
-                "partial_failed",
-                "failed",
-                "canceled",
-                "running",
-                "reconciling",
-                "canceling",
-                "queued",
-            }
-            else run.status
-        )
-        if next_status not in _ACTIVE_EXECUTION_STATUSES:
-            run.finished_at = execution.finished_at or datetime.now(timezone.utc)
+        _update_single_run_status(run, execution, next_status)
         event_key = (
             f"execution:{execution.id}:epoch:{execution.attempt_epoch}:"
             f"status:{next_status}"
@@ -508,6 +531,38 @@ async def _reconcile_execution(
     return True
 
 
+async def repair_execution_transaction(
+    db: AsyncSession, *, user_id: str, canvas_id: str, identifier: str
+) -> bool:
+    """Release all row locks before the next execution, even when unchanged."""
+    try:
+        await lock_canvas_write_identity(db, user_id=user_id)
+        execution = (
+            await db.execute(
+                select(CanvasNodeExecution)
+                .where(
+                    CanvasNodeExecution.id == identifier,
+                    CanvasNodeExecution.canvas_id == canvas_id,
+                    CanvasNodeExecution.user_id == user_id,
+                    CanvasNodeExecution.status.in_(_ACTIVE_EXECUTION_STATUSES),
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        changed = False
+        if execution is not None:
+            await _repair_missing_links(db, user_id=user_id, executions=[execution])
+            changed = await _reconcile_execution(
+                db, user_id=user_id, execution=execution
+            )
+        await commit_canvas_events(db)
+        return changed
+    except BaseException:
+        await db.rollback()
+        raise
+
+
 async def repair_canvas_executions(
     db: AsyncSession,
     *,
@@ -515,65 +570,49 @@ async def repair_canvas_executions(
     canvas_id: str,
     limit: int = 20,
 ) -> int:
+    """Scan past unrepairable rows without carrying locks between executions."""
     if limit <= 0:
         return 0
-    await lock_canvas_write_identity(db, user_id=user_id)
-    page_size = min(limit, 100)
-    cursor_updated_at: datetime | None = None
-    cursor_id: str | None = None
-    changed = False
     touched = 0
+    cursor = None
+    page_size = min(limit, 100)
     while touched < limit:
-        query = select(CanvasNodeExecution).where(
+        statement = select(
+            CanvasNodeExecution.id, CanvasNodeExecution.created_at
+        ).where(
             CanvasNodeExecution.canvas_id == canvas_id,
             CanvasNodeExecution.user_id == user_id,
             CanvasNodeExecution.status.in_(_ACTIVE_EXECUTION_STATUSES),
         )
-        if cursor_updated_at is not None and cursor_id is not None:
-            query = query.where(
+        if cursor is not None:
+            statement = statement.where(
                 or_(
-                    CanvasNodeExecution.updated_at > cursor_updated_at,
+                    CanvasNodeExecution.created_at > cursor[1],
                     and_(
-                        CanvasNodeExecution.updated_at == cursor_updated_at,
-                        CanvasNodeExecution.id > cursor_id,
+                        CanvasNodeExecution.created_at == cursor[1],
+                        CanvasNodeExecution.id > cursor[0],
                     ),
                 )
             )
-        executions = list(
-            (
-                await db.execute(
-                    query.order_by(
-                        CanvasNodeExecution.updated_at.asc(),
-                        CanvasNodeExecution.id.asc(),
-                    )
-                    .limit(page_size)
-                    .with_for_update()
-                )
-            ).scalars()
-        )
-        if not executions:
-            break
-        changed = (
-            await _repair_missing_links(
-                db,
-                user_id=user_id,
-                executions=executions,
+        rows = (
+            await db.execute(
+                statement.order_by(
+                    CanvasNodeExecution.created_at, CanvasNodeExecution.id
+                ).limit(page_size)
             )
-            or changed
-        )
-        for execution in executions:
-            if await _reconcile_execution(
-                db,
-                user_id=user_id,
-                execution=execution,
-            ):
-                touched += 1
-                if touched >= limit:
-                    break
-        cursor_updated_at = executions[-1].updated_at
-        cursor_id = executions[-1].id
-        if len(executions) < page_size:
+        ).all()
+        await commit_canvas_events(db)
+        if not rows:
             break
-    if changed or touched:
-        await db.commit()
+        cursor = rows[-1]
+        for identifier, _created_at in rows:
+            touched += int(
+                await repair_execution_transaction(
+                    db, user_id=user_id, canvas_id=canvas_id, identifier=identifier
+                )
+            )
+            if touched >= limit:
+                break
+        if len(rows) < page_size:
+            break
     return touched

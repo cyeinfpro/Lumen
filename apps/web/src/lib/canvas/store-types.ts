@@ -7,6 +7,7 @@ import type {
   CanvasEdgeDetailsUpdate,
   CanvasGraph,
   CanvasHistoryEntry,
+  CanvasHistoricalExecution,
   CanvasNodeAppearanceUpdate,
   CanvasNodeType,
   CanvasOperation,
@@ -67,6 +68,7 @@ export interface CanvasEditorState {
     subgraph: CanvasSubgraph,
     options?: InsertSubgraphOptions,
   ) => string[];
+  branchHistoricalExecution: (execution: CanvasHistoricalExecution) => { ok: true; nodeId: string } | { ok: false; reason: string };
   removeElements: (nodeIds: string[], edgeIds: string[]) => void;
   removeNodes: (nodeIds: string[]) => void;
   addEdge: (

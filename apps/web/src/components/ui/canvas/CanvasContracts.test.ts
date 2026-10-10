@@ -160,7 +160,8 @@ test("canvas keeps inspector explicit across mobile, tablet, and desktop", () =>
 
 test("canvas run controls recognize every executable registry node", () => {
   match(topBarSource, /isCanvasExecutableNodeType\(selectedNode\.type\)/);
-  match(topBarSource, /validateCanvasNodeExecution\(graph, selectedNode\.id\)/);
+  match(topBarSource, /useCanvasRunReadiness/);
+  match(topBarSource, /!disabledReasons\.get\(selectedNode\.id\)/);
   doesNotMatch(
     topBarSource,
     /selectedNode\?\.type === "image_generate"/,

@@ -30,6 +30,7 @@ import {
   MobileConnectTargets,
 } from "./CanvasViewportOverlays";
 import { canvasNodeTypes, type CanvasFlowNode } from "./nodes/CanvasNodes";
+import { useCanvasTouchPreviewGuard } from "./useCanvasTouchPreviewGuard";
 import styles from "./canvas.module.css";
 
 interface CanvasViewportSurfaceProps {
@@ -115,13 +116,18 @@ export function CanvasViewportSurface({
   addEdge,
   updateConnectionDraft,
 }: CanvasViewportSurfaceProps) {
+  const touchPreview = useCanvasTouchPreviewGuard(viewportRef);
   return (
     <div
       ref={viewportRef}
       className={styles.viewport}
       onDrop={onDrop}
-      onPointerCancelCapture={onPointerCancelCapture}
-      onTouchCancelCapture={onTouchCancelCapture}
+      onPointerDownCapture={touchPreview.onPointerDownCapture}
+      onPointerMoveCapture={touchPreview.onPointerMoveCapture}
+      onPointerUpCapture={touchPreview.onPointerUpCapture}
+      onClickCapture={touchPreview.onClickCapture}
+      onPointerCancelCapture={() => { touchPreview.clear(); onPointerCancelCapture(); }}
+      onTouchCancelCapture={() => { touchPreview.clear(); onTouchCancelCapture(); }}
       onPointerCancel={onPointerCancel}
       onTouchCancel={onTouchCancel}
       onDragOver={(event) => {

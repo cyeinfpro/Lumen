@@ -100,7 +100,7 @@ export function CanvasVideoPreviewDialog({
             {loadFailed ? (
               <div
                 role="alert"
-                className="absolute inset-0 grid place-items-center p-6 text-center"
+                className="absolute inset-0 grid place-items-center bg-[var(--bg-1)] p-6 text-center"
               >
                 <div>
                   <p className="type-body-sm font-medium text-[var(--fg-1)]">

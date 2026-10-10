@@ -135,6 +135,11 @@ async def test_lifespan_cancels_reconcile_task_when_warmup_fails(
         "image_artifact_reconciler_loop",
         fake_reconcile,
     )
+    from app.canvas_services import plan_runtime
+    from app.services import video_preparation
+
+    monkeypatch.setattr(plan_runtime, "canvas_plan_dispatch_loop", fake_reconcile)
+    monkeypatch.setattr(video_preparation, "video_preparation_loop", fake_reconcile)
     created_tasks: list[asyncio.Task[object]] = []
     real_create_task = asyncio.create_task
 
@@ -154,9 +159,13 @@ async def test_lifespan_cancels_reconcile_task_when_warmup_fails(
         async with main.lifespan(main.app):
             raise AssertionError("lifespan should not yield")
 
-    assert len(created_tasks) == 1
-    assert created_tasks[0].done()
-    assert created_tasks[0].cancelled()
+    assert len(created_tasks) == 3
+    assert {task.get_name() for task in created_tasks} == {
+        "image-artifact-reconciler",
+        "video-metadata-preparation",
+        "canvas-plan-dispatch",
+    }
+    assert all(task.done() and task.cancelled() for task in created_tasks)
     assert arq_closed is True
     assert cache.stopped is True
     assert redis.closed is True

@@ -5,6 +5,8 @@ import type { CanvasNodeExecution } from "./types";
 
 const {
   canvasExecutionElapsedMs,
+  canvasExecutionDisplayStatus,
+  isCanvasExecutionUncertain,
   canvasExecutionPrimaryTask,
   canvasExecutionProgressPercent,
   canvasExecutionStageLabel,
@@ -67,4 +69,15 @@ test("successful executions without task percentages report complete", () => {
     canvasExecutionProgressPercent(execution({ status: "succeeded" })),
     100,
   );
+});
+
+test("unknown provider result overrides terminal display without rewriting task status", () => {
+  const value = execution({ status: "failed", tasks: [{
+    id: "task", kind: "generation", status: "expired", progress_stage: "finished",
+    error_code: "direct_image_result_unknown",
+  }] });
+  assert.equal(isCanvasExecutionUncertain(value), true);
+  assert.equal(canvasExecutionDisplayStatus(value), "提交状态待确认");
+  assert.equal(value.status, "failed");
+  assert.equal(canvasExecutionDisplayStatus(execution({ status: "succeeded" })), "已成功");
 });

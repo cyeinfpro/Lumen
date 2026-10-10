@@ -71,10 +71,9 @@ function createCanvasShortcutBindings(
   return [
     binding(modifiedShiftedKey("k"), actions.onOpenCommandMenu),
     binding(modifiedKey("z"), (event) => {
-      if (event.shiftKey) store.getState().redo();
-      else store.getState().undo();
+      applyHistory(store, viewportApi, event.shiftKey ? "redo" : "undo");
     }),
-    binding(modifiedKey("y"), () => store.getState().redo()),
+    binding(modifiedKey("y"), () => applyHistory(store, viewportApi, "redo")),
     binding(modifiedKey("0"), () =>
       viewportApi?.fitView({ instant: true }),
     ),
@@ -108,6 +107,18 @@ function createCanvasShortcutBindings(
     binding(plainKey("0"), () => viewportApi?.resetZoom({ instant: true })),
     binding(plainKey("escape"), actions.onEscape),
   ];
+}
+
+export function applyHistory(store: CanvasEditorStore, viewportApi: CanvasViewportApi | null, action: "undo" | "redo") {
+  const before = store.getState().graph;
+  store.getState()[action]();
+  const after = store.getState().graph;
+  if (after === before) return;
+  viewportApi?.recoverHistoryViewport?.(before, after, () => {
+    const current = store.getState();
+    return current.graph === after && current.activeInteractionCount === 0
+      && current.selectedNodeIds.length === 0 && current.selectedEdgeId === null;
+  });
 }
 
 function binding(

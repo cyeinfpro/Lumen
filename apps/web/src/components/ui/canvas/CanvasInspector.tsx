@@ -9,11 +9,9 @@ import {
   Trash2,
   Video,
 } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  fetchVideoOptions,
   uploadReferenceVideo,
 } from "@/lib/video/requestLifecycle";
 import {
@@ -46,16 +44,15 @@ import {
 import type { SelectOption } from "./CanvasInspectorFields";
 import { CanvasBatchInspector } from "./CanvasInspectorBatch";
 import type { CanvasInspectorProps } from "./CanvasInspectorContracts";
-import { CanvasInspectorExecutionHistory } from "./CanvasInspectorExecutionHistory";
+import { CanvasHistoryPanel } from "./CanvasHistoryPanel";
+import { CanvasPreparationStatus } from "./CanvasPreparationStatus";
 import type { CanvasHistoryOutputProps } from "./CanvasInspectorExecutionHistory";
 import {
   canvasNodePreset,
   incompatibleVideoConnectionCount,
-  inspectorRunDisabledReason,
-  inspectorVideoRunDisabledReason,
-  queryErrorMessage,
 } from "./CanvasInspectorModel";
 import { CanvasInspectorNodePanel } from "./CanvasInspectorNodePanel";
+import { useCanvasRunReadiness } from "./CanvasRunReadinessProvider";
 import { CanvasOutputDownloadButton } from "./CanvasOutputDownloadButton";
 import {
   useCanvasStore,
@@ -203,12 +200,7 @@ function CanvasNodeInspector({
       ),
     [document.recent_executions, node.id],
   );
-  const videoOptionsQuery = useQuery({
-    queryKey: ["video-options"],
-    queryFn: ({ signal }) => fetchVideoOptions(signal),
-    enabled: CANVAS_NODE_SPECS[node.type].family === "video",
-    staleTime: 60_000,
-  });
+  const readiness = useCanvasRunReadiness();
   const patch = (next: Record<string, unknown>) => {
     const nextConfig = { ...node.config, ...next };
     const removedConnections = incompatibleVideoConnectionCount(
@@ -231,20 +223,9 @@ function CanvasNodeInspector({
   const preset = canvasNodePreset(node);
   const visiblePendingChange =
     pendingConfigChange?.nodeId === node.id ? pendingConfigChange : null;
-  const videoOptionsError = queryErrorMessage(
-    videoOptionsQuery.isError,
-    videoOptionsQuery.error,
-    "视频能力加载失败",
-  );
-  const runDisabledReason =
-    inspectorRunDisabledReason(graph, node) ??
-    inspectorVideoRunDisabledReason(
-      graph,
-      node,
-      videoOptionsQuery.data,
-      videoOptionsQuery.isLoading,
-      videoOptionsError,
-    );
+  const runDisabledReason = canRun
+    ? readiness.disabledReasons.get(node.id) ?? null
+    : null;
 
   return (
     <CanvasInspectorNodePanel
@@ -255,29 +236,28 @@ function CanvasNodeInspector({
       uploading={assetUpload.uploading}
       onUploadImage={assetUpload.uploadImage}
       onUploadVideo={assetUpload.uploadVideo}
-      videoOptions={videoOptionsQuery.data}
-      videoOptionsLoading={videoOptionsQuery.isLoading}
-      videoOptionsError={videoOptionsError}
-      videoOptionsRetrying={
-        videoOptionsQuery.isFetching && !videoOptionsQuery.isLoading
-      }
+      videoOptions={readiness.videoOptions}
+      videoOptionsLoading={readiness.videoOptionsLoading}
+      videoOptionsError={readiness.videoOptionsError}
+      videoOptionsRetrying={readiness.videoOptionsRetrying}
       onRetryVideoOptions={() => {
-        void videoOptionsQuery.refetch();
+        void readiness.retry();
       }}
       pendingConfigChange={visiblePendingChange}
       history={
-        executions.length > 0 ? (
-          <CanvasInspectorExecutionHistory
+        <>
+          <div className="px-4"><CanvasPreparationStatus canvasId={document.id} asset={document.assets?.find((asset) => asset.kind === "video" && asset.asset_id === node.config.video_id)} /></div>
+          {canRun ? <CanvasHistoryPanel
             executions={executions}
             document={document}
             selectedNodeId={node.id}
             OutputComponent={HistoryOutput}
-          />
-        ) : null
+          /> : null}
+        </>
       }
       canRun={canRun}
       runDisabledReason={runDisabledReason}
-      running={runningNodeId === node.id}
+      running={runningNodeId === node.id || readiness.runningNodeIds.has(node.id)}
       onCommitTitle={(value) => {
         const title = normalizeCanvasNodeTitle(value, node.title);
         if (title !== node.title) updateNodeTitle(node.id, title);

@@ -1,7 +1,9 @@
+import { assetKey, projectCanvasAsset } from "./assets.ts";
 import type {
   CanvasDocument,
   CanvasGraph,
   CanvasNodeExecution,
+  CanvasNodeSelection,
   CanvasOutput,
 } from "#canvas-types";
 
@@ -16,40 +18,44 @@ export function latestExecutionsByNode(
 }
 
 export function activeOutputsByNode(
-  document: Pick<CanvasDocument, "graph" | "selections" | "recent_executions">,
+  document: Pick<CanvasDocument, "graph" | "selections" | "recent_executions" | "assets">,
 ): Map<string, CanvasOutput> {
   const map = new Map<string, CanvasOutput>();
   const executions = new Map(
     document.recent_executions.map((execution) => [execution.id, execution]),
   );
+  const assets = new Map((document.assets ?? []).map((asset) => [assetKey(asset), asset]));
+  const selections = new Map<string, CanvasNodeSelection>();
+  for (const selection of document.selections) {
+    if (selection.execution_id !== null && !selections.has(selection.node_id)) {
+      selections.set(selection.node_id, selection);
+    }
+  }
   for (const node of document.graph.nodes) {
     if (node.type === "image_asset" || node.type === "mask_asset") {
       const imageId = stringValue(node.config.image_id);
       if (imageId) {
-        map.set(node.id, {
+        map.set(node.id, projectCanvasAsset({
           type: "image",
           image_id: imageId,
-        });
+        }, assets));
       }
       continue;
     }
     if (node.type === "video_asset") {
       const videoId = stringValue(node.config.video_id);
       if (videoId) {
-        map.set(node.id, {
+        map.set(node.id, projectCanvasAsset({
           type: "video",
           video_id: videoId,
-        });
+        }, assets));
       }
       continue;
     }
-    const selection = document.selections.find(
-      (candidate) =>
-        candidate.node_id === node.id && candidate.execution_id !== null,
-    );
+    const selection = selections.get(node.id);
     if (!selection || selection.execution_id === null) continue;
     const output = executions.get(selection.execution_id)?.outputs[selection.output_index];
-    if (output) map.set(node.id, output);
+    if (output) map.set(node.id, projectCanvasAsset(output, assets));
   }
   return map;
 }

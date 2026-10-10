@@ -609,6 +609,10 @@ async def test_reconcile_partial_failure_materializes_only_successes_in_ordinal_
             }
         )
 
+    async def progress_snapshot(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(reconcile, "record_canvas_progress", progress_snapshot)
     monkeypatch.setattr(reconcile, "_project_task", project)
     monkeypatch.setattr(reconcile, "_record_terminal_receipt", receipt)
     monkeypatch.setattr(reconcile, "_materialize_asset_refs", materialize)
@@ -706,11 +710,18 @@ async def test_periodic_reconcile_ignores_redis_availability(
 
 def test_worker_registers_canvas_task_and_cron() -> None:
     assert any(
-        getattr(function, "coroutine", function)
-        is reconcile.reconcile_canvas_execution
+        getattr(function, "coroutine", function) is reconcile.reconcile_canvas_execution
         for function in WorkerSettings.functions
     )
     assert any(
         job.coroutine is reconcile.reconcile_canvas_executions
         for job in WorkerSettings.cron_jobs
     )
+
+
+@pytest.mark.asyncio
+async def test_active_output_cas_preserves_explicit_plan_candidate():
+    execution = _execution(selection_base_revision=7)
+    session = _FakeSession([_Result(rowcount=1)])
+    assert await reconcile._cas_active_output(session, execution, 1) is True
+    assert session.statements[0].compile().params["output_index"] == 1

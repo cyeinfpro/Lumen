@@ -37,6 +37,8 @@ import type {
   CanvasViewportApi,
 } from "./CanvasViewport";
 
+import { useCanvasRunReadiness } from "./CanvasRunReadinessProvider";
+
 import {
   buildCommandItems,
   selectedNodes,
@@ -63,6 +65,7 @@ export function useCanvasWorkspaceTools({
   viewportApi,
   onRunSelected,
 }: UseCanvasWorkspaceToolsOptions) {
+  const { disabledReasons: runDisabledReasons } = useCanvasRunReadiness();
   const [commandMenuOpen, setCommandMenuOpenState] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [actionRequest, setActionRequest] =
@@ -316,6 +319,7 @@ export function useCanvasWorkspaceTools({
         selectedNodeId,
         selectedCount,
         selectedEdgeId,
+        runDisabledReasons,
       }),
     [
       actionRequest,
@@ -323,6 +327,7 @@ export function useCanvasWorkspaceTools({
       selectedCount,
       selectedEdgeId,
       selectedNodeId,
+      runDisabledReasons,
     ],
   );
 

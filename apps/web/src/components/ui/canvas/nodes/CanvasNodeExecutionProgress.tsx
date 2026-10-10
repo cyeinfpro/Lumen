@@ -9,6 +9,7 @@ import {
   canvasExecutionStageLabel,
   formatCanvasTaskElapsed,
   isCanvasExecutionActive,
+  isCanvasExecutionUncertain,
 } from "@/lib/canvas/executionPresentation";
 import type { CanvasNodeExecution } from "@/lib/canvas/types";
 import { cn } from "@/lib/utils";
@@ -20,6 +21,11 @@ export function CanvasNodeExecutionProgress({
 }) {
   if (!execution) return null;
   const task = canvasExecutionPrimaryTask(execution);
+  if (isCanvasExecutionUncertain(execution)) {
+    return <div role="status" className="border-t border-[var(--warning)]/30 bg-[var(--warning)]/10 px-3 py-2 type-caption text-[var(--warning-fg)]">
+      提交状态待确认，请先查询原任务
+    </div>;
+  }
   if (!isCanvasExecutionActive(execution)) {
     return <ExecutionFailureNotice execution={execution} task={task} />;
   }

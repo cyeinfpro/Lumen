@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from lumen_core.canvas_output_selection import canvas_auto_select_output_index
+
 import hashlib
 import json
 import logging
@@ -32,6 +34,8 @@ from lumen_core.constants import GenerationStatus, VideoGenerationStatus
 from lumen_core.models import Generation, Image, Video, VideoGeneration, new_uuid7
 
 from ..db import SessionLocal, affected_rows
+from ..canvas_progress_events import record_canvas_progress
+from ..canvas_event_delivery import notify_committed_execution
 
 logger = logging.getLogger(__name__)
 
@@ -477,11 +481,12 @@ async def _materialize_asset_refs(
 async def _cas_active_output(
     session: Any,
     execution: CanvasNodeExecution,
+    output_index: int = 0,
 ) -> bool:
     base_revision = int(execution.selection_base_revision or 0)
     values = {
         "execution_id": execution.id,
-        "output_index": 0,
+        "output_index": output_index,
         "revision": base_revision + 1,
         "updated_at": datetime.now(timezone.utc),
     }
@@ -783,9 +788,27 @@ async def _reconcile_execution_id(execution_id: str) -> bool:
             execution.finished_at = batch.finished_at or now
             execution.error_code, execution.error_message = _first_failure(projections)
             await _materialize_asset_refs(session, execution, outputs)
-            if outputs and await _auto_select_is_current(session, execution):
-                selection_updated = await _cas_active_output(session, execution)
+            output_index = canvas_auto_select_output_index(
+                execution.config_snapshot_jsonb, outputs
+            )
+            if output_index is not None and await _auto_select_is_current(
+                session, execution
+            ):
+                selection_updated = await _cas_active_output(
+                    session, execution, output_index
+                )
             changed = True
+        changed = any(
+            (
+                changed,
+                await record_canvas_progress(
+                    session,
+                    execution=execution,
+                    tasks=tasks,
+                    emit=not changed,
+                ),
+            )
+        )
         if not changed:
             execution.updated_at = now
             return False
@@ -834,17 +857,18 @@ async def _scan_execution_ids() -> list[str]:
 
 async def reconcile_canvas_execution(ctx: dict[str, Any], execution_id: str) -> int:
     """Reconcile one execution; the Redis context is deliberately not authoritative."""
-    del ctx
-    return int(await _reconcile_execution_id(execution_id))
+    changed = await _reconcile_execution_id(execution_id)
+    if changed:
+        await notify_committed_execution(ctx.get("redis"), execution_id)
+    return int(changed)
 
 
 async def reconcile_canvas_executions(ctx: dict[str, Any]) -> int:
     """Periodically converge active Canvas executions from durable task rows."""
-    del ctx
     touched = 0
     for execution_id in await _scan_execution_ids():
         try:
-            touched += int(await _reconcile_execution_id(execution_id))
+            touched += await reconcile_canvas_execution(ctx, execution_id)
         except Exception:  # noqa: BLE001
             logger.exception(
                 "canvas execution reconcile failed execution_id=%s",

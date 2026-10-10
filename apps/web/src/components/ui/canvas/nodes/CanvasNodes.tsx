@@ -43,9 +43,8 @@ function CanvasNodeComponent({ data, selected }: NodeProps<CanvasFlowNode>) {
   return (
     <article
       className={cn(
-        "relative overflow-visible rounded-[var(--radius-card)] border bg-[var(--bg-1)]/96 text-[var(--fg-0)] backdrop-blur-xl transition-[border-color,box-shadow]",
+        "relative overflow-visible rounded-[var(--radius-card)] border bg-[var(--bg-1)] text-[var(--fg-0)] transition-colors",
         canvasNodeStateClass(failed, running, warning),
-        !running && "hover:shadow-[var(--shadow-2)]",
         selected &&
           "ring-2 ring-[var(--accent)] ring-offset-2 ring-offset-[var(--surface-canvas)]",
       )}
@@ -96,7 +95,7 @@ function CanvasNodeComponent({ data, selected }: NodeProps<CanvasFlowNode>) {
             key={`${definition.id}:${definition.title}`}
             data={data}
           />
-          <p className="mt-0.5 truncate type-caption text-[var(--fg-3)]">
+          <p className="mt-0.5 truncate type-caption text-[var(--fg-muted-aa)]">
             {displayLabel}
           </p>
         </div>
@@ -129,7 +128,7 @@ function CanvasNodeBody({
       </div>
       <CanvasNodeExecutionProgress execution={data.execution} />
       <footer className="flex min-h-11 items-center justify-between gap-2 border-t border-[var(--border-subtle)] px-3">
-        <span className="type-caption truncate text-[var(--fg-3)]">
+        <span className="type-caption truncate text-[var(--fg-muted-aa)]">
           {nodeSummary(data)}
         </span>
         <NodeFooterAction data={data} />
@@ -174,7 +173,7 @@ function FrameCanvasNode({ data, selected }: NodeProps<CanvasFlowNode>) {
   return (
     <div
       className={cn(
-        "relative w-full rounded-[var(--radius-card)] border border-dashed bg-[var(--bg-1)]/24 transition-[border-color,box-shadow] hover:shadow-[var(--shadow-2)]",
+        "relative w-full rounded-[var(--radius-card)] border border-dashed bg-[var(--bg-1)]/24 transition-colors",
         collapsed ? "h-11 min-h-11" : "h-full min-h-[220px] p-3",
         selected
           ? "border-[var(--accent)] ring-2 ring-[var(--accent)] ring-offset-2 ring-offset-[var(--surface-canvas)]"

@@ -27,6 +27,7 @@ import {
 import { getPrivateIdentitySnapshot } from "@/lib/auth/privateIdentityEpoch";
 import { notifyAuthSessionChanged } from "@/lib/auth/sessionChangeBus";
 import { useSSE, type SSEHandlers } from "./useSSE";
+import { useCanvasRealtime } from "./useCanvasRealtime";
 import {
   disposeChatStoreRuntime,
   useChatStore,
@@ -46,6 +47,7 @@ import { INITIAL_SNAPSHOT_RECOVERY_REASON } from "./contracts";
 import type { SnapshotScope } from "./snapshotScopes";
 
 const EVENT_NAMES = [
+  "canvas.run.updated",
   "generation.queued",
   "generation.started",
   "generation.progress",
@@ -203,10 +205,14 @@ export function useLumenRealtime(): void {
     [identityEpoch, userId, userScope],
   );
 
+  const isCanvasScopeCurrent = useCallback(() => isRealtimeScopeCurrent(userScope), [isRealtimeScopeCurrent, userScope]);
+  const applyCanvasRunEvent = useCanvasRealtime(isCanvasScopeCurrent);
+
   const effectContext = useMemo<LumenRealtimeEffectContext>(
     () => ({
       applyStoreEvent(name, payload, cursor) {
         if (!isRealtimeScopeCurrent(userScope)) return;
+        if (name === "canvas.run.updated") { applyCanvasRunEvent(payload); return; }
         useChatStore.getState().applySSEEvent(name, payload, cursor);
       },
       invalidateTasks() {
@@ -240,7 +246,7 @@ export function useLumenRealtime(): void {
         });
       },
     }),
-    [isRealtimeScopeCurrent, queryClient, userId, userScope],
+    [applyCanvasRunEvent, isRealtimeScopeCurrent, queryClient, userId, userScope],
   );
   const router = useMemo(
     () => new EventRouter(createLumenEffectRegistry(EVENT_NAMES, effectContext)),
@@ -320,6 +326,10 @@ export function useLumenRealtime(): void {
         userId,
         identityEpoch,
       );
+      if (!initialSnapshot) {
+        await queryClient.invalidateQueries({ queryKey: ["canvas"] });
+        assertSnapshotCurrent(signal, context, userScope, userId, identityEpoch);
+      }
       const syncedAt = Date.now();
       lastSnapshot.current = {
         userScope,

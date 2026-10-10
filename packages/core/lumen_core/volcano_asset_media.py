@@ -71,6 +71,7 @@ _VIDEO_STORAGE_CLEANUP_METADATA_KEY = "video_storage_cleanup"
 _VIDEO_REFERENCE_VARIANT_METADATA_KEYS = (
     "upstream_reference_video_variant",
     VOLCANO_ASSET_VIDEO_METADATA_KEY,
+    "canvas_preparation_poster",
 )
 
 _even = _transcode._even

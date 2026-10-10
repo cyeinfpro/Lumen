@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Command,
   Keyboard,
+  Layers,
   Maximize2,
   Minimize2,
   PanelRight,
@@ -15,14 +16,17 @@ import Link from "next/link";
 import { useState } from "react";
 
 import { MobileRuntimeResilienceStatus } from "@/components/RuntimeResilienceStatus";
-import { validateCanvasNodeExecution } from "@/lib/canvas/graph";
 import { isCanvasExecutableNodeType } from "@/lib/canvas/registry";
 import { IconButton } from "@/components/ui/primitives";
 import { useCanvasStore } from "./CanvasStoreProvider";
+import { useCanvasRunReadiness } from "./CanvasRunReadinessProvider";
 
 export function CanvasTopBar({
   title,
   onRename,
+  onUndo,
+  onRedo,
+  onOpenPlan,
   onFitView,
   onOpenInspector,
   onOpenCommandMenu,
@@ -32,6 +36,9 @@ export function CanvasTopBar({
 }: {
   title: string;
   onRename: (title: string) => void;
+  onUndo: () => void;
+  onRedo: () => void;
+  onOpenPlan: () => void;
   onFitView: () => void;
   onOpenInspector: () => void;
   onOpenCommandMenu: () => void;
@@ -39,17 +46,17 @@ export function CanvasTopBar({
   onToggleFullscreen: () => void;
   fullscreen: boolean;
 }) {
+  const { disabledReasons } = useCanvasRunReadiness();
   const historyLength = useCanvasStore((state) => state.history.length);
   const futureLength = useCanvasStore((state) => state.future.length);
   const selectedNodeId = useCanvasStore((state) => state.selectedNodeId);
   const graph = useCanvasStore((state) => state.graph);
-  const undo = useCanvasStore((state) => state.undo);
-  const redo = useCanvasStore((state) => state.redo);
   const selectedNode = graph.nodes.find((node) => node.id === selectedNodeId);
   const runnable = Boolean(
     selectedNode &&
       isCanvasExecutableNodeType(selectedNode.type) &&
-      validateCanvasNodeExecution(graph, selectedNode.id).valid,
+      disabledReasons.has(selectedNode.id) &&
+      !disabledReasons.get(selectedNode.id),
   );
 
   return (
@@ -72,11 +79,12 @@ export function CanvasTopBar({
           onRename={onRename}
         />
         <div className="ml-auto flex items-center gap-1">
+          <IconButton aria-label="打开运行计划" tooltip="运行计划" onClick={onOpenPlan}><Layers className="h-4 w-4" /></IconButton>
           <IconButton
             aria-label="撤销"
             tooltip="撤销"
             disabled={historyLength === 0}
-            onClick={undo}
+            onClick={onUndo}
           >
             <Undo2 className="h-4 w-4" />
           </IconButton>
@@ -84,7 +92,7 @@ export function CanvasTopBar({
             aria-label="重做"
             tooltip="重做"
             disabled={futureLength === 0}
-            onClick={redo}
+            onClick={onRedo}
           >
             <Redo2 className="h-4 w-4" />
           </IconButton>
@@ -154,6 +162,7 @@ export function CanvasTopBar({
           <p className="truncate type-body-sm font-medium text-[var(--fg-0)]">{title}</p>
         </div>
         <MobileRuntimeResilienceStatus />
+        <IconButton aria-label="打开运行计划" onClick={onOpenPlan}><Layers className="h-4 w-4" /></IconButton>
         <IconButton
           aria-label={fullscreen ? "退出全屏" : "全屏画布"}
           aria-pressed={fullscreen}

@@ -33,7 +33,7 @@ from lumen_core.volcano_assets import volcano_asset_reference_url
 
 from ...config import settings
 from ...images.domain.variants import VIDEO_REFERENCE_VARIANT
-from ...public_urls import resolve_public_base_url
+from ...public_urls import resolve_configured_public_base_url, resolve_public_base_url
 from ...video_reference_videos import (
     VIDEO_REFERENCE_VIDEO_KIND,
     VIDEO_REFERENCE_VIDEO_MIME,
@@ -359,15 +359,9 @@ async def reference_public_base_url(
         prefers_public_media_url=prefers_public_media_url,
     ):
         return None
-    if request is None:
-        if hard_requires_public_base:
-            raise video_http_error(
-                "video_reference_public_url_missing",
-                "PUBLIC_BASE_URL or site.public_base_url is required for upstream-readable video media",
-                503,
-            )
-        return None
     try:
+        if request is None:
+            return await resolve_configured_public_base_url(db)
         return await resolver(request, db)
     except Exception as exc:
         if not hard_requires_public_base:

@@ -1,3 +1,4 @@
+import { canvasRecoveryLabel, canvasTaskSubmissionIsUnknown } from "./generationDetails.ts";
 import type {
   CanvasExecutionStatus,
   CanvasExecutionTaskDetail,
@@ -63,6 +64,14 @@ export function isCanvasExecutionActive(
   return ACTIVE_EXECUTION_STATUSES.has(execution.status);
 }
 
+export function isCanvasExecutionUncertain(execution: Pick<CanvasNodeExecution, "tasks">): boolean {
+  return execution.tasks?.some(canvasTaskSubmissionIsUnknown) ?? false;
+}
+
+export function canvasExecutionDisplayStatus(execution: CanvasNodeExecution): string {
+  return isCanvasExecutionUncertain(execution) ? "提交状态待确认" : canvasExecutionStatusLabel(execution.status);
+}
+
 export function canvasExecutionStatusLabel(
   status: CanvasExecutionStatus,
 ): string {
@@ -101,6 +110,7 @@ export function canvasExecutionStageLabel(
   execution: CanvasNodeExecution,
 ): string {
   const task = canvasExecutionPrimaryTask(execution);
+  if (task?.recovery) return canvasRecoveryLabel(task.recovery);
   const stage = task?.progress_stage || task?.status;
   if (stage) return TASK_STAGE_LABELS[stage] ?? stage;
   return canvasExecutionStatusLabel(execution.status);

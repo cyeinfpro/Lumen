@@ -1,6 +1,6 @@
 import { ClipboardPaste, Copy, Grid3X3, Keyboard, LayoutGrid, LocateFixed, Play, Scan, Search, Trash2 } from "lucide-react";
 
-import { validateCanvasConnection, validateCanvasNodeExecution } from "@/lib/canvas/graph";
+import { validateCanvasConnection } from "@/lib/canvas/graph";
 import {
   CANVAS_NODE_CATALOG,
   CANVAS_NODE_SPECS,
@@ -20,19 +20,21 @@ export function buildCommandItems({
   selectedNodeId,
   selectedCount,
   selectedEdgeId,
+  runDisabledReasons,
 }: {
   graph: CanvasGraph;
   actionRequest: CanvasViewportActionRequest | null;
   selectedNodeId: string | null;
   selectedCount: number;
   selectedEdgeId: string | null;
+  runDisabledReasons: ReadonlyMap<string, string | null>;
 }): CanvasCommandMenuItem[] {
   const draftType = actionRequest?.connectionDraft?.dataType ?? null;
   const selectedNode = graph.nodes.find((node) => node.id === selectedNodeId);
   const selectedNodeRunnable = Boolean(
     selectedNode &&
       isCanvasExecutableNodeType(selectedNode.type) &&
-      validateCanvasNodeExecution(graph, selectedNode.id).valid,
+      runDisabledReasons.get(selectedNode.id) === null,
   );
   const nodeItems = CANVAS_NODE_CATALOG.filter((item) =>
     !draftType ||
@@ -119,6 +121,7 @@ export function buildCommandItems({
       id: "run:selected",
       kind: "command",
       label: "运行当前节点",
+      description: selectedRunDescription(selectedNodeId, runDisabledReasons),
       icon: Play,
       shortcut: ["Mod", "Enter"],
       disabled: selectedCount !== 1 || !selectedNodeRunnable,
@@ -156,6 +159,13 @@ export function buildCommandItems({
     icon: Search,
   }));
   return [...nodeItems, ...commandItems, ...focusItems];
+}
+
+function selectedRunDescription(
+  nodeId: string | null,
+  reasons: ReadonlyMap<string, string | null>,
+): string | undefined {
+  return nodeId ? reasons.get(nodeId) ?? undefined : "选择一个可运行节点";
 }
 
 export function selectedNodes(

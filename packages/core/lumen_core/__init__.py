@@ -12,7 +12,7 @@
 - chat_tools: chat tool status normalization
 """
 
-__version__ = "1.2.178"
+__version__ = "1.2.179"
 
 from importlib import import_module as _import_module
 from typing import TYPE_CHECKING as _TYPE_CHECKING

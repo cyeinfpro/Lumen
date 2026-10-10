@@ -1,4 +1,5 @@
 import { createStore } from "zustand/vanilla";
+import { buildHistoricalBranch } from "./historicalBranch";
 
 import {
   addCanvasNode,
@@ -499,6 +500,17 @@ export function createCanvasEditorStore(
           saveState: "saved",
           saveMessage: null,
         });
+      },
+      branchHistoricalExecution(execution) {
+        const branch = buildHistoricalBranch(get().graph, execution);
+        if (!branch.ok) return branch;
+        const operations = operationsBetween(get().graph, branch.graph);
+        if (operations.length > CANVAS_AUTOSAVE_OPERATION_LIMIT || !validGraphForStoreCommit(branch.graph)) {
+          return { ok: false, reason: "历史配置或连接已不兼容，未修改画布" };
+        }
+        commit(branch.graph, "从历史创建固定分支", operations);
+        set({ selectedNodeId: branch.nodeId, selectedNodeIds: [branch.nodeId], selectedEdgeId: null });
+        return { ok: true, nodeId: branch.nodeId };
       },
       addNode(type, position, overrides) {
         if (!validCanvasPosition(position)) return "";

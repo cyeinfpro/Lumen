@@ -1,10 +1,7 @@
 import type { Edge } from "@xyflow/react";
 import { useMemo } from "react";
 
-import {
-  resolveCanvasTextOutputs,
-  validateCanvasNodeExecution,
-} from "@/lib/canvas/graph";
+import { resolveCanvasTextOutputs } from "@/lib/canvas/graph";
 import {
   activeOutputsByNode,
   latestExecutionsByNode,
@@ -17,6 +14,7 @@ import type {
 } from "@/lib/canvas/types";
 import { canvasEdgeAriaLabel } from "./CanvasViewportModel";
 import type { CanvasFlowNode } from "./nodes/CanvasNodes";
+import { useCanvasRunReadiness } from "./CanvasRunReadinessProvider";
 
 export interface CanvasNodeProjectionContext {
   execution: ReturnType<typeof latestExecutionsByNode> extends Map<
@@ -55,6 +53,7 @@ export function useCanvasViewportProjection({
   transientPositions,
   projectNode,
 }: UseCanvasViewportProjectionOptions) {
+  const { disabledReasons } = useCanvasRunReadiness();
   const executions = useMemo(
     () => latestExecutionsByNode(document.recent_executions),
     [document.recent_executions],
@@ -63,10 +62,11 @@ export function useCanvasViewportProjection({
     () =>
       activeOutputsByNode({
         graph,
+        assets: document.assets,
         selections: document.selections,
         recent_executions: document.recent_executions,
       }),
-    [document.recent_executions, document.selections, graph],
+    [document.assets, document.recent_executions, document.selections, graph],
   );
   const inputCountsByNode = useMemo(() => {
     const counts = new Map<string, Record<string, number>>();
@@ -97,11 +97,12 @@ export function useCanvasViewportProjection({
           activeOutputs,
           inputCounts: inputCountsByNode.get(node.id) ?? {},
           resolvedText: resolvedTextsByNode.get(node.id),
-          runDisabledReason: canvasRunDisabledReason(graph, node.id),
+          runDisabledReason: disabledReasons.get(node.id) ?? null,
         }),
       ),
     [
       activeOutputs,
+      disabledReasons,
       executions,
       graph,
       inputCountsByNode,
@@ -140,12 +141,4 @@ export function useCanvasViewportProjection({
   );
 
   return { activeOutputs, flowEdges, flowNodes };
-}
-
-function canvasRunDisabledReason(
-  graph: CanvasGraph,
-  nodeId: string,
-): string | null {
-  const validation = validateCanvasNodeExecution(graph, nodeId);
-  return validation.valid ? null : validation.reason;
 }

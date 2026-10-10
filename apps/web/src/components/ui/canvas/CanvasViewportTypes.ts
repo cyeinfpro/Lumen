@@ -1,10 +1,11 @@
-import type { CanvasDocument, ConnectionDraft } from "@/lib/canvas/types";
+import type { CanvasDocument, CanvasGraph, ConnectionDraft } from "@/lib/canvas/types";
 
 export interface CanvasViewportMotionOptions {
   instant?: boolean;
 }
 
 export interface CanvasViewportApi {
+  recoverHistoryViewport?: (before: CanvasGraph, after: CanvasGraph, isCurrent: () => boolean) => void;
   fitView: (options?: CanvasViewportMotionOptions) => void;
   fitSelection: (
     nodeIds?: readonly string[],

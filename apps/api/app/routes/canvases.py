@@ -26,6 +26,14 @@ from ..canvas_services.document_service import (
 )
 from ..canvas_services.errors import canvas_http
 from ..canvas_services.execution_service import execute_node
+from ..canvas_services.run_plan_schemas import (
+    CanvasPlanIn,
+    CanvasPlanStartIn,
+    CanvasPlanRetryIn,
+)
+from ..canvas_services.plan_preview import preview_run_plan
+from ..canvas_services.plan_creation import start_run_plan
+from ..canvas_services.plan_retry import retry_failed_plan_steps
 from ..canvas_services.mutation_service import apply_mutation
 from ..canvas_services.read_repair import repair_canvas_executions
 from ..canvas_services.run_serialization import (
@@ -105,6 +113,16 @@ async def list_canvases_route(
         limit=limit,
         q=q,
     )
+
+
+@router.get("/capabilities")
+async def canvas_capabilities_route(
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    from ..canvas_services.capability_service import canvas_capability_catalog
+
+    return await canvas_capability_catalog(user, db)
 
 
 @router.get("/{canvas_id}")
@@ -358,3 +376,119 @@ async def list_canvas_run_events_route(
             limit=limit,
         )
     }
+
+
+@router.get("/{canvas_id}/nodes/{node_id}/history")
+async def canvas_node_history_route(
+    canvas_id: str,
+    node_id: str,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    cursor: str | None = Query(default=None, max_length=200),
+    limit: int = Query(default=30, ge=1, le=100),
+) -> dict:
+    from ..canvas_services.history_service import execution_history
+
+    return await execution_history(
+        db,
+        user_id=user.id,
+        canvas_id=canvas_id,
+        node_id=node_id,
+        cursor=cursor,
+        limit=limit,
+    )
+
+
+@router.get("/{canvas_id}/runs/{run_id}/event-batch")
+async def canvas_event_batch_route(
+    canvas_id: str,
+    run_id: str,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    after_seq: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=200),
+) -> dict:
+    from ..canvas_services.history_service import execution_event_batch
+
+    return await execution_event_batch(
+        db,
+        user_id=user.id,
+        canvas_id=canvas_id,
+        run_id=run_id,
+        after_seq=after_seq,
+        limit=limit,
+    )
+
+
+@router.get("/{canvas_id}/plans/intents/{idempotency_key}")
+async def get_canvas_plan_intent_route(
+    canvas_id: str,
+    idempotency_key: str,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    run_id: str | None = Query(default=None, max_length=36),
+) -> dict:
+    from ..canvas_services.plan_intents import get_plan_intent
+
+    if not 1 <= len(idempotency_key) <= 96:
+        raise canvas_http("invalid_idempotency_key", "invalid intent key", 422)
+    return await get_plan_intent(
+        db, user_id=user.id, canvas_id=canvas_id,
+        idempotency_key=idempotency_key, run_id=run_id,
+    )
+
+
+@router.post("/{canvas_id}/plans/preview", dependencies=[Depends(verify_csrf)])
+async def preview_canvas_plan_route(
+    canvas_id: str,
+    body: CanvasPlanIn,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    canvas = await get_owned_canvas(db, user_id=user.id, canvas_id=canvas_id)
+    plan = await preview_run_plan(db, user=user, canvas=canvas, body=body)
+    return {
+        "plan": plan.to_dict(),
+        "estimated_cost_micro": plan.estimated_cost_micro,
+        "budget_semantics": "admission_estimate_not_settlement_cap",
+    }
+
+
+@router.post("/{canvas_id}/plans/run", dependencies=[Depends(verify_csrf)])
+async def start_canvas_plan_route(
+    canvas_id: str,
+    body: CanvasPlanStartIn,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> dict:
+    run = await start_run_plan(
+        db,
+        user=user,
+        canvas_id=canvas_id,
+        body=body,
+        header_idempotency_key=idempotency_key,
+    )
+    return await get_run_detail(db, user_id=user.id, canvas_id=canvas_id, run_id=run.id)
+
+
+@router.post(
+    "/{canvas_id}/runs/{run_id}/retry-failed", dependencies=[Depends(verify_csrf)]
+)
+async def retry_canvas_plan_route(
+    canvas_id: str,
+    run_id: str,
+    body: CanvasPlanRetryIn,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> dict:
+    run = await retry_failed_plan_steps(
+        db,
+        user=user,
+        canvas_id=canvas_id,
+        run_id=run_id,
+        body=body,
+        header_idempotency_key=idempotency_key,
+    )
+    return await get_run_detail(db, user_id=user.id, canvas_id=canvas_id, run_id=run.id)

@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.canvas_models import CanvasNodeExecution, CanvasRun, CanvasRunEvent
+from .event_commit import remember_canvas_notice
 
 
 async def append_run_event(
@@ -29,4 +30,5 @@ async def append_run_event(
     )
     db.add(row)
     await db.flush()
+    remember_canvas_notice(db, run=run, event=row)
     return row

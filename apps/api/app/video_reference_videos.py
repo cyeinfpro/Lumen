@@ -26,6 +26,7 @@ from lumen_core.storage_capacity import (
 )
 
 from . import video_reference_probe as reference_probe
+from .media_process import cancellable_media_thread, run_media_process
 from .services.video_storage_capacity import (
     VideoReferenceStorageQuotaExceeded,
     VideoStorageCapacityManager,
@@ -161,7 +162,7 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _file_matches(path: Path, *, size_bytes: int, sha256: str) -> bool:
+def reference_video_file_matches(path: Path, *, size_bytes: int, sha256: str) -> bool:
     try:
         return (
             path.is_file()
@@ -170,6 +171,9 @@ def _file_matches(path: Path, *, size_bytes: int, sha256: str) -> bool:
         )
     except OSError:
         return False
+
+
+_file_matches = reference_video_file_matches
 
 
 def _install_staged_variant(
@@ -358,9 +362,46 @@ def _discard_replaced_variant_after_commit(
     event.listen(sync, "after_transaction_end", _on_transaction_end)
 
 
+def inspect_video_reference_original(
+    *,
+    storage_root: str,
+    storage_key: str,
+    size_bytes: int,
+    sha256: str,
+    cancel_event=None,
+) -> dict[str, Any]:
+    """Inspect a hash-verified original using the existing bounded probe policy."""
+    path = _storage_path(storage_root, storage_key)
+    if not _file_matches(path, size_bytes=size_bytes, sha256=sha256):
+        raise VideoReferenceVideoError(
+            "video_original_changed",
+            "video original changed or is missing",
+            409,
+        )
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        raise VideoReferenceVideoError(
+            "video_probe_unavailable",
+            "ffprobe is required for video inspection",
+            503,
+        )
+    probe_options = {"cancel_event": cancel_event} if cancel_event is not None else {}
+    metadata = _probe_video(ffprobe, path, **probe_options)
+    _validate_source_video(metadata)
+    if not _file_matches(path, size_bytes=size_bytes, sha256=sha256):
+        raise VideoReferenceVideoError(
+            "video_original_changed",
+            "video original changed during inspection",
+            409,
+        )
+    return metadata
+
+
 def make_video_reference_mp4(
     source_path: Path,
     destination: Path,
+    *,
+    cancel_event=None,
 ) -> VideoReferenceMp4:
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
@@ -373,7 +414,8 @@ def make_video_reference_mp4(
     if not source_path.is_file():
         raise VideoReferenceVideoError("not_found", "binary missing", 404)
 
-    source_meta = _probe_video(ffprobe, source_path)
+    probe_options = {"cancel_event": cancel_event} if cancel_event is not None else {}
+    source_meta = _probe_video(ffprobe, source_path, **probe_options)
     _validate_source_video(source_meta)
     target_width, target_height = _fit_even_dimensions(
         int(source_meta.get("width") or 0),
@@ -441,10 +483,11 @@ def make_video_reference_mp4(
             str(dst),
         ]
         try:
-            proc = subprocess.run(
+            proc = run_media_process(
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                cancel_event=cancel_event,
                 timeout=VIDEO_REFERENCE_VIDEO_FFMPEG_TIMEOUT_SECONDS,
                 check=False,
             )
@@ -471,7 +514,7 @@ def make_video_reference_mp4(
                 "reference video transcode failed",
                 503,
             )
-        metadata = _probe_video(ffprobe, dst)
+        metadata = _probe_video(ffprobe, dst, **probe_options)
         _validate_output_video(
             metadata,
             expected_width=target_width,
@@ -510,22 +553,13 @@ async def _render_reference_variant(
     source_path: Path,
     destination: Path,
 ) -> VideoReferenceMp4:
-    task = asyncio.ensure_future(
-        asyncio.to_thread(
-            make_video_reference_mp4,
-            source_path,
-            destination,
-        )
-    )
     try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError as cancellation:
-        try:
-            await _wait_for_started_task(task)
-        except BaseException:
-            task.add_done_callback(lambda _done: destination.unlink(missing_ok=True))
+        return await cancellable_media_thread(
+            make_video_reference_mp4, source_path, destination
+        )
+    except asyncio.CancelledError:
         await asyncio.to_thread(destination.unlink, missing_ok=True)
-        raise cancellation
+        raise
 
 
 def video_reference_variant_metadata(video: Video) -> dict[str, Any] | None:
@@ -563,7 +597,8 @@ class _ReferenceSourceSnapshot:
         )
 
 
-async def _reference_storage_usage(db: AsyncSession, *, user_id: str) -> int:
+async def reference_storage_usage(db: AsyncSession, *, user_id: str) -> int:
+    """Quota snapshot; callers hold the existing user admission lock."""
     cleanup_state = Video.metadata_jsonb[VIDEO_STORAGE_CLEANUP_METADATA_KEY][
         "state"
     ].as_string()
@@ -588,9 +623,19 @@ async def _reference_storage_usage(db: AsyncSession, *, user_id: str) -> int:
         ].as_integer(),
         0,
     )
+    preparation_poster_bytes = func.coalesce(
+        Video.metadata_jsonb["canvas_preparation_poster"]["size_bytes"].as_integer(),
+        0,
+    )
     contribution = case(
         (cleanup_complete, 0),
-        else_=primary_bytes + upstream_bytes + volcano_bytes + volcano_poster_bytes,
+        else_=(
+            primary_bytes
+            + upstream_bytes
+            + volcano_bytes
+            + volcano_poster_bytes
+            + preparation_poster_bytes
+        ),
     )
     raw = (
         await db.execute(
@@ -600,6 +645,11 @@ async def _reference_storage_usage(db: AsyncSession, *, user_id: str) -> int:
         )
     ).scalar_one()
     return max(0, int(raw or 0))
+
+
+_reference_storage_usage = (
+    reference_storage_usage  # Compatibility for existing callers.
+)
 
 
 async def _snapshot_reference_source(

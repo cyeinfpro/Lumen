@@ -12,6 +12,10 @@ type RecordedCall = {
   body: Record<string, unknown>;
 };
 
+const canvasHistory = await import("../canvas/executionHistory.ts");
+const canvasAssets = await import("../canvas/assets.ts");
+const canvasGenerationDetails = await import("../canvas/generationDetails.ts");
+
 const semanticIdempotencyPersistence = await import(
   "./semanticIdempotencyPersistence.ts"
 );
@@ -484,6 +488,9 @@ test("canvas create, duplicate, and execute reuse accepted keys after response l
       apiFetchNoContent: async () => undefined,
     },
     "./semanticIdempotency": semantic,
+    "../canvas/assets": canvasAssets,
+    "../canvas/executionHistory": canvasHistory,
+    "../canvas/generationDetails": canvasGenerationDetails,
     "../canvas/graph": {
       normalizeCanvasGraph: (value: unknown) => value,
     },
@@ -539,6 +546,9 @@ test("canvas execution parameter changes acquire a new semantic key", async () =
       apiFetchNoContent: async () => undefined,
     },
     "./semanticIdempotency": semantic,
+    "../canvas/assets": canvasAssets,
+    "../canvas/executionHistory": canvasHistory,
+    "../canvas/generationDetails": canvasGenerationDetails,
     "../canvas/graph": {
       normalizeCanvasGraph: (value: unknown) => value,
     },
@@ -635,6 +645,9 @@ test("malformed 2xx payloads retain semantic keys until caller validation succee
       apiFetchNoContent: async () => undefined,
     },
     "./semanticIdempotency": semantic,
+    "../canvas/assets": canvasAssets,
+    "../canvas/executionHistory": canvasHistory,
+    "../canvas/generationDetails": canvasGenerationDetails,
     "../canvas/graph": {
       normalizeCanvasGraph: (value: unknown) => value,
     },
@@ -1229,4 +1242,23 @@ test("malformed paid-task 2xx responses preserve video, workflow, and storyboard
     {},
   );
   assertReplayPair(calls, 4, { bodyKey: true });
+});
+
+test("Canvas preparation retry replays exact source/revision intent after lost acknowledgement and never invokes generation", async () => {
+  const semantic = loadSemanticModule("preparation-key");
+  const asset = { schema_version: 1, asset_id: "video-saved", kind: "video", source_sha256: "a".repeat(64),
+    preparation_state: "failed", preparation_revision: 4, mime: "video/mp4", size_bytes: 12,
+    width: 320, height: 240, duration_ms: 1000, updated_at: null,
+    locators: { original: "/api/videos/video-saved", preview: null, thumb: null } };
+  const harness = responseLossHarness(() => ({ asset: { ...asset, preparation_state: "pending", preparation_revision: 5 } }));
+  const api = compile("./canvasHistory.ts", { "./http": { apiFetch: harness.request }, "./canvases": {},
+    "./semanticIdempotency": semantic, "../canvas/assets": canvasAssets, "../canvas/executionHistory": canvasHistory,
+  }) as { retryCanvasVideoPreparation(asset: unknown): Promise<{ preparation_state: string }> };
+  await assert.rejects(api.retryCanvasVideoPreparation(asset), /response lost/);
+  assert.equal((await api.retryCanvasVideoPreparation(asset)).preparation_state, "pending");
+  assert.equal(harness.accepted.size, 1);
+  assertReplayPair(harness.calls, 0, { bodyKey: true });
+  assert.ok(harness.calls.every((call) => call.path === "/videos/video-saved/preparation/retry"));
+  assert.deepEqual(harness.calls[0].body, { expected_source_sha256: asset.source_sha256, expected_preparation_revision: 4,
+    idempotency_key: harness.calls[0].key });
 });

@@ -80,6 +80,7 @@ export function MobileTabBar() {
 
   return (
     <nav
+      data-lumen-toast-obstacle
       aria-label="主导航"
       data-navigation-level="primary"
       aria-hidden={navigationHidden || undefined}

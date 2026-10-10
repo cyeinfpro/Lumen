@@ -11,6 +11,7 @@ VIDEO_STORAGE_CLEANUP_METADATA_KEY = "video_storage_cleanup"
 VIDEO_VARIANT_METADATA_KEYS = (
     "upstream_reference_video_variant",
     "volcano_asset_video_variant",
+    "canvas_preparation_poster",
 )
 VIDEO_STORAGE_MAX_ISSUES = 20
 
@@ -78,6 +79,16 @@ def video_reference_quota_contribution(
             declared_size - inspection.primary_size_bytes,
         )
         accounted_bytes = inspection.bytes_on_disk + missing_primary_bytes
+        metadata = getattr(video, "metadata_jsonb", None) or {}
+        poster = (
+            metadata.get("canvas_preparation_poster")
+            if isinstance(metadata, dict)
+            else None
+        )
+        if isinstance(poster, dict) and poster.get("state") == "reserved":
+            # The file may not exist yet; retain its durable quota reservation.
+            # A crash-installed file is conservatively counted until adoption.
+            accounted_bytes += max(0, int(poster.get("size_bytes") or 0))
         if inspection.issues:
             accounted_bytes = max(accounted_bytes, declared_size)
         return 1, accounted_bytes

@@ -29,10 +29,9 @@ from lumen_core.canvas_schemas import (
     EXECUTABLE_NODE_TYPES,
     IMAGE_EXECUTABLE_NODE_TYPES,
 )
-from lumen_core.constants import MAX_MESSAGE_ATTACHMENTS
-from lumen_core.models import User, VideoGeneration
+from lumen_core.canvas_capabilities import image_capability, task_model_snapshot
+from lumen_core.models import Generation, User, VideoGeneration
 from lumen_core.schemas import (
-    ImageParamsIn,
     VideoCreateIn,
     VideoReferenceMediaIn,
 )
@@ -54,11 +53,18 @@ from ..services.task_submission import (
 )
 from ..services.video.options import get_video_options as video_options
 from .api_schemas import CanvasExecuteIn
+from .execution_image_inputs import (
+    image_params as _image_params,
+    image_task_inputs as _image_task_inputs,
+)
 from .core_adapter import stable_hash, validated_graph
 from .document_service import get_owned_canvas
 from .errors import canvas_http, idempotency_conflict
 from .graph_resolution import ResolvedNode, find_node, resolve_node
 from .run_event_service import append_run_event
+from .event_commit import commit_canvas_events
+from .plan_service import single_node_run_plan
+from .plan_admission_guard import verify_plan_admission
 from .version_service import create_version
 
 
@@ -127,123 +133,6 @@ async def _await_post_commit_publish(
             execution_id,
             exc_info=True,
         )
-
-
-def _image_params(config: dict[str, Any]) -> ImageParamsIn:
-    try:
-        quality = str(config.get("quality") or "").lower()
-        size = str(config.get("size") or "").lower()
-        resolution = quality if quality in {"1k", "2k", "4k"} else size
-        render_quality = str(config.get("render_quality") or "").lower()
-        if render_quality not in {"auto", "low", "medium", "high", "xhigh", "max"}:
-            render_quality = "medium" if quality == "standard" else "high"
-        return ImageParamsIn.model_validate(
-            {
-                "model": config.get("model") or "gpt-image-2",
-                "aspect_ratio": config.get("aspect_ratio") or "1:1",
-                "size_mode": config.get("size_mode") or "auto",
-                "fixed_size": config.get("fixed_size"),
-                "count": int(config.get("count") or 1),
-                "quality": (resolution if resolution in {"1k", "2k", "4k"} else "1k"),
-                "render_quality": render_quality,
-                "output_format": config.get("output_format") or "webp",
-                "output_compression": config.get("output_compression"),
-                "background": config.get("background") or "auto",
-                "moderation": config.get("moderation") or "low",
-            }
-        )
-    except (TypeError, ValueError) as exc:
-        raise canvas_http(
-            "canvas_image_config_invalid",
-            "Canvas image node configuration is invalid",
-            422,
-            reason=str(exc),
-        ) from exc
-
-
-def _require_single_image(
-    resolved: ResolvedNode,
-    *,
-    handle: str,
-    node_type: str,
-) -> dict[str, Any]:
-    values = resolved.images_by_handle.get(handle, [])
-    if len(values) != 1:
-        raise canvas_http(
-            "canvas_input_cardinality_invalid",
-            "Canvas image input requires exactly one asset",
-            422,
-            node_type=node_type,
-            target_handle=handle,
-            actual=len(values),
-        )
-    return values[0]
-
-
-def _image_task_inputs(
-    *,
-    node_type: str,
-    resolved: ResolvedNode,
-) -> tuple[list[str], str | None]:
-    attachment_ids: list[str]
-    mask_image_id: str | None
-    if node_type == "image_generate":
-        references = resolved.images_by_handle.get("references", [])
-        masks = resolved.images_by_handle.get("mask", [])
-        if len(masks) > 1:
-            raise canvas_http(
-                "canvas_mask_invalid",
-                "image generation accepts at most one mask",
-                422,
-            )
-        if masks and len(references) != 1:
-            raise canvas_http(
-                "canvas_mask_invalid",
-                "mask requires exactly one reference image",
-                422,
-            )
-        attachment_ids = [item["image_id"] for item in references]
-        mask_image_id = masks[0]["image_id"] if masks else None
-    else:
-        source = _require_single_image(
-            resolved,
-            handle="source",
-            node_type=node_type,
-        )
-        if node_type == "image_edit":
-            references = resolved.images_by_handle.get("references", [])
-            attachment_ids = [
-                source["image_id"],
-                *(item["image_id"] for item in references),
-            ]
-            mask_image_id = None
-        elif node_type == "image_inpaint":
-            mask = _require_single_image(
-                resolved,
-                handle="mask",
-                node_type=node_type,
-            )
-            attachment_ids = [source["image_id"]]
-            mask_image_id = mask["image_id"]
-        elif node_type == "image_upscale":
-            attachment_ids = [source["image_id"]]
-            mask_image_id = None
-        else:
-            raise canvas_http(
-                "canvas_node_not_executable",
-                "node type cannot be executed as an image task",
-                422,
-                node_type=node_type,
-            )
-    if len(attachment_ids) > MAX_MESSAGE_ATTACHMENTS:
-        raise canvas_http(
-            "canvas_input_cardinality_invalid",
-            "Canvas image task exceeds the attachment limit",
-            422,
-            maximum=MAX_MESSAGE_ATTACHMENTS,
-            actual=len(attachment_ids),
-        )
-    return attachment_ids, mask_image_id
 
 
 def _video_reference_counts(resolved: ResolvedNode) -> dict[str, int]:
@@ -690,7 +579,17 @@ async def _prepare_node_execution(
         reserved_micro=0,
         spent_micro=0,
         estimated_cost_micro=0,
-        summary_jsonb={"document_revision": body.document_revision},
+        summary_jsonb={
+            "document_revision": body.document_revision,
+            "run_plan": single_node_run_plan(
+                user_id=user.id,
+                canvas_id=canvas.id,
+                revision=body.document_revision,
+                graph=graph,
+                node_id=node_id,
+                resolved_snapshot=resolved.snapshot,
+            ),
+        },
         started_at=now,
     )
     # The unique constraint remains the second defense after advisory locking.
@@ -710,8 +609,16 @@ async def _prepare_node_execution(
         definition_hash=definition_hash,
         input_hash=input_hash,
         node_schema_version=int(resolved.node.get("schema_version") or 1),
-        effective_model=config.get("model"),
-        effective_provider_capability=None,
+        effective_model=(
+            image_capability(config.get("model"))["model"]
+            if node_type in IMAGE_EXECUTABLE_NODE_TYPES
+            else config.get("model")
+        ),
+        effective_provider_capability=(
+            image_capability(config.get("model"))
+            if node_type in IMAGE_EXECUTABLE_NODE_TYPES
+            else None
+        ),
         processor_version=_PROCESSOR_VERSION,
     )
     submission_key = f"cx:{stable_hash({'key': body.idempotency_key})}"
@@ -742,6 +649,11 @@ async def _prepare_node_execution(
         model_snapshot_jsonb={
             "model": config.get("model"),
             "node_type": node_type,
+            "capability": (
+                image_capability(config.get("model"))
+                if node_type in IMAGE_EXECUTABLE_NODE_TYPES
+                else None
+            ),
         },
         pricing_snapshot_jsonb={},
         processor_version=_PROCESSOR_VERSION,
@@ -811,6 +723,22 @@ async def _submit_image_execution(
             "image generation task was not created",
             500,
         )
+    if prepared.run.kind != "single":
+        owners = list(
+            (
+                await db.execute(
+                    select(Generation).where(
+                        Generation.id.in_(submission.generation_ids),
+                        Generation.user_id == user.id,
+                    )
+                )
+            ).scalars()
+        )
+        if len(owners) != len(submission.generation_ids):
+            raise canvas_http(
+                "canvas_task_not_created", "image task admission is incomplete", 500
+            )
+        verify_plan_admission(prepared, owners)
     for ordinal, generation_id in enumerate(submission.generation_ids):
         db.add(
             CanvasExecutionTask(
@@ -826,7 +754,7 @@ async def _submit_image_execution(
                 output_jsonb={},
             )
         )
-    await db.commit()
+    await commit_canvas_events(db)
     await _await_post_commit_publish(
         "image",
         publish_canvas_image_task(
@@ -845,7 +773,7 @@ async def _submit_video_execution(
     *,
     user: User,
     active_user_snapshot: ActiveUserSnapshot,
-    request: Request,
+    request: Request | None,
     prepared: PreparedNodeExecution,
 ) -> tuple[CanvasRun, CanvasNodeExecution]:
     if active_user_snapshot.account_mode != "wallet":
@@ -875,6 +803,23 @@ async def _submit_video_execution(
             select(VideoGeneration).where(VideoGeneration.id == video_out.id)
         )
     ).scalar_one()
+    verify_plan_admission(prepared, [actual])
+    snapshot = task_model_snapshot(actual, kind="video")
+    prepared.execution.model_snapshot_jsonb = snapshot
+    prepared.execution.execution_fingerprint = canvas_execution_fingerprint(
+        definition_hash=prepared.execution.definition_hash,
+        input_hash=prepared.execution.input_hash,
+        node_schema_version=prepared.execution.node_schema_version,
+        effective_model=actual.model,
+        effective_provider_capability=snapshot["capability"],
+        processor_version=_PROCESSOR_VERSION,
+    )
+    prepared.execution.pricing_snapshot_jsonb = {
+        "source": "durable_task",
+        "estimated_cost_micro": actual.est_cost_micro,
+    }
+    if prepared.run.kind == "single":
+        prepared.run.estimated_cost_micro = actual.est_cost_micro
     db.add(
         CanvasExecutionTask(
             execution_id=prepared.execution.id,
@@ -889,7 +834,7 @@ async def _submit_video_execution(
             output_jsonb={},
         )
     )
-    await db.commit()
+    await commit_canvas_events(db)
     await _await_post_commit_publish(
         "video",
         publish_canvas_video_task(submission=video_submission),
@@ -959,5 +904,24 @@ async def execute_node(
         user=user,
         active_user_snapshot=active_user_snapshot,
         request=request,
+        prepared=prepared,
+    )
+
+
+async def dispatch_prepared_execution(
+    db: AsyncSession,
+    *,
+    user: User,
+    active_user_snapshot: ActiveUserSnapshot,
+    prepared: PreparedNodeExecution,
+) -> tuple[CanvasRun, CanvasNodeExecution]:
+    """Admit an already fenced durable plan step through the existing task outbox."""
+    if prepared.node_type in IMAGE_EXECUTABLE_NODE_TYPES:
+        return await _submit_image_execution(db, user=user, prepared=prepared)
+    return await _submit_video_execution(
+        db,
+        user=user,
+        active_user_snapshot=active_user_snapshot,
+        request=None,
         prepared=prepared,
     )

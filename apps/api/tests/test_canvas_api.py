@@ -29,7 +29,7 @@ from lumen_core.canvas_models import (
     CanvasTaskTerminalReceipt,
     CanvasVersion,
 )
-from lumen_core.models import Base, User, VideoGeneration
+from lumen_core.models import Base, User, VideoGeneration, WalletTransaction
 
 from app import db as app_db
 from app import deps
@@ -211,6 +211,7 @@ async def _session() -> AsyncIterator[AsyncSession]:
         CanvasTaskTerminalReceipt.__table__,
         User.__table__,
         VideoGeneration.__table__,
+        WalletTransaction.__table__,
     ]
     async with engine.begin() as connection:
         await connection.run_sync(
@@ -273,7 +274,9 @@ async def test_canvas_crud_ownership_and_duplicate_excludes_history() -> None:
 
 
 @pytest.mark.asyncio
-async def test_canvas_create_replays_after_response_loss_and_rejects_key_reuse() -> None:
+async def test_canvas_create_replays_after_response_loss_and_rejects_key_reuse() -> (
+    None
+):
     async with _session() as db:
         body = CanvasCreateIn(
             title="幂等创建",
@@ -402,8 +405,7 @@ async def test_canvas_duplicate_replays_without_rereading_changed_source() -> No
 def test_canvas_document_routes_allow_legacy_missing_keys_and_require_pairs() -> None:
     assert canvas_routes._document_idempotency_key(None, None) is None
     assert (
-        canvas_routes._document_idempotency_key("request-1", "request-1")
-        == "request-1"
+        canvas_routes._document_idempotency_key("request-1", "request-1") == "request-1"
     )
     for header, body, code in (
         (None, "request-1", "idempotency_key_required"),

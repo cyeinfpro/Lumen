@@ -3,6 +3,9 @@ import {
   idempotentPostRequest,
   withSemanticPostIdempotency,
 } from "./semanticIdempotency";
+import { normalizeCanvasAssets } from "../canvas/assets";
+import { normalizeExecutionFreshness } from "../canvas/executionHistory";
+import { normalizeCanvasBilling, normalizeCanvasTaskRecovery } from "../canvas/generationDetails";
 import { normalizeCanvasGraph } from "../canvas/graph";
 import type {
   CanvasDocument,
@@ -84,8 +87,8 @@ export function createCanvas(input: CreateCanvasInput): Promise<CanvasDocument> 
   );
 }
 
-export function getCanvas(canvasId: string): Promise<CanvasDocument> {
-  return apiFetch<unknown>(`/canvases/${encodeURIComponent(canvasId)}`).then(
+export function getCanvas(canvasId: string, signal?: AbortSignal): Promise<CanvasDocument> {
+  return apiFetch<unknown>(`/canvases/${encodeURIComponent(canvasId)}`, { signal }).then(
     normalizeCanvasDocument,
   );
 }
@@ -222,6 +225,15 @@ function normalizeCanvasListItem(value: unknown): CanvasListItem {
   };
 }
 
+function normalizeFreshnessProjection(raw: UnknownRecord, projections: UnknownRecord) {
+  const freshness = raw.execution_freshness ?? projections.execution_freshness;
+  const stale = raw.stale_node_ids ?? projections.stale_node_ids;
+  return {
+    ...(freshness !== undefined ? { execution_freshness: normalizeExecutionFreshness(freshness) } : {}),
+    ...(Array.isArray(stale) ? { stale_node_ids: stale.filter((id): id is string => typeof id === "string") } : {}),
+  };
+}
+
 function normalizeCanvasDocument(value: unknown): CanvasDocument {
   const raw = asRecord(value);
   const graphValue =
@@ -247,6 +259,8 @@ function normalizeCanvasDocument(value: unknown): CanvasDocument {
     thumbnail_url: text(raw.thumbnail_url),
     created_at: text(raw.created_at) ?? new Date(0).toISOString(),
     updated_at: text(raw.updated_at) ?? new Date(0).toISOString(),
+    ...(raw.assets !== undefined ? { assets: normalizeCanvasAssets(raw.assets) } : {}),
+    ...normalizeFreshnessProjection(raw, projections),
     selections,
     recent_executions: executions,
     active_runs: activeRuns,
@@ -276,7 +290,7 @@ function validateCanvasExecutionResponse(
   return value as { run?: CanvasRun; execution?: CanvasNodeExecution };
 }
 
-function normalizeExecution(value: unknown): CanvasNodeExecution {
+export function normalizeExecution(value: unknown): CanvasNodeExecution {
   const raw = asRecord(value);
   return {
     id: text(raw.id) ?? "",
@@ -295,6 +309,12 @@ function normalizeExecution(value: unknown): CanvasNodeExecution {
         url: text(item.url),
         preview_url: text(item.preview_url),
         poster_url: text(item.poster_url),
+        thumbnail_url: text(item.thumbnail_url),
+        source_sha256: text(item.source_sha256),
+        preparation_state: ["pending", "preparing", "ready", "failed", "unavailable"].includes(String(item.preparation_state))
+          ? item.preparation_state as CanvasNodeExecution["outputs"][number]["preparation_state"] : undefined,
+        preparation_revision: optionalNumber(item.preparation_revision),
+        duration_ms: optionalNumber(item.duration_ms),
         width: optionalNumber(item.width),
         height: optionalNumber(item.height),
         label: text(item.label),
@@ -305,6 +325,7 @@ function normalizeExecution(value: unknown): CanvasNodeExecution {
     error_code: text(raw.error_code),
     error_message: text(raw.error_message),
     tasks: array(raw.tasks).map(normalizeExecutionTask),
+    ...(raw.billing !== undefined ? { billing: normalizeCanvasBilling(raw.billing) } : {}),
     created_at: text(raw.created_at),
     updated_at: text(raw.updated_at),
     started_at: text(raw.started_at),
@@ -317,6 +338,8 @@ function normalizeExecutionTask(value: unknown): CanvasExecutionTaskDetail {
   return {
     id: text(raw.id) ?? "",
     kind: text(raw.kind) ?? "generation",
+    recovery: normalizeCanvasTaskRecovery(raw.recovery, raw),
+    ...(raw.billing !== undefined ? { billing: normalizeCanvasBilling(raw.billing) } : {}),
     status: text(raw.status) ?? "queued",
     progress_stage: text(raw.progress_stage) ?? text(raw.status) ?? "queued",
     progress_pct: optionalNumber(raw.progress_pct),
@@ -357,13 +380,14 @@ function normalizeSelection(value: unknown): CanvasNodeSelection {
   };
 }
 
-function normalizeRun(value: unknown): CanvasRun {
+export function normalizeRun(value: unknown): CanvasRun {
   const raw = asRecord(value);
   return {
     id: text(raw.id) ?? "",
     status: (text(raw.status) ?? "queued") as CanvasRun["status"],
     target_node_ids: array(raw.target_node_ids).map((item) => String(item)),
     last_event_seq: optionalNumber(raw.last_event_seq) ?? undefined,
+    ...(raw.billing !== undefined ? { billing: normalizeCanvasBilling(raw.billing) } : {}),
     created_at: text(raw.created_at),
     updated_at: text(raw.updated_at),
   };

@@ -1,11 +1,13 @@
-import { useState, type ComponentType } from "react";
+import { useMemo, useState, type ComponentType, type ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import {
   canvasExecutionElapsedMs,
   canvasExecutionPrimaryTask,
   canvasExecutionProgressPercent,
   canvasExecutionStageLabel,
-  canvasExecutionStatusLabel,
+  canvasExecutionDisplayStatus,
+  isCanvasExecutionUncertain,
   formatCanvasTaskElapsed,
   isCanvasExecutionActive,
 } from "@/lib/canvas/executionPresentation";
@@ -15,10 +17,15 @@ import type {
   CanvasNodeExecution,
   CanvasOutput,
 } from "@/lib/canvas/types";
-import { useSelectCanvasOutputMutation } from "@/lib/queries/canvases";
+import { canvasQueryKeys, useSelectCanvasOutputMutation } from "@/lib/queries/canvases";
+import { CanvasExecutionFacts } from "./CanvasExecutionFacts";
 import { cn } from "@/lib/utils";
 import { toast } from "@/components/ui/primitives";
 import { InspectorSection } from "./CanvasInspectorFields";
+import { useCanvasStore } from "./CanvasStoreProvider";
+import { savedCanvasProjectionMatches, visibleExecutionFreshness } from "@/lib/canvas/executionHistory";
+import { assetKey, projectCanvasAsset } from "@/lib/canvas/assets";
+import { CanvasPreparationStatus } from "./CanvasPreparationStatus";
 
 export interface CanvasHistoryOutputProps {
   output: CanvasOutput;
@@ -33,20 +40,42 @@ export function CanvasInspectorExecutionHistory({
   document,
   selectedNodeId,
   OutputComponent,
+  renderExecutionTools,
 }: {
   executions: CanvasNodeExecution[];
   document: CanvasDocument;
   selectedNodeId: string;
   OutputComponent: ComponentType<CanvasHistoryOutputProps>;
+  renderExecutionTools?: (execution: CanvasNodeExecution) => ReactNode;
 }) {
+  const graph = useCanvasStore((state) => state.graph);
+  const revision = useCanvasStore((state) => state.revision);
+  const pending = useCanvasStore((state) => state.pendingOperations.length);
+  const assets = useMemo(() => new Map((document.assets ?? []).map((asset) => [assetKey(asset), asset])), [document.assets]);
+  const projectionMatches = useMemo(() => savedCanvasProjectionMatches(document, graph, revision, pending), [document, graph, revision, pending]);
+  const freshness = useMemo(() => new Map(executions.map((execution) => [execution.id,
+    visibleExecutionFreshness(document, graph, revision, pending, execution.id, projectionMatches)])), [document, graph, revision, pending, executions, projectionMatches]);
   const selectOutput = useSelectCanvasOutputMutation(document.id);
+  const queryClient = useQueryClient();
+  const [querying, setQuerying] = useState(false);
+  const queryTaskState = async () => {
+    setQuerying(true);
+    try {
+      await queryClient.refetchQueries(
+        { queryKey: canvasQueryKeys.detail(document.id), exact: true, type: "active" },
+        { throwOnError: true },
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "暂时无法查询任务状态");
+    } finally { setQuerying(false); }
+  };
   const current = document.selections.find(
     (selection) => selection.node_id === selectedNodeId,
   );
   return (
     <InspectorSection title="历史输出">
       <div className="grid gap-2">
-        {executions.map((execution) => (
+        {executions.slice(0, 30).map((execution) => (
           <div
             key={execution.id}
             className="border-b border-[var(--border-subtle)] pb-3 last:border-0"
@@ -60,7 +89,7 @@ export function CanvasInspectorExecutionHistory({
                     : "text-[var(--fg-2)]",
                 )}
               >
-                {canvasExecutionStatusLabel(execution.status)}
+                {canvasExecutionDisplayStatus(execution)}
               </span>
               <span className="type-caption text-[var(--fg-3)]">
                 {execution.created_at
@@ -68,7 +97,10 @@ export function CanvasInspectorExecutionHistory({
                   : ""}
               </span>
             </div>
+            <FreshnessBadge freshness={freshness.get(execution.id)} />
+            {renderExecutionTools?.(execution)}
             <ExecutionTaskDetails execution={execution} />
+            <CanvasExecutionFacts execution={execution} querying={querying} onQuery={() => { void queryTaskState(); }} />
             {execution.error_message ||
             canvasExecutionPrimaryTask(execution)?.error_message ? (
               <p
@@ -87,9 +119,9 @@ export function CanvasInspectorExecutionHistory({
             {execution.outputs.length > 0 ? (
               <div className="mt-2 grid grid-cols-3 gap-2">
                 {execution.outputs.map((output, index) => (
+                  <div key={`${execution.id}:${index}`} className="min-w-0">
                   <OutputComponent
-                    key={`${execution.id}:${index}`}
-                    output={output}
+                    output={projectCanvasAsset(output, assets)}
                     index={index}
                     active={
                       current?.execution_id === execution.id &&
@@ -113,6 +145,8 @@ export function CanvasInspectorExecutionHistory({
                       )
                     }
                   />
+                  <CanvasPreparationStatus canvasId={document.id} asset={assets.get(assetKey({ kind: output.type, asset_id: output.video_id ?? output.image_id ?? "" }))} />
+                  </div>
                 ))}
               </div>
             ) : null}
@@ -121,6 +155,13 @@ export function CanvasInspectorExecutionHistory({
       </div>
     </InspectorSection>
   );
+}
+
+function FreshnessBadge({ freshness }: { freshness?: import("@/lib/canvas/types").CanvasExecutionFreshness }) {
+  const label = freshness?.state === "fresh" ? "与已保存输入一致"
+    : freshness?.state === "stale" ? "输入或上游已改变"
+      : freshness?.reason === "draft_changed" ? "草稿已变化，结果适用性待确认" : "历史适用性未知";
+  return <p className="mt-1 type-caption text-[var(--fg-2)]">{label}</p>;
 }
 
 function ExecutionTaskDetails({
@@ -136,6 +177,12 @@ function ExecutionTaskDetails({
   const stage = canvasExecutionStageLabel(execution);
   const elapsed = formatCanvasTaskElapsed(canvasExecutionElapsedMs(execution));
   const rows = task ? executionTaskRows(task, elapsed) : [];
+  if (isCanvasExecutionUncertain(execution)) {
+    return <details className="mt-2 rounded-[var(--radius-control)] border border-[var(--border-subtle)] px-3 pb-2">
+      <summary className="flex min-h-11 cursor-pointer items-center type-caption text-[var(--fg-2)]">原任务详情</summary>
+      <TaskDetailRows rows={rows} />
+    </details>;
+  }
   return (
     <div className="mt-2 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/56 p-2.5">
       <div className="flex items-center justify-between gap-2">
@@ -181,20 +228,22 @@ function ExecutionTaskDetails({
           <summary className="cursor-pointer type-caption text-[var(--fg-2)]">
             任务详情
           </summary>
-          <dl className="mt-2 grid grid-cols-[68px_minmax(0,1fr)] gap-x-2 gap-y-1.5 type-caption">
-            {rows.map(([label, value]) => (
-              <div key={label} className="contents">
-                <dt className="text-[var(--fg-3)]">{label}</dt>
-                <dd className="min-w-0 break-words text-[var(--fg-1)]">
-                  {value}
-                </dd>
-              </div>
-            ))}
-          </dl>
+          <TaskDetailRows rows={rows} />
         </details>
       ) : null}
     </div>
   );
+}
+
+function TaskDetailRows({ rows }: { rows: Array<[string, string]> }) {
+  return <dl className="mt-2 grid grid-cols-[68px_minmax(0,1fr)] gap-x-2 gap-y-1.5 type-caption">
+    {rows.map(([label, value]) => (
+      <div key={label} className="contents">
+        <dt className="text-[var(--fg-muted-aa)]">{label}</dt>
+        <dd className="min-w-0 break-words text-[var(--fg-1)]">{value}</dd>
+      </div>
+    ))}
+  </dl>;
 }
 
 function executionTaskRows(

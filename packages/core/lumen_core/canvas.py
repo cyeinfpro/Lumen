@@ -38,6 +38,7 @@ from .canvas_schemas import (
     UpdateNodeConfigOperation,
     UpdateNodeMetaOperation,
 )
+from .canvas_snapshot_index import CanvasSnapshotIndex
 from .constants import MAX_PROMPT_CHARS
 from .immutables import immutable_mapping
 
@@ -340,12 +341,17 @@ def _binding_source_matches(
     node_by_id: Mapping[str, Any],
     edges: Sequence[Any],
     selections: Mapping[str, tuple[str | None, int]],
+    text_cache: dict[str, str | None],
 ) -> tuple[bool, str | None]:
     if source.type in {"prompt", "prompt_merge"}:
-        try:
-            resolved = resolve_canvas_text_node(node_by_id, edges, source.id)
-        except CanvasPromptTooLongError:
-            return False, None
+        if source.id not in text_cache:
+            try:
+                text_cache[source.id] = resolve_canvas_text_node(
+                    node_by_id, edges, source.id
+                )
+            except CanvasPromptTooLongError:
+                text_cache[source.id] = None
+        resolved = text_cache[source.id]
         if resolved is None:
             return False, None
         text = resolved.strip() if source.type == "prompt" else resolved
@@ -385,24 +391,19 @@ def canvas_input_snapshot_matches_graph(
     node_id: str,
     input_snapshot: Mapping[str, Any],
     selections: Mapping[str, tuple[str | None, int]],
+    index: CanvasSnapshotIndex | None = None,
 ) -> bool:
-    """Check whether current graph bindings still resolve to a stored input snapshot."""
+    """Check current bindings; a request-local index avoids repeated graph scans."""
 
-    parsed = _graph_model(graph)
-    node_by_id = {node.id: node for node in parsed.nodes}
+    index = index or CanvasSnapshotIndex.build(graph)
+    parsed = index.graph
+    node_by_id = index.nodes
     if node_id not in node_by_id:
         return False
     raw_bindings = input_snapshot.get("bindings")
     if not isinstance(raw_bindings, list):
         return False
-    incoming = sorted(
-        (edge for edge in parsed.edges if edge.target_node_id == node_id),
-        key=lambda edge: (
-            edge.target_handle,
-            int(edge.order or 0),
-            edge.id,
-        ),
-    )
+    incoming = index.incoming.get(node_id, [])
     if len(incoming) != len(raw_bindings):
         return False
 
@@ -423,6 +424,7 @@ def canvas_input_snapshot_matches_graph(
             node_by_id,
             parsed.edges,
             selections,
+            index.text,
         )
         if not matches:
             return False

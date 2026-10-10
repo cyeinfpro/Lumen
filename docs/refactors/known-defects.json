@@ -1,7 +1,7 @@
 {
   "defects": [
     {
-      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
       "id": "P0-01",
       "owner": "track-a-worker",
       "paths": [
@@ -17,7 +17,7 @@
       "summary": "Accepted sidecar jobs can be regenerated and released after poll timeout."
     },
     {
-      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
       "id": "P0-02",
       "owner": "track-a-worker",
       "paths": [
@@ -33,7 +33,7 @@
       "summary": "Succeeded sidecar jobs can be regenerated and released after delivery failure."
     },
     {
-      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
       "id": "P1-01",
       "owner": "track-a-image-job",
       "paths": [
@@ -50,7 +50,7 @@
       "summary": "Image-job cancellation endpoint and typed outcome contract are missing."
     },
     {
-      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
       "id": "P1-02",
       "owner": "track-a-image-job",
       "paths": [
@@ -65,7 +65,7 @@
       "summary": "Retention can clear queued or running jobs."
     },
     {
-      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
       "id": "P1-03",
       "owner": "track-a-worker",
       "paths": [
@@ -79,7 +79,7 @@
       "summary": "Sidecar requests can generate multiple images while only one is delivered."
     },
     {
-      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
       "id": "P1-04",
       "owner": "track-b-canvas",
       "paths": [
@@ -94,7 +94,7 @@
       "summary": "Canvas video submission used a stale service signature."
     },
     {
-      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
       "id": "P1-05",
       "owner": "track-c-realtime",
       "paths": [
@@ -108,7 +108,7 @@
       "summary": "Follower tabs can report recovery complete without a local snapshot."
     },
     {
-      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
       "id": "P1-06",
       "owner": "track-c-realtime",
       "paths": [
@@ -124,7 +124,7 @@
       "summary": "auth_invalidated does not revoke the client session and private state."
     },
     {
-      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
       "id": "P1-07",
       "owner": "track-d-video",
       "paths": [
@@ -139,7 +139,7 @@
       "summary": "Video local state and channels are not scoped by user identity."
     },
     {
-      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
       "id": "P1-08",
       "owner": "lead-ci",
       "paths": [
@@ -154,7 +154,7 @@
       "summary": "Production build inputs could select an empty PR test plan."
     },
     {
-      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
       "id": "P1-09",
       "owner": "lead-release",
       "paths": [
@@ -169,7 +169,7 @@
       "summary": "Migration lint and release tag main ancestry were bypassable."
     },
     {
-      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
       "id": "P1-10",
       "owner": "track-e-updater",
       "paths": [
@@ -185,7 +185,7 @@
       "summary": "Updater committed before final HTTP and compose health proof."
     },
     {
-      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
       "id": "P1-11",
       "owner": "track-e-release",
       "paths": [

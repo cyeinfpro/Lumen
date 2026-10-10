@@ -329,6 +329,7 @@ export function AgentComposer({
     <>
       <div
         ref={rootRef}
+        data-lumen-toast-obstacle
         className={cn(
           "z-[var(--z-composer)] pointer-events-none",
           agentComposerPosition(platform),

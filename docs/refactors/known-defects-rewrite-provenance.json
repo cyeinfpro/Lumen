@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "reason": "Privacy history rewrite on 2026-10-09; references follow the recorded commit mapping. Ancestry and regression-test requirements remain unchanged.",
+  "mapping_sha256": "93b0fd8707cd3d85286506bef19928f0ab48a93a8357a9934a1757854ddb86dc",
+  "verification": "All referenced regression-test blobs and application-source blobs are unchanged. The sole referenced file change is the reviewed forced-push suppression guard in docker-release.yml, preventing historical rewrite pushes from publishing releases.",
+  "defects": [
+    {
+      "id": "P0-01",
+      "previous_fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
+      "changed_referenced_paths": []
+    },
+    {
+      "id": "P0-02",
+      "previous_fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
+      "changed_referenced_paths": []
+    },
+    {
+      "id": "P1-01",
+      "previous_fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
+      "changed_referenced_paths": []
+    },
+    {
+      "id": "P1-02",
+      "previous_fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
+      "changed_referenced_paths": []
+    },
+    {
+      "id": "P1-03",
+      "previous_fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
+      "changed_referenced_paths": []
+    },
+    {
+      "id": "P1-04",
+      "previous_fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
+      "changed_referenced_paths": []
+    },
+    {
+      "id": "P1-05",
+      "previous_fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
+      "changed_referenced_paths": []
+    },
+    {
+      "id": "P1-06",
+      "previous_fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
+      "changed_referenced_paths": []
+    },
+    {
+      "id": "P1-07",
+      "previous_fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
+      "changed_referenced_paths": []
+    },
+    {
+      "id": "P1-08",
+      "previous_fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
+      "changed_referenced_paths": []
+    },
+    {
+      "id": "P1-09",
+      "previous_fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
+      "changed_referenced_paths": [
+        ".github/workflows/docker-release.yml"
+      ]
+    },
+    {
+      "id": "P1-10",
+      "previous_fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
+      "changed_referenced_paths": []
+    },
+    {
+      "id": "P1-11",
+      "previous_fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
+      "fixed_commit": "0224b39fc05d18bea957821a5560deb27d8d821b",
+      "changed_referenced_paths": []
+    }
+  ]
+}

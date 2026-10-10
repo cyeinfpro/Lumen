@@ -210,7 +210,7 @@ async def create_canvas_video_task(
     *,
     body: VideoCreateIn,
     user: User,
-    request: Request,
+    request: Request | None,
     metadata: dict[str, Any],
     active_user_snapshot: ActiveUserSnapshot,
 ) -> CanvasVideoSubmission:
@@ -222,7 +222,7 @@ async def create_canvas_video_task(
             user,
             context=VideoSubmissionContext(
                 request=request,
-                session_id=durable_session_id(request),
+                session_id=durable_session_id(request) if request is not None else None,
                 active_user_snapshot=active_user_snapshot,
                 idempotency_serialized=True,
                 workflow_metadata=metadata,

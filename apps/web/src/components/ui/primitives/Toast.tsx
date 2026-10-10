@@ -5,6 +5,7 @@
 // 默认时长按级别分层；带 action 的通知会保留更久。
 
 import { type ReactNode, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { create } from "zustand";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import {
@@ -17,6 +18,8 @@ import {
 import { cn } from "@/lib/utils";
 import { GESTURE, SPRING, projectMomentum } from "@/lib/motion";
 import { IconButton } from "./IconButton";
+import { usePortalReady } from "./mobile/useModalLayer";
+import { useToastPortal } from "./useToastPortal";
 
 type ToastTone = "success" | "error" | "info" | "warning";
 
@@ -183,9 +186,7 @@ function ToastRow({ item }: { item: ToastItem }) {
         setFocused(false);
       }}
       className={cn(
-        "pointer-events-auto w-[320px] max-w-[calc(100vw-2rem)]",
-        // 移动端撑满可用宽度（已扣掉 viewport 两侧 padding）
-        "max-sm:w-full",
+        "pointer-events-auto w-full shrink-0",
         "surface-panel flex items-start gap-3 px-3 py-2.5 text-[var(--fg-0)] shadow-[var(--shadow-3)]",
         tone.border,
       )}
@@ -215,7 +216,7 @@ function ToastRow({ item }: { item: ToastItem }) {
               item.action?.onClick();
               dismiss(item.id);
             }}
-            className="type-caption mt-1.5 inline-flex items-center justify-center font-medium text-[var(--link-fg)] underline-offset-2 hover:underline max-sm:-ml-2 max-sm:min-h-11 max-sm:min-w-11 max-sm:px-2"
+            className="type-caption mt-1.5 inline-flex min-h-11 min-w-11 items-center justify-center font-medium text-[var(--link-fg)] underline-offset-2 hover:underline max-sm:-ml-2 max-sm:min-h-11 max-sm:min-w-11 max-sm:px-2"
           >
             {item.action.label}
           </button>
@@ -223,7 +224,7 @@ function ToastRow({ item }: { item: ToastItem }) {
       </div>
       <IconButton
         variant="ghost"
-        size="sm"
+        size="lg"
         aria-label="关闭通知"
         onClick={() => dismiss(item.id)}
         className="shrink-0 text-[var(--fg-1)] hover:text-[var(--fg-0)] max-sm:-mr-1"
@@ -284,25 +285,30 @@ function useAutoDismiss(
   }, [dismiss, durationMs, id, paused]);
 }
 
-export function ToastViewport() {
-  const items = useToastStore((s) => s.items);
-  return (
+function ToastPortal({ items }: { items: ToastItem[] }) {
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const host = useToastPortal(viewportRef, items.length > 0);
+  return createPortal(
     <div
-      className={cn(
-        "fixed z-[var(--z-toast)] flex flex-col gap-2",
-        // 桌面：右下角
-        "sm:bottom-4 sm:right-4 sm:items-end",
-        // 移动端：底部居中，留左右 padding；safe-area 避免被 home indicator / composer 挡住
-        "max-sm:left-0 max-sm:right-0 max-sm:items-center max-sm:px-[var(--mobile-page-gutter)]",
-        "max-sm:bottom-[calc(var(--mobile-tabbar-height)+0.75rem)]",
-        "pointer-events-none",
-      )}
+      ref={viewportRef}
+      data-lumen-toast-viewport
+      role="region"
+      aria-label="通知"
+      className="pointer-events-none absolute flex flex-col gap-2 overflow-y-auto overscroll-contain"
+      style={{ visibility: "hidden" }}
     >
       <AnimatePresence initial={false}>
         {items.map((item) => (
           <ToastRow key={item.id} item={item} />
         ))}
       </AnimatePresence>
-    </div>
+    </div>,
+    host,
   );
+}
+
+export function ToastViewport() {
+  const items = useToastStore((s) => s.items);
+  const ready = usePortalReady();
+  return ready ? <ToastPortal items={items} /> : null;
 }

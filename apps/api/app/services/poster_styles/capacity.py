@@ -8,6 +8,7 @@ import secrets
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
+from lumen_core.capacity_leases import maintained_capacity_lease
 
 
 logger = logging.getLogger(__name__)
@@ -129,47 +130,29 @@ class RedisCapacityLease:
     async def hold(self) -> AsyncIterator[None]:
         lease = await self.acquire()
         holder_task = asyncio.current_task()
-        stopped = asyncio.Event()
+        # Shared guard uses bounded renewal RPCs and a confirmed-TTL deadline.
+        # Exceptions/false ownership fail closed, before the safety margin ends.
+        async with maintained_capacity_lease(
+            lease, ttl_seconds=self.ttl_seconds
+        ) as guard:
+            await (
+                guard.assert_owned()
+            )  # Confirm even a delayed acquire acknowledgement.
 
-        async def renew_loop() -> None:
-            interval = max(1.0, self.ttl_seconds / 3)
-            while not stopped.is_set():
-                try:
-                    await asyncio.wait_for(stopped.wait(), timeout=interval)
-                    break
-                except TimeoutError:
-                    try:
-                        renewed = await lease.renew()
-                    except Exception:
-                        # A transient Redis error does not mean the slot is
-                        # gone; keep renewing so a short outage does not
-                        # abort in-flight work.
-                        logger.warning("capacity lease renewal failed; retrying")
-                        continue
-                    if not renewed:
-                        # The slot is no longer ours: another worker may now
-                        # hold it. Interrupt the guarded body (semaphore
-                        # semantics) instead of silently running past the
-                        # lease and breaching the concurrency limit.
-                        stopped.set()
-                        logger.warning(
-                            "capacity lease lost; interrupting guarded work"
-                        )
-                        if holder_task is not None:
-                            holder_task.cancel()
-                        break
+            async def interrupt_on_loss():
+                await guard.wait_lost()
+                if holder_task is not None:
+                    holder_task.cancel()
 
-        renew_task = asyncio.create_task(
-            renew_loop(),
-            name="poster-tagging-capacity-renew",
-        )
-        try:
-            yield
-        finally:
-            stopped.set()
-            renew_task.cancel()
-            await asyncio.gather(renew_task, return_exceptions=True)
-            await lease.release()
+            watcher = asyncio.create_task(
+                interrupt_on_loss(), name="media-capacity-loss"
+            )
+            try:
+                yield
+                await guard.assert_owned()
+            finally:
+                watcher.cancel()
+                await asyncio.gather(watcher, return_exceptions=True)
 
 
 __all__ = [

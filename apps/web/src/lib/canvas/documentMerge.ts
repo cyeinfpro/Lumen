@@ -1,3 +1,4 @@
+import { mergeCanvasAssets } from "./assets.ts";
 import type {
   CanvasDocument,
   CanvasNodeExecution,
@@ -34,12 +35,24 @@ export function mergeCanvasDocumentByRevision(
   current: CanvasDocument | undefined,
   incoming: CanvasDocument,
 ): CanvasDocument {
-  if (!current || incoming.revision > current.revision) return incoming;
+  if (!current) return incoming;
+  if (incoming.revision > current.revision) {
+    return { ...incoming, ...(current.assets || incoming.assets
+      ? { assets: mergeCanvasAssets(current.assets, incoming.assets) } : {}) };
+  }
   if (incoming.revision < current.revision) return current;
   const preserveMissingCurrent =
     compareDocumentProjection(current, incoming) > 0;
   return {
     ...incoming,
+    ...(current.assets || incoming.assets
+      ? { assets: mergeCanvasAssets(current.assets, incoming.assets) } : {}),
+    // A freshness map belongs to its original selection snapshot. Mixing in
+    // newer selections must fail closed until a fresh authoritative GET.
+    ...(incoming.execution_freshness !== undefined ? { execution_freshness: preserveMissingCurrent || current.selections.some((selection) => {
+      const next = incoming.selections.find((item) => item.node_id === selection.node_id);
+      return !next || compareSelectionProjection(selection, next) > 0;
+    }) ? undefined : incoming.execution_freshness } : {}),
     selections: mergeProjectionItems(
       current.selections,
       incoming.selections,

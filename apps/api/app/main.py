@@ -408,11 +408,7 @@ class _NavFeatureGuardMiddleware:
                         return
                     continue
                 raw = values[setting_key]
-                disabled = (
-                    raw != "1"
-                    if feature in {"canvas", "agent"}
-                    else raw == "0"
-                )
+                disabled = raw != "1" if feature in {"canvas", "agent"} else raw == "0"
                 if disabled:
                     response = _feature_disabled_response(feature)
                     await response(scope, receive, send)
@@ -604,6 +600,36 @@ async def lifespan(app: FastAPI):
             await asyncio.gather(image_reconcile_task, return_exceptions=True)
 
         lifecycle.own("image_reconciler", _stop_image_reconciler)
+
+        from .services.video_preparation import video_preparation_loop
+
+        video_prepare_stop = asyncio.Event()
+        video_prepare_task = asyncio.create_task(
+            video_preparation_loop(video_prepare_stop),
+            name="video-metadata-preparation",
+        )
+
+        async def _stop_video_preparation() -> None:
+            video_prepare_stop.set()
+            video_prepare_task.cancel()
+            await asyncio.gather(video_prepare_task, return_exceptions=True)
+
+        lifecycle.own("video_preparation", _stop_video_preparation)
+
+        from .canvas_services.plan_runtime import canvas_plan_dispatch_loop
+
+        canvas_plan_stop = asyncio.Event()
+        canvas_plan_task = asyncio.create_task(
+            canvas_plan_dispatch_loop(canvas_plan_stop),
+            name="canvas-plan-dispatch",
+        )
+
+        async def _stop_canvas_plans() -> None:
+            canvas_plan_stop.set()
+            canvas_plan_task.cancel()
+            await asyncio.gather(canvas_plan_task, return_exceptions=True)
+
+        lifecycle.own("canvas_plan_dispatch", _stop_canvas_plans)
 
         runtime = ApiRuntime(
             _redis=r,

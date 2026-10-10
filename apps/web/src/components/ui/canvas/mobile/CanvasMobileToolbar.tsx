@@ -30,22 +30,25 @@ const MODES: Array<{
 
 export function CanvasMobileToolbar({
   onAdd,
+  onUndo,
+  onRedo,
   onFitView,
   onOpenCommandMenu,
 }: {
   onAdd: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
   onFitView: () => void;
   onOpenCommandMenu: () => void;
 }) {
   const toolMode = useCanvasStore((state) => state.toolMode);
   const setToolMode = useCanvasStore((state) => state.setToolMode);
-  const undo = useCanvasStore((state) => state.undo);
-  const redo = useCanvasStore((state) => state.redo);
   const canUndo = useCanvasStore((state) => state.history.length > 0);
   const canRedo = useCanvasStore((state) => state.future.length > 0);
   const [overflowOpen, setOverflowOpen] = useState(false);
   return (
     <nav
+      data-lumen-toast-obstacle
       aria-label="画布工具"
       className="relative z-[var(--z-tabbar)] w-full shrink-0 border-t border-[var(--border)] bg-[var(--surface-chrome)]/96 pt-1.5 shadow-[var(--shadow-1)] backdrop-blur-xl [scrollbar-width:none] min-[1200px]:hidden [&::-webkit-scrollbar]:hidden"
       style={{
@@ -77,7 +80,7 @@ export function CanvasMobileToolbar({
               onClick={() => {
                 setOverflowOpen(false);
                 blurActiveCanvasEditor();
-                undo();
+                onUndo();
               }}
             >
               <Undo2 className="h-4 w-4" />
@@ -88,7 +91,7 @@ export function CanvasMobileToolbar({
               onClick={() => {
                 setOverflowOpen(false);
                 blurActiveCanvasEditor();
-                redo();
+                onRedo();
               }}
             >
               <Redo2 className="h-4 w-4" />

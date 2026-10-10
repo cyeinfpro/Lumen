@@ -27,6 +27,7 @@ type ModalLayer = {
 };
 
 const activeModalLayers: ModalLayer[] = [];
+const modalLayerListeners = new Set<() => void>();
 const pendingFocusRestoreTimers = new Set<number>();
 const isolatedElements = new Map<
   HTMLElement,
@@ -90,6 +91,23 @@ function syncModalIsolation() {
   }
 }
 
+// Subscribers move owned overlays before isolation, so they never inherit inert
+// from the previous modal (or leave interactive content outside the focus trap).
+function syncModalLayerChange() {
+  restoreModalIsolation();
+  for (const listener of modalLayerListeners) listener();
+  syncModalIsolation();
+}
+
+export function getActiveModalRoot(): HTMLElement | null {
+  return topModalLayer()?.root ?? null;
+}
+
+export function subscribeActiveModalRoot(listener: () => void): () => void {
+  modalLayerListeners.add(listener);
+  return () => { modalLayerListeners.delete(listener); };
+}
+
 function registerModalLayer(layer: ModalLayer) {
   const previousIndex = activeModalLayers.findIndex(
     (candidate) => candidate.id === layer.id,
@@ -97,13 +115,13 @@ function registerModalLayer(layer: ModalLayer) {
   if (previousIndex >= 0) activeModalLayers.splice(previousIndex, 1);
   activeModalLayers.push(layer);
   cancelPendingFocusRestores();
-  syncModalIsolation();
+  syncModalLayerChange();
 }
 
 function unregisterModalLayer(id: symbol) {
   const index = activeModalLayers.findIndex((layer) => layer.id === id);
   if (index >= 0) activeModalLayers.splice(index, 1);
-  syncModalIsolation();
+  syncModalLayerChange();
 }
 
 function topModalLayer(): ModalLayer | null {
@@ -303,6 +321,9 @@ export function useModalLayer<T extends HTMLElement>({
     const onKeyDown = (event: KeyboardEvent) => {
       const currentRoot = rootRef.current;
       if (!currentRoot || !isTopmostModal(currentRoot)) return;
+      // React portal events follow the React tree, not their modal DOM parent.
+      // Trap at document capture too so owned notification actions wrap safely.
+      if (event.key === "Tab") trapModalFocus(event, currentRoot);
       if (
         event.key === "Escape" &&
         !event.isComposing &&
@@ -346,7 +367,7 @@ export function useModalLayer<T extends HTMLElement>({
 
   return useCallback(
     (event: ReactKeyboardEvent<T>) => {
-      if (!isTopmostModal(event.currentTarget)) return;
+      if (event.defaultPrevented || !isTopmostModal(event.currentTarget)) return;
       trapModalFocus(event, rootRef.current);
     },
     [rootRef],

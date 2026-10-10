@@ -29,6 +29,7 @@ import type {
   CanvasViewportApi,
 } from "./CanvasViewportTypes";
 import type { ConnectionDraft } from "@/lib/canvas/types";
+import { recoverCanvasHistoryViewport } from "./canvasHistoryViewportRecovery";
 
 interface UseCanvasViewportActionsOptions {
   cancelledConnectionRef: MutableRefObject<boolean>;
@@ -355,6 +356,9 @@ function createViewportApi({
   viewportRef,
 }: CreateViewportApiOptions): CanvasViewportApi {
   return {
+    recoverHistoryViewport: (before, after, isCurrent) => recoverCanvasHistoryViewport({
+      instance, viewportRef, preferences: viewportPreferencesRef, before, after, isCurrent,
+    }),
     fitView: (options) =>
       fitCanvasViewport(
         instance,

@@ -1,6 +1,7 @@
 import { AlertCircle, CheckCircle2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { canvasNodeExecutionState } from "./CanvasNodesPresentation";
 import { CANVAS_NOTE_MAX_CHARS } from "@/lib/canvas/constants";
 import { CANVAS_NODE_SPECS } from "@/lib/canvas/registry";
 import type { CanvasNodeType } from "@/lib/canvas/types";
@@ -103,18 +104,19 @@ function NodeInputOverview({ data }: { data: CanvasFlowNodeData }) {
   const { definition } = data;
   const spec = CANVAS_NODE_SPECS[definition.type];
   const isAsset = spec.family === "asset";
+  const { running } = canvasNodeExecutionState(data.execution);
   if (isAsset) {
     const selected =
       definition.type === "video_asset"
         ? Boolean(definition.config.video_id)
         : Boolean(definition.config.image_id);
     return (
-      <div className="grid min-h-[112px] place-items-center bg-[var(--surface-media)] p-3 text-center">
+      <div className="grid min-h-[112px] place-items-center bg-[var(--bg-2)] p-3 text-center">
         <div>
           <p className="type-body-sm font-medium text-[var(--fg-1)]">
             {selected ? "素材已就绪" : assetEmptyLabel(definition.type)}
           </p>
-          <p className="mt-1 type-caption text-[var(--fg-3)]">
+          <p className="mt-1 type-caption text-[var(--fg-muted-aa)]">
             {selected
               ? "可连接到兼容的下游节点"
               : "在右侧检查器中上传或填写素材 ID"}
@@ -124,12 +126,14 @@ function NodeInputOverview({ data }: { data: CanvasFlowNodeData }) {
     );
   }
   return (
-    <div className="grid min-h-[112px] content-start gap-2 bg-[var(--surface-media)] p-3">
+    <div className="grid min-h-[112px] content-start gap-2 bg-[var(--bg-2)] p-3">
       <div className="flex items-center justify-between gap-3">
         <span className="type-caption font-medium text-[var(--fg-1)]">
           输入状态
         </span>
-        <span className="type-caption text-[var(--fg-3)]">等待运行</span>
+        <span className="type-caption text-[var(--fg-muted-aa)]" role={running ? "status" : undefined}>
+          {running ? "处理中，结果就绪后显示" : "等待运行"}
+        </span>
       </div>
       <div className="grid gap-1.5">
         {spec.inputs.map((port) => {
@@ -151,7 +155,7 @@ function NodeInputOverview({ data }: { data: CanvasFlowNodeData }) {
                     ? "text-[var(--danger-fg)]"
                     : count > 0
                       ? "text-[var(--success-fg)]"
-                      : "text-[var(--fg-3)]",
+                      : "text-[var(--fg-muted-aa)]",
                 )}
               >
                 {missing ? (
@@ -305,7 +309,7 @@ function TextNodeContent({ data }: { data: CanvasFlowNodeData }) {
         event.stopPropagation();
       }}
       className={cn(
-        "nodrag nopan nowheel nokey block h-24 w-full cursor-text resize-none overflow-y-auto border-0 bg-[var(--bg-2)]/38 p-3 type-body-sm leading-5 text-[var(--fg-1)] outline-none placeholder:text-[var(--fg-3)] focus:bg-[var(--bg-2)]/62 focus:ring-2 focus:ring-inset focus:ring-[var(--accent-soft)]  max-[1199px]:leading-6",
+        "nodrag nopan nowheel nokey block h-24 w-full cursor-text resize-none overflow-y-auto border-0 bg-[var(--bg-2)]/38 p-3 type-body-sm leading-5 text-[var(--fg-1)] outline-none placeholder:text-[var(--fg-muted-aa)] focus:bg-[var(--bg-2)]/62 focus:ring-2 focus:ring-inset focus:ring-[var(--accent-soft)]  max-[1199px]:leading-6",
         editingDisabled &&
           "pointer-events-none cursor-default overflow-hidden bg-transparent",
       )}

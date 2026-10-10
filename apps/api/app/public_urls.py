@@ -138,6 +138,19 @@ async def _configured_public_base_url(db: AsyncSession) -> str | None:
     return _normalize_public_base_url(row)
 
 
+async def resolve_configured_public_base_url(db: AsyncSession) -> str:
+    """Trusted configuration only, including background media submissions."""
+    configured = await _configured_public_base_url(db)
+    if configured and _has_public_hostname(configured):
+        return configured
+    fallback = _normalize_public_base_url(settings.public_base_url)
+    if fallback and _has_public_hostname(fallback):
+        return fallback
+    raise RuntimeError(
+        "PUBLIC_BASE_URL or site.public_base_url is required for upstream media"
+    )
+
+
 async def resolve_public_base_url(
     request: Request,
     db: AsyncSession,
@@ -176,4 +189,5 @@ __all__ = [
     "PUBLIC_BASE_URL_SETTING_KEY",
     "request_public_origin",
     "resolve_public_base_url",
+    "resolve_configured_public_base_url",
 ]

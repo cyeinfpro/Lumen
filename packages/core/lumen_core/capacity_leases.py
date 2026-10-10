@@ -65,6 +65,7 @@ class CapacityLeaseGuard:
             if remaining <= 0:
                 self.mark_lost()
                 raise CapacityLeaseLost("capacity lease expired")
+            renewal_started_at = self._monotonic()
             try:
                 owned = await asyncio.wait_for(
                     self.lease.renew(),
@@ -82,7 +83,8 @@ class CapacityLeaseGuard:
                 raise CapacityLeaseLost("capacity lease ownership changed")
             if self.lost.is_set():
                 raise CapacityLeaseLost("capacity lease was lost")
-            self._last_confirmed_at = self._monotonic()
+            # A delayed Redis response must not extend the server TTL estimate.
+            self._last_confirmed_at = renewal_started_at
 
     async def wait_lost(self) -> None:
         await self.lost.wait()

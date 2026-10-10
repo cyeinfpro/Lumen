@@ -15,7 +15,12 @@ from lumen_core.canvas_models import (
     CanvasRun,
     CanvasRunEvent,
 )
-from lumen_core.models import VideoGeneration
+from lumen_core.models import Generation, VideoGeneration
+from lumen_core.canvas_task_state import canvas_task_recovery
+from lumen_core.canvas_freshness import execution_freshness
+
+from .asset_descriptors import canvas_asset_descriptors
+from .billing_projection import aggregate_task_billing, task_billing_details
 
 from .document_service import get_owned_canvas
 from .document_service import document_dict
@@ -40,6 +45,7 @@ def output_dict(output: dict[str, Any]) -> dict[str, Any]:
     if isinstance(image_id, str) and image_id:
         item["url"] = f"/api/images/{image_id}/binary"
         item["preview_url"] = f"/api/images/{image_id}/variants/preview1024"
+        item["thumb_url"] = f"/api/images/{image_id}/variants/thumb256"
     if isinstance(video_id, str) and video_id:
         item["url"] = f"/api/videos/{video_id}/binary"
         item["poster_url"] = f"/api/videos/{video_id}/poster"
@@ -74,7 +80,7 @@ def execution_task_dict(
 ) -> dict[str, Any]:
     source = owner or task
     progress_pct = getattr(source, "progress_pct", None)
-    if not isinstance(progress_pct, int):
+    if type(progress_pct) is not int or not 0 <= progress_pct <= 100:
         progress_pct = None
     return {
         "id": task.id,
@@ -104,6 +110,8 @@ def execution_task_dict(
         "submit_started_at": getattr(source, "submit_started_at", None),
         "submitted_at": getattr(source, "submitted_at", None),
         "finished_at": getattr(source, "finished_at", None),
+        "cancel_requested_at": getattr(source, "cancel_requested_at", None),
+        "recovery": canvas_task_recovery(owner, task_kind=task.task_kind),
     }
 
 
@@ -143,12 +151,33 @@ async def execution_tasks_by_execution(
         ).scalars()
         video_generations = {row.id: row for row in rows}
 
+    image_generations: dict[str, Generation] = {}
+    generation_ids = [row.generation_id for row in tasks if row.generation_id]
+    if generation_ids:
+        rows = (
+            await db.execute(
+                select(Generation).where(Generation.id.in_(generation_ids))
+            )
+        ).scalars()
+        image_generations = {row.id: row for row in rows}
+    execution_users = {row.id: row.user_id for row in executions}
+    owners = {}
+    for task in tasks:
+        owner = (
+            video_generations.get(task.video_generation_id or "")
+            if task.task_kind == "video_generation"
+            else image_generations.get(task.generation_id or "")
+        )
+        if owner is not None and owner.user_id == execution_users.get(
+            task.execution_id
+        ):
+            owners[task.id] = owner
+    billing = await task_billing_details(db, tasks=tasks, owners=owners)
     details: dict[str, list[dict[str, Any]]] = {}
     for task in tasks:
-        owner = video_generations.get(task.video_generation_id or "")
-        details.setdefault(task.execution_id, []).append(
-            execution_task_dict(task, owner)
-        )
+        detail = execution_task_dict(task, owners.get(task.id))
+        detail["billing"] = billing[task.id]
+        details.setdefault(task.execution_id, []).append(detail)
     return details
 
 
@@ -176,6 +205,7 @@ def execution_dict(
         "started_at": row.started_at,
         "finished_at": row.finished_at,
         "tasks": tasks or [],
+        "billing": aggregate_task_billing(tasks or []),
     }
 
 
@@ -233,6 +263,7 @@ async def canvas_projections(
     canvas_id: str,
     execution_limit: int = 50,
     graph: dict[str, Any] | None = None,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     selections = list(
         (
@@ -313,7 +344,20 @@ async def canvas_projections(
         ).scalars()
     )
     tasks = await execution_tasks_by_execution(db, executions)
+    assets = (
+        await canvas_asset_descriptors(
+            db, user_id=user_id, graph=graph or {}, executions=executions
+        )
+        if user_id is not None
+        else []
+    )
     return {
+        **(
+            execution_freshness(graph, executions, selections)
+            if graph is not None
+            else {}
+        ),
+        "assets": assets,
         "selections": [selection_dict(row) for row in selections],
         "recent_executions": [
             execution_dict(row, tasks.get(row.id)) for row in executions
@@ -333,6 +377,7 @@ async def serialize_canvas_document(
             db,
             canvas_id=canvas.id,
             graph=canvas.graph_jsonb,
+            user_id=canvas.user_id,
         ),
     }
 
@@ -392,9 +437,10 @@ async def get_run_detail(
     tasks = await execution_tasks_by_execution(db, executions)
     return {
         **run_dict(run),
-        "executions": [
-            execution_dict(row, tasks.get(row.id)) for row in executions
-        ],
+        "billing": aggregate_task_billing(
+            [task for details in tasks.values() for task in details]
+        ),
+        "executions": [execution_dict(row, tasks.get(row.id)) for row in executions],
     }
 
 

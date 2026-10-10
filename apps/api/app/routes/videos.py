@@ -78,7 +78,10 @@ from . import video_generation_routes as _video_generation_routes
 from . import video_upload_routes as _video_upload_routes
 
 
+from .video_preparation_routes import router as preparation_router
+
 router = APIRouter()
+router.include_router(preparation_router)
 logger = logging.getLogger(__name__)
 
 _VIDEO_LIST_LIMIT_MAX = 100

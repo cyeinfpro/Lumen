@@ -47,10 +47,12 @@ import {
   useCanvasStoreApi,
 } from "./CanvasStoreProvider";
 import { CanvasTopBar } from "./CanvasTopBar";
+import { CanvasRunPlanDialog } from "./CanvasRunPlanDialog";
 import { CanvasSaveStatus, canvasCanRetrySave } from "./CanvasSaveStatus";
 import type { CanvasViewportApi } from "./CanvasViewport";
 import { CanvasMobileToolbar } from "./mobile/CanvasMobileToolbar";
 import {
+  applyHistory,
   useCanvasFullscreen,
   useCanvasKeyboardShortcuts,
 } from "./CanvasWorkspaceInteractions";
@@ -64,6 +66,18 @@ import {
   useRemoteDocumentSync,
 } from "./CanvasWorkspacePersistence";
 import { useCanvasWorkspaceTools } from "./useCanvasWorkspaceTools";
+import { useCanvasAutoFit } from "./useCanvasAutoFit";
+import {
+  CanvasRunReadinessProvider,
+  useCanvasRunReadiness,
+} from "./CanvasRunReadinessProvider";
+import {
+  assertCanvasRunIntentMatches,
+  canvasActiveNodeIds,
+  canvasUncertainNodeIds,
+  canvasRunBusyReason,
+  canvasRunGraphKey,
+} from "./canvasRunReadiness";
 
 const CanvasViewport = dynamic(
   () => import("./CanvasViewport").then((module) => module.CanvasViewport),
@@ -77,19 +91,9 @@ const CanvasViewport = dynamic(
   },
 );
 
-const ACTIVE_EXECUTION_STATUSES = new Set([
-  "pending",
-  "ready",
-  "queued",
-  "running",
-  "reconciling",
-  "canceling",
-]);
-const AUTO_FIT_NODE_LIMIT = 200;
-
 export function CanvasWorkspace({ canvasId }: { canvasId: string }) {
   const query = useCanvasQuery(canvasId);
-  if (query.isLoading) {
+  if (query.isPending) {
     return (
       <div className="grid h-[100dvh] place-items-center bg-[var(--bg-0)]">
         <Spinner size={24} />
@@ -115,11 +119,13 @@ export function CanvasWorkspace({ canvasId }: { canvasId: string }) {
       graph={query.data.graph}
       revision={query.data.revision}
     >
-      <CanvasWorkspaceInner
-        canvasId={canvasId}
-        document={query.data}
-        onRefetch={() => query.refetch()}
-      />
+      <CanvasRunReadinessProvider document={query.data}>
+        <CanvasWorkspaceInner
+          canvasId={canvasId}
+          document={query.data}
+          onRefetch={() => query.refetch()}
+        />
+      </CanvasRunReadinessProvider>
     </CanvasStoreProvider>
   );
 }
@@ -135,6 +141,7 @@ function CanvasWorkspaceInner({
 }) {
   const router = useRouter();
   const queryClient = useQueryClient();
+  const { setNodeSubmitting } = useCanvasRunReadiness();
   const isMobile = useMediaQuery("(max-width: 767px)") !== false;
   const isCompact = useMediaQuery("(max-width: 1199px)") !== false;
   const store = useCanvasStoreApi();
@@ -161,6 +168,7 @@ function CanvasWorkspaceInner({
     selectedNodeIds.length > 0 || Boolean(selectedEdgeId);
   const [title, setTitle] = useState(document.title);
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [planOpen, setPlanOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [viewportApi, setViewportApi] = useState<CanvasViewportApi | null>(
     null,
@@ -187,16 +195,10 @@ function CanvasWorkspaceInner({
     [document, graph, revision, title],
   );
   const activeNodeIds = useMemo(
-    () =>
-      new Set(
-        document.recent_executions
-          .filter((execution) =>
-            ACTIVE_EXECUTION_STATUSES.has(execution.status),
-          )
-          .map((execution) => execution.node_id),
-      ),
-    [document.recent_executions],
+    () => canvasActiveNodeIds(document),
+    [document],
   );
+  const uncertainNodeIds = useMemo(() => canvasUncertainNodeIds(document), [document]);
   const runningNodeId = resolveRunningNodeId(
     executeNode.isPending,
     executeNode.variables?.nodeId,
@@ -226,7 +228,8 @@ function CanvasWorkspaceInner({
         canvasQueryKeys.detail(canvasId),
         (current) =>
           current && current.revision <= savedRevision
-            ? { ...current, graph: savedGraph, revision: savedRevision }
+            ? { ...current, graph: savedGraph, revision: savedRevision,
+                execution_freshness: undefined, stale_node_ids: undefined }
             : current,
       );
       void queryClient.invalidateQueries({ queryKey: canvasQueryKeys.all });
@@ -270,45 +273,30 @@ function CanvasWorkspaceInner({
       toast.error(error instanceof Error ? error.message : "副本导出失败");
     }
   }, [canvasId, clientId, document.description, store, title]);
-  useEffect(() => {
-    if (
-      !viewportApi ||
-      activeInteractionCount > 0 ||
-      graph.nodes.length > AUTO_FIT_NODE_LIMIT
-    ) {
-      return;
-    }
-    let secondFrame = 0;
-    const firstFrame = window.requestAnimationFrame(() => {
-      secondFrame = window.requestAnimationFrame(() => viewportApi.fitView());
-    });
-    return () => {
-      window.cancelAnimationFrame(firstFrame);
-      if (secondFrame) window.cancelAnimationFrame(secondFrame);
-    };
-  }, [
-    activeInteractionCount,
-    fullscreen,
-    graph.nodes.length,
-    isCompact,
+  useCanvasAutoFit({
+    canvasId,
     viewportApi,
-  ]);
+    nodeCount: graph.nodes.length,
+    fullscreen,
+    compact: isCompact,
+    activeInteractionCount,
+    getState: store.getState,
+  });
 
   const runNode = useCallback(
     async (nodeId: string) => {
-      if (
-        activeNodeIds.has(nodeId) ||
-        submittingNodeIdsRef.current.has(nodeId)
-      ) {
-        toast.error("节点运行中，等待当前任务完成");
+      const busyReason = canvasRunBusyReason(nodeId, activeNodeIds, submittingNodeIdsRef.current, uncertainNodeIds);
+      if (busyReason) {
+        toast.error(busyReason);
         return;
       }
       submittingNodeIdsRef.current.add(nodeId);
+      setNodeSubmitting(nodeId, true);
       try {
-        const validation = validateCanvasNodeExecution(
-          store.getState().graph,
-          nodeId,
-        );
+        blurActiveCanvasEditor();
+        const checkedGraph = store.getState().graph;
+        const checkedGraphKey = canvasRunGraphKey(checkedGraph);
+        const validation = validateCanvasNodeExecution(checkedGraph, nodeId);
         if (!validation.valid) {
           toast.error(validation.reason);
           return;
@@ -353,15 +341,17 @@ function CanvasWorkspaceInner({
           toast.error("画布未保存，暂不能运行");
           return;
         }
+        assertCanvasRunIntentMatches(state.graph, checkedGraphKey);
         await executeNode.mutateAsync({ nodeId, revision: state.revision });
         toast.success("任务已提交");
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "运行失败");
       } finally {
         submittingNodeIdsRef.current.delete(nodeId);
+        setNodeSubmitting(nodeId, false);
       }
     },
-    [activeNodeIds, autosaveRef, executeNode, store],
+    [activeNodeIds, uncertainNodeIds, autosaveRef, executeNode, setNodeSubmitting, store],
   );
 
   const runSelected = useCallback(() => {
@@ -452,6 +442,9 @@ function CanvasWorkspaceInner({
       <CanvasTopBar
         title={title}
         onRename={renameCanvas}
+        onUndo={() => applyHistory(store, viewportApi, "undo")}
+        onRedo={() => applyHistory(store, viewportApi, "redo")}
+        onOpenPlan={() => setPlanOpen(true)}
         onFitView={() => viewportApi?.fitView()}
         onOpenInspector={() => setInspectorOpen(true)}
         onOpenCommandMenu={() => tools.openCommandMenu(null)}
@@ -459,6 +452,8 @@ function CanvasWorkspaceInner({
         onToggleFullscreen={() => void toggleFullscreen()}
         fullscreen={fullscreen}
       />
+      <CanvasRunPlanDialog open={planOpen} canvasId={canvasId} document={document}
+        saveDraft={async () => { await autosaveRef.current?.flush(); }} onClose={() => setPlanOpen(false)} />
       <CanvasSaveStatus
         state={saveState}
         revision={revision}
@@ -563,6 +558,8 @@ function CanvasWorkspaceInner({
           <div className="hidden max-[767px]:contents">
             <CanvasMobileToolbar
               onAdd={() => setPaletteOpen(true)}
+              onUndo={() => applyHistory(store, viewportApi, "undo")}
+              onRedo={() => applyHistory(store, viewportApi, "redo")}
               onFitView={() => viewportApi?.fitView()}
               onOpenCommandMenu={() => tools.openCommandMenu(null)}
             />

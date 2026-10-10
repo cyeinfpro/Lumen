@@ -46,9 +46,8 @@ from ..video_publish import publish_video_queued
 from .errors import video_http_error
 from .options import allow_negative_balance, require_video_create_ready
 from .presentation import generation_out
+from .submission_preflight import validate_provider_submission
 from .reference_media import (
-    HAPPYHORSE_ASPECT_RATIOS,
-    OMNI_FLASH_ASPECT_RATIOS,
     input_image_snapshot as load_input_image_snapshot,
     provider_prefers_public_media_url,
     provider_requires_public_media,
@@ -325,35 +324,6 @@ class _VideoBillingAdmission:
     allow_negative: bool
 
 
-def _validate_provider_aspect_ratio(provider_kind: str, body: VideoCreateIn) -> None:
-    if (
-        provider_kind == "dashscope"
-        and body.action in {"t2v", "reference"}
-        and body.aspect_ratio != "adaptive"
-        and body.aspect_ratio not in HAPPYHORSE_ASPECT_RATIOS
-    ):
-        raise video_http_error(
-            "invalid_aspect_ratio",
-            "aspect_ratio is not available for HappyHorse",
-            422,
-            model=body.model,
-            aspect_ratio=body.aspect_ratio,
-            available_aspect_ratios=list(HAPPYHORSE_ASPECT_RATIOS),
-        )
-    if (
-        provider_kind == "omni_flash"
-        and body.aspect_ratio not in OMNI_FLASH_ASPECT_RATIOS
-    ):
-        raise video_http_error(
-            "invalid_aspect_ratio",
-            "aspect_ratio is not available for Omni Flash",
-            422,
-            model=body.model,
-            aspect_ratio=body.aspect_ratio,
-            available_aspect_ratios=list(OMNI_FLASH_ASPECT_RATIOS),
-        )
-
-
 def _reference_variant_diagnostics(
     input_image_url: str | None,
     reference_snapshots: list[dict[str, Any]],
@@ -426,13 +396,12 @@ async def _prepare_video_billing_admission(
         body,
         reference_media_snapshot,
     )
-    services.reference_validator(
-        provider.kind,
+    validate_provider_submission(
+        provider,
+        body,
         reference_media,
-        model=body.model,
-        upstream_model=upstream_model,
+        reference_validator=services.reference_validator,
     )
-    _validate_provider_aspect_ratio(provider.kind, body)
     billing_model = video_billing_model(body.model, upstream_model)
     pricing_variant = video_pricing_variant(
         body.action,

@@ -1,3 +1,5 @@
+import type { CanvasBillingDetails, CanvasTaskRecovery } from "./generationDetails";
+
 export type CanvasNodeType =
   | "prompt"
   | "prompt_merge"
@@ -106,6 +108,25 @@ export interface CanvasGraph {
   settings: CanvasDocumentSettings;
 }
 
+export type CanvasAssetPreparationState =
+  | "pending" | "preparing" | "ready" | "failed" | "unavailable";
+
+export interface CanvasAssetDescriptor {
+  schema_version: 1;
+  asset_id: string;
+  kind: "image" | "video";
+  source_sha256: string;
+  mime: string;
+  size_bytes: number | null;
+  width: number | null;
+  height: number | null;
+  duration_ms: number | null;
+  preparation_state: CanvasAssetPreparationState;
+  preparation_revision: number | null;
+  updated_at: string | null;
+  locators: { original: string | null; preview: string | null; thumb: string | null };
+}
+
 export interface CanvasOutput {
   type: "image" | "video";
   image_id?: string | null;
@@ -113,6 +134,11 @@ export interface CanvasOutput {
   url?: string | null;
   preview_url?: string | null;
   poster_url?: string | null;
+  thumbnail_url?: string | null;
+  source_sha256?: string | null;
+  preparation_state?: CanvasAssetPreparationState;
+  preparation_revision?: number | null;
+  duration_ms?: number | null;
   width?: number | null;
   height?: number | null;
   label?: string | null;
@@ -122,6 +148,8 @@ export interface CanvasOutput {
 
 export interface CanvasExecutionTaskDetail {
   id: string;
+  recovery?: CanvasTaskRecovery;
+  billing?: CanvasBillingDetails;
   kind: "generation" | "completion" | "video_generation" | string;
   status: string;
   progress_stage: string;
@@ -152,6 +180,7 @@ export interface CanvasExecutionTaskDetail {
 
 export interface CanvasNodeExecution {
   id: string;
+  billing?: CanvasBillingDetails;
   run_id?: string | null;
   node_id: string;
   node_type: CanvasNodeType | string;
@@ -176,6 +205,7 @@ export interface CanvasNodeSelection {
 
 export interface CanvasRun {
   id: string;
+  billing?: CanvasBillingDetails;
   status: CanvasExecutionStatus | "planning" | "paused";
   target_node_ids?: string[];
   last_event_seq?: number;
@@ -183,7 +213,28 @@ export interface CanvasRun {
   updated_at?: string | null;
 }
 
+
+export interface CanvasExecutionFreshness {
+  state: "fresh" | "stale" | "unknown";
+  reason: string | null;
+}
+
+export interface CanvasHistoricalExecution extends CanvasNodeExecution {
+  config_snapshot: Record<string, unknown> | null;
+  input_snapshot: Record<string, unknown> | null;
+  definition_hash: string | null;
+  input_hash: string | null;
+  processor_version: string | null;
+}
+
+export interface CanvasExecutionHistoryPage {
+  items: CanvasHistoricalExecution[];
+  next_cursor: string | null;
+}
+
 export interface CanvasDocument {
+  execution_freshness?: Record<string, CanvasExecutionFreshness>;
+  stale_node_ids?: string[];
   id: string;
   title: string;
   description?: string | null;
@@ -194,6 +245,7 @@ export interface CanvasDocument {
   thumbnail_url?: string | null;
   created_at: string;
   updated_at: string;
+  assets?: CanvasAssetDescriptor[];
   selections: CanvasNodeSelection[];
   recent_executions: CanvasNodeExecution[];
   active_runs: CanvasRun[];
