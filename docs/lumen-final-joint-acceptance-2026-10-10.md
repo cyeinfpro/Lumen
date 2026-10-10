@@ -114,3 +114,32 @@ Original 51 dirty entries remain protected; six unrelated audit artifacts are ex
 Source integration and release must independently pass their remaining gates.
 See lumen-release-scope-2026-10-10.md for the reviewed governance prerequisite,
 exact staging rules and the existing tag-triggered formal release requirements.
+
+## Original-source verification and browser entrypoint correction
+
+The protected original source was CAS-integrated with exactly 230 reviewed
+staged paths; the six unrelated audit artifacts remained unchanged and unstaged.
+Operation 8d9e7fea9ad64cc0a756cf219e3ca950 then passed actual-source version sync/check,
+repository integrity, full Ruff, the real local image and video stub chains,
+1,183 Web unit tests, type-check, lint and production build. Every source and
+staged blob matched the accepted manifest after testing. Commit
+496fb20abd9f486f4d6f56cbbce0cdc0e2fe788d was normally pushed to main.
+
+Inspection during the first main CI identified a collection integration defect: its ordinary seven
+Chromium projects also discovered the dedicated scale/media and native-touch
+specs. The former requires an explicit local video fixture; the latter requires
+touch capability absent from desktop projects. The default configuration now
+excludes only those two dedicated files, while their own configuration explicitly
+opts back in. Per-project ignore rules retain the existing Agent live-test policy.
+Three configuration-contract tests prevent inherited exclusions from silently
+removing dedicated acceptance or ordinary regressions.
+
+Operation 132fdf57089a4bef98d67e3c2f8b13a1 passed 1,186 Web tests, full type-check,
+lint and real Playwright collection checks. The ordinary collection changed
+from 882 to 833 cases: exactly 49 dedicated project mappings were removed,
+with every ordinary case unchanged. Dedicated scale and touch still collect
+exactly six and four cases. Product source, fixture data, browser assertions,
+round counts and effective dedicated workloads were not changed. The earlier
+six-cell timings remain observations of the unchanged product, not a fresh
+measurement under a different test script. Formal release still requires the
+corrected commit's remote CI and the tag-triggered publication to finish.

@@ -3,6 +3,8 @@ import local from "./playwright.lumen-ux-local.config";
 // Dedicated artifacts; no video recording or trace overhead in timing samples.
 export default defineConfig({
   ...local,
+  // Opt in explicitly; the default suite excludes dedicated acceptance files.
+  testIgnore: [],
   testMatch: "**/canvas-scale-performance.spec.ts",
   // Accommodates all repeated actions and artifact capture; no speed SLA.
   timeout: 360_000, retries: 0, workers: 1,

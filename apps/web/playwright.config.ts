@@ -60,9 +60,14 @@ const viewports = [
 ] as const;
 const externalBaseURL = process.env.PLAYWRIGHT_BASE_URL?.trim() || null;
 const fullStackAgentE2E = process.env.AGENT_FULL_STACK_E2E === "1";
+const dedicatedCanvasWorkloads = ["**/canvas-scale-performance.spec.ts", "**/canvas-touch-preview.spec.ts"];
 
 export default defineConfig({
   testDir: "./e2e",
+  // Dedicated scale/media and native-touch acceptance use their own configs.
+  // The ordinary seven-viewport suite has neither their media fixture nor
+  // touch support in every project; keep all other Canvas regressions here.
+  testIgnore: dedicatedCanvasWorkloads,
   fullyParallel: false,
   workers: 1,
   retries: process.env.CI ? 1 : 0,
@@ -78,7 +83,7 @@ export default defineConfig({
   },
   projects: viewports.map((viewport) => ({
     name: viewport.name,
-    testIgnore: fullStackAgentE2E ? [] : ["**/agent-live.spec.ts"],
+    testIgnore: [...dedicatedCanvasWorkloads, ...(fullStackAgentE2E ? [] : ["**/agent-live.spec.ts"])],
     use: {
       viewport: { width: viewport.width, height: viewport.height },
       colorScheme: viewport.colorScheme,
