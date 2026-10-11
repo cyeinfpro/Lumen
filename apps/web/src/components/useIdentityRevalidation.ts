@@ -8,7 +8,12 @@ import {
   clearPreviousUserQueryCache,
   prepareUserIdentityRevalidation,
 } from "@/lib/queries/userScope";
-import { ApiError, type AuthUser } from "@/lib/apiClient";
+import type { AuthUser } from "@/lib/apiClient";
+import {
+  canRetainConfirmedIdentity,
+  isRetryableIdentityError,
+  isUnauthorizedIdentityError,
+} from "@/lib/auth/identityRecoveryPolicy";
 import { resumeSessionClientState } from "@/lib/api/http";
 import { invalidateSessionClientState } from "@/lib/auth/authFailureCoordinator";
 import { isPublicPath } from "@/lib/auth/publicPaths";
@@ -59,29 +64,6 @@ function getIdentityRevalidationRetryDelay(attempt: number): number {
     IDENTITY_REVALIDATION_RETRY_DELAYS_MS.length - 1,
   );
   return IDENTITY_REVALIDATION_RETRY_DELAYS_MS[index] ?? 30_000;
-}
-
-function isUnauthorizedIdentityError(error: unknown): boolean {
-  return error instanceof ApiError && error.status === 401;
-}
-
-function isRetryableIdentityError(error: unknown): boolean {
-  if (isUnauthorizedIdentityError(error)) return false;
-  if (error instanceof Error && error.name === "AbortError") return false;
-  if (!(error instanceof ApiError)) return true;
-  return error.status === 0 || error.status === 408 || error.status === 429 || (error.status >= 500 && error.status <= 599);
-}
-
-function canRetainConfirmedIdentity(
-  error: unknown,
-  currentUserId: string | null,
-  retainedUserId: string | null,
-): currentUserId is string {
-  return (
-    isRetryableIdentityError(error) &&
-    currentUserId !== null &&
-    retainedUserId === currentUserId
-  );
 }
 
 function isAuthUser(value: unknown): value is AuthUser {

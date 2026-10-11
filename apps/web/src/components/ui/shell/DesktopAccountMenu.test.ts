@@ -36,6 +36,10 @@ const identityRevalidationSource = readFileSync(
   new URL("../../useIdentityRevalidation.ts", import.meta.url),
   "utf8",
 );
+const identityRecoveryPolicySource = readFileSync(
+  new URL("../../../lib/auth/identityRecoveryPolicy.ts", import.meta.url),
+  "utf8",
+);
 const taskIslandSource = readFileSync(
   new URL("../tray/TaskIsland.tsx", import.meta.url),
   "utf8",
@@ -193,7 +197,7 @@ function loadIdentityRetryDelay(): (attempt: number) => number {
     "const IDENTITY_REVALIDATION_RETRY_DELAYS_MS",
   );
   const end = identityRevalidationSource.indexOf(
-    "function isUnauthorizedIdentityError",
+    "function isAuthUser",
     start,
   );
   ok(start >= 0 && end > start, "missing identity retry policy");
@@ -230,16 +234,9 @@ function loadIdentityErrorPolicy() {
     }
   }
 
-  const start = identityRevalidationSource.indexOf(
-    "function isUnauthorizedIdentityError",
-  );
-  const end = identityRevalidationSource.indexOf("function isAuthUser", start);
-  ok(start >= 0 && end > start, "missing identity error policy");
+  match(identityRevalidationSource, /from "@\/lib\/auth\/identityRecoveryPolicy"/);
   const output = ts.transpileModule(
-    `${identityRevalidationSource.slice(start, end)}
-module.exports.isUnauthorizedIdentityError = isUnauthorizedIdentityError;
-module.exports.isRetryableIdentityError = isRetryableIdentityError;
-module.exports.canRetainConfirmedIdentity = canRetainConfirmedIdentity;`,
+    identityRecoveryPolicySource,
     {
       compilerOptions: {
         module: ts.ModuleKind.CommonJS,
@@ -259,7 +256,10 @@ module.exports.canRetainConfirmedIdentity = canRetainConfirmedIdentity;`,
     },
   };
   runInNewContext(output, {
-    ApiError: TestApiError,
+    require: (specifier: string) => {
+      equal(specifier, "@/lib/api/errors");
+      return { ApiError: TestApiError };
+    },
     Error,
     module: moduleRecord,
     exports: moduleRecord.exports,
