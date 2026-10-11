@@ -35,6 +35,8 @@ async function fixture(page: Page) {
 }
 const node = (page: Page) => page.locator('.react-flow__node[data-id="image"]');
 const mobile = (page: Page) => (page.viewportSize()?.width ?? 1440) < 768;
+// 768–1199px uses a tablet overlay, not the automatically docked inspector.
+const compactInspector = (page: Page) => (page.viewportSize()?.width ?? 1440) < 1200;
 async function select(page: Page) {
   // This suite tests recovery facts after initial layout, not clicks racing the
   // initial two-frame fit. Wait for the real viewport to leave its identity
@@ -49,9 +51,13 @@ async function select(page: Page) {
 }
 async function openInspector(page: Page) {
   await select(page);
-  if (mobile(page)) await page.getByRole("button", { name: "打开检查器", exact: true }).click();
+  if (compactInspector(page)) {
+    await page.getByRole("button", { name: "打开检查器", exact: true }).click();
+    await expect(page.getByRole("button", { name: "关闭检查器", exact: true })).toBeVisible();
+  }
   const facts = page.getByRole("region", { name: "任务恢复与费用" });
   await expect(facts).toHaveCount(1);
+  await expect(facts).toBeVisible();
   await facts.scrollIntoViewIfNeeded();
   return facts;
 }

@@ -143,3 +143,36 @@ round counts and effective dedicated workloads were not changed. The earlier
 six-cell timings remain observations of the unchanged product, not a fresh
 measurement under a different test script. Formal release still requires the
 corrected commit's remote CI and the tag-triggered publication to finish.
+
+## Narrow output hit targets: real defect and final product rerun
+
+The superseded first CI's retained log also exposed a genuine 320px interaction
+failure: the 44px download control overlapped the center of a short historical
+output thumbnail. Excluding an environment-specific sampler did not fix that
+product defect. A focused real-browser red test independently reproduced failed
+center hit-testing at 320px in 159240aa927c4e11a60f477c9e422f2d; its screenshot
+was visually inspected. The companion 375px attempt failed earlier on initial-fit
+readiness and is not evidence of the same product failure.
+
+Historical output cards now keep the original aspect-ratio selection preview and
+place download in a separate footer. Neither touch target is reduced. A real
+320/375px regression checks DOM hit testing and non-overlapping bounds, selects
+the exact candidate without triggering a download, then actually downloads that
+candidate without changing the selection. It uses real taps in touch projects
+and an unforced mouse click otherwise, with no paid requests or page errors.
+
+Final product gate 780bf992a9884c82af1d72a3a94b4f43 passed in 234.5 seconds:
+15 browser cases across desktop Chromium, touch Chromium and reduced-motion
+WebKit (six narrow output cases plus nine execution-facts cases), all 1,186 Web
+unit tests, full type-check/lint and production build. The final 320px screenshot
+was visually checked. Product code was then frozen for a fresh complete scale
+cohort rather than reusing the previous layout's numbers.
+
+Cohort 7, operation 9c66cfbad28444ac95252741d1990874, passed all six uniform
+Chromium/WebKit 100/500/1,000-node cases from 18:31:45 to 18:50:25 UTC in
+1,119.908 seconds. All 1,036 source entries matched before and after; their
+canonical SHA-256 is 724589b4af26242365f1498a6a87ff12f308bc9f251af5d9d0e9d4c5d983eac3.
+The sampler exited and released port 3127. Its independent distributions and
+terminal evidence are in lumen-canvas-scale-acceptance-2026-10-10.md. Cohort 6
+remains the prior product layout's evidence; no samples are combined. Final source
+promotion, exact-commit CI and formal tag publication remain separate gates.

@@ -7,6 +7,7 @@ function source(path: string) {
 }
 
 const workspaceSource = source("./CanvasWorkspace.tsx");
+const loadStateSource = source("./CanvasLoadState.tsx");
 const workspaceInteractionsSource = source("./CanvasWorkspaceInteractions.ts");
 const workspacePersistenceSource = source("./CanvasWorkspacePersistence.ts");
 const persistenceDomainSource = source("./canvasPersistenceDomain.ts");
@@ -43,6 +44,14 @@ const querySource = source("../../../lib/queries/canvases.ts");
 const apiSource = source("../../../lib/api/canvases.ts");
 const constantsSource = source("../../../lib/canvas/constants.ts");
 const manifestSource = source("../../../app/manifest.ts");
+
+test("canvas loading and error shells retain mobile session recovery with safe-area clearance", () => {
+  match(loadStateSource, /<MobileRuntimeResilienceStatus\s*\/>/);
+  match(loadStateSource, /safe-area-inset-top/);
+  match(loadStateSource, /md:hidden/);
+  match(workspaceSource, /<CanvasLoadState>\s*<Spinner/);
+  match(workspaceSource, /<CanvasLoadState>\s*<ErrorState/);
+});
 
 test("canvas fullscreen is distinct from fit view and keeps portal overlays available", () => {
   match(workspaceInteractionsSource, /document\.documentElement/);

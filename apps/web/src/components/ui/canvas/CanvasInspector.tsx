@@ -645,49 +645,55 @@ function HistoryOutput({
   const visibleSrc = sources[sourceIndex] ?? null;
   return (
     <div
-      style={{ aspectRatio: historyOutputAspectRatio(output) }}
-      className="relative min-h-11 w-full overflow-hidden rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--surface-media)]"
+      data-canvas-output-card
+      className="w-full overflow-hidden rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--surface-media)]"
     >
-      <button
-        type="button"
-        aria-label={`${active ? "当前" : "选择"}第 ${index + 1} 个${output.type === "image" ? "图片" : "视频"}输出`}
-        aria-pressed={active}
-        disabled={active || loading}
-        onClick={onSelect}
-        className="absolute inset-0 h-full w-full disabled:cursor-default"
+      <div
+        style={{ aspectRatio: historyOutputAspectRatio(output) }}
+        className="relative min-h-11 w-full"
       >
-        {visibleSrc ? (
-          // eslint-disable-next-line @next/next/no-img-element -- API-backed execution output.
-          <img
-            src={visibleSrc}
-            alt={`第 ${index + 1} 个${output.type === "image" ? "图片" : "视频"}输出预览`}
-            loading="lazy"
-            decoding="async"
-            className="h-full w-full object-contain"
-            onError={() =>
-              setSourceState({ key: sourceKey, index: sourceIndex + 1 })
-            }
-          />
-        ) : (
-          <span className="grid h-full place-items-center text-[var(--fg-2)]">
-            <Icon className="h-5 w-5" aria-hidden />
-          </span>
-        )}
-        {active ? (
-          <span className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-full bg-[var(--success)] text-[var(--success-on)]">
-            <Check className="h-3 w-3" />
-          </span>
-        ) : loading ? (
-          <span className="absolute inset-0 grid place-items-center bg-[var(--surface-scrim)] text-[var(--media-control-fg)]">
-            <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
-          </span>
-        ) : null}
-      </button>
-      <CanvasOutputDownloadButton
-        output={output}
-        title={`画布输出 ${index + 1}`}
-        className="absolute bottom-1 left-1 z-[var(--z-header)]"
-      />
+        <button
+          type="button"
+          aria-label={`${active ? "当前" : "选择"}第 ${index + 1} 个${output.type === "image" ? "图片" : "视频"}输出`}
+          aria-pressed={active}
+          disabled={active || loading}
+          onClick={onSelect}
+          className="absolute inset-0 h-full w-full disabled:cursor-default"
+        >
+          {visibleSrc ? (
+            // eslint-disable-next-line @next/next/no-img-element -- API-backed execution output.
+            <img
+              src={visibleSrc}
+              alt={`第 ${index + 1} 个${output.type === "image" ? "图片" : "视频"}输出预览`}
+              loading="lazy"
+              decoding="async"
+              className="h-full w-full object-contain"
+              onError={() =>
+                setSourceState({ key: sourceKey, index: sourceIndex + 1 })
+              }
+            />
+          ) : (
+            <span className="grid h-full place-items-center text-[var(--fg-2)]">
+              <Icon className="h-5 w-5" aria-hidden />
+            </span>
+          )}
+          {active ? (
+            <span className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-full bg-[var(--success)] text-[var(--success-on)]">
+              <Check className="h-3 w-3" />
+            </span>
+          ) : loading ? (
+            <span className="absolute inset-0 grid place-items-center bg-[var(--surface-scrim)] text-[var(--media-control-fg)]">
+              <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
+            </span>
+          ) : null}
+        </button>
+      </div>
+      <div className="flex min-h-11 justify-end border-t border-[var(--border)] p-1">
+        <CanvasOutputDownloadButton
+          output={output}
+          title={`画布输出 ${index + 1}`}
+        />
+      </div>
     </div>
   );
 }

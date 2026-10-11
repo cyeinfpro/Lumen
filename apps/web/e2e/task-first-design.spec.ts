@@ -65,12 +65,25 @@ test("studio uses compact editable presets and preserves deliberate submission",
 
 test("studio conversation starters are disclosed without submitting", async ({ page }, testInfo) => {
   await installAgentFixture(page);
-  await page.goto("/");
-  await page.waitForLoadState("networkidle");
-  const welcome = page.locator("[data-studio-welcome]");
+  // Default conversation loading can replace the welcome with a spinner; the
+  // server-selected shell can also be replaced at the live client breakpoint.
+  const [historyResponse] = await Promise.all([
+    page.waitForResponse((response) => response.request().method() === "GET"
+      && new URL(response.url()).pathname === "/api/conversations/studio-conversation-1/messages"
+      && response.ok()),
+    page.goto("/"),
+  ]);
+  expect(await historyResponse.finished()).toBeNull();
+  const shell = page.locator(page.viewportSize()!.width < 768 ? "[data-app-viewport]" : ".studio-shell");
+  const welcome = shell.locator("[data-studio-welcome]");
+  await expect(welcome).toBeVisible();
+  // This control is enabled only after Onboarding hydration and loading finish.
+  await expect(welcome.getByRole("button", { name: "开始创作", exact: true })).toBeEnabled();
   const disclosure = welcome.locator("details");
+  await expect(disclosure).toBeVisible();
   await expect(disclosure).not.toHaveAttribute("open", "");
   const summary = disclosure.locator("summary");
+  await expect(summary).toBeVisible();
   await summary.focus();
   await expect(summary).toBeFocused();
   await summary.press("Space");

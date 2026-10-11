@@ -39,7 +39,10 @@ test("pages: project actions are separate from the row link and failed deletion 
   await page.keyboard.press("Escape");
   await expect(dialog).toBeVisible();
   release?.();
-  await expect(dialog.getByRole("alert")).toContainText("删除结果未确认");
+  // Toasts are portaled into the active dialog; assert the retained inline error.
+  const inlineError = dialog.locator('p[role="alert"]');
+  await expect(inlineError).toBeVisible();
+  await expect(inlineError).toHaveText("删除结果未确认，核对项目状态后重试。");
   await testInfo.attach("project-delete-error", { body: await page.screenshot(), contentType: "image/png" });
   await dialog.getByRole("button", { name: "取消", exact: true }).click();
   await expect(dialog).toHaveCount(0);

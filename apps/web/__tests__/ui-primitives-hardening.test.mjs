@@ -381,7 +381,14 @@ test("runtime resilience exposes compact recovery actions for mobile and desktop
   let snapshot = { session: "degraded" };
   let recoveries = 0;
   let logins = 0;
+  let recoveryState;
   const runtime = loadModule("src/components/RuntimeResilienceStatus.tsx", {
+    react: {
+      useState(initial) {
+        recoveryState ??= initial;
+        return [recoveryState, (next) => { recoveryState = next; }];
+      },
+    },
     "lucide-react": {
       AlertTriangle: "AlertTriangle",
       LogIn: "LogIn",
@@ -415,6 +422,17 @@ test("runtime resilience exposes compact recovery actions for mobile and desktop
   degradedAction.props.onClick();
   assert.equal(recoveries, 1);
   assert.equal(logins, 0);
+
+  snapshot = { session: "revalidating" };
+  const pending = runtime.MobileRuntimeResilienceStatus();
+  const pendingAction = findElement(pending, (node) => node.type === "IconButton");
+  assert.equal(pending.props.role, "status");
+  assert.equal(pending.props["aria-live"], "polite");
+  assert.equal(pendingAction.props["aria-busy"], true);
+  assert.equal(pendingAction.props["aria-disabled"], true);
+  assert.equal(pendingAction.props.disabled, undefined);
+  pendingAction.props.onClick();
+  assert.equal(recoveries, 1);
 
   snapshot = { session: "unauthorized" };
   const unauthorized = runtime.RuntimeResilienceStatus();

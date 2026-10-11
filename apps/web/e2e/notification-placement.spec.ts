@@ -50,6 +50,15 @@ async function expectHitTarget(button: Locator) {
   })).toBe(true);
 }
 
+async function expectEntireNoticeVisible(notice: Locator) {
+  await expect.poll(() => notice.evaluate((element) => {
+    const viewport = element.closest("[data-lumen-toast-viewport]")!.getBoundingClientRect();
+    const row = element.getBoundingClientRect();
+    return row.left >= viewport.left && row.right <= viewport.right &&
+      row.top >= viewport.top && row.bottom <= viewport.bottom;
+  })).toBe(true);
+}
+
 async function expectAbove(notice: Locator, obstacle: Locator) {
   await expect.poll(async () => {
     const [toast, control] = await Promise.all([notice.boundingBox(), obstacle.boundingBox()]);
@@ -172,13 +181,38 @@ test("notifications: real Agent composer growth and a reduced viewport remain un
   await expectAbove(notice, composer);
   const input = composer.locator("textarea").first();
   const initialHeight = (await composer.boundingBox())?.height ?? 0;
-  await input.fill(Array.from({ length: 7 }, (_, index) => `第 ${index + 1} 行保留的草稿内容`).join("\n"));
+  const draft = Array.from({ length: 7 }, (_, index) => `第 ${index + 1} 行保留的草稿内容`).join("\n");
+  await input.fill(draft);
   await expect.poll(async () => (await composer.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(initialHeight);
-  await expectAbove(notice, composer);
+  try {
+    await expectAbove(notice, composer);
+    await expectEntireNoticeVisible(notice);
+    await expectHitTarget(close);
+    await expect(input).toHaveValue(draft);
+    await expect.poll(() => input.evaluate((element) =>
+      element.clientHeight >= 44 && element.scrollHeight > element.clientHeight && getComputedStyle(element).overflowY === "auto",
+    )).toBe(true);
+    await input.evaluate((element) => { element.scrollTop = 0; });
+    await expect.poll(() => input.evaluate((element) => element.scrollTop)).toBe(0);
+    await input.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await expect.poll(() => input.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  } finally {
+    const geometry = await page.evaluate(() => ({
+      viewport: { width: innerWidth, height: innerHeight, visual: window.visualViewport?.height },
+      elements: Array.from(document.querySelectorAll("[data-lumen-toast-host], [data-lumen-toast-viewport], [role=alert], [data-lumen-toast-obstacle], [data-testid=agent-composer], textarea, [aria-label='关闭通知']")).map((el) => ({
+        tag: el.tagName, rect: el.getBoundingClientRect().toJSON(), style: el.getAttribute("style"),
+        className: el.className, maxHeight: getComputedStyle(el).maxHeight,
+      })),
+    }));
+    await writeFile(testInfo.outputPath("notification-composer-growth-geometry.json"), JSON.stringify(geometry, null, 2));
+    await page.screenshot({ path: testInfo.outputPath("notification-composer-growth.png") });
+  }
   await page.setViewportSize({ width: 375, height: 480 });
   await expectAbove(notice, composer);
+  await expectEntireNoticeVisible(notice);
   await expectHitTarget(close);
-  await expect(input).toHaveValue(/第 7 行保留的草稿内容/u);
+  await expect(input).toHaveValue(draft);
+  await expect.poll(async () => (await input.boundingBox())?.height ?? 0).toBe(144);
   await page.screenshot({ path: testInfo.outputPath("notification-composer-375x480.png") });
   await close.click();
   await expect(notice).toHaveCount(0);

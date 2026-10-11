@@ -533,7 +533,12 @@ function AgentComposerInputRow({
         maxLength={10_000}
         aria-label="发送给 Agent"
         placeholder={runActive ? "准备下一轮消息" : "描述目标"}
-        className="max-h-36 min-h-11 min-w-0 flex-1 resize-none overflow-y-auto rounded-[var(--radius-control)] bg-transparent px-2 py-2.5 type-body text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] disabled:opacity-60"
+        className={cn(
+          "max-h-36 min-h-11 min-w-0 flex-1 resize-none overflow-y-auto rounded-[var(--radius-control)] bg-transparent px-2 py-2.5 type-body text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] disabled:opacity-60",
+          // Reserve short-landscape space for navigation, toolbar and a reachable notice.
+          // The draft scrolls internally; normal viewports retain the 144px growth limit.
+          "[@media(orientation:landscape)_and_(max-height:480px)]:max-h-[clamp(44px,calc(100dvh_-_264px),144px)]",
+        )}
       />
       <div ref={settingsAnchorRef}>
         <IconButton

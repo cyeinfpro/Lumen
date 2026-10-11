@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { canvasNode, installScaleFixture } from "./canvas-scale-fixture";
 
 const camera = (page: Page) => page.locator(".react-flow__viewport").getAttribute("style");
-async function focusNode(page: Page, id: string) {
+async function focusNode(page: Page, id: string, centralDrag = true) {
   const close = page.getByRole("button", { name: "关闭检查器", exact: true });
   if (await close.isVisible()) await close.click();
   await page.keyboard.press("Escape");
@@ -16,6 +16,33 @@ async function focusNode(page: Page, id: string) {
   if (await fit.isVisible()) await fit.click();
   else await page.keyboard.press("Shift+2");
   await grip.hover();
+  // Short landscape viewports put the fitted header inside edge auto-pan.
+  // Move the camera with the real pan gesture before measuring a central drag.
+  const view = (await page.locator(".react-flow").boundingBox())!;
+  const box = (await grip.boundingBox())!;
+  const startY = box.y + box.height / 2;
+  if (centralDrag && (startY < view.y + 50 || startY + 35 > view.y + view.height - 50)) {
+    const point = await page.locator(".react-flow__pane").evaluate((pane) => {
+      const r = pane.getBoundingClientRect();
+      for (let y = r.top + 30; y < r.bottom - 70; y += 16) {
+        for (let x = r.left + 30; x < r.right - 30; x += 16) {
+          if (document.elementFromPoint(x, y) === pane) return { x, y };
+        }
+      }
+      throw new Error("No genuine empty pan target");
+    });
+    const deltaY = view.y + view.height / 2 - 17.5 - startY;
+    await page.keyboard.down("Space");
+    await page.mouse.move(point.x, point.y);
+    await page.mouse.down();
+    await page.mouse.move(point.x, point.y + deltaY, { steps: 8 });
+    await page.mouse.up();
+    await page.keyboard.up("Space");
+    await grip.hover();
+    const centered = (await grip.boundingBox())!;
+    expect(centered.y + centered.height / 2 - view.y).toBeGreaterThanOrEqual(50);
+    expect(view.y + view.height - centered.y - centered.height / 2 - 35).toBeGreaterThanOrEqual(50);
+  }
   return grip;
 }
 
@@ -38,7 +65,15 @@ test("initial fit works and repeated real node drags keep the chosen camera", as
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await page.mouse.down();
     await page.mouse.move(box.x + box.width / 2 + 50, box.y + box.height / 2 + 35, { steps: 8 });
+    const duringDrag = await camera(page);
     await page.mouse.up();
+    const afterPointerUp = await camera(page);
+    expect(duringDrag).toBe(transform);
+    expect(afterPointerUp).toBe(transform);
+    await info.attach(`drag-geometry-${round}.json`, { body: JSON.stringify({
+      grip: box, viewport: await page.locator(".react-flow").boundingBox(),
+      transform, duringDrag, afterPointerUp,
+    }, null, 2), contentType: "application/json" });
     await expect.poll(() => fixture.counts.mutations).toBeGreaterThan(mutation);
     await expect.poll(() => fixture.graph.nodes[fixture.anchor]!.position).not.toEqual(original);
     await expect(page.locator("[data-canvas-save-status]")).toContainText("已保存");
@@ -54,4 +89,30 @@ test("initial fit works and repeated real node drags keep the chosen camera", as
   expect(errors).toEqual([]);
   expect(fixture.counts.prohibited).toBe(0);
   await page.screenshot({ path: info.outputPath("drag-camera-preserved.png") });
+});
+
+test("drag completion and undo preserve the camera chosen by edge auto-pan", async ({ page }, info) => {
+  const fixture = await installScaleFixture(page, 100);
+  await page.goto("/projects/canvas/canvas-scale");
+  await expect(canvasNode(page, "n-0")).toBeAttached();
+  const grip = await focusNode(page, "n-" + fixture.anchor, false);
+  const before = structuredClone(fixture.graph.nodes);
+  const initialCamera = await camera(page);
+  const box = (await grip.boundingBox())!;
+  const mutation = fixture.counts.mutations;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 50, box.y + box.height / 2 + 35, { steps: 8 });
+  await page.mouse.up();
+  const completedCamera = await camera(page);
+  if (info.project.name === "phone-landscape-dark") expect(completedCamera).not.toBe(initialCamera);
+  await expect.poll(() => fixture.counts.mutations).toBeGreaterThan(mutation);
+  await expect(page.locator("[data-canvas-save-status]")).toContainText("已保存");
+  await grip.hover();
+  expect(await camera(page)).toBe(completedCamera);
+  await page.keyboard.press("ControlOrMeta+z");
+  await expect.poll(() => fixture.graph.nodes).toEqual(before);
+  await expect(page.locator("[data-canvas-save-status]")).toContainText("已保存");
+  expect(await camera(page)).toBe(completedCamera);
+  expect(fixture.counts.prohibited).toBe(0);
 });

@@ -5,22 +5,24 @@ Date: 2026-10-10. Workspace: 520b06121cc249f7b5c67da858426a77.
 ## Current acceptance status
 
 **Accepted for the stated deterministic real-browser functional workload.**
-The final, frozen-source six-cell matrix passed in Chromium and WebKit at
-100/500/1000 model nodes: 30 navigation samples, 660 measured operation samples,
-60 exact drag-undo resets, and 60 layout-undo visible-node checks. Page errors
-and prohibited/paid requests were zero. All six final screenshots were inspected.
+The latest frozen-source **cohort 7**, after the inspector download-target repair,
+passed all six Chromium/WebKit cases at 100/500/1000 model nodes:
+30 navigation samples, 660 measured operation samples, 60 exact drag-undo
+resets, and 60 layout-undo visible-node checks. Page errors and prohibited/paid
+requests were zero. All six original final screenshots were inspected.
 
 Performance observations and distributions are complete. **No production speed
 SLA or responsiveness certification is claimed.** Measurements use a development
 build, driver/assertion-inclusive timing, virtualization, synthetic local media,
 mocked API/EventSource transport and a shared host with background load. Long
-frames and an 851 ms Chromium LongTask remain visible in the data.
+frames and an 819 ms Chromium LongTask remain visible in cohort 7.
 
-The final product includes the isolated overview-touch protection plus the
-coordinator's undo-visibility and drag-end auto-fit repairs. Earlier failed
-matrices, the generated-output corruption, and the fifth-batch runner timeout
-remain separately labeled and immutable. See the final cohort below for the
-authoritative runner results and current-source measurements.
+The product includes overview-touch protection, undo-visibility and drag-end
+auto-fit repairs, plus separate inspector download footers that preserve preview
+hit targets. Earlier matrices, the generated-output corruption, and the
+fifth-batch runner timeout remain separately labeled and immutable. Cohort 6
+passed its then-frozen source; cohort 7 is the authoritative current-source
+revalidation below. Their performance observations are not pooled.
 
 ## Workload and execution
 
@@ -576,7 +578,10 @@ flag only; they are preserved for audit and must not be used as overall pass/fai
 evidence. Raw JSON, screenshots, full logs, host snapshots and source hashes
 remain under the matching batch-5 paths.
 
-## Final six-cell cohort: accepted
+## Historical cohort 6: accepted on its then-frozen source
+
+The following cohort-6 results are preserved as recorded. Cohort 7 below
+supersedes them for current-source acceptance after the later inspector fix.
 
 Operation `43d91a31e0a7431e8994ba070698dc68` ran
 **17:23:06–17:41:54 UTC**, 1128.25 seconds. Authoritative Playwright JSON records
@@ -763,3 +768,193 @@ Test files:
 The local runner uses existing browser/ffmpeg installations. Do not install
 dependencies, invoke a paid provider, change production data, or publish as part
 of this test task. Release coordination is handled separately.
+
+## Cohort 7: accepted after inspector download-target repair
+
+Operation `9c66cfbad28444ac95252741d1990874` ran
+**18:31:46–18:50:25 UTC**, with a durable command duration of 1,119.908 seconds.
+Authoritative Playwright JSON reports **six passed, zero failed**. Postflight
+also passed, with no listener on port 3127. The serialized heavy-validation
+window was handed back; this task started no further browser tests.
+
+### Reason for revalidation and frozen source
+
+The coordinator reported that default CI unintentionally discovered dedicated
+scale cases using a 320-pixel project. That exposed a separate real inspector
+hit-target defect: a 44-pixel download control overlapped a candidate preview's
+center. The coordinator moved downloads into independent footers and added
+focused 320/375-pixel regressions. Those narrow-viewport cases are separate from
+this matrix; the matrix retains Chromium 1440×900 and WebKit 375×812.
+
+Before this run, the coordinator's operation
+`780bf992a9884c82af1d72a3a94b4f43` reported 15 browser cases passed, including
+preview selection, actual independent downloads and nine generation-facts cases,
+plus 1,186 unit tests, typecheck, lint and production build. These supporting
+gates are not counted as additional performance samples.
+
+The scale spec and fixture remain byte-identical to cohort 6:
+- Spec: `0aac125d1c4b3bd1b482bee6616bcd3f4f009c9f742d06954e8a88783dca274d`
+- Fixture: `298f35bb8ffb77e53b00c5189207010e7aecf0669e0223f1cdf18c98262de788`
+- Dedicated scale config: `2de404f3f4fb1edb9d3f26df47259e285c6cd30559278e89c3f755cba770cc0d`
+- CanvasInspector: `065fcd9a4d4c67a0c9ecf559f3bef786b94ba3ee920d4c95e29b2aabddb005f6`
+- New output-target E2E: `4911b1f4fcb8e3be4cce66b4c7f2092a241bc44514596ea2817c74ac1a8f8247`
+
+The dedicated config explicitly opts into its acceptance file with
+`testIgnore: []`; the default entry excludes dedicated acceptance cases.
+Actual `--list` discovery confirmed exactly two engines and six tests.
+Ten rounds, five loads, one worker, zero retries, the 360-second observation
+budget, original-overview touchscreen selection and all correctness assertions
+were unchanged. WebKit 1000 completed in 242.837 seconds. No action was omitted,
+forced or retried to manufacture a pass.
+
+There were **1,036 source/configuration entries**, all equal before/after and
+rehashed against current files during result validation. Relative to cohort 6,
+the only existing-file changes were CanvasInspector and the two Playwright
+entry configs; additions were the output-target E2E and this cohort's capture
+script. No product, fixture, spec or config was edited during measurement.
+
+Before snapshot file SHA256:
+`d30c77eb06bd8e23fe2a8254b500176eb6df2c295e82539ffc00b2174c9a3ffb`.
+After snapshot file SHA256:
+`841de36ba43e26299dd4703e57c49ff103c118e454eabb6d00e5fdd62020f020`.
+Snapshot file hashes differ because timestamps and comparison metadata differ.
+Sorting each `files` array by path and serializing with
+`json.dumps(entries, sort_keys=True, separators=(',', ':'), ensure_ascii=False)`
+then UTF-8 encoding produced **143,831 identical bytes** and the same canonical
+SHA256 in both snapshots:
+`724589b4af26242365f1498a6a87ff12f308bc9f251af5d9d0e9d4c5d983eac3`.
+Both changed-during and removed-during lists are empty.
+
+### Coverage and interpretation
+
+All six cells completed the same 110 measured actions, five loads, ten exact
+real-keyboard drag resets and ten layout-undo actual visible-node intersections.
+Draft, selection, editor DOM identity, graph/config/output identities, camera,
+mutation acknowledgements, simulated visibility request bounds and native video
+decode/unmount checks remained asserted. Page errors, runner errors and
+prohibited/paid requests were zero.
+
+All six original final PNGs were inspected without adding a cosmetic fit-all.
+Actual post-layout-undo visible-node counts remained 100/414/432 for Chromium
+and 100/328/392 for WebKit. Dense graph edges and media nodes remained visible;
+large graphs were cropped at the documented minimum zoom. Model node counts
+must not be mistaken for simultaneously rendered DOM counts.
+
+The following observations are **cohort 7 only**. Main elapsed groups have ten
+samples and nearest-rank p50/p95, so p95 is the largest observed sample. First
+video decode has one sample, repeated decode nine; the four warm-reload median
+is the ordinary median. Raw observations and full min/p50/p95/max, frame and
+LongTask distributions remain available in JSON/CSV. No speed threshold is used.
+
+### Cohort 7 navigation observations (ms)
+
+| Engine | Nodes | Fresh context | Four warm reloads | Warm median | Runner duration ms |
+| --- | ---: | ---: | --- | ---: | ---: |
+| ux-desktop-light | 100 | 4392 | 1822, 1840, 1823, 1768 | 1822.5 | 154977 |
+| ux-desktop-light | 500 | 2198 | 2018, 2201, 2144, 1796 | 2081 | 174970 |
+| ux-desktop-light | 1000 | 2973 | 2383, 2848, 2824, 2880 | 2836 | 207001 |
+| ux-webkit-reduced | 100 | 2893 | 2316, 1650, 1948, 1713 | 1830.5 | 102613 |
+| ux-webkit-reduced | 500 | 3527 | 3374, 3298, 3599, 3596 | 3485 | 189861 |
+| ux-webkit-reduced | 1000 | 5487 | 5801, 5876, 5428, 5789 | 5795 | 242837 |
+
+### Cohort 7 ux-desktop-light: elapsed p50 / p95 (ms)
+
+| Action | 100 | 500 | 1000 |
+| --- | ---: | ---: | ---: |
+| fit-all | 240.6 / 533.3 | 520.1 / 1130.1 | 553.1 / 1117.4 |
+| select | 298.9 / 556.2 | 412.9 / 624.0 | 424.5 / 551.3 |
+| inspector | 301.7 / 456.4 | 438.7 / 670.8 | 733.0 / 892.2 |
+| output-selection | 514.7 / 813.8 | 983.7 / 1120.3 | 1037.7 / 1301.1 |
+| drag | 1192.1 / 1412.9 | 1335.9 / 1489.0 | 1675.2 / 1724.9 |
+| pan | 1243.1 / 1463.5 | 1170.8 / 1407.1 | 1388.6 / 1700.2 |
+| zoom | 517.8 / 889.3 | 569.4 / 714.8 | 533.9 / 652.9 |
+| sse-burst-32 | 198.5 / 304.7 | 253.5 / 346.6 | 276.6 / 402.4 |
+| snapshot-gap-burst | 198.8 / 277.1 | 184.3 / 341.9 | 271.7 / 402.9 |
+| video-first-decode | 792.9 / 792.9 | 437.8 / 437.8 | 614.7 / 614.7 |
+| video-repeat-decode | 402.1 / 636.6 | 517.2 / 727.2 | 610.1 / 711.0 |
+| layout-all | 1168.7 / 2120.5 | 1166.4 / 1360.0 | 1330.2 / 2277.8 |
+
+### Cohort 7 ux-webkit-reduced: elapsed p50 / p95 (ms)
+
+| Action | 100 | 500 | 1000 |
+| --- | ---: | ---: | ---: |
+| fit-all | 387.0 / 414.0 | 1210.0 / 1679.0 | 1014.0 / 2812.0 |
+| select | 327.0 / 395.0 | 870.0 / 990.0 | 1051.0 / 1959.0 |
+| inspector | 349.0 / 639.0 | 991.0 / 1799.0 | 1253.0 / 2138.0 |
+| output-selection | 253.0 / 292.0 | 574.0 / 612.0 | 722.0 / 799.0 |
+| drag | 129.0 / 146.0 | 244.0 / 262.0 | 449.0 / 493.0 |
+| pan | 65.0 / 79.0 | 112.0 / 124.0 | 195.0 / 273.0 |
+| zoom | 49.0 / 57.0 | 75.0 / 114.0 | 52.0 / 66.0 |
+| sse-burst-32 | 148.0 / 150.0 | 149.0 / 178.0 | 149.0 / 156.0 |
+| snapshot-gap-burst | 148.0 / 160.0 | 148.0 / 185.0 | 148.0 / 166.0 |
+| video-first-decode | 315.0 / 315.0 | 295.0 / 295.0 | 281.0 / 281.0 |
+| video-repeat-decode | 235.0 / 272.0 | 244.0 / 273.0 | 250.0 / 263.0 |
+| layout-all | 1066.0 / 1142.0 | 1296.0 / 1371.0 | 1579.0 / 2082.0 |
+
+### Cohort 7 observed frame tails and DOM workload
+
+| Engine | Model nodes/edges | Fit-all DOM nodes/edges range | Drag frame p50 / p95 / max ms | Layout frame p50 / p95 / max ms | Largest available LongTask ms |
+| --- | --- | --- | --- | --- | --- |
+| ux-desktop-light | 100/66 | 100–100 / 66–66 | 83.3 / 133.4 / 166.7 | 83.4 / 133.4 / 183.3 | 251 |
+| ux-desktop-light | 500/333 | 306–414 / 242–278 | 83.3 / 133.4 / 166.6 | 83.3 / 166.7 / 233.3 | 766 |
+| ux-desktop-light | 1000/666 | 324–432 / 253–325 | 100.0 / 149.9 / 200.0 | 100.0 / 183.4 / 550.0 | 819 |
+| ux-webkit-reduced | 100/66 | 100–100 / 66–66 | 17.0 / 31.0 / 43.0 | 17.0 / 91.0 / 163.0 | unsupported |
+| ux-webkit-reduced | 500/333 | 328–328 / 261–261 | 17.0 / 79.0 / 85.0 | 17.0 / 143.0 / 211.0 | unsupported |
+| ux-webkit-reduced | 1000/666 | 392–392 / 318–318 | 26.0 / 161.0 / 185.0 | 17.0 / 150.0 / 329.0 | unsupported |
+
+### Cohort 7 environment and limitations
+
+Browser/host versions and viewports remained unchanged: Chromium 153.0.8010.12
+at 1440×900/light; WebKit 26.5 at 375×812/dark, mobile context and reduced motion;
+Playwright 1.62.1, Next.js 16.3.8 dev webpack, Node v22.22.0, Apple M1 Max with
+10 logical CPUs and 32 GiB, Darwin 25.3.0 arm64. Loaded-page telemetry confirms
+DPR 1 and configured inner/visual viewport dimensions. No CPU throttle was used.
+
+Before/after load was **6.29/6.58/6.39 → 5.73/5.70/5.73**;
+memory_pressure free was **63% → 61%**. Background fseventsd measured
+104.8% → 105.1% CPU; Python families, WindowServer and other resident services
+also consumed CPU. The preflight includes resident Lightroom at 2.1% CPU.
+Only command families are recorded, not secret-bearing arguments. This is a
+shared host, not an idle dedicated performance machine.
+
+Over the measurement interval, vm_stat swap-ins rose by 16 16-KiB pages
+(0.25 MiB), swap-outs by zero, and compressor occupancy by 52,842 pages
+(about 825.66 MiB). Historical totals are not presented as interval activity.
+The earlier unrelated process cleanup happened before older cohorts and is not
+evidence of product optimization.
+
+The largest available Chromium LongTask was 819 ms; Chromium 1000 layout frame
+maximum was 550 ms. WebKit's LongTask API is unsupported, not measured as zero.
+These tails warrant separate production-build profiling on a controlled host
+if a responsiveness target is required. Differences from cohort 6 cannot be
+attributed to the footer change or claimed as a performance improvement.
+
+Times include Playwright driver/actionability/assertion polling and two rAFs;
+layout also includes persistence acknowledgement. Fresh context is not OS/server
+cold cache; intercepted routing disables HTTP cache. API/EventSource transport
+remains fixture-backed, hidden visibility is an in-browser event simulation,
+and media consists of repeated local PNG/one-second MP4. Selection on WebKit
+uses actual touchscreen taps; drag/pan remain mouse and zoom controls/keyboard.
+Physical-phone touch-drag, pinch, thermal and OS-background behavior are outside
+this acceptance. All earlier failures, including the unsuppressed historical
+ResizeObserver error, remain retained; it did not recur in this cohort.
+
+### Cohort 7 authoritative evidence
+
+All paths below are within `tmp/lumen-core-ui-joint/`:
+- `scale-runner-7.json`, `scale-formal-7.log` and `scale-formal-artifacts-7/`
+- `scale-formal-7-discovery.log`: the actual six-test discovery
+- `scale-results-7/`: six raw JSONs and original PNGs
+- `scale-results-7-runner-summary.json` and
+  `scale-results-7-runner-distributions.csv`: runner-linked distributions
+- `scale-final-facts-7.json`, SHA256
+  `38b8463863977d3ffae4e0aa5d6292598caaa7cb8a0b61e78122cf3e81d072c9`
+- `scale-final-tables-7.md` and `scale-final-screenshot-review-7.json`
+- `scale-source-before-7.json`, `scale-source-after-7.json`
+- `scale-pressure-7-before.json`, `scale-pressure-7-after.json`
+- `scale-formal-7-preflight.log`, `scale-formal-7-postflight.log`
+- `scale-final-source-evidence-manifest-20261010-cohort7.json`: current source,
+  this report and retained evidence index; the cohort-6 index remains unchanged
+
+Local functional acceptance is complete for this stated workload. Release and
+deployment claims remain the coordinator's separate responsibility.

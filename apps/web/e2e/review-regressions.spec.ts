@@ -105,7 +105,10 @@ test("review: prompt deletion names the target and retains a failed actionable c
   expect(deletes).toBe(0);
   await page.getByRole("button", { name: "删除", exact: true }).click();
   await dialog.getByRole("button", { name: "删除", exact: true }).click();
-  await expect(dialog.getByRole("alert")).toBeVisible();
+  // A dialog-owned toast may coexist; the confirmation must retain its own error.
+  const inlineError = dialog.locator('p[role="alert"]');
+  await expect(inlineError).toBeVisible();
+  await expect(inlineError).toHaveText("操作结果未确认，核对对象状态后重试。");
   expect(deletes).toBe(1);
   await expect(dialog.getByRole("button", { name: "删除", exact: true })).toBeEnabled();
   await capture(page, testInfo, "prompt-delete-error");

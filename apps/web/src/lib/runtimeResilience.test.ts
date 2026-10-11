@@ -244,14 +244,17 @@ test("runtime recovery stays actionable without covering mobile controls", () =>
   doesNotMatch(source, /top-\[calc\(var\(--mobile-topbar-h\)/);
   match(source, /export function MobileRuntimeResilienceStatus\(\)/);
   match(source, /data-runtime-resilience-status="mobile"/);
-  match(source, /aria-live="assertive"/);
+  match(source, /aria-live=\{revalidating \? "polite" : "assertive"\}/);
+  match(source, /revalidating: requested && status === "revalidating"/);
+  match(source, /aria-busy=\{revalidating \|\| undefined\}/);
+  match(source, /aria-disabled=\{revalidating \|\| undefined\}/);
   match(source, /aria-label=\{accessibleLabel\}/);
   match(mobileTopBar, /<MobileRuntimeResilienceStatus \/>/);
   match(canvasTopBar, /<MobileRuntimeResilienceStatus \/>/);
   match(videoControls, /<MobileRuntimeResilienceStatus \/>/);
   match(
     source,
-    /if \(!unauthorized && !sessionDegraded\) return null;/,
+    /if \(!unauthorized && !sessionDegraded && !revalidating\) return null;/,
   );
   doesNotMatch(
     source,

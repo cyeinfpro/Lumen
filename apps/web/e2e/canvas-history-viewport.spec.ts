@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { canvasNode, installScaleFixture } from "./canvas-scale-fixture";
 
 async function visibleNodes(page: Page) {
@@ -11,11 +11,15 @@ async function visibleNodes(page: Page) {
     }).length;
   });
 }
-async function toolbarHistory(page: Page, name: "撤销" | "重做") {
+async function activateHistoryControl(control: Locator, hasTouch: boolean) {
+  if (hasTouch) await control.tap();
+  else await control.click();
+}
+async function toolbarHistory(page: Page, name: "撤销" | "重做", hasTouch: boolean) {
   const desktop = page.getByRole("button", { name, exact: true });
-  if (await desktop.isVisible()) { await desktop.click(); return; }
-  await page.getByRole("button", { name: "更多画布操作", exact: true }).tap();
-  await page.getByRole("menuitem", { name, exact: true }).tap();
+  if (await desktop.isVisible()) { await activateHistoryControl(desktop, hasTouch); return; }
+  await activateHistoryControl(page.getByRole("button", { name: "更多画布操作", exact: true }), hasTouch);
+  await activateHistoryControl(page.getByRole("menuitem", { name, exact: true }), hasTouch);
 }
 const positions = (nodes: Array<{ id: string; position: { x: number; y: number } }>) =>
   nodes.map((node) => ({ id: node.id, ...node.position }));
@@ -40,10 +44,10 @@ test("layout undo and redo retain saved geometry without stranding the camera", 
   await expect.poll(() => positions(fixture.graph.nodes)).toEqual(laidOut);
   await expect(page.locator("[data-canvas-save-status]")).toContainText("已保存");
   await expect.poll(() => visibleNodes(page)).toBeGreaterThan(0);
-  await toolbarHistory(page, "撤销");
+  await toolbarHistory(page, "撤销", info.project.use.hasTouch === true);
   await expect.poll(() => positions(fixture.graph.nodes)).toEqual(initial);
   await expect.poll(() => visibleNodes(page)).toBeGreaterThan(0);
-  await toolbarHistory(page, "重做");
+  await toolbarHistory(page, "重做", info.project.use.hasTouch === true);
   await expect.poll(() => positions(fixture.graph.nodes)).toEqual(laidOut);
   await expect(page.locator("[data-canvas-save-status]")).toContainText("已保存");
   await expect.poll(() => visibleNodes(page)).toBeGreaterThan(0);

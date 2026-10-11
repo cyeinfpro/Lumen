@@ -6,6 +6,8 @@ const NOW = "2026-10-10T13:00:00Z";
 const CANVAS = "canvas-history-review";
 const CURSOR = "opaque+history|cursor&2";
 const mobile = (page: Page) => (page.viewportSize()?.width ?? 1440) < 768;
+// The tablet inspector is also an explicit overlay; only >=1200px docks it.
+const compactInspector = (page: Page) => (page.viewportSize()?.width ?? 1440) < 1200;
 const node = (page: Page, id: string) => page.locator('.react-flow__node[data-id="' + id + '"]');
 
 function initialGraph(): CanvasGraph {
@@ -99,10 +101,18 @@ async function fixture(page: Page) {
 async function openInspector(page: Page, id = "target") {
   await expect(node(page, id)).toBeVisible();
   await node(page, id).locator("header").click({ position: { x: 20, y: 12 } });
-  if (mobile(page)) await page.getByRole("button", { name: "打开检查器", exact: true }).click();
+  await expect(node(page, id)).toHaveClass(/selected/);
+  if (compactInspector(page)) {
+    await page.getByRole("button", { name: "打开检查器", exact: true }).click();
+    await expect(page.getByRole("button", { name: "关闭检查器", exact: true })).toBeVisible();
+  }
 }
-async function closeMobileInspector(page: Page) {
-  if (mobile(page)) await page.getByRole("button", { name: "关闭检查器", exact: true }).click();
+async function closeCompactInspector(page: Page) {
+  if (compactInspector(page)) {
+    const close = page.getByRole("button", { name: "关闭检查器", exact: true });
+    await close.click();
+    await expect(close).toHaveCount(0);
+  }
 }
 async function openHistory(page: Page) {
   await openInspector(page);
@@ -134,7 +144,7 @@ test("real history keeps A/B across bounded pages and failed-page retry; changin
   expect(control.requests.every((request) => request.limit === "30" && request.nodeId === "target")).toBe(true);
   expect(control.requests.map((request) => request.cursor)).toEqual([null, CURSOR, CURSOR, null]);
   await info.attach("history-immutable-cross-page-comparison", { body: await page.screenshot(), contentType: "image/png" });
-  await closeMobileInspector(page); await openInspector(page, "source");
+  await closeCompactInspector(page); await openInspector(page, "source");
   await expect(page.getByRole("region", { name: "历史 A/B 比较" })).toHaveCount(0);
   expect(control.paid).toHaveLength(0);
 });
@@ -157,7 +167,7 @@ test("real historical branch saves exact pins and literals in one transaction; u
   const pinned = addedEdges.find((edge) => edge.binding_mode === "pinned") as CanvasEdgeDefinition;
   expect(pinned.source_node_id).toBe("source"); expect(pinned.pinned_execution_id).toBe("SAVED-source-execution"); expect(pinned.pinned_output_index).toBe(2);
   await expect.poll(() => control.graph.nodes.length).toBe(originalCount + 3);
-  await closeMobileInspector(page);
+  await closeCompactInspector(page);
   if (mobile(page)) {
     await page.getByRole("button", { name: "更多画布操作", exact: true }).click();
     await page.getByRole("menuitem", { name: "撤销", exact: true }).click();

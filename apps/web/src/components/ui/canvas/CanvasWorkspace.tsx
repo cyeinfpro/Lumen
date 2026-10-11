@@ -37,6 +37,7 @@ import {
 } from "@/components/ui/primitives";
 import { BottomSheet } from "@/components/ui/primitives/mobile";
 import { CanvasCommandMenu } from "./CanvasCommandMenu";
+import { CanvasLoadState } from "./CanvasLoadState";
 import { CanvasInspectorSurfaces } from "./CanvasInspectorSurfaces";
 import { CanvasNodePalette } from "./CanvasNodePalette";
 import { CanvasSelectionToolbar } from "./CanvasSelectionToolbar";
@@ -95,14 +96,14 @@ export function CanvasWorkspace({ canvasId }: { canvasId: string }) {
   const query = useCanvasQuery(canvasId);
   if (query.isPending) {
     return (
-      <div className="grid h-[100dvh] place-items-center bg-[var(--bg-0)]">
+      <CanvasLoadState>
         <Spinner size={24} />
-      </div>
+      </CanvasLoadState>
     );
   }
   if (query.isError || !query.data) {
     return (
-      <div className="grid h-[100dvh] place-items-center bg-[var(--bg-0)] px-6">
+      <CanvasLoadState>
         <ErrorState
           title="画布加载失败"
           description={
@@ -110,7 +111,7 @@ export function CanvasWorkspace({ canvasId }: { canvasId: string }) {
           }
           onRetry={() => query.refetch()}
         />
-      </div>
+      </CanvasLoadState>
     );
   }
   return (

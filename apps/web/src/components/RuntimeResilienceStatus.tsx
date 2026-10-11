@@ -1,6 +1,7 @@
 "use client";
 
 import { AlertTriangle, LogIn, RefreshCw } from "lucide-react";
+import { useState } from "react";
 
 import { replaceWithLogin } from "@/lib/auth/navigation";
 import {
@@ -17,32 +18,46 @@ function runtimeStatusMessage(status: RuntimeResilienceSnapshot): string {
   if (status.session === "degraded") {
     return "会话验证暂不可用";
   }
+  if (status.session === "revalidating") {
+    return "正在验证会话";
+  }
   return "";
 }
 
-function recoverRuntimeSession(unauthorized: boolean) {
-  if (unauthorized) {
-    replaceWithLogin();
-    return;
+function useSessionRecovery(status: RuntimeResilienceSnapshot["session"]) {
+  const [recovery, setRecovery] = useState({ requested: false, status });
+  if (recovery.status !== status) {
+    setRecovery({ requested: recovery.requested && status === "revalidating", status });
   }
-  requestRuntimeRecovery();
+  const requested = recovery.requested;
+  return {
+    // Initial/background verification stays quiet; explicit recovery retains focus.
+    revalidating: requested && status === "revalidating",
+    recover: () => {
+      if (status === "revalidating") return;
+      if (status === "unauthorized") { replaceWithLogin(); return; }
+      setRecovery({ requested: true, status });
+      requestRuntimeRecovery();
+    },
+  };
 }
 
 export function RuntimeResilienceStatus() {
   const status = useRuntimeResilience();
   const unauthorized = status.session === "unauthorized";
   const sessionDegraded = status.session === "degraded";
-  if (!unauthorized && !sessionDegraded) return null;
+  const { revalidating, recover } = useSessionRecovery(status.session);
+  if (!unauthorized && !sessionDegraded && !revalidating) return null;
 
   const message = runtimeStatusMessage(status);
   const Icon = unauthorized ? LogIn : AlertTriangle;
   const ActionIcon = unauthorized ? LogIn : RefreshCw;
-  const actionLabel = unauthorized ? "登录" : "重新验证会话";
+  const actionLabel = revalidating ? "验证中，请稍候" : unauthorized ? "登录" : "重新验证会话";
 
   return (
     <div
-      role="alert"
-      aria-live="assertive"
+      role={revalidating ? "status" : "alert"}
+      aria-live={revalidating ? "polite" : "assertive"}
       aria-atomic="true"
       data-runtime-resilience-status="desktop"
       className="pointer-events-none fixed bottom-4 right-4 z-[var(--z-toast)] hidden max-w-[min(20rem,calc(100vw-2rem))] md:block"
@@ -60,7 +75,9 @@ export function RuntimeResilienceStatus() {
         <IconButton
           size="sm"
           variant="ghost"
-          onClick={() => recoverRuntimeSession(unauthorized)}
+          onClick={recover}
+          aria-busy={revalidating || undefined}
+          aria-disabled={revalidating || undefined}
           aria-label={actionLabel}
           title={actionLabel}
           tooltip={actionLabel}
@@ -77,17 +94,18 @@ export function MobileRuntimeResilienceStatus() {
   const status = useRuntimeResilience();
   const unauthorized = status.session === "unauthorized";
   const sessionDegraded = status.session === "degraded";
-  if (!unauthorized && !sessionDegraded) return null;
+  const { revalidating, recover } = useSessionRecovery(status.session);
+  if (!unauthorized && !sessionDegraded && !revalidating) return null;
 
   const message = runtimeStatusMessage(status);
-  const Icon = unauthorized ? LogIn : AlertTriangle;
-  const actionLabel = unauthorized ? "登录" : "重新验证会话";
+  const Icon = revalidating ? RefreshCw : unauthorized ? LogIn : AlertTriangle;
+  const actionLabel = revalidating ? "验证中，请稍候" : unauthorized ? "登录" : "重新验证会话";
   const accessibleLabel = `${message}，${actionLabel}`;
 
   return (
     <div
-      role="alert"
-      aria-live="assertive"
+      role={revalidating ? "status" : "alert"}
+      aria-live={revalidating ? "polite" : "assertive"}
       aria-atomic="true"
       data-runtime-resilience-status="mobile"
       className="flex shrink-0"
@@ -96,7 +114,9 @@ export function MobileRuntimeResilienceStatus() {
       <IconButton
         size="md"
         variant="ghost"
-        onClick={() => recoverRuntimeSession(unauthorized)}
+        onClick={recover}
+        aria-busy={revalidating || undefined}
+        aria-disabled={revalidating || undefined}
         aria-label={accessibleLabel}
         title={accessibleLabel}
         tooltip={accessibleLabel}

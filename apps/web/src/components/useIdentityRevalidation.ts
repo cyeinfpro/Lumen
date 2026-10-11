@@ -437,7 +437,9 @@ export function useIdentityRevalidation({
         currentUserId,
         queryData?.id,
       );
-      if (!retainedUserId && !queryData && !queryError) return;
+      // Fail-closed cleanup resets the query's data/error. Keep the handled
+      // failure as evidence that this is recovery, not an untouched bootstrap.
+      if (!retainedUserId && !queryData && !queryError && state.handledError === null) return;
 
       state.generation += 1;
       const generation = state.generation;

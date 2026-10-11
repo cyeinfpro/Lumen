@@ -128,7 +128,7 @@ for (const runtimeStatus of ["degraded", "unauthorized"] as const) {
         : "会话已失效，登录";
     for (const routePath of ["/video", "/projects/canvas/canvas-1"]) {
       const routePage = routePath === "/video" ? page : await page.context().newPage();
-      await installRuntimeFailureFixture(routePage, runtimeStatus);
+      const runtime = await installRuntimeFailureFixture(routePage, runtimeStatus);
       await routePage.goto(routePath);
       const recovery = routePage.getByRole("button", { name: expectedLabel });
       await expect(recovery).toBeVisible();
@@ -136,8 +136,10 @@ for (const runtimeStatus of ["degraded", "unauthorized"] as const) {
       const recoveryBox = await recovery.boundingBox();
       expect(recoveryBox?.width ?? 0).toBeGreaterThanOrEqual(44);
       expect(recoveryBox?.height ?? 0).toBeGreaterThanOrEqual(44);
+      const authCallsBeforeRetry = runtime.authCalls();
       await recovery.click();
       if (runtimeStatus === "degraded") {
+        await expect.poll(runtime.authCalls).toBeGreaterThan(authCallsBeforeRetry);
         await expect(recovery).toBeFocused();
       } else {
         await expect(routePage).toHaveURL(/\/login/u);
