@@ -48,6 +48,37 @@ class ExtractImageResults(Protocol):
     ) -> list[ImageResult]: ...
 
 
+def _raise_explicit_image_error(
+    payload: dict[str, Any],
+    *,
+    status_code: int,
+    upstream_error_type: UpstreamErrorType,
+) -> None:
+    detail = payload.get("error")
+    if not isinstance(detail, dict):
+        if payload.get("type") != "error":
+            return
+        detail = payload
+    raw_code = detail.get("code") or detail.get("type")
+    raw_message = detail.get("message")
+    raise upstream_error_type(
+        raw_message
+        if isinstance(raw_message, str) and raw_message
+        else "upstream returned an image error",
+        status_code=status_code,
+        error_code=(
+            raw_code
+            if isinstance(raw_code, str) and raw_code
+            else "upstream_error"
+        ),
+        payload={
+            **payload,
+            "upstream_error": detail,
+            "response_received": True,
+        },
+    )
+
+
 async def _image_payload_from_url(
     image_url: str,
     *,
@@ -113,6 +144,13 @@ async def _extract_image_results(
             status_code=status_code,
             error_code=bad_response_error_code,
         )
+    # Some compatible gateways put an explicit rejection inside HTTP 200.
+    # Keep the real error instead of reporting a successful POST with no image.
+    _raise_explicit_image_error(
+        payload,
+        status_code=status_code,
+        upstream_error_type=upstream_error_type,
+    )
     data = payload.get("data")
     if not isinstance(data, list) or not data:
         raise upstream_error_type(

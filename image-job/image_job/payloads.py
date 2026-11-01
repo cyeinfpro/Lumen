@@ -246,13 +246,14 @@ def normalize_image_output_options(
     policy: PayloadPolicy,
 ) -> None:
     background = target.get("background")
-    if background == "transparent":
-        target["output_format"] = "png"
-        target.pop("output_compression", None)
-        return
-
     output_format = target.get("output_format")
-    if output_format not in policy.image_output_formats:
+    if not isinstance(output_format, str):
+        output_format = None
+    if background == "transparent" and output_format not in {"png", "webp"}:
+        # JPEG cannot carry alpha; preserve an explicitly requested WebP.
+        output_format = "png"
+        target["output_format"] = output_format
+    elif output_format not in policy.image_output_formats:
         output_format = policy.default_image_output_format
         target["output_format"] = output_format
 
@@ -261,9 +262,9 @@ def normalize_image_output_options(
     elif output_format == "png":
         target.pop("output_compression", None)
 
-    if target.get("background") not in {"auto", "opaque", "transparent"}:
+    if background not in ("auto", "opaque", "transparent"):
         target["background"] = "auto"
-    if target.get("moderation") not in {"auto", "low"}:
+    if target.get("moderation") not in ("auto", "low"):
         target["moderation"] = "low"
 
 
@@ -274,12 +275,20 @@ def normalize_payload_body(
 ) -> dict[str, Any]:
     normalized = copy.deepcopy(body)
     if endpoint in {"/v1/images/generations", "/v1/images/edits"}:
+        model = normalized.get("model")
+        if isinstance(model, str) and (
+            model.startswith("gpt-image-") or model == "chatgpt-image-latest"
+        ):
+            # GPT Image always returns base64. Older callers may still send
+            # the legacy DALL-E field, which strict upstreams reject with 400.
+            normalized.pop("response_format", None)
         normalize_image_output_options(normalized, policy)
     elif endpoint == "/v1/responses":
         tools = normalized.get("tools")
         if isinstance(tools, list):
             for tool in tools:
                 if isinstance(tool, dict) and tool.get("type") == "image_generation":
+                    tool.pop("response_format", None)
                     normalize_image_output_options(tool, policy)
                     if policy.responses_strip_partial_images:
                         tool.pop("partial_images", None)

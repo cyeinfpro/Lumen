@@ -536,8 +536,13 @@ class ImageCandidateFacade:
             if not isinstance(event, dict):
                 continue
             event_type = str(event.get("type") or "")
-            if event_type == "error" and isinstance(event.get("error"), dict):
+            # Compatible gateways can return the normal error envelope inside
+            # HTTP 200 JSON/SSE, or put code/message directly on an error event.
+            # Preserve that rejection instead of reporting a missing image.
+            if isinstance(event.get("error"), dict):
                 return event["error"]
+            if event_type == "error":
+                return event
             if event_type == "response.failed":
                 response = event.get("response")
                 if isinstance(response, dict) and isinstance(
@@ -577,7 +582,12 @@ class ImageCandidateFacade:
             or error_type.endswith("_user_error")
         ):
             return self.error_class_validation()
-        if "invalid" in joined or "bad_request" in joined or "bad request" in joined:
+        if (
+            code in {"unknown_parameter", "unsupported_parameter"}
+            or "invalid" in joined
+            or "bad_request" in joined
+            or "bad request" in joined
+        ):
             return self.error_class_upstream_4xx()
         return self.error_class_upstream_5xx()
 

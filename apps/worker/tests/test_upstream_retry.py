@@ -846,7 +846,7 @@ async def test_direct_generate_stream_returns_on_final_image_event(
     assert result == [(InlineImageBytes(b"final"), "final prompt")]
     assert seen["json_body"]["stream"] is True
     assert seen["json_body"]["partial_images"] == 0
-    assert seen["json_body"]["response_format"] == "b64_json"
+    assert "response_format" not in seen["json_body"]
     assert seen["headers"]["x-trace-id"] == "gen-stream"
     assert [event["type"] for event in progress_events] == [
         "dispatch_ready",

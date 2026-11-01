@@ -558,7 +558,8 @@ async def _direct_generate_image_once(
     if streaming_override:
         body["stream"] = True
         body["partial_images"] = 0
-        body["response_format"] = "b64_json"
+        # GPT Image returns base64 without the legacy response_format field.
+        # Strict upstreams reject that retired option even in streaming mode.
     trace_id = context.trace_id
     headers = services.core.auth_headers(api_key_override, trace_id=trace_id)
     services.core.attach_image_idempotency_key(

@@ -127,13 +127,33 @@ def _revised_prompt(event: dict[str, Any]) -> str | None:
     )
 
 
+def _stream_error_detail(event: dict[str, Any]) -> dict[str, Any]:
+    detail = event.get("error")
+    if isinstance(detail, dict):
+        return detail
+    response = event.get("response")
+    if isinstance(response, dict):
+        detail = response.get("error")
+        if isinstance(detail, dict):
+            return detail
+        incomplete = response.get("incomplete_details")
+        if event.get("type") == "response.incomplete" and isinstance(incomplete, dict):
+            reason = incomplete.get("reason")
+            code = reason if isinstance(reason, str) and reason else "response_incomplete"
+            return {
+                **incomplete,
+                "code": code,
+                "message": incomplete.get("message")
+                or f"direct image stream incomplete: {code}",
+            }
+    return event
+
+
 def _stream_error(
     call: DirectGenerationStreamCall,
     event: dict[str, Any],
 ) -> BaseException:
-    detail = event.get("error")
-    if not isinstance(detail, dict):
-        detail = event
+    detail = _stream_error_detail(event)
     raw_code = detail.get("code") or detail.get("type")
     raw_message = detail.get("message")
     return call.services.infrastructure.UpstreamError(
@@ -230,7 +250,7 @@ async def _consume_stream(
                     ),
                 )
                 continue
-            if event_type in _ERROR_EVENTS:
+            if event_type in _ERROR_EVENTS or isinstance(event.get("error"), dict):
                 raise _stream_error(call, event)
             if event_type not in _FINAL_EVENTS:
                 continue
