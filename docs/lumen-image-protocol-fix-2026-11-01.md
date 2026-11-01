@@ -1,4 +1,4 @@
-# Lumen 生图请求协议修复（v1.2.180）
+# Lumen 生图请求协议修复（v1.2.181）
 
 日期：2026-11-01
 
@@ -72,6 +72,25 @@ JSON `type` 的错误信封。原直连提取器会把它们误判为
 
 涉及 `image-job/image_job/candidates.py`。
 
+## 发布审计发现的依赖阻塞
+
+首次 v1.2.180 tag 的 Python 与 Web 测试通过，但正式流水线在 Runtime
+生产依赖审计处失败；发布前主动检查也发现 Web 存在 high / critical
+依赖记录。因此保留原 tag，补齐安全版本后发布 v1.2.181。
+
+- Runtime 的直接依赖和 override 同步精确锁定 undici 8.12.3；
+  Pi 三个包继续保持 1.0.4，未采用审计工具建议的强制降级。
+- Web 的 Next.js 与 eslint-config-next 同步至 16.4.3，
+  Sentry Next.js SDK 至 10.78.0，Zod 锁文件解析至 4.6.7。
+- 使用 npm 生成锁文件，并按发布流程从锁文件重新安装和执行全部门禁。
+- 保留原生产审计阈值；不跳过审计、不忽略高危记录。
+- minimatch 等上游传递依赖仍有 moderate 提示；未为清空审计输出而
+  强制跨主版本替换整个依赖树。相关 high / critical 发布门禁已通过。
+
+参考：[undici 安全公告](https://github.com/nodejs/undici/security/advisories/GHSA-4w7w-5xrc-9h26)、
+[Next.js 安全公告](https://github.com/vercel/next.js/security/advisories/GHSA-2464-fhr4-w9xw)、
+[Sentry 安全公告](https://github.com/getsentry/sentry-javascript/security/advisories/GHSA-mchm-gjx6-7h55)。
+
 ## 验证
 
 先用回归测试复现原始失败，再修复请求构造和响应解析。
@@ -81,13 +100,18 @@ JSON `type` 的错误信封。原直连提取器会把它们误判为
 | Worker 生图请求、重试、编辑和协议回归 | 160 passed |
 | image-job 全套测试 | 379 passed |
 | Core 图片模型与上游计费决策测试 | 71 passed |
+| Agent Runtime 全套测试 | 172 passed |
+| Agent Runtime 运维契约 | 10 passed |
+| Web 全套测试 | 1199 passed |
+| Runtime 与 Web 的生产依赖 high / critical 审计 | 通过 |
+| Runtime 与 Web 的类型、lint、生产构建 | 通过 |
 | Python Ruff | 通过 |
 | 仓库完整性、复杂度、架构检查 | 通过 |
 | Facade、死代码、运行时状态、基线单调性检查 | 通过 |
 | `git diff --check` | 通过 |
-| 版本同步与 `uv.lock` workspace 版本检查 | 通过，1.2.180 |
+| 版本同步与 `uv.lock` workspace 版本检查 | 通过，1.2.181 |
 
-本地共 610 项相关回归通过。测试使用严格模拟上游，不代表额外发起了真实
+本地共 610 项生图相关回归通过，加上 Runtime、运维契约和 Web 共 1991 项测试通过。测试使用严格模拟上游，不代表额外发起了真实
 付费生成。生产可用性另由正式镜像发布后的版本及服务健康检查确认。
 
 新增测试：
@@ -98,7 +122,7 @@ JSON `type` 的错误信封。原直连提取器会把它们误判为
 
 ## 发布范围
 
-按仓库既有流程发布 `v1.2.180`：同步版本及 lockfile，推送 main 和对应 tag，
+按仓库既有流程发布 `v1.2.181`：同步版本及 lockfile，推送 main 和对应 tag，
 等待 tag 触发的 Docker Release 成功，再通过稳定通道更新已关联的生产部署。
 
 异步 image-job 的源代码修复包含在本版本中。生产预检确认当前关联部署没有
