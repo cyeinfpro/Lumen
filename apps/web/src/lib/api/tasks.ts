@@ -1,4 +1,5 @@
 import type {
+  VisionSvgArtifactState,
   RecommendedErrorAction,
   StructuredAttachment,
 } from "../types";
@@ -77,7 +78,7 @@ export interface BackendGeneration {
   queue_wait_ms?: number | null;
 }
 
-export interface BackendCompletion {
+export interface BackendCompletion extends VisionSvgArtifactState {
   id: string;
   message_id: string;
   conversation_id?: string | null;

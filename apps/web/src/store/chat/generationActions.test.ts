@@ -908,3 +908,22 @@ test("rerollImage 乐观变更后会话历史缓存失效", async () => {
     "重roll 后缓存被失效",
   );
 });
+
+
+test("GIF silent reroll preserves custom or auto requested size", async () => {
+  for (const size of ["768x432", "auto"]) {
+    const { state, actions } = makeHarness();
+    state.imagesById = { "gif-size": generatedImage("gif-size", "gen-old") };
+    state.generations["gen-old"] = { ...oldGeneration, size_requested: size,
+      requested_params: { output_format: "gif", frame_count: 9, frame_duration_ms: 200 } };
+    let payload: Record<string, unknown> = {};
+    stubHost.__apiClientStub = { createSilentGeneration: async (_convId, body) => {
+      payload = body as Record<string, unknown>;
+      return silentGenerationOut("asst-size", "gen-size");
+    } };
+    await actions.rerollImage("gif-size");
+    const params = payload.image_params as Record<string, unknown>;
+    assert.equal(params.size_mode, size === "auto" ? "auto" : "fixed");
+    assert.equal(params.fixed_size, size === "auto" ? undefined : size);
+  }
+});

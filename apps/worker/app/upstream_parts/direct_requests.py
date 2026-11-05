@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable, NoReturn
 import httpx
 from lumen_core.image_resource_limits import MAX_GIF_REQUEST_FRAMES, validate_gif_request_budget
 from lumen_core.providers import ProviderProxyDefinition
+from lumen_core.svg_options import normalize_svg_options
 from lumen_core.upstream_billing import (
     IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES,
     UPSTREAM_DISPATCH_PROVEN_UNDELIVERED,
@@ -507,6 +508,9 @@ def _validate_native_generation(body: dict[str, Any], request: ImageExecutionReq
 
 def _apply_generation_controls(body: dict[str, Any], request: ImageExecutionRequest,
                                streaming: bool) -> bool:
+    svg = normalize_svg_options(request.svg, output_format=request.output_format)
+    if svg is not None:
+        body["svg"] = svg
     if request.complexity is not None:
         body["complexity"] = request.complexity
     if request.output_format not in {"svg", "gif"}:
@@ -521,6 +525,10 @@ def _apply_generation_controls(body: dict[str, Any], request: ImageExecutionRequ
 
 
 def _validate_edit_format(request: ImageExecutionRequest) -> None:
+    if request.output_format == "svg":
+        validate_native_edit(request)
+    if getattr(request, "svg", None) is not None:
+        raise ValueError("SVG author selection is only supported for generation, not edits")
     if any(image_artifacts.looks_like_svg(raw) or raw.startswith((b"GIF87a", b"GIF89a"))
            for raw in request.images):
         raise ValueError("SVG/GIF originals cannot be editing inputs; use a static PNG, JPEG or WebP")
@@ -709,7 +717,11 @@ async def _direct_generate_image_once(
         proxy_url=proxy_url,
         http_attempts=http_attempts,
     )
-    validate_native_results(results, request, url=url, path="images/generations", trace_id=trace_id)
+    native_output = validate_native_results(results, request, url=url, path="images/generations", trace_id=trace_id)
+    if native_output is not None:
+        await services.transport.emit_image_progress(
+            request.progress_callback, "native_output_ready", native_output=native_output,
+        )
     return results
 
 
@@ -938,7 +950,11 @@ async def _direct_edit_image_once(
         proxy_url=proxy_url,
         request_context=context,
     )
-    validate_native_results(results, request, url=url, path="images/edits", trace_id=trace_id)
+    native_output = validate_native_results(results, request, url=url, path="images/edits", trace_id=trace_id)
+    if native_output is not None:
+        await services.transport.emit_image_progress(
+            request.progress_callback, "native_output_ready", native_output=native_output,
+        )
     return results
 
 

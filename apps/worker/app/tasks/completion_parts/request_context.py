@@ -39,6 +39,12 @@ async def _record_memory_metadata(
 
 
 async def load_request_context(state: CompletionExecution) -> None:
+    from ...vision_svg_artifact import is_vision_svg, load_vision_svg_context
+    async with state.ports.persistence.SessionLocal() as session:
+        completion = await session.get(state.ports.persistence.Completion, state.request.task_id)
+        if completion is not None and is_vision_svg(completion):
+            await load_vision_svg_context(state, completion, session)
+            return
     state.streaming.instructions = (
         state.preparation.system_prompt or DEFAULT_CHAT_INSTRUCTIONS
     )

@@ -27,6 +27,8 @@ export type ReasoningEffort =
   | "xhigh";
 
 export interface ComposerState {
+  /** Explicit one-shot vision artifact; never inferred from native SVG output. */
+  artifactFormat?: "svg";
   text: string;
   attachments: AttachmentImage[];
   mode: ComposerMode;
@@ -93,6 +95,7 @@ export interface ChatState {
   setImageModel: (model: ImageModel) => void;
   setImageComplexity: (value: "low" | "medium" | "high" | undefined) => void;
   setImageOutputFormat: (format: ImageOutputFormat) => void;
+  setImageSvgAuthor: (value: ImageParams["svg"]) => void;
   setImageFrameCount: (value: number) => void;
   setImageFrameDuration: (value: number) => void;
   setRenderQuality: (quality: RenderQualityChoice) => void;

@@ -1,5 +1,6 @@
 "use client";
 
+import { VisionSvgArtifact } from "./VisionSvgArtifact";
 import { useEffect, useState } from "react";
 import { Badge, type BadgeTone } from "@/components/ui/primitives/Badge";
 import { cn } from "@/lib/utils";
@@ -213,6 +214,7 @@ export function CompletionStatusLine({
   const active = msg.status === "pending" || msg.status === "streaming";
   const now = useNow(active);
   const status = resolveCompletionStatus(msg, now);
+  if (msg.artifact_format === "svg") return <VisionSvgArtifact key={[msg.id, msg.last_delta_at, msg.artifact_status, msg.artifact_error].join(":")} msg={msg} />;
   if (!status) return null;
   const tone: BadgeTone =
     status.tone === "active"

@@ -183,7 +183,11 @@ def test_markup_limits_checked_before_decode(monkeypatch):
 @pytest.mark.parametrize("output_format", ["svg", "gif"])
 def test_vector_animation_preserves_static_edit_references(output_format):
     item = request(action="edit", output_format=output_format, images=[png()])
-    assert image_controls.validate_image_controls(item).images == item.images
+    if output_format == "svg":
+        with pytest.raises(ValueError, match="Native SVG editing is unsupported"):
+            image_controls.validate_image_controls(item)
+    else:
+        assert image_controls.validate_image_controls(item).images == item.images
 
 
 @pytest.mark.asyncio

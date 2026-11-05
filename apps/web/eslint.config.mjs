@@ -58,6 +58,8 @@ const eslintConfig = defineConfig([
   globalIgnores([
     // Default ignores of eslint-config-next:
     ".next/**",
+    // Isolated Next builds and UI tests use custom NEXT_DIST_DIR outputs.
+    ".next-*/**",
     ".next-e2e/**",
     ".next-ux/**",
     ".next-build-check/**",

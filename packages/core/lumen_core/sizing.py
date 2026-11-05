@@ -175,7 +175,7 @@ def validate_explicit_size(w: int, h: int) -> None:
 
 
 def validate_gif_frame_size(w: int, h: int) -> None:
-    """GIF sizes are per frame; the static-image minimum does not apply."""
+    """Apply Lumen frame/aspect safety limits, not claimed provider maxima."""
     validate_gif_resource_budget(w, h, 1)
     if w <= 0 or h <= 0:
         raise ValueError(f"size must be positive, got {w}x{h}")

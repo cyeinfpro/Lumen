@@ -20,6 +20,7 @@
 
 # next.js
 /.next/
+/.next-*/
 /.next-e2e/
 /.next-ux/
 /.next-build-check/

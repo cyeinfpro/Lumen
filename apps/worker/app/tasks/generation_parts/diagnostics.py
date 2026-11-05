@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from lumen_core.svg_options import public_svg_options
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -310,6 +311,9 @@ def image_requested_params_snapshot(
     ):
         if key in req:
             out[key] = compact_diag_value(req[key])
+    svg = public_svg_options(req.get("svg"), output_format=req.get("output_format"))
+    if svg is not None:
+        out["svg"] = svg
     return out
 
 
@@ -338,6 +342,9 @@ def image_effective_params_snapshot(
     ):
         if key in opts:
             out[key] = compact_diag_value(opts[key])
+    svg = public_svg_options(opts.get("svg"), output_format=opts.get("output_format"))
+    if svg is not None:
+        out["svg"] = svg
     if width and height:
         out["size_actual"] = f"{width}x{height}"
     if mime:

@@ -1,3 +1,4 @@
+import { visionSvgArtifactFields } from "../../lib/visionSvg";
 import type { BackendMessage } from "../../lib/apiClient";
 import type {
   AssistantMessage,
@@ -275,6 +276,7 @@ export function adaptBackendAssistantMessage(
     generation_ids: ids.length > 0 ? ids : undefined,
     generation_id: ids[0],
     completion_id: completionId,
+    ...visionSvgArtifactFields(content),
     text,
     thinking,
     tool_calls: toolCalls.length > 0 ? toolCalls : undefined,

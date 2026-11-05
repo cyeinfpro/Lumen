@@ -52,6 +52,7 @@ export type ComposerActions = Pick<
   | "setImageModel"
   | "setImageComplexity"
   | "setImageOutputFormat"
+  | "setImageSvgAuthor"
   | "setImageFrameCount"
   | "setImageFrameDuration"
   | "setRenderQuality"
@@ -307,9 +308,13 @@ export function createComposerActions(
               ? { count: 1, output_compression: undefined } : {}),
             frame_count: format === "gif" ? (state.composer.params.frame_count ?? 9) : undefined,
             frame_duration_ms: format === "gif" ? (state.composer.params.frame_duration_ms ?? 200) : undefined,
-            ...(format === "gif" ? { fixed_size: "512x512", quality: "1k" as const } : {}),
+            ...(format === "gif" ? { fixed_size: state.composer.params.fixed_size ?? "512x512", quality: "1k" as const } : {}),
           },
         },
+      })),
+    setImageSvgAuthor: (svg) =>
+      set((state) => ({
+        composer: { ...state.composer, params: { ...state.composer.params, svg } },
       })),
     setImageFrameCount: (frame_count) =>
       set((state) => ({
@@ -500,7 +505,7 @@ export function createComposerActions(
         id: uuid(),
         kind: "generated",
         data_url: image.data_url,
-        mime: "image/png",
+        mime: image.mime ?? /^data:([^;,]+)/u.exec(image.data_url)?.[1] ?? "application/octet-stream",
         width: image.width,
         height: image.height,
         source_image_id: image.id,

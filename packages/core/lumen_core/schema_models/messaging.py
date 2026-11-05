@@ -15,7 +15,8 @@ from ..image_models import (
     ImageRenderQuality,
     validate_image_model_quality,
 )
-from ..message_content import public_message_content
+from ..message_content import public_message_content, vision_svg_public_text
+from ..svg_options import SvgOptions
 from ..sizing import AspectRatio as AspectRatioLiteral
 from .common import BaseOut
 from ..image_resource_limits import MAX_GIF_REQUEST_FRAMES, validate_gif_request_budget
@@ -40,6 +41,7 @@ class ImageParamsIn(BaseModel):
     render_quality: ImageRenderQuality = "high"
     output_format: Literal["png", "jpeg", "webp", "svg", "gif"] | None = None
     complexity: Literal["low", "medium", "high"] | None = None
+    svg: SvgOptions | None = None
     frame_count: int | None = Field(default=None, ge=2, le=MAX_GIF_REQUEST_FRAMES)
     frame_duration_ms: int | None = Field(default=None, ge=20, le=2000, multiple_of=10)
     # Only applies to jpeg/webp. None omits the provider compression option.
@@ -56,6 +58,8 @@ class ImageParamsIn(BaseModel):
             if self.count != 1:
                 raise ValueError("SVG/GIF output requires count=1")
             self.output_compression = None
+        if self.svg is not None and self.output_format != "svg":
+            raise ValueError("SVG author options require SVG output")
         if self.output_format == "gif":
             validate_gif_request_budget(self.fixed_size if self.size_mode == "fixed" else "auto", self.frame_count)
         if self.output_format != "gif" and (
@@ -69,6 +73,8 @@ class ImageParamsIn(BaseModel):
 
 
 class ChatParamsIn(BaseModel):
+    # Local artifact contract, never an upstream Responses API parameter.
+    artifact_format: Literal["svg"] | None = None
     # system_prompt 与用户文本一同进入上游 instructions，保持同样上限。
     system_prompt: str | None = Field(default=None, max_length=10000)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
@@ -93,6 +99,22 @@ class ChatParamsIn(BaseModel):
     code_interpreter: bool = False
     # Image generation：在 chat 中允许模型按需生成图片，结果会保存到当前助手消息。
     image_generation: bool = False
+
+    @model_validator(mode="after")
+    def validate_artifact_contract(self) -> "ChatParamsIn":
+        if self.artifact_format == "svg":
+            if self.fast is True:
+                raise ValueError("Vision SVG does not support priority mode")
+            # Prevent the global fast default from changing model/pricing selection.
+            self.fast = False
+            if any((self.web_search, self.file_search, self.code_interpreter,
+                    self.image_generation, self.vector_store_ids)):
+                raise ValueError("Vision SVG requires tools disabled")
+            if self.system_prompt:
+                raise ValueError("Vision SVG accepts only the current prompt and source image")
+            if self.max_output_tokens > 16000:
+                raise ValueError("Vision SVG max_output_tokens must not exceed 16000")
+        return self
 
 
 class AdvancedIn(BaseModel):
@@ -163,6 +185,8 @@ class PostMessageIn(BaseModel):
 
     @model_validator(mode="after")
     def normalize_attachment_contract(self) -> "PostMessageIn":
+        if self.intent == "image_to_image" and self.image_params.output_format == "svg":
+            raise ValueError("Native SVG editing is unsupported; use SVG text generation or an explicitly separate vision-to-SVG workflow")
         structured_ids = [att.image_id for att in self.attachments]
         input_ids = [value for value in self.input_images if value]
         legacy_ids = list(self.attachment_image_ids or [])
@@ -180,6 +204,16 @@ class PostMessageIn(BaseModel):
             raise ValueError("input_images must match attachments image_id values")
 
         canonical_ids = structured_ids or legacy_ids or input_ids
+        if self.chat_params.artifact_format == "svg":
+            if self.intent != "vision_qa" or len(canonical_ids) != 1:
+                raise ValueError("Vision SVG requires vision_qa and exactly one source image")
+            if self.mask_image_id or self.markup_image_id or self.advanced.stream_partial_image:
+                raise ValueError("Vision SVG does not support masks, markup or partial images")
+            if (self.image_params.count != 1 or self.image_params.frame_count is not None
+                    or self.image_params.frame_duration_ms is not None
+                    or self.image_params.output_format is not None
+                    or self.image_params.svg is not None):
+                raise ValueError("Vision SVG cannot be combined with native image output controls")
         if canonical_ids:
             self.attachment_image_ids = list(canonical_ids)
             if not self.input_images or not same_ids(input_ids, canonical_ids):
@@ -262,6 +296,32 @@ class GenerationOut(BaseOut):
 
 
 class CompletionOut(BaseOut):
+    artifact_format: Literal["svg"] | None = None
+    artifact_status: str | None = None
+    artifact_image_id: str | None = None
+    artifact_error: str | None = None
+    # This field is source text, never HTML/Markdown or a media URL.
+    artifact_source_text: str | None = None
+
+    @model_validator(mode="after")
+    def project_vision_svg(self) -> "CompletionOut":
+        req = self.upstream_request or {}
+        if req.get("artifact_format") == "svg":
+            self.artifact_format = "svg"
+            self.artifact_status = str(req.get("artifact_status") or "pending")
+            self.artifact_image_id = req.get("artifact_image_id")
+            self.artifact_error = req.get("artifact_error")
+            if self.artifact_source_text is None:
+                self.artifact_source_text = self.text
+            self.text = vision_svg_public_text(self.artifact_status)
+            # Keep checkpoint/source text private even if legacy metadata contains it.
+            self.upstream_request = {key: req[key] for key in (
+                "artifact_format", "artifact_status", "artifact_image_id", "artifact_error",
+                "source_image_id", "source_image_sha256", "max_output_tokens",
+                "completion_checkpoint_response_id", "completion_billing_state",
+            ) if key in req}
+        return self
+
     id: str
     message_id: str
     user_api_credential_id: str | None = None

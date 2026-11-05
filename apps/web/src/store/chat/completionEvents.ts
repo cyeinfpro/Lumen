@@ -1,3 +1,4 @@
+import { applyVisionSvgArtifact } from "../../lib/visionSvg";
 import type {
   AssistantMessage,
   Message,
@@ -47,7 +48,9 @@ export function applyCompletionSucceededEvent(
   payload: Record<string, unknown>,
   eventNow: number,
 ): void {
+  if (message.artifact_format === "svg" && message.artifact_status === "ready" && payload.artifact_format === "svg" && payload.artifact_status !== "ready") return;
   message.status = "succeeded";
+  applyVisionSvgArtifact(message, payload);
   if (typeof payload.text === "string") message.text = payload.text;
   const toolCalls = coerceCompletionToolCalls(payload.tool_calls);
   if (toolCalls.length > 0) message.tool_calls = toolCalls;

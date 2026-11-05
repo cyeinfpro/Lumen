@@ -121,6 +121,10 @@ def completion_has_trustworthy_persisted_usage(completion: Any) -> bool:
     if completion_has_completed_checkpoint(completion):
         return True
     request = _checkpoint_request(completion) or _completion_request(completion)
+    if request.get("artifact_format") == "svg" and "completion_checkpoint_version" in request:
+        # A completed SVG receipt with inexact/malformed usage cannot turn the
+        # fallback token estimate into an actual charge. Reconcile unknown cost.
+        return False
     usage_epoch = _nonnegative_int(request.get(COMPLETION_USAGE_EXECUTION_EPOCH_KEY))
     execution_epoch = _nonnegative_int(getattr(completion, "execution_epoch", 0) or 0)
     if usage_epoch is None or execution_epoch is None:
@@ -204,6 +208,8 @@ def _checkpoint_usage_is_recoverable(
             COMPLETION_CHECKPOINT_BILLING_READY,
             COMPLETION_CHECKPOINT_PARTIAL_CORRUPTION,
         }
+    if request.get("artifact_format") == "svg":
+        return False
     return bool(
         usage_exact is False
         and usage_complete is False
@@ -233,7 +239,8 @@ def completion_has_completed_checkpoint(completion: Any) -> bool:
             for image in images
         )
         and _checkpoint_usage_is_recoverable(completion, request)
-        and bool(completion_text_or_empty(getattr(completion, "text", None)))
+        and (bool(completion_text_or_empty(getattr(completion, "text", None)))
+             or request.get("artifact_format") == "svg")
     )
 
 
@@ -243,6 +250,8 @@ def completion_checkpoint_has_no_usable_output(completion: Any) -> bool:
         return False
     images = _validated_checkpoint_images(request)
     if images is None or _checkpoint_normalization_required(completion):
+        return False
+    if request.get("artifact_format") == "svg" and _checkpoint_usage_is_recoverable(completion, request):
         return False
     return bool(
         not any(
@@ -267,6 +276,14 @@ async def apply_completed_checkpoint(
     context: Any,
     completion: Any,
 ) -> tuple[str, str, dict[str, Any]]:
+    from .vision_svg_artifact import is_vision_svg, stage_vision_svg_artifact
+    svg_content = await stage_vision_svg_artifact(context.session, completion) if is_vision_svg(completion) else None
+    if svg_content is not None and getattr(context, "state", None) is not None:
+        state = context.state
+        if state.settlement.lease_lost.is_set():
+            raise state.ports.retry._LeaseLost("lease lost during SVG artifact processing")
+        await state.ports.retry._raise_if_completion_cancelled(
+            state.request.redis, str(completion.id), "cancelled during SVG artifact processing")
     await context.billing.charge_completion(context.session, completion)
     completion.status = CompletionStatus.SUCCEEDED.value
     completion.progress_stage = CompletionStage.FINALIZING
@@ -278,6 +295,9 @@ async def apply_completed_checkpoint(
     if message is not None and message.status != MessageStatus.CANCELED.value:
         content = dict(message.content or {})
         content["text"] = completion.text
+        if svg_content is not None:
+            content.update(svg_content)
+            content.pop("thinking", None)
         message.content = content
         message.status = MessageStatus.SUCCEEDED.value
     request = _checkpoint_request(completion) or _completion_request(completion)
@@ -295,7 +315,8 @@ async def apply_completed_checkpoint(
                 "attempt": int(completion.attempt or 0),
                 "attempt_epoch": int(completion.attempt or 0),
                 "execution_epoch": int(completion.execution_epoch or 0),
-                "text": completion.text,
+                "text": svg_content["text"] if svg_content is not None else completion.text,
+                **(svg_content or {}),
                 "tokens_in": int(completion.tokens_in or 0),
                 "tokens_out": int(completion.tokens_out or 0),
                 "response_id": request.get(COMPLETION_CHECKPOINT_RESPONSE_ID_KEY),
@@ -413,6 +434,15 @@ async def record_completion_completed_checkpoint(
         request[COMPLETION_CHECKPOINT_USAGE_KEY] = _durable_checkpoint_usage(raw_usage)
         request[COMPLETION_CHECKPOINT_AT_KEY] = checkpoint_at
         _apply_checkpoint_image_state(request, images)
+        if request.get("artifact_format") == "svg":
+            request = state.ports.upstream._merge_completion_upstream_metadata(
+                request, provider_event=state.usage.upstream_provider_event, fast_mode=False)
+            response = state.usage.completed_response or {}
+            request["vision_svg_actual_model"] = response.get("model") or completion.model
+            request["vision_svg_request_id"] = response.get("request_id") or response.get("_request_id")
+            if len(durable_text.encode("utf-8")) > 1024 * 1024:
+                request["artifact_output_oversized"] = True
+                durable_text = durable_text.encode("utf-8")[:1024 * 1024].decode("utf-8", errors="ignore")
         completion.upstream_request = request
         completion.text = durable_text
         for field in _COMPLETION_USAGE_FIELDS:

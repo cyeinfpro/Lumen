@@ -24,6 +24,7 @@ python3 scripts/version.py check
 - `apps/api/pyproject.toml`
 - `apps/worker/pyproject.toml`
 - `apps/tgbot/pyproject.toml`
+- `image-job/pyproject.toml`
 - `packages/core/pyproject.toml`
 - `packages/core/lumen_core/__init__.py`
 - `apps/web/package.json`

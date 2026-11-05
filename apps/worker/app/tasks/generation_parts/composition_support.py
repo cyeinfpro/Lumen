@@ -70,6 +70,7 @@ def build_image_execution_request(
         complexity=request.complexity,
         frame_count=request.frame_count,
         frame_duration_ms=request.frame_duration_ms,
+        svg=request.svg,
         progress_callback=request.progress_callback,
         provider_override=request.provider_override,
         user_id=request.user_id,

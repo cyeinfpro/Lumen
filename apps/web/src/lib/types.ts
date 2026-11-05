@@ -28,7 +28,14 @@ export type RenderQuality = "auto" | "low" | "medium" | "high" | "xhigh" | "max"
 export type RenderQualityChoice = Exclude<RenderQuality, "auto">;
 export type ImageOutputFormat = "png" | "jpeg" | "webp" | "svg" | "gif";
 
+export type SvgReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export interface SvgAuthorOptions {
+  model: string;
+  reasoning?: { effort?: SvgReasoningEffort | null } | null;
+}
+
 export interface ImageParams {
+  svg?: SvgAuthorOptions | null;
   model?: ImageModel;
   aspect_ratio: AspectRatio;
   size_mode: SizeMode;
@@ -302,7 +309,15 @@ export interface UserMessage {
   created_at: number;
 }
 
-export interface AssistantMessage {
+export interface VisionSvgArtifactState {
+  artifact_format?: "svg";
+  artifact_status?: "pending" | "ready" | "invalid" | "processing_failed";
+  artifact_image_id?: string;
+  artifact_error?: string;
+  artifact_source_text?: string;
+}
+
+export interface AssistantMessage extends VisionSvgArtifactState {
   id: string;
   role: "assistant";
   parent_user_message_id: string;

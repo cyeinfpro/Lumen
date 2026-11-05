@@ -52,6 +52,8 @@ def _normalize_thinking_level_map(
 
 
 class ProviderItemOut(BaseModel):
+    # Informational evidence only; never persisted as a provider setting.
+    svg_author_recommendation: dict[str, Any] | None = None
     name: str
     base_url: str
     api_key_hint: str

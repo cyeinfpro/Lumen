@@ -25,6 +25,7 @@ from ..constants import DEFAULT_CHAT_MODEL
 from ..model_base import Base, TimestampMixin, new_uuid7
 from ..queue_metadata import completion_queue_metadata, generation_queue_metadata
 from ..sqltypes import JsonType, StringListType
+from ..svg_options import public_svg_options
 from .accounts import UserApiCredential
 
 # ---------- Tasks (generation / completion) ----------
@@ -213,6 +214,10 @@ class Generation(Base, TimestampMixin):
             item = request.get(key)
             if isinstance(item, (str, int)) and not isinstance(item, bool):
                 out.setdefault(key, item)
+        svg = public_svg_options(request.get("svg"), output_format=request.get("output_format"))
+        out.pop("svg", None)
+        if svg is not None:
+            out["svg"] = svg
         return out or None
 
     @property

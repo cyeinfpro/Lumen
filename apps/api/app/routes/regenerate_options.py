@@ -22,6 +22,9 @@ def chat_params_from_user_content(content: dict[str, Any]) -> ChatParamsIn:
     if not isinstance(vector_store_ids, list):
         vector_store_ids = []
     return ChatParamsIn(
+        artifact_format="svg" if content.get("artifact_format") == "svg" else None,
+        max_output_tokens=(content.get("max_output_tokens", 2048)
+                           if content.get("artifact_format") == "svg" else 2048),
         reasoning_effort=effort,
         fast=content.get("fast") is True,
         web_search=content.get("web_search") is True,

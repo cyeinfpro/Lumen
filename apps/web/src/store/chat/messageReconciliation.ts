@@ -1,3 +1,4 @@
+import { applyVisionSvgArtifact } from "../../lib/visionSvg";
 import type { BackendCompletion } from "../../lib/apiClient";
 import type {
   AssistantMessage,
@@ -45,6 +46,8 @@ export function preferredMessageSnapshot(
   if (!shouldAcceptTaskSnapshot(current.status, incoming.status)) {
     return current;
   }
+  if (current.artifact_format === "svg" && current.artifact_status === "ready" && incoming.artifact_status !== "ready") return current;
+  if (incoming.artifact_format === "svg") return incoming;
   const currentText = current.text ?? "";
   const incomingText = incoming.text ?? "";
   if (
@@ -165,10 +168,13 @@ function reconcileCompletionMessage(
   if (!shouldAcceptTaskSnapshot(message.status, incomingStatus)) {
     return message;
   }
+  if (message.artifact_format === "svg" && message.artifact_status === "ready" && fresh.artifact_status !== "ready") return message;
   const next = { ...message };
   const statusChanged = applyCompletionStatus(next, fresh, now);
   const textChanged = applyCompletionText(next, fresh, now);
-  return statusChanged || textChanged ? next : message;
+  const artifactChanged = applyVisionSvgArtifact(next, fresh);
+  if (artifactChanged) next.last_delta_at = now;
+  return statusChanged || textChanged || artifactChanged ? next : message;
 }
 
 export function applyCompletionSnapshot(

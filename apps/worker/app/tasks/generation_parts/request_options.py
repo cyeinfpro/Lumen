@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from lumen_core.svg_options import normalize_svg_options
+
 from typing import Any
 
 from lumen_core.constants import (
@@ -220,6 +222,9 @@ def image_request_options(
     for key in ("frame_count", "frame_duration_ms"):
         if request.get(key) is not None:
             options[key] = request[key]
+    svg = normalize_svg_options(request.get("svg"), output_format=output_format)
+    if svg is not None:
+        options["svg"] = svg
     options["n"] = image_requested_count(request)
     return options
 

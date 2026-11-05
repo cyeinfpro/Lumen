@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from lumen_core.svg_options import public_svg_usage
+
 import asyncio
 import logging
 import time
@@ -88,7 +90,7 @@ class _EpochGuardedProgressPublisher:
         if event.get("type") == "dispatch_ready":
             await _record_generation_dispatch_ready(self._state)
             return
-        if event.get("type") in {"response_ready", "response_received"}:
+        if event.get("type") in {"response_ready", "response_received", "native_output_ready"}:
             await record_generation_upstream_marker(
                 self._state,
                 response_received=True,
@@ -96,6 +98,8 @@ class _EpochGuardedProgressPublisher:
                 response_request_id=event.get(UPSTREAM_RESPONSE_REQUEST_ID),
                 response_trace_id=event.get(UPSTREAM_RESPONSE_TRACE_ID),
                 response_http_attempts=event.get(UPSTREAM_RESPONSE_HTTP_ATTEMPTS),
+                svg_usage=event.get("svg_usage"),
+                native_output=event.get("native_output"),
             )
             return
         if event.get("type") == "dual_race_bonus_ready":
@@ -178,6 +182,10 @@ def resolve_generation_size(state: GenerationRunState) -> Any:
         else None
     )
     try:
+        if output_format == "gif" and state.size_requested == "auto":
+            # Provider chooses the frame size. Finalization uses decoded actual
+            # dimensions; native GIF validation still enforces local budgets.
+            return resolve_size(state.aspect_ratio, "auto", output_format="gif")
         resolved = resolve_size(
             state.aspect_ratio,
             "fixed",
@@ -449,6 +457,8 @@ async def record_generation_upstream_marker(
     response_request_id: str | None = None,
     response_trace_id: str | None = None,
     response_http_attempts: int | None = None,
+    svg_usage: dict[str, Any] | None = None,
+    native_output: dict[str, Any] | None = None,
 ) -> None:
     """Persist an upstream receipt in a short, ownership-fenced transaction."""
 
@@ -465,6 +475,8 @@ async def record_generation_upstream_marker(
             response_request_id,
             response_trace_id,
             response_http_attempts,
+            svg_usage,
+            native_output,
         )
     ):
         raise ValueError("response diagnostics require a response receipt")
@@ -520,6 +532,18 @@ async def record_generation_upstream_marker(
                 attempt=state.attempt,
                 execution_epoch=generation_execution_epoch(state),
             )
+        author_usage = public_svg_usage(svg_usage)
+        if author_usage or native_output is not None:
+            # Preserve legacy derived diagnostics when creating the first stored
+            # diagnostics object, including requested/effective parameters.
+            diagnostics = dict(current.diagnostics)
+            if author_usage:
+                # Usage is separate from image credits; an unknown rate is not zero.
+                diagnostics["svg_usage"] = author_usage
+                diagnostics["svg_author_cost_status"] = "unknown"
+            if native_output is not None:
+                diagnostics["native_output"] = native_output
+            request["generation_diagnostics"] = diagnostics
         current.upstream_request = request
         await session.commit()
         state.gen_upstream_request_snapshot = dict(request)
@@ -553,6 +577,7 @@ def build_image_iterator(state: GenerationRunState) -> Any:
         complexity=options.get("complexity"),
         frame_count=options.get("frame_count"),
         frame_duration_ms=options.get("frame_duration_ms"),
+        svg=options.get("svg"),
         progress_callback=state.progress_publisher,
         provider_override=provider_override,
         user_id=state.user_id,

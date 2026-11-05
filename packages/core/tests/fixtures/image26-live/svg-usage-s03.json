@@ -1,0 +1,24 @@
+{
+  "source_case": "s03-svg-author-sol",
+  "source_result_sha256": "93c18c710d3351044385b6953c2a661ef449e6cc8c000e2275df59612c157741",
+  "usage": {
+    "input_tokens": 100,
+    "input_tokens_details": {
+      "image_tokens": 0,
+      "text_tokens": 100
+    },
+    "output_tokens": 824,
+    "output_tokens_details": {
+      "image_tokens": 824,
+      "text_tokens": 0
+    },
+    "total_tokens": 924
+  },
+  "svg_usage": {
+    "input_tokens": 1572,
+    "model": "gpt-6.1-sol",
+    "output_tokens": 3071,
+    "reasoning_tokens": 0,
+    "total_tokens": 4643
+  }
+}

@@ -37,9 +37,12 @@ def message_request_fingerprint(body: PostMessageIn) -> str:
     # Optional 2.6 controls must not change the identity of an ordinary retry.
     if payload.get("markup_image_id") is None:
         payload.pop("markup_image_id", None)
+    chat_params = payload.get("chat_params")
+    if isinstance(chat_params, dict) and chat_params.get("artifact_format") is None:
+        chat_params.pop("artifact_format", None)
     image_params = payload.get("image_params")
     if isinstance(image_params, dict):
-        for key in ("complexity", "frame_count", "frame_duration_ms"):
+        for key in ("complexity", "frame_count", "frame_duration_ms", "svg"):
             if image_params.get(key) is None:
                 image_params.pop(key, None)
     return canonical_request_fingerprint(

@@ -109,11 +109,28 @@ def _public_agent_content(content: dict[str, Any]) -> dict[str, Any]:
     return projected
 
 
+def vision_svg_public_text(status: Any) -> str:
+    if status == "ready":
+        return "SVG 已生成。"
+    if status == "invalid":
+        return "模型已完成，但 SVG 未通过安全校验，未交付图片；已产生的文本用量仍计费。"
+    if status == "processing_failed":
+        return "模型已完成，但 SVG 本地处理失败；可重试本地处理，不会重新调用模型。"
+    return "正在处理 SVG。"
+
+
 def public_message_content(content: Any) -> dict[str, Any]:
     """Project persisted message JSON onto the user-visible content contract."""
 
     if not isinstance(content, dict):
         return {}
+    if content.get("artifact_format") == "svg" and "artifact_status" in content:
+        # Assistant artifact text is never routed through generic Markdown/HTML.
+        # The explicit source field is rendered only as escaped text by the UI.
+        return {**{key: content[key] for key in (
+            "artifact_format", "artifact_status", "artifact_image_id", "artifact_error",
+            "images", "attachments", "source", "completion_id", "artifact_source_text",
+        ) if key in content}, "text": vision_svg_public_text(content.get("artifact_status"))}
     if content.get("source") == "agent" or isinstance(content.get("agent_run_id"), str):
         return _public_agent_content(content)
     return {

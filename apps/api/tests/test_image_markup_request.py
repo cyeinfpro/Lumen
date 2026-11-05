@@ -88,7 +88,9 @@ def test_absent_controls_preserve_existing_request_fingerprint():
     body = _body()
     legacy_payload = body.model_dump(mode="json", exclude={"idempotency_key"})
     legacy_payload.pop("markup_image_id", None)
-    for key in ("complexity", "frame_count", "frame_duration_ms"):
+    # The pre-artifact schema did not serialize this optional field at all.
+    legacy_payload["chat_params"].pop("artifact_format", None)
+    for key in ("complexity", "frame_count", "frame_duration_ms", "svg"):
         legacy_payload["image_params"].pop(key, None)
     assert message_request_fingerprint(body) == canonical_request_fingerprint(
         MESSAGE_CREATE_IDEMPOTENCY_OPERATION, legacy_payload,

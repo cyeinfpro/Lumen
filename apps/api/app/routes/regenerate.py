@@ -353,6 +353,7 @@ async def _image_params_from_target(
                 ),
                 "output_format": output_format,
                 "complexity": upstream_request.get("complexity"),
+                "svg": upstream_request.get("svg") if output_format == "svg" else None,
                 "frame_count": upstream_request.get("frame_count") if output_format == "gif" else None,
                 "frame_duration_ms": upstream_request.get("frame_duration_ms") if output_format == "gif" else None,
                 "output_compression": output_compression,
@@ -655,9 +656,14 @@ async def regenerate_message(
             if image_intent else _DEFAULT_IMAGE_OUTPUT_FORMAT
         )
         chat_params = _chat_params_from_user_content(user_content)
-        system_prompt = await _regenerate_system_prompt(
-            db, user=user, conv=conv, target=target, intent=intent,
-            chat_params=chat_params,
+        if chat_params.artifact_format == "svg" and intent != Intent.VISION_QA:
+            raise _http("invalid_intent", "Vision SVG regeneration requires vision_qa", 422)
+        system_prompt = (
+            None if chat_params.artifact_format == "svg"
+            else await _regenerate_system_prompt(
+                db, user=user, conv=conv, target=target, intent=intent,
+                chat_params=chat_params,
+            )
         )
         now = datetime.now(timezone.utc)
         cleanup = await _cancel_regenerate_target_active_tasks(

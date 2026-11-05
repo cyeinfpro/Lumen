@@ -258,7 +258,7 @@ export const AssistantTurn = memo(function AssistantTurn({
         </div>
       )}
 
-      {isFailedText && (
+      {isFailedText && msg.artifact_format !== "svg" && (
         <div className={CONVERSATION_TEXT_RAIL}>
           <Button
             size="sm"

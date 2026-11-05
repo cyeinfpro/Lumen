@@ -30,13 +30,7 @@
     "**/*.tsx",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts",
-    ".next-e2e/types/**/*.ts",
-    ".next-e2e/dev/types/**/*.ts",
-    ".next-build-check/types/**/*.ts",
-    ".next-build-check/dev/types/**/*.ts",
-    ".next-ux/types/**/*.ts",
-    ".next-ux/dev/types/**/*.ts",
     "**/*.mts"
   ],
-  "exclude": ["node_modules"]
+  "exclude": ["node_modules", ".next-*/**"]
 }

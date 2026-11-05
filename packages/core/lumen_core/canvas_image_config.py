@@ -7,6 +7,7 @@ from .image_models import (
     DEFAULT_IMAGE_MODEL, ImageModel, LegacyImageModel, ImageRenderQuality,
     validate_image_model_quality,
 )
+from .svg_options import SvgOptions
 from .image_resource_limits import MAX_GIF_REQUEST_FRAMES, validate_gif_request_budget
 
 
@@ -23,6 +24,7 @@ class ImageGenerateNodeConfig(BaseModel):
     count: int = Field(default=1, ge=1, le=10)
     output_format: Literal["png", "jpeg", "webp", "svg", "gif"] | None = "webp"
     complexity: Literal["low", "medium", "high"] | None = None
+    svg: SvgOptions | None = None
     frame_count: int | None = Field(default=None, ge=2, le=MAX_GIF_REQUEST_FRAMES)
     frame_duration_ms: int | None = Field(default=None, ge=20, le=2000, multiple_of=10)
     output_compression: int | None = Field(default=None, ge=0, le=100)
@@ -47,6 +49,8 @@ class ImageGenerateNodeConfig(BaseModel):
             if self.count != 1:
                 raise ValueError("SVG/GIF output requires count=1")
             self.output_compression = None
+        if self.svg is not None and self.output_format != "svg":
+            raise ValueError("SVG author options require SVG output")
         if self.output_format == "gif":
             validate_gif_request_budget(self.fixed_size if self.size_mode == "fixed" else "auto", self.frame_count)
         if self.output_format != "gif" and (

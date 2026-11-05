@@ -1,3 +1,4 @@
+import { normalizeSvgAuthor } from "../../lib/svgAuthor.ts";
 import { normalizeImageModel, normalizeImageQuality } from "../../lib/imageModels.ts";
 import type {
   ImageParams,
@@ -42,12 +43,14 @@ export function normalizeImageParams(params: ImageParams): ImageParams {
     render_quality: normalizeImageQuality(params.render_quality, params.model),
     count: specialFormat ? 1 : clampImageCount(params.count),
     complexity,
+    svg: format === "svg" ? normalizeSvgAuthor(params.svg) : undefined,
     frame_count: format === "gif" ? boundedInteger(params.frame_count, 2, 16, 9) : undefined,
     frame_duration_ms: format === "gif" ? Math.round(boundedInteger(params.frame_duration_ms, 20, 2000, 200) / 10) * 10 : undefined,
     ...(specialFormat || outputCompression === undefined
       ? { output_compression: undefined }
       : { output_compression: outputCompression }),
   };
+  if (normalized.svg === undefined) delete normalized.svg;
   if (normalized.complexity === undefined) delete normalized.complexity;
   if (normalized.frame_count === undefined) delete normalized.frame_count;
   if (normalized.frame_duration_ms === undefined) delete normalized.frame_duration_ms;

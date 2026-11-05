@@ -22,7 +22,16 @@ export type ProviderThinkingLevelMap = Partial<
   Record<ProviderThinkingLevel, string | null>
 >;
 
+export interface SvgAuthorRecommendation {
+  model: string;
+  tested_at: string;
+  provider_base_url: string;
+  access_guaranteed: false;
+  selection_required: true;
+}
+
 export interface ProviderItemOut {
+  svg_author_recommendation?: SvgAuthorRecommendation | null;
   name: string;
   base_url: string;
   api_key_hint: string;

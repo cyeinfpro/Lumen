@@ -1,3 +1,4 @@
+import { SVG_REASONING_EFFORTS } from "../svgAuthor.ts";
 import type { CanvasNodeType } from "./types";
 
 type CanvasConfigRecord = Record<string, unknown>;
@@ -35,6 +36,7 @@ const IMAGE_CONFIG_KEYS = new Set([
   "fast",
   "output_format",
   "complexity",
+  "svg",
   "frame_count",
   "frame_duration_ms",
   "output_compression",
@@ -152,6 +154,7 @@ function imageRenderingConfigIsValid(config: CanvasConfigRecord): boolean {
     ) &&
     optionalNullableSetValue(config, "complexity", new Set(["low", "medium", "high"])) &&
     imageAnimationConfigIsValid(config) &&
+    imageSvgConfigIsValid(config) &&
     optionalNullableInteger(config, "output_compression", 0, 100) &&
     optionalSetValue(
       config,
@@ -160,6 +163,17 @@ function imageRenderingConfigIsValid(config: CanvasConfigRecord): boolean {
     ) &&
     optionalSetValue(config, "moderation", new Set(["auto", "low"]))
   );
+}
+
+function imageSvgConfigIsValid(config: CanvasConfigRecord): boolean {
+  const svg = config.svg;
+  if (svg == null) return true;
+  if (config.output_format !== "svg" || !isCanvasConfigRecord(svg)) return false;
+  if (!hasOnlyKeys(svg, new Set(["model", "reasoning"])) || typeof svg.model !== "string" || !svg.model.trim()) return false;
+  const reasoning = svg.reasoning;
+  return reasoning == null || (isCanvasConfigRecord(reasoning) &&
+    hasOnlyKeys(reasoning, new Set(["effort"])) &&
+    optionalNullableSetValue(reasoning, "effort", new Set(SVG_REASONING_EFFORTS)));
 }
 
 function imageAnimationConfigIsValid(config: CanvasConfigRecord): boolean {

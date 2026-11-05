@@ -4,7 +4,7 @@ from __future__ import annotations
 MAX_GENERATED_IMAGE_SIDE = 10_000
 MAX_GENERATED_IMAGE_PIXELS = 64_000_000
 MAX_GIF_FRAMES = 64
-# Conservative intersection of the current guide and GIF-preview API reference.
+# Lumen product limit, not a universal provider capability or pixel-budget claim.
 MAX_GIF_REQUEST_FRAMES = 16
 DEFAULT_GIF_FRAMES = 9
 

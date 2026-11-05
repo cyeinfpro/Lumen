@@ -202,8 +202,8 @@ test("markup submits a distinct layer and preserves multi-turn primary source", 
   assert.equal(sent.action_source, "composer.markup");
 });
 
-test("SVG and GIF preserve static references and image-to-image intent", async () => {
-  for (const output_format of ["svg", "gif"]) {
+test("GIF preserves static references and image-to-image intent", async () => {
+  for (const output_format of ["gif"]) {
     const harness = createHarness({ composer: {
       ...createComposerState(null), mode: "image", text: "Transform this",
       params: { ...createComposerState(null).params, output_format },
@@ -976,4 +976,128 @@ test("abortAllSendRequests aborts a send that has not reached the backend", asyn
   assert.deepEqual(harness.get().messages, []);
   assert.equal(harness.get().composer.text, "画一只猫");
   assert.equal(harness.get().composerError, null);
+});
+
+
+test("GIF request sends custom or auto size and blocks invalid dimensions", async () => {
+  for (const [size_mode, fixed_size, valid] of [["fixed", "768x432", true], ["auto", undefined, true], ["fixed", "767x432", false]] as const) {
+    const harness = createHarness({ composer: {
+      ...createComposerState(null), mode: "image", text: "Animate a dot",
+      params: { ...createComposerState(null).params, output_format: "gif", size_mode, fixed_size },
+    }});
+    let sent: Record<string, unknown> | undefined;
+    stubHost.__conversationsStub = { postMessage: async (_conv, body) => {
+      sent = body as Record<string, unknown>;
+      return { user_message: backendUserMessage(), assistant_message: backendAssistantMessage(), generation_ids: ["gen-size"] };
+    }};
+    await harness.sendMessage();
+    if (!valid) {
+      assert.equal(sent, undefined);
+      assert.match(harness.get().composerError ?? "", /16/);
+    } else {
+      assert.ok(sent);
+      const params = sent.image_params as Record<string, unknown>;
+      assert.equal(params.size_mode, size_mode);
+      assert.equal(params.fixed_size, fixed_size);
+    }
+  }
+});
+
+test("native SVG edits reject before submission and preserve references and author", async () => {
+  for (const svg of [undefined, { model: "gpt-6.1-sol" }]) {
+    const composer = {
+      ...createComposerState(null), mode: "image", text: "Trace this",
+      params: { ...createComposerState(null).params, output_format: "svg", svg },
+      attachments: [{ id: "ref", kind: "upload", data_url: "data:image/png;base64,aA==", mime: "image/png" }],
+    };
+    const harness = createHarness({ composer });
+    let called = false;
+    stubHost.__conversationsStub = { postMessage: async () => { called = true; throw new Error("must not send"); } };
+    await harness.sendMessage();
+    assert.equal(called, false);
+    assert.match(harness.get().composerError ?? "", /原生 SVG 不支持参考图编辑/);
+    assert.deepEqual(harness.get().composer.attachments, composer.attachments);
+    assert.deepEqual(harness.get().composer.params.svg, svg);
+  }
+});
+
+test("GIF invalid timing stays visible instead of being silently coerced on send", async () => {
+  for (const timing of [{ frame_count: 17 }, { frame_count: 2.5 }, { frame_duration_ms: 33 }, { frame_duration_ms: 2100 }]) {
+    const composer = {
+      ...createComposerState(null), mode: "image", text: "Animate",
+      params: { ...createComposerState(null).params, output_format: "gif", ...timing },
+    };
+    const harness = createHarness({ composer });
+    let called = false;
+    stubHost.__conversationsStub = { postMessage: async () => { called = true; throw new Error("must not send"); } };
+    await harness.sendMessage();
+    assert.equal(called, false);
+    assert.ok(harness.get().composerError);
+    assert.deepEqual(harness.get().composer.params, composer.params);
+  }
+});
+
+test("vision SVG explicitly submits chat artifact and refreshes terminal race without consuming draft", async () => {
+  const { createVisionSvgSnapshot } = await import(new URL("./visionSvg.ts", import.meta.url).href);
+  let refreshed = "";
+  const composer = { ...createComposerState(null), mode: "image", text: "Rebuild this as SVG",
+    params: { ...createComposerState(null).params, output_format: "svg", count: 3, frame_count: 9, frame_duration_ms: 20, svg: { model: "keep-native-author" } },
+    attachments: [{ id: "ref", kind: "uploaded", data_url: "data:image/png;base64,aA==", mime: "image/png" }] };
+  const harness = createHarness({ composer, refreshCompletionText: async (id: string) => { refreshed = id; } });
+  let sent: Record<string, unknown> | undefined;
+  stubHost.__conversationsStub = { postMessage: async (_conv, body) => {
+    sent = body as Record<string, unknown>;
+    return { user_message: backendUserMessage(), assistant_message: { ...backendAssistantMessage(), content: { artifact_format: "svg", artifact_status: "pending" } }, completion_id: "vision-comp", generation_ids: [] };
+  }};
+  await harness.sendMessage({ composerSnapshot: createVisionSvgSnapshot(composer), throwOnError: true });
+  assert.ok(sent);
+  assert.equal(sent.intent, "vision_qa");
+  assert.deepEqual(sent.chat_params, { artifact_format: "svg", fast: false, max_output_tokens: 16000 });
+  assert.equal(sent.image_params, undefined);
+  assert.equal(sent.action_source, "composer.vision_svg");
+  assert.deepEqual(sent.attachment_image_ids, ["ref"]);
+  assert.equal(refreshed, "vision-comp");
+  assert.equal(harness.get().composer, composer);
+  assert.equal(harness.get().composer.params.svg?.model, "keep-native-author");
+});
+
+test("vision SVG rejects a native SVG reference without converting or discarding it", async () => {
+  const { createVisionSvgSnapshot } = await import(new URL("./visionSvg.ts", import.meta.url).href);
+  const composer = { ...createComposerState(null), text: "Rebuild",
+    attachments: [{ id: "ref-svg", kind: "generated", source_image_id: "svg-source", data_url: "/preview.png", mime: "image/svg+xml" }] };
+  const harness = createHarness({ composer });
+  let posts = 0;
+  stubHost.__conversationsStub = { postMessage: async () => { posts++; throw new Error("unexpected"); } };
+  await assert.rejects(harness.sendMessage({ composerSnapshot: createVisionSvgSnapshot(composer), throwOnError: true }), /PNG\/JPEG\/WebP/);
+  assert.equal(posts, 0);
+  assert.equal(harness.get().composer, composer);
+});
+
+test("vision succeeded before POST ACK reconciles media once without a separate image event", async () => {
+  runtime.clearUserScopedRuntime();
+  const { createVisionSvgSnapshot } = await import(new URL("./visionSvg.ts", import.meta.url).href);
+  const { applyCompletionSnapshot } = await import(new URL("./messageReconciliation.ts", import.meta.url).href);
+  const composer = { ...createComposerState(null), text: "Rebuild", attachments: [{ id: "ref", mime: "image/png", kind: "uploaded", data_url: "/ref.png" }] };
+  const response = deferred<unknown>();
+  const fresh = { id: "vision-race", status: "succeeded", text: "SVG ready", artifact_format: "svg", artifact_status: "ready", artifact_image_id: "vision-race-image", artifact_source_text: "<svg/>" };
+  const harness = createHarness({ composer, refreshCompletionText: async (id: string) => {
+    harness.set(state => ({ messages: applyCompletionSnapshot(state.messages, id, fresh, 15) }));
+  } });
+  let posted = false;
+  stubHost.__conversationsStub = { postMessage: async () => { posted = true; return response.promise; } };
+  const pending = harness.sendMessage({ composerSnapshot: createVisionSvgSnapshot(composer), throwOnError: true });
+  await waitFor(() => posted, "vision request submitted");
+  const event = { ...fresh, completion_id: "vision-race", message_id: "real-asst-1", images: [{ image_id: "vision-race-image", actual_size: "64x64", mime: "image/svg+xml" }] };
+  applySseEventPayload(harness.set, harness.get, "completion.succeeded", event, 11);
+  response.resolve({ user_message: backendUserMessage(), assistant_message: { ...backendAssistantMessage(), content: { artifact_format: "svg", artifact_status: "pending" } }, completion_id: "vision-race" });
+  await pending;
+  applySseEventPayload(harness.set, harness.get, "completion.succeeded", event, 16);
+  const assistant = harness.get().messages.find(message => message.role === "assistant");
+  assert.equal(assistant?.role, "assistant");
+  if (assistant?.role !== "assistant") assert.fail("assistant missing");
+  assert.equal(assistant.artifact_status, "ready");
+  assert.equal(assistant.artifact_source_text, "<svg/>");
+  assert.deepEqual(assistant.generation_ids, ["completion-tool-vision-race"]);
+  assert.equal(harness.get().generations["completion-tool-vision-race"].image?.id, "vision-race-image");
+  assert.equal(Object.keys(harness.get().imagesById).filter(id => id === "vision-race-image").length, 1);
 });

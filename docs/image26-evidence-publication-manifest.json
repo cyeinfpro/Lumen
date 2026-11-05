@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "scope": "Selected publication evidence; not a release or deployment receipt",
+  "archive_manifest_sha256": "66890a74e879c7028bc8da0482a1ffb37a7c73ce9e2c2eac873a42bf67110fff",
+  "archive_member_count": 235,
+  "archive_total_files_including_manifest": 236,
+  "archive_total_bytes": 41508060,
+  "cases": 73,
+  "http_status_counts": {
+    "200": 40,
+    "400": 33
+  },
+  "files": [
+    {
+      "path": "docs/image26-public-case-summary-2026-11-05.md",
+      "bytes": 80431,
+      "sha256": "2e52fd4409ee554cfb49b595e0ef9e3a64a6a63664d81a419b28e361edda5a77"
+    },
+    {
+      "path": "docs/evidence/image26-live-20261105/gif-contact-sheet.jpg",
+      "bytes": 89947,
+      "sha256": "3128a48ec8d646de64a2d3e9378efd3bc6efd70e80a10db21b2cfe0013209f6c"
+    },
+    {
+      "path": "docs/evidence/image26-live-20261105/cases/s03-svg-author-sol/output-0-preview.png",
+      "bytes": 49529,
+      "sha256": "0f2c3729c35b6fb99a4c8420e607584630066fdaa5413b658af94ee0ba319d40"
+    },
+    {
+      "path": "docs/evidence/image26-live-20261105/cases/s11-vision-to-svg-alternative/output-0-preview.png",
+      "bytes": 6114,
+      "sha256": "58d0f0220ab9af5251e9b06646f24406351b49d8b13d1671d115b04629a84d85"
+    },
+    {
+      "path": "docs/evidence/image26-live-20261105/robot-animation-contact-sheet.jpg",
+      "bytes": 141519,
+      "sha256": "dead6200ed76738aa2e34a01206b899ff0dcebc1c26509cfb61bec3cff308720"
+    }
+  ],
+  "selected_total_bytes": 367540
+}

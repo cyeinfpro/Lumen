@@ -697,6 +697,47 @@ async def cancel_completion(
     return {"status": comp.status}
 
 
+@router.post("/completions/{comp_id}/artifact/retry", dependencies=[Depends(verify_csrf)])
+async def retry_completion_artifact(
+    comp_id: str,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    request: Request = None,
+) -> dict[str, str]:
+    """Retry only local SVG postprocessing. Never reset or rebill a completion."""
+    snapshot = await lock_authenticated_user_snapshot(
+        db, user, session_id=durable_session_id(request),
+    )
+    user = snapshot.user
+    comp = (await db.execute(
+        select(Completion).where(Completion.id == comp_id, Completion.user_id == user.id)
+        .with_for_update()
+    )).scalar_one_or_none()
+    if comp is None:
+        raise _http("not_found", "completion not found", 404)
+    req = dict(comp.upstream_request or {})
+    if (comp.status != CompletionStatus.SUCCEEDED.value
+            or comp.cancel_requested_at is not None
+            or req.get("artifact_format") != "svg"
+            or req.get("artifact_status") not in {"processing_failed", "pending"}
+            or not req.get("completion_checkpoint_response_id")
+            or req.get("completion_checkpoint_usage_exact") is not True
+            or req.get("completion_checkpoint_state") != "billing_ready"
+            or req.get("completion_checkpoint_execution_epoch") != comp.execution_epoch
+            or req.get("completion_checkpoint_attempt_epoch") != comp.attempt):
+        raise _http("artifact_not_retryable", "Only completed SVG local processing can be retried", 409)
+    payload = {"task_id": comp.id, "user_id": user.id, "kind": "completion",
+               "execution_epoch": comp.execution_epoch, "artifact_repair": True}
+    outbox = OutboxEvent(kind="completion", payload=payload, published_at=None)
+    db.add(outbox)
+    await db.flush()
+    payload["outbox_id"] = str(outbox.id)
+    outbox.payload = dict(payload)
+    await db.commit()
+    await _publish_queued(payload, comp.message_id)
+    return {"status": comp.status, "artifact_status": str(req["artifact_status"])}
+
+
 @router.post("/completions/{comp_id}/retry", dependencies=[Depends(verify_csrf)])
 async def retry_completion(
     comp_id: str,
@@ -735,6 +776,14 @@ async def retry_completion(
             "completion billing must be reconciled before retry",
             409,
         )
+
+    if (isinstance(comp.upstream_request, dict)
+            and comp.upstream_request.get("artifact_format") == "svg"
+            and ("completion_checkpoint" in comp.upstream_request
+                 or any(str(key).startswith("completion_checkpoint_")
+                        for key in comp.upstream_request))):
+        raise _http("artifact_local_retry_required",
+                    "Completed SVG responses cannot replay the model; use local artifact repair", 409)
 
     redis = get_redis()
 

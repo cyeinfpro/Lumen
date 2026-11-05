@@ -39,6 +39,21 @@ class PreparationState:
     target_msg: Message | None = None
     reasoning_effort: str | None = None
     fast_mode: bool = False
+    @property
+    def artifact_format(self) -> str | None:
+        return self.queue_metadata_payload.get("artifact_format")
+
+    @artifact_format.setter
+    def artifact_format(self, value: str | None) -> None:
+        self.queue_metadata_payload["artifact_format"] = value
+
+    @property
+    def artifact_max_output_tokens(self) -> int:
+        return int(self.queue_metadata_payload.get("artifact_max_output_tokens", 2048))
+
+    @artifact_max_output_tokens.setter
+    def artifact_max_output_tokens(self, value: int) -> None:
+        self.queue_metadata_payload["artifact_max_output_tokens"] = value
 
 
 @dataclass(slots=True)

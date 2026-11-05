@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from lumen_core.svg_options import public_svg_usage
 from collections.abc import Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
@@ -449,6 +450,15 @@ async def complete_direct_generation_response(
         raise error
     if isinstance(payload, dict):
         services.core.record_usage(payload.get("usage"))
+        author_usage = public_svg_usage(payload.get("svg_usage"))
+        if request.output_format == "svg" and author_usage:
+            # Separate token telemetry only: no rate or synthetic billing charge.
+            services.core.record_usage(author_usage)
+            await services.transport.emit_image_progress(
+                request.progress_callback, "response_ready",
+                **response_metadata, svg_usage=author_usage,
+                svg_author_cost_status="unknown",
+            )
     return await services.core.extract_image_results(
         payload,
         response.status_code,

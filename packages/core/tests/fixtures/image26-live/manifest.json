@@ -1,0 +1,52 @@
+[
+  {
+    "file": "s03-svg-author-sol.svg",
+    "source_case": "s03-svg-author-sol",
+    "sha256": "7d128964d90b378dd96b50a0820cfec17701c7794530bdef32e35fec2c427f2d",
+    "dimensions": [
+      1024,
+      1024
+    ]
+  },
+  {
+    "file": "s06-sunburst-author.svg",
+    "source_case": "s06-sunburst-author",
+    "sha256": "2c6b754444f0da227a9bf9c1bc1e86444011f06b84017823e12bd3a0569fd0b6",
+    "dimensions": [
+      1536,
+      864
+    ]
+  },
+  {
+    "file": "s11-vision-to-svg-alternative.svg",
+    "source_case": "s11-vision-to-svg-alternative",
+    "sha256": "d1848e048420be55f9aa882f2c5afec703be44fae68c59b2207a06b51c18a677",
+    "dimensions": [
+      1024,
+      1024
+    ]
+  },
+  {
+    "file": "gif-4frames-100ms.gif",
+    "source_case": "g12-size-256x512",
+    "sha256": "bd08349bb8eaa343fb48566015b5ed011cee6b3631dab7e1dc00a0a1c86bcfef",
+    "metadata": {
+      "width": 256,
+      "height": 512,
+      "frame_count": 4,
+      "durations_ms": [
+        100,
+        100,
+        100,
+        100
+      ],
+      "total_duration_ms": 400,
+      "loop": 0
+    }
+  },
+  {
+    "file": "svg-usage-s03.json",
+    "source_case": "s03-svg-author-sol",
+    "sha256": "06ff5c5fd808fa6e3cccaac8db8521614ba62ecfcc3f84d70e53f07eb5bd23ce"
+  }
+]

@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 from lumen_core.providers import ProviderProxyDefinition
+from lumen_core.svg_options import normalize_svg_options
 
 from ..provider_runtime.contracts import ImageJobEndpoint
 from ..provider_runtime.upstream_services import (
@@ -630,6 +631,9 @@ async def _image_job_generate_once(
     proxy_override: ProviderProxyDefinition | None = None,
     before_attempt: Callable[[int], Awaitable[None]] | None = None,
 ) -> tuple[str, str | None]:
+    if request.svg is not None:
+        normalize_svg_options(request.svg, output_format=request.output_format)
+        raise ValueError("SVG author selection requires direct Images API; image jobs are unsupported")
     runtime = request.upstream_runtime
     services = _runtime_services(runtime)
     body = services.image_jobs.image_job_body_base(
@@ -694,6 +698,8 @@ async def _image_job_edit_once(
     image_edit_input_transport: str = "url",
     before_attempt: Callable[[int], Awaitable[None]] | None = None,
 ) -> tuple[str, str | None]:
+    if request.svg is not None:
+        raise ValueError("SVG author selection is only supported for direct generation, not edits")
     runtime = request.upstream_runtime
     services = _runtime_services(runtime)
     if not request.images:

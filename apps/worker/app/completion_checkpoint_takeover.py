@@ -45,6 +45,7 @@ class _CheckpointApplyContext:
     billing: Any
     now: datetime
     stage_event: Any
+    state: Any = None
 
 
 def completion_checkpoint_claim_action(
@@ -55,7 +56,9 @@ def completion_checkpoint_claim_action(
         return CompletionCheckpointClaimAction(True, validation_error)
     return CompletionCheckpointClaimAction(
         bool(
-            completion_checkpoint_requires_recovery(completion)
+            ((completion.upstream_request or {}).get("artifact_format") == "svg"
+             and "completion_checkpoint_version" in (completion.upstream_request or {}))
+            or completion_checkpoint_requires_recovery(completion)
             or completion_has_completed_checkpoint(completion)
             or completion_checkpoint_has_no_usable_output(completion)
         )
@@ -196,6 +199,10 @@ async def take_over_completion_checkpoint(state: Any, checkpoint_row: Any) -> bo
                 else "terminal"
             )
             return True
+        if ((completion.upstream_request or {}).get("artifact_format") == "svg"
+                and (completion.upstream_request or {}).get("completion_checkpoint_usage_exact") is not True):
+            completion.upstream_request = {**dict(completion.upstream_request or {}),
+                "artifact_status": "processing_failed", "artifact_error": "上游用量待核对，不能重新调用模型。"}
         validation_error = completion_checkpoint_validation_error(completion)
         if validation_error is not None:
             delivery = await _apply_checkpoint_failure(
@@ -218,6 +225,7 @@ async def take_over_completion_checkpoint(state: Any, checkpoint_row: Any) -> bo
             delivery = await apply_completed_checkpoint(
                 _CheckpointApplyContext(
                     session=session,
+                    state=state,
                     billing=state.ports.billing.worker_billing,
                     now=datetime.now(timezone.utc),
                     stage_event=(
@@ -227,6 +235,11 @@ async def take_over_completion_checkpoint(state: Any, checkpoint_row: Any) -> bo
                 completion,
             )
             outcome = "succeeded"
+        elif (completion.upstream_request or {}).get("artifact_format") == "svg":
+            completion.upstream_request = {**dict(completion.upstream_request or {}),
+                "artifact_status": "processing_failed", "artifact_error": "上游用量待核对，不能重新调用模型。"}
+            delivery = await _apply_checkpoint_failure(state, session, completion,
+                code="vision_svg_usage_unknown", message="Completed SVG response usage requires reconciliation")
         else:
             raise state.ports.retry._CompletionEpochSuperseded(
                 f"completion checkpoint takeover incomplete task={state.request.task_id}"

@@ -1,3 +1,4 @@
+import { normalizeSvgAuthor } from "../../lib/svgAuthor.ts";
 import type { Generation, ImageParams } from "../../lib/types";
 
 // Reroll-only fields: fidelity upscale must not inherit GIF/SVG or annotations.
@@ -12,6 +13,7 @@ export function rerollImageOptions(generation: Generation): Partial<ImageParams>
   if (complexity === "low" || complexity === "medium" || complexity === "high") {
     result.complexity = complexity;
   }
+  Object.assign(result, rerollSvgOptions(format, requested.svg));
   if (format === "gif") {
     for (const key of ["frame_count", "frame_duration_ms"] as const) {
       const value = requested[key];
@@ -24,4 +26,10 @@ export function rerollImageOptions(generation: Generation): Partial<ImageParams>
 export function rerollMarkupId(generation: Generation): string | undefined {
   const value = generation.requested_params?.markup_image_id;
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function rerollSvgOptions(format: unknown, value: unknown): Partial<ImageParams> {
+  if (format !== "svg") return {};
+  const svg = normalizeSvgAuthor(value);
+  return svg ? { svg } : {};
 }

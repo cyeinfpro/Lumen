@@ -1,0 +1,102 @@
+{
+  "source": "docs/evidence/image26-live-20261105/cases/s11-vision-to-svg-alternative/result.json",
+  "source_sha256": "b1cb9e5fc0f36c07ad78db8220e286d5599726e602a935c3a2620d027236542b",
+  "response": {
+    "id": "resp_0331b46a33b76bdf016aec4b3ac6dc87d2911c7a54817ffa01",
+    "object": "response",
+    "created_at": 1793870650,
+    "status": "completed",
+    "access_programs": null,
+    "background": false,
+    "billing": {
+      "payer": "developer"
+    },
+    "completed_at": 1793870655,
+    "error": null,
+    "frequency_penalty": 0.0,
+    "image": {
+      "context_compression": "disabled"
+    },
+    "incomplete_details": null,
+    "instructions": null,
+    "max_output_tokens": null,
+    "max_tool_calls": null,
+    "model": "gpt-6.1-sol",
+    "moderation": null,
+    "output": [
+      {
+        "id": "msg_0331b46a33b76bdf016aec4b3dc4e487d2a02caceb8126cc43",
+        "type": "message",
+        "status": "completed",
+        "content": [
+          {
+            "type": "output_text",
+            "annotations": [],
+            "logprobs": [],
+            "text": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1024 1024\">\n  <rect width=\"1024\" height=\"1024\" fill=\"#ffffff\"/>\n  <g fill=\"#f3802b\">\n    <rect x=\"270\" y=\"240\" width=\"421\" height=\"451\" rx=\"61\"/>\n    <rect x=\"675\" y=\"400\" width=\"146\" height=\"71\"/>\n    <ellipse cx=\"810.5\" cy=\"350.5\" rx=\"35.5\" ry=\"80\"/>\n  </g>\n  <g fill=\"#1969e8\">\n    <circle cx=\"385.5\" cy=\"385.5\" r=\"35.5\"/>\n    <circle cx=\"575.5\" cy=\"385.5\" r=\"35.5\"/>\n  </g>\n  <rect x=\"375\" y=\"540\" width=\"216\" height=\"36\" fill=\"#202b40\"/>\n</svg>"
+          }
+        ],
+        "phase": "final_answer",
+        "role": "assistant"
+      }
+    ],
+    "parallel_tool_calls": true,
+    "presence_penalty": 0.0,
+    "previous_response_id": null,
+    "prompt_cache_key": null,
+    "prompt_cache_retention": "24h",
+    "reasoning": {
+      "context": "all_turns",
+      "effort": "low",
+      "mode": "standard",
+      "summary": null
+    },
+    "safety_identifier": null,
+    "service_tier": "default",
+    "store": false,
+    "temperature": 1.0,
+    "text": {
+      "format": {
+        "type": "text"
+      },
+      "verbosity": "medium"
+    },
+    "tool_choice": "auto",
+    "tool_usage": {
+      "image_gen": {
+        "input_tokens": 0,
+        "input_tokens_details": {
+          "image_tokens": 0,
+          "text_tokens": 0
+        },
+        "output_tokens": 0,
+        "output_tokens_details": {
+          "image_tokens": 0,
+          "text_tokens": 0
+        },
+        "total_tokens": 0
+      },
+      "web_search": {
+        "num_requests": 0
+      }
+    },
+    "tools": [],
+    "top_logprobs": 0,
+    "top_p": 0.98,
+    "truncation": "disabled",
+    "usage": {
+      "input_tokens": 1307,
+      "input_tokens_details": {
+        "cache_write_tokens": 1304,
+        "cached_tokens": 0
+      },
+      "output_tokens": 214,
+      "output_tokens_details": {
+        "reasoning_tokens": 0
+      },
+      "total_tokens": 1521
+    },
+    "user": null,
+    "metadata": {}
+  }
+}

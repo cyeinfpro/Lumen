@@ -42,7 +42,7 @@ def request(fmt, runtime, **changes):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fmt", ["svg", "gif"])
+@pytest.mark.parametrize("fmt", ["gif"])
 @pytest.mark.parametrize("model", ["gpt-image-2.6-flare", "gpt-image-2.6-sunburst"])
 async def test_native_edit_preserves_references_and_real_result(monkeypatch, fmt, model):
     runtime = build_image_upstream_runtime()
@@ -77,7 +77,7 @@ async def test_native_edit_preserves_references_and_real_result(monkeypatch, fmt
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fmt", ["svg", "gif"])
+@pytest.mark.parametrize("fmt", ["gif"])
 async def test_native_edit_upstream_rejection_is_not_replaced_or_retried(monkeypatch, fmt):
     runtime = build_image_upstream_runtime()
     calls = []
@@ -95,7 +95,7 @@ async def test_native_edit_upstream_rejection_is_not_replaced_or_retried(monkeyp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fmt", ["svg", "gif"])
+@pytest.mark.parametrize("fmt", ["gif"])
 async def test_native_edit_rejects_silent_png_substitution(monkeypatch, fmt):
     runtime = build_image_upstream_runtime()
     calls = []
@@ -112,7 +112,7 @@ async def test_native_edit_rejects_silent_png_substitution(monkeypatch, fmt):
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("fmt", ["svg", "gif"])
+@pytest.mark.parametrize("fmt", ["gif"])
 @pytest.mark.parametrize("overlay", ["mask", "markup"])
 def test_native_edit_rejects_overlay_without_discarding_it(fmt, overlay):
     item = request(fmt, None, **{overlay: png()})
@@ -126,3 +126,20 @@ def test_native_edit_budget_before_renderer_or_network():
     item = request("gif", None, size="4096x4096", frame_count=9)
     with pytest.raises(ValueError, match="safety"):
         direct_requests._validate_edit_format(item)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["gpt-image-2.6-flare", "gpt-image-2.6-sunburst"])
+@pytest.mark.parametrize("author", [None, {"model": "explicit-author"}])
+async def test_svg_edit_rejected_before_any_renderer_or_transport(monkeypatch, model, author):
+    runtime = build_image_upstream_runtime()
+    def unexpected(*args, **kwargs):
+        pytest.fail("unsupported SVG edit must not render or dispatch")
+    monkeypatch.setattr(runtime.services.transport, "curl_post_multipart", unexpected)
+    monkeypatch.setattr(direct_requests.image_artifacts, "require_svg_renderer", unexpected)
+    item = request("svg", runtime, image_model=model, svg=author)
+    with pytest.raises(ValueError, match="Native SVG editing is unsupported"):
+        image_controls.validate_image_controls(item)
+    with pytest.raises(ValueError, match="Native SVG editing is unsupported"):
+        await direct_requests._direct_edit_image_once(
+            item, base_url_override="https://example.invalid/v1", api_key_override="test")

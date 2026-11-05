@@ -195,6 +195,9 @@ async def claim_completion(state: CompletionExecution) -> bool:
                 f"expected={expected_execution_epoch} current={current_execution_epoch}"
             )
         if state.ports.persistence.is_completion_terminal(completion.status):
+            from ...vision_svg_artifact import repair_terminal_svg
+            if await repair_terminal_svg(state, session, completion):
+                return False
             state.ports.events.logger.info(
                 "completion terminal task_id=%s status=%s",
                 state.request.task_id,
@@ -355,6 +358,8 @@ async def prepare_completion_request(state: CompletionExecution) -> None:
         }
     if state.preparation.fast_mode:
         state.streaming.body["service_tier"] = "priority"
+    if getattr(state.preparation, "artifact_format", None) == "svg":
+        state.streaming.body.update(store=False, tools=[], max_output_tokens=state.preparation.artifact_max_output_tokens)
     state.streaming.body = normalize_responses_model_body(state.streaming.body)
     state.streaming.max_tool_invocations = max(
         1,
@@ -386,6 +391,8 @@ async def _publish_thinking(
     state: CompletionExecution,
     text: str,
 ) -> None:
+    if getattr(state.preparation, "artifact_format", None) == "svg":
+        return
     if not text:
         return
     if state.streaming.accumulated_thinking.endswith(text):
@@ -406,6 +413,8 @@ async def _store_image_event(
     *,
     mark_partial: bool,
 ) -> None:
+    if getattr(state.preparation, "artifact_format", None) == "svg":
+        return
     image_b64 = state.ports.tools._extract_response_image_b64(event)
     if not image_b64:
         return
@@ -445,6 +454,8 @@ async def handle_completion_tool_call(
     *,
     allow_tool_limit: bool,
 ) -> bool:
+    if getattr(state.preparation, "artifact_format", None) == "svg":
+        return False
     tool_call = state.usage.tool_tracker.update(event)
     if tool_call is None:
         return False
@@ -512,6 +523,11 @@ async def _handle_delta(
             state.request.redis, state.request.task_id
         ):
             raise state.ports.retry._TaskCancelled(f"cancelled during {phase} stream")
+    if getattr(state.preparation, "artifact_format", None) == "svg":
+        # Unvalidated XML never enters ordinary text/thinking SSE or Markdown.
+        if len(state.streaming.accumulated_text.encode("utf-8")) > 1024 * 1024:
+            state.streaming.accumulated_text = state.streaming.accumulated_text.encode("utf-8")[:1024 * 1024].decode("utf-8", errors="ignore")
+        return
     total_len = len(state.streaming.accumulated_text)
     if (
         total_len - state.streaming.flushed_len
@@ -566,6 +582,8 @@ async def _handle_completed(
     elif not state.streaming.accumulated_text:
         state.streaming.accumulated_text = completed_text
     image_events = list(state.ports.tools._extract_image_events_from_response(response))
+    if getattr(state.preparation, "artifact_format", None) == "svg":
+        image_events = []
     checkpoint_text = completion_actual_text(state)
     await persist_completed_event_checkpoint(
         state,
@@ -574,6 +592,8 @@ async def _handle_completed(
         final_text=checkpoint_text,
         image_events=image_events,
     )
+    if getattr(state.preparation, "artifact_format", None) == "svg":
+        return
     if not state.streaming.accumulated_thinking:
         await _publish_thinking(
             state,

@@ -575,6 +575,9 @@ function handleCompletionLifecycle(context: SseEventContext): void {
       }),
     ),
   }));
+  if (context.eventName === "completion.succeeded" && context.payload.artifact_format === "svg" && context.payload.artifact_status === "ready") {
+    handleCompletionImage(context, target);
+  }
   refreshTerminalCompletion(context, completionId);
 }
 

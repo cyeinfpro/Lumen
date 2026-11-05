@@ -501,6 +501,10 @@ function deriveAssistantTurnState(
   };
 }
 
+function allowModelRetry(allowed: boolean, msg: AssistantMessage): boolean {
+  return allowed && msg.artifact_format !== "svg";
+}
+
 const AssistantTurn = memo(function AssistantTurn({
   msg,
   generations,
@@ -577,7 +581,7 @@ const AssistantTurn = memo(function AssistantTurn({
       )}
 
       {/* 文本失败重试 */}
-      {isFailedText && (
+      {allowModelRetry(isFailedText, msg) && (
         <Button
           size="sm"
           variant="secondary"
@@ -591,7 +595,7 @@ const AssistantTurn = memo(function AssistantTurn({
       )}
 
       {/* 已完成的助手消息：提供重新生成按钮 */}
-      {canRegenerate && (
+      {allowModelRetry(canRegenerate, msg) && (
         <div className="flex items-center gap-2 pt-0.5">
           <Button
             size="sm"

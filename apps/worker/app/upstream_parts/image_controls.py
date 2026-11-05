@@ -5,6 +5,7 @@ import io
 from dataclasses import replace
 
 from PIL import Image, ImageOps
+from lumen_core.svg_options import normalize_svg_options
 
 from .image_execution import ImageExecutionRequest
 
@@ -15,7 +16,8 @@ MARKUP_MAX_BYTES = 50 * 1024 * 1024
 
 def requires_images_controls(request: ImageExecutionRequest) -> bool:
     return (
-        request.complexity is not None
+        request.svg is not None
+        or request.complexity is not None
         or request.markup is not None
         or request.output_format in {"svg", "gif"}
         or request.frame_count is not None
@@ -25,6 +27,11 @@ def requires_images_controls(request: ImageExecutionRequest) -> bool:
 
 def validate_image_controls(request: ImageExecutionRequest) -> ImageExecutionRequest:
     """Fail before dispatch, preserving original input order and separate markup."""
+    if request.output_format == "svg" and request.action != "generate":
+        raise ValueError("Native SVG editing is unsupported; use SVG text generation or an explicitly separate vision-to-SVG workflow")
+    normalize_svg_options(request.svg, output_format=request.output_format)
+    if request.svg is not None and request.action != "generate":
+        raise ValueError("SVG author selection is only supported for generation, not edits")
     if not requires_images_controls(request):
         return request
     if request.image_model not in IMAGE_26_MODELS:

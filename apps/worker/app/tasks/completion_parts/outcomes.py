@@ -247,6 +247,12 @@ async def _persist_success(
 
 
 async def settle_success(state: Any) -> None:
+    if getattr(state.preparation, "artifact_format", None) == "svg":
+        from ...completion_checkpoint_takeover import take_over_completion_checkpoint
+        async with state.ports.persistence.SessionLocal() as session:
+            completion = await session.get(state.ports.persistence.Completion, state.request.task_id)
+        await take_over_completion_checkpoint(state, completion)
+        return
     final_text = completion_final_text(state)
     if state.settlement.lease_lost.is_set():
         raise state.ports.retry._LeaseLost("lease lost before success commit")

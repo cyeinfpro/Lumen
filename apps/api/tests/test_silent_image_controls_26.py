@@ -22,7 +22,7 @@ def test_silent_markup_and_controls_are_part_of_durable_hash():
         "attachment_image_ids": plain.attachment_image_ids,
         "image_params": plain.image_params.model_dump(mode="json"),
     }
-    for key in ("complexity", "frame_count", "frame_duration_ms"):
+    for key in ("complexity", "frame_count", "frame_duration_ms", "svg"):
         payload["image_params"].pop(key, None)
     expected = hashlib.sha256(json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),

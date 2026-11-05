@@ -28,6 +28,7 @@ def image_params(config: dict[str, Any]) -> ImageParamsIn:
                 "output_format": config.get("output_format") or "webp",
                 "output_compression": config.get("output_compression"),
                 "complexity": config.get("complexity"),
+                "svg": config.get("svg"),
                 "frame_count": config.get("frame_count"),
                 "frame_duration_ms": config.get("frame_duration_ms"),
                 "background": config.get("background") or "auto",

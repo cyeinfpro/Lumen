@@ -113,6 +113,7 @@ class ImageExecutionRequest:
     markup: bytes | None = None
     frame_count: int | None = None
     frame_duration_ms: int | None = None
+    svg: dict[str, Any] | None = None
 
     def with_progress(
         self,

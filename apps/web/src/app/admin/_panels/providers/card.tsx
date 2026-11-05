@@ -81,6 +81,12 @@ export function ProviderCard({
         onToggle={togglePurpose}
       />
       <ProviderMetadata provider={provider} probe={probe} stats={stats} />
+      {purposes.includes("image") && provider.svg_author_recommendation && (
+        <p className="mt-3 break-words type-caption text-[var(--fg-2)]">
+          SVG 作者参考：{provider.svg_author_recommendation.model}，仅在 {provider.svg_author_recommendation.provider_base_url} 于 {provider.svg_author_recommendation.tested_at} 实测。
+          不保证当前权限或其他通道可用；请在生成时显式选择，作者用量独立计费。此提示不会修改配置。
+        </p>
+      )}
     </motion.div>
   );
 }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, cast
 
+from lumen_core.svg_options import svg_author_recommendation
 from lumen_core.agent_provider_contract import effective_agent_base_url
 from lumen_core.providers_parts.config import (
     normalize_image_edit_input_transport,
@@ -141,6 +142,7 @@ def normalize_agent_thinking_level_map(raw: Any) -> dict[str, str | None] | None
 def provider_out(item: dict[str, Any], index: int) -> ProviderItemOut:
     endpoint = normalize_image_jobs_endpoint(item.get("image_jobs_endpoint"))
     return ProviderItemOut(
+        svg_author_recommendation=svg_author_recommendation(item.get("base_url")),
         name=item.get("name") or f"provider-{index}",
         base_url=item.get("base_url", ""),
         api_key_hint=mask_key(item.get("api_key", "")),

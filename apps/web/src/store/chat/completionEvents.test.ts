@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import "./moduleResolution.test-helper.mjs";
 import test from "node:test";
 import type {
   AssistantMessage,

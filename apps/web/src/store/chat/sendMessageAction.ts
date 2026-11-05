@@ -1,3 +1,5 @@
+import { visionSvgSendError } from "./visionSvg";
+import { gifSizeError, gifTimingError, resolveGifSize } from "../../lib/gifSize";
 import { normalizeImageQuality } from "../../lib/imageModels";
 import {
   createConversation as apiCreateConversation,
@@ -205,7 +207,10 @@ function image26SendError(composer: ComposerState, intent: Exclude<Intent, "auto
   if (isImageIntent(intent) && special && (mask || markup)) {
     return "SVG / GIF 暂不支持蒙版或标注，请清除后重试；参考图会保留";
   }
-  return mask && markup ? "标注和蒙版不能同时使用" : null;
+  if (intent === "image_to_image" && composer.params.output_format === "svg") {
+    return "原生 SVG 不支持参考图编辑；请移除参考图或改用 PNG/WebP/GIF，不会自动改用视觉模型重绘";
+  }
+  return mask && markup ? "标注和蒙版不能同时使用" : isImageIntent(intent) ? gifSizeError(composer.params) ?? gifTimingError(composer.params) : null;
 }
 
 function prepareSend(
@@ -234,7 +239,7 @@ function prepareSend(
     resolveIntent(snapshot.mode, attachments.length > 0, snapshot.forceIntent);
   const maskImageId = resolveMaskImageId(snapshot, intent);
   const markupImageId = resolveMarkupImageId(snapshot, intent);
-  const imageError = image26SendError(snapshot, intent, maskImageId, markupImageId);
+  const imageError = visionSvgSendError(snapshot, intent) ?? image26SendError(snapshot, intent, maskImageId, markupImageId);
   if (imageError) return { prepared: null, error: imageError };
   const structuredAttachments = structuredAttachmentsFromComposer(
     attachments,
@@ -256,7 +261,7 @@ function prepareSend(
       attachmentImageIds: structuredAttachments.map(
         (attachment) => attachment.image_id,
       ),
-      actionSource: markupImageId ? "composer.markup" : resolveActionSource(intent, maskImageId),
+      actionSource: snapshot.artifactFormat === "svg" ? "composer.vision_svg" : markupImageId ? "composer.markup" : resolveActionSource(intent, maskImageId),
     },
     error: null,
   };
@@ -325,6 +330,7 @@ function buildOptimisticSend(
     id: assistantId,
     role: "assistant",
     parent_user_message_id: userId,
+    ...(prepared.composer.artifactFormat === "svg" ? { artifact_format: "svg" as const, artifact_status: "pending" as const } : {}),
     intent_resolved: prepared.intent,
     status: "pending",
     generation_ids: generationIds.length > 0 ? generationIds : undefined,
@@ -395,6 +401,7 @@ function commitOptimisticSend(
 
 function buildChatParams(prepared: PreparedSend): Record<string, unknown> | undefined {
   if (prepared.isImage) return undefined;
+  if (prepared.composer.artifactFormat === "svg") return { artifact_format: "svg", fast: false, max_output_tokens: 16000 };
   const params: Record<string, unknown> = {
     fast: prepared.composer.fast,
   };
@@ -421,7 +428,7 @@ function buildImageParams(prepared: PreparedSend): ImageParams | undefined {
   } = prepared.params;
   const resolvedQuality = quality ?? "4k";
   const resolvedSize = outputFormat === "gif"
-    ? { fixed_size: prepared.params.fixed_size || "512x512", size_mode: "fixed" as const }
+    ? resolveGifSize(prepared.params)
     : qualityToFixedSize(resolvedQuality, prepared.params.aspect_ratio);
   const renderQuality = normalizeImageQuality(renderQualityOverride, prepared.params.model);
   const outputCompression =
@@ -807,6 +814,11 @@ async function prepareSemanticSend(
   return null;
 }
 
+function refreshVisionArtifactAfterSend(prepared: PreparedSend, validated: ValidatedSend, get: ChatStateGetter): void {
+  if (prepared.composer.artifactFormat !== "svg" || !validated.completionId) return;
+  void get().refreshCompletionText(validated.completionId).catch(() => undefined);
+}
+
 export function createSendMessageAction(
   set: ChatStateSetter,
   get: ChatStateGetter,
@@ -894,6 +906,8 @@ export function createSendMessageAction(
           optimistic,
           validated,
         );
+        // A terminal SSE may arrive before POST establishes the completion alias.
+        refreshVisionArtifactAfterSend(prepared, validated, get);
       } catch (err) {
         await semanticPostIdempotency.recordFailure(idempotency, err);
         removeOptimisticSend(set, optimistic);

@@ -1,3 +1,4 @@
+import { gifNativeOutputRows } from "@/lib/gifNativeOutput";
 import type { LightboxItem } from "./types";
 
 export type LightboxMetadataRow = {
@@ -455,6 +456,7 @@ export function buildLightboxMetadataSections(
     { title: "参数差异", rows: buildParamDiffRows(item) },
     { title: "运行信息", rows: buildRuntimeRows(item) },
     { title: "诊断", rows: buildDiagnosticsRows(item) },
+    { title: "GIF 实际文件", rows: collectRecordSources(item).flatMap((source) => gifNativeOutputRows(source.native_output)) },
     { title: "文件信息", rows: buildFileRows(item) },
     { title: "记录", rows: buildRecordRows(item) },
   ].filter((section) => section.rows.length > 0);

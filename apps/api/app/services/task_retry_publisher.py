@@ -32,6 +32,9 @@ async def publish_queued_retry(
             payload["task_id"],
             _job_id=arq_job_id(kind, payload["task_id"], payload.get("outbox_id")),
         )
+        # Local artifact repair keeps the completed model task terminal.
+        if payload.get("artifact_repair"):
+            return
         await publish_sse_event(
             redis,
             user_id=payload["user_id"],

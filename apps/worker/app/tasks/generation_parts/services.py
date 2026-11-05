@@ -49,6 +49,7 @@ class GenerationProviderRequest:
     complexity: str | None = None
     frame_count: int | None = None
     frame_duration_ms: int | None = None
+    svg: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

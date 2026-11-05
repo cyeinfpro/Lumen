@@ -100,7 +100,7 @@ def silent_generation_request_hash(body: SilentGenerationIn) -> str:
         "image_params": body.image_params.model_dump(mode="json"),
     }
     # Newly optional controls must not change durable hashes when omitted.
-    for key in ("complexity", "frame_count", "frame_duration_ms"):
+    for key in ("complexity", "frame_count", "frame_duration_ms", "svg"):
         if payload["image_params"].get(key) is None:
             payload["image_params"].pop(key, None)
     if body.markup_image_id is not None:

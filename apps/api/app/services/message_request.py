@@ -219,6 +219,9 @@ def build_user_content(
             content[key] = request_metadata[key]
     if not is_chat_intent(intent):
         return content
+    if chat_params.artifact_format == "svg":
+        content["artifact_format"] = "svg"
+        content["max_output_tokens"] = chat_params.max_output_tokens
     if chat_params.reasoning_effort:
         if chat_params.reasoning_effort not in allowed_reasoning_efforts:
             raise http_error(
@@ -259,13 +262,14 @@ async def resolve_assistant_context(
     credential_pin = None
     credential_pin_resolved = False
     if is_chat_intent(intent):
-        system_prompt = await runtime.resolve_system_prompt(
-            db,
-            user_id=user.id,
-            default_system_prompt_id=user.default_system_prompt_id,
-            conv=conversation,
-            explicit_prompt=chat_params.system_prompt,
-        )
+        if chat_params.artifact_format != "svg":
+            system_prompt = await runtime.resolve_system_prompt(
+                db,
+                user_id=user.id,
+                default_system_prompt_id=user.default_system_prompt_id,
+                conv=conversation,
+                explicit_prompt=chat_params.system_prompt,
+            )
         credential_pin = await runtime.resolve_credential_pin(
             db,
             user.id,
@@ -344,7 +348,7 @@ async def persist_message_request(
             return MessageTransactionResult(prior, None, None, [])
         db.add(user_message)
         await db.flush()
-        if is_chat_intent(intent):
+        if is_chat_intent(intent) and command.chat_params.artifact_format != "svg":
             await runtime.apply_pending_confirmation_reply(
                 db=db,
                 user=user,
@@ -374,7 +378,7 @@ async def persist_message_request(
             credential_pin_resolved=(command.assistant_context.credential_pin_resolved),
             request_metadata=command.request_metadata,
         )
-        if is_chat_intent(intent):
+        if is_chat_intent(intent) and command.chat_params.artifact_format != "svg":
             await runtime.apply_explicit_memory_write(
                 db=db,
                 user=user,
