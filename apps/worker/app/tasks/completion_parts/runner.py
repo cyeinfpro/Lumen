@@ -29,11 +29,9 @@ from functools import partial
 from typing import Any
 
 from lumen_core.constants import (
-    EV_COMP_DELTA,
     EV_COMP_PROGRESS,
     EV_COMP_RESTARTED,
     EV_COMP_STARTED,
-    EV_COMP_THINKING_DELTA,
     CompletionStage,
     CompletionStatus,
     task_channel,
@@ -69,6 +67,12 @@ from ...completion_checkpoint_takeover import (
 )
 from ...completion_text import completion_text_or_empty
 from .outcomes import completion_actual_text
+from .stream_output import (
+    completion_event_payload as _event_payload,
+    handle_completion_delta as _handle_delta,
+    publish_completion_thinking as _publish_thinking,
+)
+from .vision_svg_repair import repair_terminal_svg
 
 
 _STABLE_PROVIDER_IDEMPOTENCY_KEY = "_stable_provider_idempotency"
@@ -112,17 +116,6 @@ def _new_execution(
             0, int(execution_epoch)
         )
     return state
-
-
-def _event_payload(state: CompletionExecution, **extra: Any) -> dict[str, Any]:
-    return {
-        "completion_id": state.request.task_id,
-        "message_id": state.preparation.message_id,
-        "attempt": state.preparation.attempt,
-        "attempt_epoch": state.preparation.attempt_epoch,
-        "execution_epoch": _completion_execution_epoch(state),
-        **extra,
-    }
 
 
 async def claim_completion(state: CompletionExecution) -> bool:
@@ -195,7 +188,6 @@ async def claim_completion(state: CompletionExecution) -> bool:
                 f"expected={expected_execution_epoch} current={current_execution_epoch}"
             )
         if state.ports.persistence.is_completion_terminal(completion.status):
-            from ...vision_svg_artifact import repair_terminal_svg
             if await repair_terminal_svg(state, session, completion):
                 return False
             state.ports.events.logger.info(
@@ -387,26 +379,6 @@ async def prepare_completion_request(state: CompletionExecution) -> None:
     )
 
 
-async def _publish_thinking(
-    state: CompletionExecution,
-    text: str,
-) -> None:
-    if getattr(state.preparation, "artifact_format", None) == "svg":
-        return
-    if not text:
-        return
-    if state.streaming.accumulated_thinking.endswith(text):
-        return
-    state.streaming.accumulated_thinking += text
-    await state.ports.events.publish_event(
-        state.request.redis,
-        state.preparation.user_id,
-        state.request.channel,
-        EV_COMP_THINKING_DELTA,
-        _event_payload(state, thinking_delta=text),
-    )
-
-
 async def _store_image_event(
     state: CompletionExecution,
     event: dict[str, Any],
@@ -502,50 +474,6 @@ async def handle_completion_tool_call(
     )
     state.streaming.tool_loop_truncated = True
     return True
-
-
-async def _handle_delta(
-    state: CompletionExecution,
-    event: dict[str, Any],
-    *,
-    phase: str,
-) -> None:
-    delta = event.get("delta") or ""
-    if not delta:
-        return
-    state.streaming.has_partial = True
-    state.streaming.accumulated_text += delta
-    state.usage.delta_counter += 1
-    if state.usage.delta_counter % state.ports.retry._CANCEL_CHECK_EVERY_DELTAS == 0:
-        if state.settlement.lease_lost.is_set():
-            raise state.ports.retry._LeaseLost(f"lease lost during {phase} stream")
-        if await state.ports.retry._is_cancelled(
-            state.request.redis, state.request.task_id
-        ):
-            raise state.ports.retry._TaskCancelled(f"cancelled during {phase} stream")
-    if getattr(state.preparation, "artifact_format", None) == "svg":
-        # Unvalidated XML never enters ordinary text/thinking SSE or Markdown.
-        if len(state.streaming.accumulated_text.encode("utf-8")) > 1024 * 1024:
-            state.streaming.accumulated_text = state.streaming.accumulated_text.encode("utf-8")[:1024 * 1024].decode("utf-8", errors="ignore")
-        return
-    total_len = len(state.streaming.accumulated_text)
-    if (
-        total_len - state.streaming.flushed_len
-        >= state.ports.retry._PG_FLUSH_EVERY_CHARS
-    ):
-        state.streaming.flushed_len = total_len
-        await state.ports.persistence._flush_completion_text(
-            state.request.task_id,
-            state.streaming.accumulated_text,
-            attempt_epoch=state.preparation.attempt_epoch,
-        )
-    await state.ports.events.publish_event(
-        state.request.redis,
-        state.preparation.user_id,
-        state.request.channel,
-        EV_COMP_DELTA,
-        _event_payload(state, text_delta=delta),
-    )
 
 
 async def _handle_completed(

@@ -166,9 +166,23 @@ async def test_memory_finalization_query_is_bounded_under_advisory_lock() -> Non
 
 
 @pytest.mark.asyncio
-async def test_completion_memory_and_tool_settings_run_after_main_session_exit() -> None:
+@pytest.mark.parametrize(
+    "completion",
+    [
+        None,
+        SimpleNamespace(upstream_request={}),
+        SimpleNamespace(upstream_request={"artifact_format": "text"}),
+    ],
+    ids=["missing-completion", "ordinary-completion", "explicit-text-completion"],
+)
+async def test_completion_memory_and_tool_settings_run_after_main_session_exit(
+    completion: Any,
+) -> None:
     active = {"value": False}
     message_model = object()
+    completion_model = object()
+    lookups = []
+    events = []
     target = SimpleNamespace(parent_message_id="parent-1")
     parent = SimpleNamespace(
         content={"reasoning_effort": "high", "fast": True},
@@ -178,14 +192,21 @@ async def test_completion_memory_and_tool_settings_run_after_main_session_exit()
         async def __aenter__(self) -> Session:
             assert active["value"] is False
             active["value"] = True
+            events.append("session-enter")
             return self
 
         async def __aexit__(self, *_args: Any) -> None:
             active["value"] = False
+            events.append("session-exit")
 
         async def get(self, model: Any, row_id: str) -> Any:
             assert active["value"] is True
+            lookups.append((model, row_id))
+            if model is completion_model:
+                assert row_id == "completion-1"
+                return completion
             assert model is message_model
+            assert row_id in {"message-1", "parent-1"}
             return target if row_id == "message-1" else parent
 
     async def pack(*_args: Any, **_kwargs: Any) -> Any:
@@ -201,10 +222,14 @@ async def test_completion_memory_and_tool_settings_run_after_main_session_exit()
 
     async def inject(*_args: Any, **_kwargs: Any) -> dict[str, list[Any]]:
         assert active["value"] is False
+        assert _args == (None,)
+        events.append("inject-memory")
         return {"used_memory_ids": [], "used_memory_summary": []}
 
     async def chat_tools(_content: dict[str, Any]) -> list[str]:
         assert active["value"] is False
+        assert _content == parent.content
+        events.append("resolve-tools")
         return ["web_search"]
 
     state = SimpleNamespace(
@@ -212,6 +237,7 @@ async def test_completion_memory_and_tool_settings_run_after_main_session_exit()
             persistence=SimpleNamespace(
                 SessionLocal=Session,
                 Message=message_model,
+                Completion=completion_model,
             ),
             context=SimpleNamespace(
                 _pack_recent_history=pack,
@@ -252,3 +278,18 @@ async def test_completion_memory_and_tool_settings_run_after_main_session_exit()
     assert state.preparation.reasoning_effort == "high"
     assert state.preparation.fast_mode is True
     assert state.streaming.chat_tools == ["web_search"]
+    assert lookups == [
+        (completion_model, "completion-1"),
+        (message_model, "message-1"),
+        (message_model, "parent-1"),
+    ]
+    assert events == [
+        "session-enter", "session-exit",
+        "session-enter", "session-exit",
+        "inject-memory", "resolve-tools",
+    ]
+    assert state.preparation.target_msg is target
+    assert state.streaming.instructions == "default"
+    assert state.usage.memory_meta_for_event == {
+        "used_memory_ids": [], "used_memory_summary": [],
+    }

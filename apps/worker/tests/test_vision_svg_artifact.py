@@ -15,6 +15,7 @@ from app import vision_svg_artifact as svg
 from app import completion_checkpoint as checkpoint
 from app.completion_checkpoint_takeover import completion_checkpoint_claim_action
 from app.tasks.completion_parts import runner
+from app.tasks.completion_parts.vision_svg_repair import repair_terminal_svg
 from app.tasks.completion_parts.request_metadata import (
     merge_completion_upstream_metadata,
 )
@@ -343,10 +344,10 @@ async def test_terminal_repair_has_no_charge_or_upstream(renderer):
             ),
         ),
     )
-    assert await svg.repair_terminal_svg(state, s, c)
+    assert await repair_terminal_svg(state, s, c)
     assert s.commits == 1 and c.upstream_request["artifact_status"] == "ready"
     assert c.tokens_out == 45 and c.image_output_tokens == 0
-    assert not await svg.repair_terminal_svg(state, s, c)
+    assert not await repair_terminal_svg(state, s, c)
     assert s.commits == 1
 
 
@@ -357,10 +358,10 @@ async def test_terminal_repair_cancel_and_unknown_rejected(renderer):
     c.upstream_request["artifact_status"] = "processing_failed"
     s = Session(c)
     c.cancel_requested_at = "cancelled"
-    assert not await svg.repair_terminal_svg(NS(), s, c)
+    assert not await repair_terminal_svg(NS(), s, c)
     c.cancel_requested_at = None
     c.upstream_request["completion_checkpoint_usage_exact"] = False
-    assert not await svg.repair_terminal_svg(NS(), s, c)
+    assert not await repair_terminal_svg(NS(), s, c)
     assert not s.added
 
 
@@ -376,7 +377,7 @@ async def test_terminal_repair_lease_loss_cannot_commit(renderer):
         settlement=NS(lease_lost=lost), ports=NS(retry=NS(_LeaseLost=RuntimeError))
     )
     with pytest.raises(RuntimeError):
-        await svg.repair_terminal_svg(state, s, c)
+        await repair_terminal_svg(state, s, c)
     assert s.commits == 0 and not s.added
 
 
