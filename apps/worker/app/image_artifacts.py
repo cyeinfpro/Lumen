@@ -165,8 +165,8 @@ def _validated_image(raw_image: bytes) -> Iterator[PILImage.Image]:
         # Existing libvips renderer only sees validated static vector content.
         # Fail explicitly if this runtime lacks SVG support; never fake a preview.
         try:
-            raw_image = require_svg_renderer().Image.new_from_buffer(
-                raw_image, "", access="sequential"
+            raw_image = require_svg_renderer().Image.svgload_buffer(
+                raw_image, access="sequential"
             ).write_to_buffer(".png")
         except Exception as exc:
             raise ValueError("SVG preview renderer is unavailable") from exc
@@ -375,7 +375,12 @@ def _make_variants_with_vips_sync(
         raw_image = validated_svg_render_bytes(raw_image)
     pyvips = require_svg_renderer() if inspection.orig_format == "SVG" else _VIPS_ADAPTER.load()
 
-    image = pyvips.Image.new_from_buffer(raw_image, "", access="sequential")
+    # Validated XML may use a namespace prefix that automatic sniffing misses.
+    image = (
+        pyvips.Image.svgload_buffer(raw_image, access="sequential")
+        if inspection.orig_format == "SVG"
+        else pyvips.Image.new_from_buffer(raw_image, "", access="sequential")
+    )
     display = _resize_vips_image(image, 2048)
     preview = _resize_vips_image(image, 1024)
     thumb = _resize_vips_image(image, 256)
