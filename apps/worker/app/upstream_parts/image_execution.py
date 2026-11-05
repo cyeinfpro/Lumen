@@ -6,6 +6,8 @@ import uuid
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from lumen_core.svg_options import SvgOptionsPayload
+
 from ..provider_runtime.upstream_services import ImageUpstreamRuntime
 from ..upstream_clients.image_job_models import ImageJobExecutionHandle
 from .generated_payload import GeneratedImageResult
@@ -113,7 +115,7 @@ class ImageExecutionRequest:
     markup: bytes | None = None
     frame_count: int | None = None
     frame_duration_ms: int | None = None
-    svg: dict[str, Any] | None = None
+    svg: SvgOptionsPayload | None = None
 
     def with_progress(
         self,

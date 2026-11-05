@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.models import Generation
 from lumen_core.image_models import DEFAULT_IMAGE_MODEL
+from lumen_core.svg_options import SvgOptionsPayload
 
 from ...provider_runtime.contracts import ResolvedProvider
 from ...upstream_clients.image_job_models import ImageJobExecutionHandle
@@ -49,7 +50,7 @@ class GenerationProviderRequest:
     complexity: str | None = None
     frame_count: int | None = None
     frame_duration_ms: int | None = None
-    svg: dict[str, Any] | None = None
+    svg: SvgOptionsPayload | None = None
 
 
 @dataclass(frozen=True, slots=True)

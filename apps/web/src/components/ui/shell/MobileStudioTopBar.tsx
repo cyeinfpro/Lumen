@@ -9,7 +9,7 @@ import {
   Zap,
 } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { MobileTopBar } from "./MobileTopBar";
 import { MobileConversationDrawer } from "./MobileConversationDrawer";
 import { MobileIconButton } from "@/components/ui/primitives/mobile/MobileIconButton";
@@ -27,7 +27,7 @@ import {
 import { ContextWindowMeter } from "@/components/ui/chat/ContextWindowMeter";
 import { ConversationMemoryButton } from "@/components/ui/chat/ConversationMemoryButton";
 
-export function MobileStudioTopBar() {
+export function MobileStudioTopBar({ historyActions }: { historyActions?: ReactNode }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);
 
@@ -103,14 +103,17 @@ export function MobileStudioTopBar() {
           </div>
         }
         right={
-          <MobileIconButton
-            icon={<Plus className="w-5 h-5" />}
-            label="新建会话"
-            onPress={handleNewConv}
-            disabled={createMut.isPending}
-            minHit
-            className="h-11 w-11 rounded-[var(--radius-control)] disabled:opacity-50"
-          />
+          <>
+            {historyActions}
+            <MobileIconButton
+              icon={<Plus className="w-5 h-5" />}
+              label="新建会话"
+              onPress={handleNewConv}
+              disabled={createMut.isPending}
+              minHit
+              className="h-11 w-11 rounded-[var(--radius-control)] disabled:opacity-50"
+            />
+          </>
         }
         below={
           <div className="mobile-tool-scroller flex min-h-11 items-center gap-1.5 overflow-x-auto overscroll-x-contain no-scrollbar">

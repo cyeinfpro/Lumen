@@ -258,7 +258,19 @@ test("mobile bottom stack includes the measured task island", () => {
   );
   match(mobileStudioSource, /paddingBottom: "var\(--bottom-overlay-stack\)"/);
   match(mobileStudioSource, /data-testid="conversation-scroll"/);
-  match(mobileCanvasSource, /var\(--bottom-overlay-stack, 120px\)/);
+});
+
+test("mobile history navigation occupies the header instead of covering message controls", () => {
+  match(mobileStudioSource, /historyActions=\{<div ref=\{setHistoryActionsRoot\}/);
+  match(mobileStudioSource, /historyActionsRoot=\{historyActionsRoot\}/);
+  match(mobileTopBarSource, /\{historyActions\}/);
+  match(mobileCanvasSource, /historyActionsRoot && createPortal\(/);
+  const jumpButton = mobileCanvasSource.slice(
+    mobileCanvasSource.indexOf("function JumpToLatestButton"),
+    mobileCanvasSource.indexOf("const UserTurn"),
+  );
+  doesNotMatch(jumpButton, /\bfixed\b|--z-tray/);
+  match(jumpButton, /min-h-11/);
 });
 
 test("empty mobile studio starts at the top instead of auto-scrolling", () => {

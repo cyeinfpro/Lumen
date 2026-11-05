@@ -11,6 +11,7 @@ import {
   useMemo,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   AlertTriangle,
@@ -51,6 +52,7 @@ interface MobileConversationCanvasProps {
   generations: Record<string, Generation>;
   scrollRef?: RefObject<HTMLDivElement | null>;
   scrollToMessageId?: string | null;
+  historyActionsRoot: HTMLElement | null;
   onEditImage: (imageId: string) => void;
   onRetryGen: (gid: string) => void;
   onRetryText: (assistantId: string) => void;
@@ -178,6 +180,7 @@ export function MobileConversationCanvas({
   generations,
   scrollRef,
   scrollToMessageId,
+  historyActionsRoot,
   onEditImage,
   onRetryGen,
   onRetryText,
@@ -405,10 +408,14 @@ export function MobileConversationCanvas({
 
       {body}
 
-      <JumpToLatestButton
-        visible={showJumpToLatest}
-        onClick={() => scrollToLatest("smooth")}
-      />
+      {/* Keep navigation in the header, never over short-viewport message controls. */}
+      {historyActionsRoot && createPortal(
+        <JumpToLatestButton
+          visible={showJumpToLatest}
+          onClick={() => scrollToLatest("smooth")}
+        />,
+        historyActionsRoot,
+      )}
     </div>
   );
 }
@@ -423,20 +430,15 @@ function JumpToLatestButton({
   if (!visible) return null;
 
   return (
-    <div
-      className="fixed left-1/2 z-[var(--z-tray)] -translate-x-1/2"
-      style={{ bottom: "calc(var(--bottom-overlay-stack, 120px) + 4px)" }}
+    <Button
+      size="sm"
+      variant="secondary"
+      leftIcon={<ArrowDownToLine className="h-3.5 w-3.5" aria-hidden />}
+      onClick={onClick}
+      className="min-h-11 shrink-0 px-2"
     >
-      <Button
-        size="sm"
-        variant="secondary"
-        leftIcon={<ArrowDownToLine className="h-3.5 w-3.5" aria-hidden />}
-        onClick={onClick}
-        className="min-h-11 border-[var(--border)] bg-[var(--bg-1)]/90 px-3 shadow-[var(--shadow-2)] backdrop-blur-xl"
-      >
-        最新
-      </Button>
-    </div>
+      最新
+    </Button>
   );
 }
 

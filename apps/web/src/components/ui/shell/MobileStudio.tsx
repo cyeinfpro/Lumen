@@ -100,6 +100,7 @@ export function MobileStudio() {
     [convsQuery.data],
   );
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [historyActionsRoot, setHistoryActionsRoot] = useState<HTMLDivElement | null>(null);
   const [composerMetrics, setComposerMetrics] = useState<{
     height: number;
     bottom: number | null;
@@ -315,7 +316,9 @@ export function MobileStudio() {
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <div ref={topChromeRef} className="shrink-0">
         <LandscapeBanner />
-        <MobileStudioTopBar />
+        <MobileStudioTopBar
+          historyActions={<div ref={setHistoryActionsRoot} className="empty:hidden" />}
+        />
       </div>
 
       <main
@@ -371,6 +374,7 @@ export function MobileStudio() {
               generations={generations}
               scrollRef={scrollRef}
               scrollToMessageId={scrollTo}
+              historyActionsRoot={historyActionsRoot}
               onEditImage={promoteImageToReference}
               onRetryGen={(gid) => void retryGeneration(gid)}
               onRetryText={(id) => void retryAssistant(id)}

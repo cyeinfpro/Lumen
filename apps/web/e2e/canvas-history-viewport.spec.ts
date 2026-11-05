@@ -58,18 +58,28 @@ test("layout undo and redo retain saved geometry without stranding the camera", 
 test("configuration undo preserves the existing camera and current graph inputs", async ({ page }) => {
   const fixture = await installScaleFixture(page, 100);
   await page.goto("/projects/canvas/canvas-scale");
-  await expect(canvasNode(page, "n-0")).toBeAttached();
-  // Use the full-size initial node, not a sub-pixel touch target at overview.
-  const node = canvasNode(page, "n-0");
+  await expect.poll(() => page.locator(".react-flow__viewport").evaluate((element) =>
+    new DOMMatrixReadOnly(getComputedStyle(element).transform).a)).toBeLessThan(1);
+  await page.keyboard.press("ControlOrMeta+0");
+  await page.evaluate(() => new Promise<void>((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  // Initial auto-fit virtualizes corner nodes on short viewports. Select a
+  // central prompt through the UI, then fit it before interacting with its editor.
+  const node = canvasNode(page, "n-" + fixture.anchor);
+  await node.locator("header > svg").first().click();
+  await expect(node).toHaveClass(/selected/);
+  await page.keyboard.press("Shift+2");
   const editor = node.getByRole("textbox", { name: "编辑提示词内容" });
+  await expect(editor).toBeVisible();
+  await expect(editor).toBeEditable();
   const original = await editor.inputValue();
   await editor.fill("A reversible draft only");
   await editor.blur();
-  await expect.poll(() => fixture.graph.nodes[0]!.config.text).toBe("A reversible draft only");
+  await expect.poll(() => fixture.graph.nodes[fixture.anchor]!.config.text).toBe("A reversible draft only");
   await expect(page.locator("[data-canvas-save-status]")).toContainText("已保存");
   const camera = await page.locator(".react-flow__viewport").getAttribute("style");
   await page.keyboard.press("ControlOrMeta+z");
-  await expect.poll(() => fixture.graph.nodes[0]!.config.text).toBe(original);
+  await expect.poll(() => fixture.graph.nodes[fixture.anchor]!.config.text).toBe(original);
   await expect(page.locator("[data-canvas-save-status]")).toContainText("已保存");
   await page.evaluate(() => new Promise<void>((resolve) =>
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));

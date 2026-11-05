@@ -87,6 +87,28 @@ for (const initialStatus of ["ready","invalid","processing_failed"] as const) {
       const download=await downloadReady;
       const target=info.outputPath("verified.svg");await download.saveAs(target);
       expect(await readFile(target,"utf8")).toContain("<rect");
+      const viewport = page.viewportSize();
+      if (viewport && viewport.width < 768 && viewport.height < 480) {
+        const scroll = page.getByTestId("conversation-scroll");
+        const latest = page.getByRole("button", { name: "最新", exact: true });
+        await card.getByRole("status").first().scrollIntoViewIfNeeded();
+        await expect(latest).toBeVisible();
+        const latestBox = await latest.boundingBox();
+        const scrollBox = await scroll.boundingBox();
+        expect(latestBox).not.toBeNull();
+        expect(scrollBox).not.toBeNull();
+        expect(latestBox!.y + latestBox!.height).toBeLessThanOrEqual(scrollBox!.y + 1);
+        const sourceToggle = card.getByText("查看模型原始文本（仅文本，不执行）", { exact: true });
+        await sourceToggle.click();
+        await expect(card.locator("pre")).toBeHidden();
+        await sourceToggle.click();
+        await expect(card.locator("pre")).toHaveText(rawSource);
+        await latest.click();
+        await expect(latest).toHaveCount(0);
+        await expect.poll(() => scroll.evaluate(element =>
+          element.scrollHeight - element.scrollTop - element.clientHeight,
+        )).toBeLessThanOrEqual(2);
+      }
     }
     else await expect(card.getByRole("button",{name:"下载已验证 SVG"})).toHaveCount(0);
     if(initialStatus==="invalid") {

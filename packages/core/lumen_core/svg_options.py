@@ -6,10 +6,21 @@ Omitting svg retains compatibility with providers without model selection.
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, NotRequired, TypedDict
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SvgReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+
+class SvgReasoningPayload(TypedDict):
+    effort: SvgReasoningEffort
+
+
+class SvgOptionsPayload(TypedDict):
+    """Validated JSON payload shared by generation and transport requests."""
+
+    model: str
+    reasoning: NotRequired[SvgReasoningPayload]
 
 
 class SvgReasoningOptions(BaseModel):
@@ -29,16 +40,24 @@ class SvgOptions(BaseModel):
         return self
 
 
-def normalize_svg_options(value: object, *, output_format: str | None) -> dict | None:
+def normalize_svg_options(
+    value: object, *, output_format: str | None
+) -> SvgOptionsPayload | None:
     """Validate untrusted persisted input and serialize only explicit options."""
     if value is None:
         return None
     if output_format != "svg":
         raise ValueError("SVG author options require SVG output")
-    return SvgOptions.model_validate(value).model_dump(exclude_none=True)
+    options = SvgOptions.model_validate(value)
+    payload: SvgOptionsPayload = {"model": options.model}
+    if options.reasoning is not None and options.reasoning.effort is not None:
+        payload["reasoning"] = {"effort": options.reasoning.effort}
+    return payload
 
 
-def public_svg_options(value: object, *, output_format: str | None) -> dict | None:
+def public_svg_options(
+    value: object, *, output_format: str | None
+) -> SvgOptionsPayload | None:
     """Expose only validated author fields, never arbitrary upstream metadata."""
     try:
         return normalize_svg_options(value, output_format=output_format)
