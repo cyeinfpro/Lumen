@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from enum import StrEnum
 
 from .immutables import immutable_mapping
+from .image_models import DEFAULT_IMAGE_MODEL
 
 
 # --- request limits ---
@@ -350,7 +351,7 @@ MAX_EXPLICIT_ASPECT = 21 / 9
 EXPLICIT_ALIGN = 16
 
 # 上游模型标识（/v1/images/* 系列接口使用）
-UPSTREAM_MODEL = "gpt-image-2"
+UPSTREAM_MODEL = DEFAULT_IMAGE_MODEL
 # Chat / vision completion 默认模型（/v1/responses 系列接口使用）。
 DEFAULT_CHAT_MODEL = "gpt-5.6-sol"
 # 生图（/v1/responses + image_generation 工具）的 reasoning 主模型。

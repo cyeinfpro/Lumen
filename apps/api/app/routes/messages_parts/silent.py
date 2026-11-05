@@ -36,7 +36,7 @@ from ...services.active_user import (
 )
 from ...services.agent_conversations import studio_conversation_filter
 from ..regenerate_source import primary_generations
-from ...services.message_request import validate_mask_image
+from ...services.message_request import validate_mask_image, validate_markup_image
 from ...services.message_idempotency import (
     SILENT_GENERATION_IDEMPOTENCY_OPERATION,
     idempotency_request_metadata,
@@ -54,6 +54,7 @@ class SilentGenerationIn(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=96)
     parent_message_id: str
     mask_image_id: str | None = Field(default=None, min_length=1, max_length=64)
+    markup_image_id: str | None = Field(default=None, min_length=1, max_length=64)
     intent: Literal["text_to_image", "image_to_image"] = "text_to_image"
     image_params: ImageParamsIn = Field(default_factory=ImageParamsIn)
     prompt: str = Field(default="", max_length=MAX_PROMPT_CHARS)
@@ -98,6 +99,12 @@ def silent_generation_request_hash(body: SilentGenerationIn) -> str:
         "attachment_image_ids": list(body.attachment_image_ids),
         "image_params": body.image_params.model_dump(mode="json"),
     }
+    # Newly optional controls must not change durable hashes when omitted.
+    for key in ("complexity", "frame_count", "frame_duration_ms"):
+        if payload["image_params"].get(key) is None:
+            payload["image_params"].pop(key, None)
+    if body.markup_image_id is not None:
+        payload["markup_image_id"] = body.markup_image_id
     # Preserve durable idempotency fingerprints emitted by older clients.
     if body.mask_image_id is not None:
         payload["mask_image_id"] = body.mask_image_id
@@ -316,6 +323,60 @@ async def _publish_silent_generation(
     )
 
 
+def _silent_request_metadata(
+    body: SilentGenerationIn,
+    attachment_ids: list[str],
+    request_hash: str,
+    request_hash_key: str,
+) -> dict[str, Any]:
+    metadata = {request_hash_key: request_hash}
+    if body.markup_image_id:
+        metadata.update({
+            "markup_image_id": body.markup_image_id,
+            "primary_input_image_id": attachment_ids[0],
+            "source_image_id": attachment_ids[0],
+            "input_images": [
+                {"image_id": image_id, "role": "source" if index == 0 else "reference"}
+                for index, image_id in enumerate(attachment_ids)
+            ] + [{"image_id": body.markup_image_id, "role": "markup"}],
+        })
+    return idempotency_request_metadata(
+        metadata,
+        operation_namespace=SILENT_GENERATION_IDEMPOTENCY_OPERATION,
+        request_fingerprint=request_hash,
+    )
+
+
+async def _validate_silent_edit_layers(
+    db: AsyncSession,
+    *,
+    body: SilentGenerationIn,
+    user: User,
+    user_id: str,
+    intent: Intent,
+    attachment_ids: list[str],
+    runtime: SilentGenerationRuntime,
+) -> None:
+    if body.mask_image_id is not None:
+        await validate_mask_image(
+            db,
+            user_id=user_id,
+            intent=intent,
+            attachment_ids=attachment_ids,
+            mask_image_id=body.mask_image_id,
+            visibility_filter=await runtime.byok_image_visible_filter(db, user),
+            http_error=runtime.http_error,
+        )
+    if body.markup_image_id is not None:
+        await validate_markup_image(
+            db, user_id=user_id, intent=intent,
+            attachment_ids=attachment_ids, markup_image_id=body.markup_image_id,
+            mask_image_id=body.mask_image_id,
+            visibility_filter=await runtime.byok_image_visible_filter(db, user),
+            http_error=runtime.http_error,
+        )
+
+
 async def create_silent_generation(
     conv_id: str,
     body: SilentGenerationIn,
@@ -435,16 +496,10 @@ async def create_silent_generation(
             )
 
     intent = Intent(body.intent)
-    if body.mask_image_id is not None:
-        await validate_mask_image(
-            db,
-            user_id=user_id,
-            intent=intent,
-            attachment_ids=attachment_ids,
-            mask_image_id=body.mask_image_id,
-            visibility_filter=await runtime.byok_image_visible_filter(db, user),
-            http_error=runtime.http_error,
-        )
+    await _validate_silent_edit_layers(
+        db, body=body, user=user, user_id=user_id, intent=intent,
+        attachment_ids=attachment_ids, runtime=runtime,
+    )
     default_image_output_format = runtime.default_image_output_format
     spec = runtime.get_spec("image.output_format")
     if spec is not None:
@@ -468,10 +523,8 @@ async def create_silent_generation(
             mask_image_id=body.mask_image_id,
             text=body.prompt,
             default_image_output_format=default_image_output_format,
-            request_metadata=idempotency_request_metadata(
-                {runtime.request_hash_key: request_hash},
-                operation_namespace=SILENT_GENERATION_IDEMPOTENCY_OPERATION,
-                request_fingerprint=request_hash,
+            request_metadata=_silent_request_metadata(
+                body, attachment_ids, request_hash, runtime.request_hash_key,
             ),
         )
         conv.last_activity_at = datetime.now(timezone.utc)

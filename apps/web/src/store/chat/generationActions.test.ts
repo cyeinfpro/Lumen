@@ -227,6 +227,47 @@ function silentGenerationOut(assistantId: string, generationId: string) {
   };
 }
 
+test("reroll preserves image26 options and markup sources without affecting upscale", async () => {
+  const { state, actions } = makeHarness();
+  state.imagesById = { "img-26": generatedImage("img-26", "gen-old") };
+  state.generations["gen-old"] = {
+    ...oldGeneration, action: "edit", mask_image_id: null,
+    input_image_ids: ["previous-output", "reference"], primary_input_image_id: "previous-output",
+    requested_params: { model: "gpt-image-2.6-flare", complexity: "low", output_format: "png", markup_image_id: "ink" },
+  };
+  const bodies: Record<string, unknown>[] = [];
+  stubHost.__apiClientStub = {
+    createSilentGeneration: async (_convId, body) => {
+      bodies.push(body as Record<string, unknown>);
+      return silentGenerationOut("asst-26", "gen-26");
+    },
+  };
+  await actions.rerollImage("img-26");
+  assert.equal(bodies[0].markup_image_id, "ink");
+  assert.deepEqual(bodies[0].attachment_image_ids, ["previous-output", "reference"]);
+  assert.equal((bodies[0].image_params as Record<string, unknown>).complexity, "low");
+  assert.equal(state.generations["gen-26"].requested_params?.markup_image_id, "ink");
+  await actions.upscaleImage("img-26");
+  assert.equal(bodies[1].markup_image_id, undefined);
+  assert.equal((bodies[1].image_params as Record<string, unknown>).complexity, undefined);
+  assert.equal((bodies[1].image_params as Record<string, unknown>).output_format, undefined);
+});
+
+test("GIF reroll preserves animation timing and format", async () => {
+  const { state, actions } = makeHarness();
+  state.imagesById = { "gif-26": generatedImage("gif-26", "gen-old") };
+  state.generations["gen-old"] = { ...oldGeneration, size_requested: "512x512",
+    requested_params: { output_format: "gif", frame_count: 9, frame_duration_ms: 200, complexity: "medium" } };
+  let payload: Record<string, unknown> = {};
+  stubHost.__apiClientStub = { createSilentGeneration: async (_convId, body) => {
+    payload = body as Record<string, unknown>;
+    return silentGenerationOut("asst-gif", "gen-gif");
+  } };
+  await actions.rerollImage("gif-26");
+  assert.deepEqual(Object.fromEntries(Object.entries(payload.image_params as object).filter(([key]) => ["output_format", "frame_count", "frame_duration_ms", "complexity"].includes(key))),
+    { output_format: "gif", frame_count: 9, frame_duration_ms: 200, complexity: "medium" });
+});
+
 test("regenerateAssistant: 双击在途去重，只发一次 POST /regenerate", async () => {
   const stub = stubHost.__apiClientStub ?? {};
   stubHost.__apiClientStub = stub;
@@ -315,7 +356,7 @@ for (const source of [
     const params = source.requested_params ?? source.request_params ?? source.effective_params;
     const expectedModel = params && ("model" in params ? params.model : params.image_model);
     const submitted = body.image_params as Record<string, unknown>;
-    assert.equal(submitted.model, expectedModel ?? "gpt-image-2");
+    assert.equal(submitted.model, expectedModel === "gpt-image-2.5-sunburst" ? "gpt-image-2.6-sunburst" : "gpt-image-2.6-flare");
     assert.equal(submitted.render_quality, params?.render_quality ?? "high");
     assert.equal(submitted.quality, "4k");
     assert.equal(submitted.size_mode, "fixed");

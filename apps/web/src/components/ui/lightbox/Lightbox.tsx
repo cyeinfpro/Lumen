@@ -6,6 +6,7 @@
 // 首次 SSR / 未定维度时返回 null（Lightbox 是叠加层，不渲染骨架）。
 
 import dynamic from "next/dynamic";
+import { GifEditorHost } from "./GifEditorHost";
 import { useIsMobile } from "@/hooks/useMediaQuery";
 
 const DesktopLightbox = dynamic(
@@ -20,5 +21,5 @@ const MobileLightbox = dynamic(
 export function Lightbox() {
   const isMobile = useIsMobile();
   if (isMobile === null) return null;
-  return isMobile ? <MobileLightbox /> : <DesktopLightbox />;
+  return <><GifEditorHost />{isMobile ? <MobileLightbox /> : <DesktopLightbox />}</>;
 }

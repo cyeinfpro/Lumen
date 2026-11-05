@@ -24,6 +24,7 @@ import { MediaControlButton } from "@/components/ui/primitives/MediaControlButto
 import { Tooltip } from "@/components/ui/primitives/Tooltip";
 import { cn } from "@/lib/utils";
 
+import { isGifItem, openGifEditor } from "./gifEditorEvents";
 import { LightboxActionMenu } from "./LightboxActionMenu";
 import { LightboxDetailsContent } from "./LightboxDetailsContent";
 import {
@@ -44,6 +45,7 @@ import {
 
 function DesktopTopBar(props: DesktopLightboxViewProps) {
   const overflowActions = [
+    ...(isGifItem(props.currentItem) ? [{ label: "编辑 GIF", icon: <Brush className="h-4 w-4" />, onSelect: () => openGifEditor(props.currentItem!, props.onClose) }] : []),
     {
       label: "迭代",
       icon: <Edit2 className="h-4 w-4" />,

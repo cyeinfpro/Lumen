@@ -3,6 +3,8 @@
 import { imageQualityOptions } from "@/lib/imageModels";
 import { useChatStore } from "@/store/useChatStore";
 import { ImageModelSelect } from "../shared/ImageModelSelect";
+import { ImageOutputControls } from "../shared/ImageOutputControls";
+import { Image26Controls } from "../shared/Image26Controls";
 
 import {
   ChevronDown,
@@ -109,6 +111,8 @@ export function MobileAdvancedSettings({
       {imageMode ? (
         <div className="grid gap-4 pt-4">
           <ImageModelSelect />
+          <ImageOutputControls />
+          <Image26Controls />
           <div className="grid grid-cols-2 gap-2">
             <MobileSettingSelect
               label="尺寸"

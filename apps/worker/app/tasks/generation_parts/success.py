@@ -272,11 +272,13 @@ def _build_artifact(
     g: RunGenerationDeps,
 ) -> GeneratedArtifact:
     image_id = new_uuid7()
-    orig_ext = {"PNG": "png", "WEBP": "webp", "JPEG": "jpg"}[processed.orig_format]
+    orig_ext = {"PNG": "png", "WEBP": "webp", "JPEG": "jpg", "SVG": "svg", "GIF": "gif"}[processed.orig_format]
     orig_mime = {
         "PNG": "image/png",
         "WEBP": "image/webp",
         "JPEG": "image/jpeg",
+        "SVG": "image/svg+xml",
+        "GIF": "image/gif",
     }[processed.orig_format]
     model_metadata = model_image_metadata_from_request(
         image_id=image_id,
@@ -353,7 +355,7 @@ def _embed_model_metadata(
     model_metadata: dict[str, Any],
     g: RunGenerationDeps,
 ) -> tuple[bytes, str]:
-    if not model_metadata:
+    if orig_format in {"SVG", "GIF"} or not model_metadata:
         return raw_image, sha
     try:
         with PILImage.open(io.BytesIO(raw_image)) as image:

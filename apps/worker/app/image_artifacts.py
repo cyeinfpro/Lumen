@@ -15,14 +15,18 @@ from dataclasses import dataclass
 from typing import Any
 
 from PIL import Image as PILImage
+from lumen_core.svg_output import looks_like_svg, validate_static_svg, validated_svg_render_bytes
+from lumen_core.image_resource_limits import (
+    MAX_GENERATED_IMAGE_SIDE, MAX_GENERATED_IMAGE_PIXELS, validate_gif_resource_budget,
+)
 
 logger = logging.getLogger(__name__)
 
-_ALLOWED_UPSTREAM_IMAGE_FORMATS = frozenset({"PNG", "WEBP", "JPEG"})
-_MAX_UPSTREAM_IMAGE_SIDE = 10000
+_ALLOWED_UPSTREAM_IMAGE_FORMATS = frozenset({"PNG", "WEBP", "JPEG", "SVG", "GIF"})
+_MAX_UPSTREAM_IMAGE_SIDE = MAX_GENERATED_IMAGE_SIDE
 _MAX_UPSTREAM_IMAGE_BYTES = 50 * 1024 * 1024
 _MAX_UPSTREAM_IMAGE_B64_CHARS = ((_MAX_UPSTREAM_IMAGE_BYTES + 2) // 3) * 4
-_MAX_UPSTREAM_IMAGE_PIXELS = 64_000_000
+_MAX_UPSTREAM_IMAGE_PIXELS = MAX_GENERATED_IMAGE_PIXELS
 _MAX_BASE64_HEADER_CHARS = 4096
 
 
@@ -84,6 +88,20 @@ _BLURHASH_ADAPTER = _BlurhashAdapter()
 _VIPS_ADAPTER = _VipsAdapter()
 
 
+def require_svg_renderer() -> Any:
+    """Check the exact native renderer used by SVG postprocessing before billing."""
+    try:
+        pyvips = _VIPS_ADAPTER.load()
+        if not pyvips.type_find("VipsOperation", "svgload_buffer"):
+            raise ValueError("libvips svgload_buffer is unavailable")
+        return pyvips
+    except Exception as exc:
+        raise ValueError(
+            "SVG output is unavailable: this runtime image lacks native libvips "
+            "or its SVG loader; use a runtime image with SVG rendering support"
+        ) from exc
+
+
 def _sha256(data: bytes) -> str:
     h = hashlib.sha256()
     h.update(data)
@@ -142,6 +160,16 @@ def _validate_generated_image_metadata(
 def _validated_image(raw_image: bytes) -> Iterator[PILImage.Image]:
     """Open and fully decode an image only after cheap size/header checks."""
     _validate_raw_image_bytes(raw_image)
+    if looks_like_svg(raw_image):
+        raw_image = validated_svg_render_bytes(raw_image)
+        # Existing libvips renderer only sees validated static vector content.
+        # Fail explicitly if this runtime lacks SVG support; never fake a preview.
+        try:
+            raw_image = require_svg_renderer().Image.new_from_buffer(
+                raw_image, "", access="sequential"
+            ).write_to_buffer(".png")
+        except Exception as exc:
+            raise ValueError("SVG preview renderer is unavailable") from exc
     pil: PILImage.Image | None = None
     try:
         with warnings.catch_warnings():
@@ -155,6 +183,13 @@ def _validated_image(raw_image: bytes) -> Iterator[PILImage.Image]:
                 pil.size[1],
             )
             pil.load()
+            if pil.format == "GIF":
+                frames = getattr(pil, "n_frames", 1)
+                validate_gif_resource_budget(pil.width, pil.height, frames)
+                for index in range(frames):
+                    pil.seek(index)
+                    pil.load()
+                pil.seek(0)
         yield pil
     except (PILImage.DecompressionBombError, PILImage.DecompressionBombWarning) as exc:
         raise ValueError(f"upstream image decompression bomb: {exc}") from exc
@@ -164,6 +199,9 @@ def _validated_image(raw_image: bytes) -> Iterator[PILImage.Image]:
 
 
 def _inspect_generated_image_sync(raw_image: bytes) -> _GeneratedImageInspection:
+    if looks_like_svg(raw_image):
+        width, height = validate_static_svg(raw_image)
+        return _GeneratedImageInspection("SVG", width, height, True)
     with _validated_image(raw_image) as pil:
         return _GeneratedImageInspection(
             orig_format=str(pil.format),
@@ -331,7 +369,11 @@ def _make_variants_with_vips_sync(
     inspection: _GeneratedImageInspection,
 ) -> _ImageVariantBundle:
     _validate_raw_image_bytes(raw_image)
-    pyvips = _VIPS_ADAPTER.load()
+    if inspection.orig_format == "GIF":
+        return _make_variants_with_pil_sync(raw_image, inspection)
+    if inspection.orig_format == "SVG":
+        raw_image = validated_svg_render_bytes(raw_image)
+    pyvips = require_svg_renderer() if inspection.orig_format == "SVG" else _VIPS_ADAPTER.load()
 
     image = pyvips.Image.new_from_buffer(raw_image, "", access="sequential")
     display = _resize_vips_image(image, 2048)
@@ -364,6 +406,27 @@ def _make_variants_with_vips_sync(
     )
 
 
+def _make_animated_preview(orig: PILImage.Image, max_side: int) -> tuple[bytes, tuple[int, int]]:
+    """Retain every GIF frame and its timing in animated WebP previews."""
+    frames: list[PILImage.Image] = []
+    durations: list[int] = []
+    try:
+        loop = int(orig.info.get("loop", 0))
+        for index in range(orig.n_frames):
+            orig.seek(index)
+            with _scaled_for_variant(orig, max_side) as frame:
+                frames.append(frame.convert("RGBA"))
+            durations.append(int(orig.info.get("duration", 200)))
+        out = io.BytesIO()
+        frames[0].save(out, format="WEBP", save_all=True, append_images=frames[1:],
+                       duration=durations, loop=loop, quality=86, method=4)
+        return out.getvalue(), frames[0].size
+    finally:
+        for frame in frames:
+            frame.close()
+        orig.seek(0)
+
+
 def _make_variants_with_pil_sync(
     raw_image: bytes,
     inspection: _GeneratedImageInspection | None = None,
@@ -371,8 +434,13 @@ def _make_variants_with_pil_sync(
     if inspection is None:
         inspection = _inspect_generated_image_sync(raw_image)
     with _validated_image(raw_image) as pil:
-        display_bytes, display_size = _make_display(pil)
-        preview_bytes, preview_size = _make_preview(pil)
+        if inspection.orig_format == "GIF" and getattr(pil, "n_frames", 1) > 1:
+            display_bytes, display_size = _make_animated_preview(pil, 2048)
+            preview_bytes, preview_size = _make_animated_preview(pil, 1024)
+            pil.seek(0)
+        else:
+            display_bytes, display_size = _make_display(pil)
+            preview_bytes, preview_size = _make_preview(pil)
         thumb_bytes, thumb_size = _make_thumb(pil)
     return _ImageVariantBundle(
         orig_format=inspection.orig_format,

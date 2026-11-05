@@ -9,6 +9,7 @@ import json
 from typing import Any
 
 import httpx
+from lumen_core.svg_output import looks_like_svg
 
 from ..provider_runtime.upstream_services import (
     ImageUpstreamRuntime,
@@ -50,6 +51,12 @@ def _normalize_reference_image(
             },
         )
 
+    if looks_like_svg(raw) or raw.startswith((b"GIF87a", b"GIF89a")):
+        raise services.infrastructure.UpstreamError(
+            "SVG/GIF originals cannot be editing inputs; use a static PNG, JPEG or WebP",
+            error_code=services.infrastructure.EC.BAD_REFERENCE_IMAGE.value,
+            status_code=400,
+        )
     image_api = services.infrastructure.PILImage
     try:
         with image_api.open(io.BytesIO(raw)) as image:

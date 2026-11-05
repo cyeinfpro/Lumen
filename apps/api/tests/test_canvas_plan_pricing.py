@@ -27,7 +27,7 @@ async def test_image_quote_uses_real_unit_price_and_per_image_rate_rounding(
     )
     assert calls == [{"tier": "1k", "n": 1}]
     assert quote.estimated_cost_micro == (10001 * 10009 // 10000) * 3
-    assert quote.model == "gpt-image-2"
+    assert quote.model == "gpt-image-2.6-flare"
     assert len(quote.capability_version) == 64
 
 

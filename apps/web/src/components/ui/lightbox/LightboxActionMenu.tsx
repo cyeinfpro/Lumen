@@ -27,6 +27,7 @@ export function LightboxActionMenu({
   className,
 }: LightboxActionMenuProps) {
   const [open, setOpen] = useState(false);
+  const [availableHeight, setAvailableHeight] = useState<number>();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuId = useId();
@@ -68,7 +69,11 @@ export function LightboxActionMenu({
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
         tabIndex={tabIndex}
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => {
+          const rect = triggerRef.current?.getBoundingClientRect();
+          if (rect) setAvailableHeight(Math.max(40, (side === "top" ? rect.top : window.innerHeight - rect.bottom) - 16));
+          setOpen((value) => !value);
+        }}
         className="shadow-[var(--shadow-2)]"
       >
         <MoreHorizontal className="h-5 w-5" aria-hidden />
@@ -78,8 +83,9 @@ export function LightboxActionMenu({
           id={menuId}
           role="menu"
           aria-label="更多操作"
+          style={{ maxHeight: availableHeight }}
           className={cn(
-            "surface-panel absolute right-0 z-[var(--z-tray)] min-w-44 p-1",
+            "surface-panel absolute right-0 z-[var(--z-tray)] min-w-44 overflow-y-auto overscroll-contain p-1",
             side === "top"
               ? "bottom-[calc(100%+var(--space-2))]"
               : "top-[calc(100%+var(--space-2))]",

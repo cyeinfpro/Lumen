@@ -1270,6 +1270,8 @@ def test_retry_cache_busters_remove_partial_images_for_small_size() -> None:
         ("gpt-image-2", ("low", "medium", "high")),
         ("gpt-image-2.5-flare", ("low", "medium", "high", "xhigh", "max")),
         ("gpt-image-2.5-sunburst", ("low", "medium", "high", "xhigh", "max")),
+        ("gpt-image-2.6-flare", ("low", "medium", "high", "xhigh", "max")),
+        ("gpt-image-2.6-sunburst", ("low", "medium", "high", "xhigh", "max")),
     ]
     for quality in qualities
 ])
@@ -1907,6 +1909,8 @@ async def test_direct_transparent_background_uses_native_webp_request(
         ("gpt-image-2", ("low", "medium", "high")),
         ("gpt-image-2.5-flare", ("low", "medium", "high", "xhigh", "max")),
         ("gpt-image-2.5-sunburst", ("low", "medium", "high", "xhigh", "max")),
+        ("gpt-image-2.6-flare", ("low", "medium", "high", "xhigh", "max")),
+        ("gpt-image-2.6-sunburst", ("low", "medium", "high", "xhigh", "max")),
     ]
     for quality in qualities
 ])
@@ -2529,13 +2533,13 @@ def test_normalize_reference_image_reencodes_png_to_clean_webp() -> None:
 
 
 def test_normalize_reference_image_reencodes_non_webp_to_webp() -> None:
-    # JPEG / GIF / CMYK 等也统一转标准 8-bit WebP
+    # Static JPEG input is re-encoded; animated GIF input is rejected explicitly.
     buf = _io.BytesIO()
-    _PILImage.new("RGB", (4, 4), color=(1, 2, 3)).save(buf, format="GIF")
-    gif_bytes = buf.getvalue()
+    _PILImage.new("RGB", (4, 4), color=(1, 2, 3)).save(buf, format="JPEG")
+    jpeg_bytes = buf.getvalue()
 
     out_bytes, mime = TEST_UPSTREAM_SERVICES.references.normalize_reference_image(
-        gif_bytes
+        jpeg_bytes
     )
     assert mime == "image/webp"
     _assert_webp_bytes(out_bytes)
@@ -2832,7 +2836,7 @@ async def test_extract_image_result_url_download_failure_raises_upstream_error(
     assert "image url download" in str(exc_info.value).lower()
 
 
-@pytest.mark.parametrize("model", ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"])
+@pytest.mark.parametrize("model", ["gpt-image-2.6-flare", "gpt-image-2.6-sunburst"])
 @pytest.mark.parametrize("quality", ["low", "medium", "high", "xhigh", "max"])
 def test_selected_model_quality_survive_worker_and_all_request_shapes(model, quality):
     options = request_options.image_request_options({"model": model, "render_quality": quality}, size="1024x1024")
@@ -2863,3 +2867,10 @@ async def test_direct_engine_locks_sidecar_endpoint(monkeypatch, action):
         ImageProviderRoute("auto", "image2", True, "provider"),
     )
     assert captured["endpoint_override"] == "generations"
+
+
+def test_admitted_request_without_model_keeps_legacy_default():
+    original = {"render_quality": "high"}
+    options = request_options.image_request_options(original, size="1024x1024")
+    assert options["image_model"] == "gpt-image-2"
+    assert original == {"render_quality": "high"}

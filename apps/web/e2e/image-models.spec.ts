@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { installAgentFixture } from "./agent-fixture";
 
-test("image model menu filters quality and submits the selected model", async ({ page }, testInfo) => {
+test("image model menu exposes only 2.6 and submits the selected model", async ({ page }, testInfo) => {
   await installAgentFixture(page);
   let submitted: Record<string, unknown> | null = null;
   await page.route("**/api/conversations/*/messages", async (route) => {
@@ -24,20 +24,19 @@ test("image model menu filters quality and submits the selected model", async ({
   const dialog = page.getByRole("dialog", { name: /^(高级)?执行设置$/ });
   const models = dialog.getByRole("combobox", { name: "生图模型" });
   const quality = dialog.getByRole("combobox", { name: "质量", exact: true });
-  await expect(models.locator("option")).toHaveCount(3);
-  await expect(models).toHaveValue("gpt-image-2.5-sunburst");
+  await expect(models.locator("option")).toHaveCount(2);
+  await expect(models).toHaveValue("gpt-image-2.6-sunburst");
   await expect(quality.locator("option")).toHaveCount(5);
   await expect(quality).toHaveValue("max");
-  for (const model of ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"]) {
+  for (const model of ["gpt-image-2.6-flare", "gpt-image-2.6-sunburst"]) {
     await models.selectOption(model);
     await expect(quality.locator("option")).toHaveCount(5);
     await quality.selectOption("max");
     await expect(quality).toHaveValue("max");
   }
-  await models.selectOption("gpt-image-2");
-  await expect(quality.locator("option")).toHaveCount(3);
-  await expect(quality).toHaveValue("high");
-  await models.selectOption("gpt-image-2.5-sunburst");
+  await expect(models.locator('option[value="gpt-image-2"]')).toHaveCount(0);
+  await expect(models.locator('option[value^="gpt-image-2.5"]')).toHaveCount(0);
+  await models.selectOption("gpt-image-2.6-sunburst");
   await quality.selectOption("xhigh");
   await testInfo.attach("image-model-menu", { body: await page.screenshot({ path: testInfo.outputPath("image-model-menu.png") }), contentType: "image/png" });
   await page.keyboard.press("Escape");
@@ -45,6 +44,6 @@ test("image model menu filters quality and submits the selected model", async ({
   await expect.poll(() => submitted).not.toBeNull();
   expect(submitted).toMatchObject({
     intent: "text_to_image",
-    image_params: { model: "gpt-image-2.5-sunburst", render_quality: "xhigh" },
+    image_params: { model: "gpt-image-2.6-sunburst", render_quality: "xhigh" },
   });
 });

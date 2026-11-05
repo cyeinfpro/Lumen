@@ -35,7 +35,9 @@ def route_harness(monkeypatch):
         conv = ExpiringIdentity("conv")
         target = SimpleNamespace(intent="image_to_image", status="succeeded")
         parent = SimpleNamespace(content={"text": "original user", "attachments": []})
-        source = SimpleNamespace(prompt="actual edit operation", input_image_ids=["source-image"])
+        source = SimpleNamespace(
+            prompt="actual edit operation", input_image_ids=["source-image"], upstream_request={},
+        )
         prior = RegenerateOut(
             assistant_message_id="prior", generation_ids=["prior-gen"], completion_id=None,
         )

@@ -37,6 +37,7 @@ import {
 } from "@/features/generation";
 import { DEFAULT_PARAMS } from "./imageParams";
 import { resolveRerollMask } from "./rerollMask";
+import { rerollImageOptions, rerollMarkupId } from "./rerollImageOptions";
 import { mergeSubmissionMessages, mergeSubmissionGenerations } from "./submissionReconciliation";
 import type {
   ChatState,
@@ -350,6 +351,7 @@ function buildRerollPayload(
     prompt: clampPromptForRequest(generation.prompt),
     attachment_image_ids: generation.input_image_ids,
     ...(maskImageId ? { mask_image_id: maskImageId } : {}),
+    ...(rerollMarkupId(generation) ? { markup_image_id: rerollMarkupId(generation) } : {}),
     image_params: {
       aspect_ratio: generation.aspect_ratio,
       size_mode: fixedSize ? "fixed" : "auto",
@@ -357,6 +359,7 @@ function buildRerollPayload(
       quality: qualityFromFixedSize(generation.size_requested, generation.aspect_ratio),
       count: 1,
       ...imageParamsForReroll(generation),
+      ...rerollImageOptions(generation),
       background: "auto",
       moderation: "low",
     },
@@ -423,6 +426,7 @@ export function createGenerationActions(
             attachments: structuredClone(userMsg.attachments),
             params: { ...userMsg.image_params },
             mask: null,
+            markup: null,
             forceIntent: undefined,
             webSearch: userMsg.web_search ?? current.webSearch,
             fileSearch: userMsg.file_search ?? current.fileSearch,
@@ -752,7 +756,7 @@ export function createGenerationActions(
             input_image_ids: gen.input_image_ids,
             primary_input_image_id: gen.primary_input_image_id,
             mask_image_id: maskImageId,
-            requested_params: { ...payload.image_params },
+            requested_params: { ...payload.image_params, markup_image_id: payload.markup_image_id },
             status: "queued",
             stage: "queued",
             attempt: 0,
@@ -860,6 +864,7 @@ export function createGenerationActions(
             attachments: [tempAtt],
             mode: "image",
             forceIntent: "image",
+            markup: null,
             mask: {
               image_id: maskUploaded.id,
               preview_data_url: maskPreviewDataUrl,

@@ -45,6 +45,8 @@ def _request(runtime: Any, model: str = "gpt-image-2") -> ImageExecutionRequest:
         "gpt-image-2",
         "gpt-image-2.5-flare",
         "gpt-image-2.5-sunburst",
+        "gpt-image-2.6-flare",
+        "gpt-image-2.6-sunburst",
     ],
 )
 @pytest.mark.parametrize("streaming", [False, True])

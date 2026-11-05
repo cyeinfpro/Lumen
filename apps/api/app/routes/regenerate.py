@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
+from lumen_core.image_models import upgrade_legacy_image_model
 from lumen_core.constants import (
     Intent,
     MessageStatus,
@@ -335,7 +336,7 @@ async def _image_params_from_target(
     try:
         return ImageParamsIn.model_validate(
             {
-                "model": upstream_request.get("model") or "gpt-image-2",
+                "model": upgrade_legacy_image_model(upstream_request.get("model")),
                 "aspect_ratio": first.aspect_ratio,
                 "size_mode": "fixed" if fixed_size else "auto",
                 "fixed_size": fixed_size,
@@ -351,6 +352,9 @@ async def _image_params_from_target(
                     "auto",
                 ),
                 "output_format": output_format,
+                "complexity": upstream_request.get("complexity"),
+                "frame_count": upstream_request.get("frame_count") if output_format == "gif" else None,
+                "frame_duration_ms": upstream_request.get("frame_duration_ms") if output_format == "gif" else None,
                 "output_compression": output_compression,
                 "background": _str_option(
                     upstream_request.get("background"),
@@ -635,6 +639,17 @@ async def regenerate_message(
                 db, user_id=user_id, conv_id=conv_id, target_msg_id=message_id,
             ) if intent == Intent.IMAGE_TO_IMAGE and replay_source is not None else None
         )
+        markup_image_id = None
+        if intent == Intent.IMAGE_TO_IMAGE and replay_source is not None:
+            markup_image_id = (replay_source.upstream_request or {}).get("markup_image_id")
+            if markup_image_id:
+                from ..services.message_request import validate_markup_image
+
+                await validate_markup_image(
+                    db, user_id=user_id, intent=intent, attachment_ids=attachment_ids,
+                    markup_image_id=markup_image_id, mask_image_id=mask_image_id,
+                    visibility_filter=None, http_error=_http,
+                )
         default_image_output_format = (
             await _default_image_output_format(db)
             if image_intent else _DEFAULT_IMAGE_OUTPUT_FORMAT
@@ -659,7 +674,7 @@ async def regenerate_message(
             default_image_output_format=default_image_output_format,
             mask_image_id=mask_image_id,
             request_metadata=_idempotency_request_metadata(
-                None,
+                {"markup_image_id": markup_image_id} if markup_image_id else None,
                 operation_namespace=_MESSAGE_REGENERATE_IDEMPOTENCY_OPERATION,
                 request_fingerprint=request_fingerprint,
             ),

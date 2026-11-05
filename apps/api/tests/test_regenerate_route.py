@@ -938,7 +938,7 @@ async def test_post_commit_regenerate_cancel_cleanup_keeps_cancel_when_cache_fai
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model", ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"])
+@pytest.mark.parametrize("model", ["gpt-image-2.6-flare", "gpt-image-2.6-sunburst"])
 @pytest.mark.parametrize("quality", ["xhigh", "max"])
 async def test_regeneration_preserves_selected_model_and_quality(model, quality):
     gen = Generation(
@@ -957,3 +957,27 @@ async def test_regeneration_preserves_selected_model_and_quality(model, quality)
     request = image_upstream_request(params, resolve_size(aspect="1:1", mode="fixed", fixed="1024x1024"))
     assert request["model"] == model
     assert request["render_quality"] == quality
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("old,new", [
+    ("gpt-image-2", "gpt-image-2.6-flare"),
+    ("gpt-image-2.5-flare", "gpt-image-2.6-flare"),
+    ("gpt-image-2.5-sunburst", "gpt-image-2.6-sunburst"),
+])
+async def test_regeneration_upgrades_retired_model_without_rewriting_history(old, new):
+    original = {"model": old, "render_quality": "high"}
+    gen = Generation(
+        id="gen-legacy", message_id="assistant-old", user_id="user-1",
+        action="generate", prompt="original", size_requested="1024x1024",
+        aspect_ratio="1:1", input_image_ids=[], status="succeeded",
+        idempotency_key="legacy-model-test", upstream_request=original,
+    )
+    params = await regenerate._image_params_from_target(
+        _Db([_Result(all_values=[gen])]), user_id="user-1",
+        conv_id="conv-1", target_msg_id="assistant-old",
+    )
+    assert params.model == new
+    assert params.render_quality == "high"
+    assert gen.upstream_request == original
+    assert gen.upstream_request["model"] == old

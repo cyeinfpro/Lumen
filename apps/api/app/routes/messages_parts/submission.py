@@ -28,6 +28,7 @@ from ...services.message_request import (
     resolve_assistant_context,
     validate_attachment_ids,
     validate_mask_image,
+    validate_markup_image,
 )
 from ...services.message_idempotency import (
     MESSAGE_CREATE_IDEMPOTENCY_OPERATION,
@@ -62,6 +63,52 @@ class SubmissionRuntime:
     publish_message_appended: Callable[..., Awaitable[None]]
     publish_assistant_task: Callable[..., Awaitable[None]]
     allowed_reasoning_efforts: frozenset[str]
+
+
+async def _validate_edit_input_ids(
+    db: AsyncSession,
+    *,
+    user: User,
+    body: PostMessageIn,
+    intent: Intent,
+    attachment_ids: list[str],
+    mask_image_id: str | None,
+    runtime: SubmissionRuntime,
+) -> None:
+    if mask_image_id is not None:
+        image_retention_filter = await runtime.byok_image_visible_filter(db, user)
+        await validate_mask_image(
+            db,
+            user_id=user.id,
+            intent=intent,
+            attachment_ids=attachment_ids,
+            mask_image_id=mask_image_id,
+            visibility_filter=image_retention_filter,
+            http_error=runtime.http_error,
+        )
+
+    markup_image_id = (body.markup_image_id or "").strip() or None
+    if markup_image_id is not None:
+        image_retention_filter = await runtime.byok_image_visible_filter(db, user)
+        await validate_markup_image(
+            db,
+            user_id=user.id,
+            intent=intent,
+            attachment_ids=attachment_ids,
+            markup_image_id=markup_image_id,
+            mask_image_id=mask_image_id,
+            visibility_filter=image_retention_filter,
+            http_error=runtime.http_error,
+        )
+    image_intent = intent in (Intent.TEXT_TO_IMAGE, Intent.IMAGE_TO_IMAGE)
+    if image_intent and body.image_params.output_format in {"svg", "gif"} and (
+        mask_image_id or markup_image_id
+    ):
+        raise runtime.http_error(
+            "image_format_incompatible_overlay",
+            "SVG/GIF output currently cannot be combined with mask or markup",
+            422,
+        )
 
 
 async def submit_user_message(
@@ -141,17 +188,10 @@ async def submit_user_message(
             "image_to_image requires at least one reference image",
             400,
         )
-    if mask_image_id is not None:
-        image_retention_filter = await runtime.byok_image_visible_filter(db, user)
-        await validate_mask_image(
-            db,
-            user_id=user.id,
-            intent=intent,
-            attachment_ids=attachment_ids,
-            mask_image_id=mask_image_id,
-            visibility_filter=image_retention_filter,
-            http_error=runtime.http_error,
-        )
+    await _validate_edit_input_ids(
+        db, user=user, body=body, intent=intent, attachment_ids=attachment_ids,
+        mask_image_id=mask_image_id, runtime=runtime,
+    )
 
     now = datetime.now(timezone.utc)
     request_metadata = idempotency_request_metadata(

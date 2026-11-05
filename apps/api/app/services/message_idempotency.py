@@ -33,9 +33,18 @@ def canonical_request_fingerprint(
 
 
 def message_request_fingerprint(body: PostMessageIn) -> str:
+    payload = body.model_dump(mode="json", exclude={"idempotency_key"})
+    # Optional 2.6 controls must not change the identity of an ordinary retry.
+    if payload.get("markup_image_id") is None:
+        payload.pop("markup_image_id", None)
+    image_params = payload.get("image_params")
+    if isinstance(image_params, dict):
+        for key in ("complexity", "frame_count", "frame_duration_ms"):
+            if image_params.get(key) is None:
+                image_params.pop(key, None)
     return canonical_request_fingerprint(
         MESSAGE_CREATE_IDEMPOTENCY_OPERATION,
-        body.model_dump(mode="json", exclude={"idempotency_key"}),
+        payload,
     )
 
 

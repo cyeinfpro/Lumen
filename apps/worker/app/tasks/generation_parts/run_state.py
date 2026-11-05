@@ -83,6 +83,7 @@ class GenerationRunState:
     references: list[tuple[str, bytes]] = field(default_factory=list)
     ref_for_body: list[tuple[str, bytes]] = field(default_factory=list)
     mask_bytes: bytes | None = None
+    markup_bytes: bytes | None = None
     inpaint_size_override: str | None = None
     prompt_for_upstream: str = ""
     progress_publisher: Any | None = None

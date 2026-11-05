@@ -8,6 +8,7 @@ from typing import Any, Protocol
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.models import Generation
+from lumen_core.image_models import DEFAULT_IMAGE_MODEL
 
 from ...provider_runtime.contracts import ResolvedProvider
 from ...upstream_clients.image_job_models import ImageJobExecutionHandle
@@ -44,7 +45,10 @@ class GenerationProviderRequest:
     provider_override: ResolvedProvider | None
     user_id: str | None
     context: GenerationProviderContext
-    image_model: str = "gpt-image-2"
+    image_model: str = DEFAULT_IMAGE_MODEL
+    complexity: str | None = None
+    frame_count: int | None = None
+    frame_duration_ms: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +56,7 @@ class GenerationProviderEditRequest:
     request: GenerationProviderRequest
     images: Sequence[bytes]
     mask: bytes | None
+    markup: bytes | None = None
 
 
 class GenerationStoreService(Protocol):
@@ -145,6 +150,10 @@ class GenerationProviderService(Protocol):
         self,
         session: AsyncSession,
         mask_image_id: str,
+    ) -> bytes: ...
+
+    async def load_markup_image(
+        self, session: AsyncSession, image_id: str,
     ) -> bytes: ...
 
     async def postprocess(

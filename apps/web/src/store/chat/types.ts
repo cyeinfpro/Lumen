@@ -6,6 +6,7 @@ import type {
   GeneratedImage,
   ImageParams,
   ImageModel,
+  ImageOutputFormat,
   Intent,
   MaskState,
   Message,
@@ -38,6 +39,8 @@ export interface ComposerState {
   codeInterpreter: boolean;
   imageGeneration: boolean;
   mask: MaskState | null;
+  /** Independent transparent annotation layer for the first reference image. */
+  markup?: MaskState | null;
 }
 
 export type PollInflightOptions = {
@@ -88,6 +91,10 @@ export interface ChatState {
   setFixedSize: (size: string | undefined) => void;
   setQuality: (quality: Quality) => void;
   setImageModel: (model: ImageModel) => void;
+  setImageComplexity: (value: "low" | "medium" | "high" | undefined) => void;
+  setImageOutputFormat: (format: ImageOutputFormat) => void;
+  setImageFrameCount: (value: number) => void;
+  setImageFrameDuration: (value: number) => void;
   setRenderQuality: (quality: RenderQualityChoice) => void;
   setImageCount: (count: number) => void;
   setTransparentBackground: (enabled: boolean) => void;
@@ -102,6 +109,8 @@ export interface ChatState {
   moveAttachment: (id: string, targetId: string) => void;
   setMask: (mask: MaskState) => void;
   clearMask: () => void;
+  setMarkup: (markup: MaskState) => void;
+  clearMarkup: () => void;
   clearComposer: () => void;
   promoteImageToReference: (imageId: string) => void;
 

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, NoReturn
 
 import httpx
+from lumen_core.image_resource_limits import MAX_GIF_REQUEST_FRAMES, validate_gif_request_budget
 from lumen_core.providers import ProviderProxyDefinition
 from lumen_core.upstream_billing import (
     IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES,
@@ -22,6 +23,7 @@ from ..provider_runtime.upstream_services import (
 )
 from .. import image_artifacts
 from .delivery_evidence import transport_error_proves_undelivered
+from .native_image_formats import validate_native_edit, validate_native_results
 from .direct_generation_responses import (
     DirectGenerationStreamCall,
     complete_direct_generation_response as _complete_direct_generation_response,
@@ -487,6 +489,59 @@ def _is_direct_image_result_unknown(
     )
 
 
+def _apply_gif_frames(body: dict[str, Any], request: ImageExecutionRequest) -> None:
+    frame_count = request.frame_count if request.frame_count is not None else 9
+    duration = request.frame_duration_ms if request.frame_duration_ms is not None else 200
+    if not 2 <= frame_count <= MAX_GIF_REQUEST_FRAMES or not 20 <= duration <= 2000 or duration % 10:
+        raise ValueError("Invalid GIF frame count or duration")
+    body["frame_count"] = frame_count
+    body["frame_duration_ms"] = duration
+
+
+def _validate_native_generation(body: dict[str, Any], request: ImageExecutionRequest) -> None:
+    if request.n != 1 or request.images or request.mask is not None or request.markup is not None:
+        raise ValueError("SVG/GIF generation requires n=1 and no reference images, mask or markup")
+    if body["model"] not in {"gpt-image-2.6-flare", "gpt-image-2.6-sunburst"}:
+        raise ValueError("SVG/GIF output requires GPT Image 2.6")
+
+
+def _apply_generation_controls(body: dict[str, Any], request: ImageExecutionRequest,
+                               streaming: bool) -> bool:
+    if request.complexity is not None:
+        body["complexity"] = request.complexity
+    if request.output_format not in {"svg", "gif"}:
+        return streaming
+    _validate_native_generation(body, request)
+    body["output_format"] = request.output_format
+    for unsupported in ("stream", "partial_images", "output_compression", "prompt_rewriter"):
+        body.pop(unsupported, None)
+    if request.output_format == "gif":
+        _apply_gif_frames(body, request)
+    return False
+
+
+def _validate_edit_format(request: ImageExecutionRequest) -> None:
+    if any(image_artifacts.looks_like_svg(raw) or raw.startswith((b"GIF87a", b"GIF89a"))
+           for raw in request.images):
+        raise ValueError("SVG/GIF originals cannot be editing inputs; use a static PNG, JPEG or WebP")
+    validate_native_edit(request)
+
+
+def _apply_edit_controls(data: dict[str, str], files: list, request: ImageExecutionRequest) -> None:
+    if request.complexity is not None:
+        data["complexity"] = request.complexity
+    if request.markup is not None:
+        files.append(("markup", ("markup.png", request.markup, "image/png")))
+    if request.output_format in {"svg", "gif"}:
+        data["output_format"] = request.output_format
+        for key in ("stream", "partial_images", "output_compression", "prompt_rewriter"):
+            data.pop(key, None)
+        if request.output_format == "gif":
+            frames = {}
+            _apply_gif_frames(frames, request)
+            data.update({key: str(value) for key, value in frames.items()})
+
+
 async def _direct_generate_image_once(
     request: ImageExecutionRequest,
     *,
@@ -498,6 +553,10 @@ async def _direct_generate_image_once(
     streaming_override: bool = False,
 ) -> list[tuple[str, str | None]]:
     """Text-to-image via direct `/v1/images/generations` using the selected GPT Image model."""
+    if request.output_format == "svg":
+        image_artifacts.require_svg_renderer()
+    if request.output_format == "gif":
+        validate_gif_request_budget(request.size, request.frame_count)
     runtime = request.upstream_runtime
     services = _runtime_services(runtime)
     prompt = request.prompt
@@ -555,6 +614,7 @@ async def _direct_generate_image_once(
         background=background,
         moderation=moderation,
     )
+    streaming_override = _apply_generation_controls(body, request, streaming_override)
     if streaming_override:
         body["stream"] = True
         body["partial_images"] = 0
@@ -638,7 +698,7 @@ async def _direct_generate_image_once(
             timeout_s=None,
             runtime=runtime,
         )
-    return await _complete_direct_generation_response(
+    results = await _complete_direct_generation_response(
         services=services,
         request=request,
         response=resp,
@@ -649,6 +709,8 @@ async def _direct_generate_image_once(
         proxy_url=proxy_url,
         http_attempts=http_attempts,
     )
+    validate_native_results(results, request, url=url, path="images/generations", trace_id=trace_id)
+    return results
 
 
 def _wrap_inpaint_prompt(
@@ -717,6 +779,7 @@ async def _direct_edit_image_once(
     inpaint 路径（圆外像素级保留，已 spike 验证）。mask 为 None 时不带这个字段，
     走纯图生图路径，保持现有 i2i 行为。
     """
+    _validate_edit_format(request)
     runtime = request.upstream_runtime
     services = _runtime_services(runtime)
     prompt = request.prompt
@@ -764,6 +827,7 @@ async def _direct_edit_image_once(
     # 注释）。
     if mask is not None:
         files.append(("mask", ("mask.png", mask, "image/png")))
+    _apply_edit_controls(data, files, request)
 
     trace_id = context.trace_id
     headers = services.core.auth_headers(api_key_override, trace_id=trace_id)
@@ -868,12 +932,14 @@ async def _direct_edit_image_once(
     )
     if isinstance(payload, dict):
         services.core.record_usage(payload.get("usage"))
-    return await services.core.extract_image_results(
+    results = await services.core.extract_image_results(
         payload,
         status,
         proxy_url=proxy_url,
         request_context=context,
     )
+    validate_native_results(results, request, url=url, path="images/edits", trace_id=trace_id)
+    return results
 
 
 __all__ = [

@@ -96,6 +96,8 @@ class UploadPolicy:
     mask_requested: bool
     reference_size: tuple[int, int] | None
     purpose: str | None = None
+    parent_image_id: str | None = None
+    initial_metadata: dict[str, Any] | None = None
     min_side: int | None = None
     min_aspect_ratio: float | None = None
     max_aspect_ratio: float | None = None
@@ -755,3 +757,8 @@ class UploadCommandService:
             raise ArtifactStoreError(
                 f"published image artifact verification failed key={key.value}"
             )
+
+
+def map_upload_error(error: Exception) -> UploadCommandError | None:
+    """Map processing/storage failures at public image workflow boundaries."""
+    return _map_upload_error(error)

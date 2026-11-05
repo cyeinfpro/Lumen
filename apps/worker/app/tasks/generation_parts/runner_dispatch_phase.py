@@ -18,6 +18,7 @@ from lumen_core.constants import (
     GenerationStage,
 )
 from lumen_core.models import Generation
+from lumen_core.image_models import DEFAULT_IMAGE_MODEL
 from lumen_core.sizing import resolve_size
 from lumen_core.upstream_billing import (
     IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES,
@@ -170,6 +171,7 @@ async def prepare_upstream_request(state: GenerationRunState) -> None:
 
 
 def resolve_generation_size(state: GenerationRunState) -> Any:
+    output_format = (state.generation.upstream_request or {}).get("output_format")
     fixed_size = (
         state.size_requested
         if state.size_requested and "x" in state.size_requested
@@ -180,11 +182,13 @@ def resolve_generation_size(state: GenerationRunState) -> Any:
             state.aspect_ratio,
             "fixed",
             fixed_size,
+            output_format=output_format,
         )
         validate_resolved_size(
             resolved.size,
             state.aspect_ratio,
             validate_aspect_ratio=fixed_size is None,
+            output_format=output_format,
         )
         return resolved
     except ValueError as exc:
@@ -212,6 +216,17 @@ async def load_references_and_mask(state: GenerationRunState) -> None:
                 session,
                 state.mask_image_id,
             )
+        state.markup_bytes = None
+        markup_id = (state.generation.upstream_request or {}).get("markup_image_id")
+        if markup_id:
+            if state.action != GenerationAction.EDIT or not state.input_image_ids:
+                raise UpstreamError("markup requires a source image", status_code=400, error_code=EC.INVALID_REQUEST_ERROR.value)
+            if mask is not None:
+                raise UpstreamError("markup and mask cannot be combined", status_code=400, error_code=EC.INVALID_REQUEST_ERROR.value)
+            state.markup_bytes = await services.provider.load_markup_image(session, markup_id)
+            # Markup matches the full-size, orientation-corrected original, never a resized reference cache.
+            first_original = await services.provider.load_markup_image(session, state.input_image_ids[0])
+            state.references[0] = (state.references[0][0], first_original)
     state.ref_for_body = (
         state.references if state.action == GenerationAction.EDIT else []
     )
@@ -534,7 +549,10 @@ def build_image_iterator(state: GenerationRunState) -> Any:
         moderation=str(options["moderation"]),
         n=state.requested_image_count,
         model=str(options["responses_model"]),
-        image_model=str(options.get("image_model", "gpt-image-2")),
+        image_model=str(options.get("image_model", DEFAULT_IMAGE_MODEL)),
+        complexity=options.get("complexity"),
+        frame_count=options.get("frame_count"),
+        frame_duration_ms=options.get("frame_duration_ms"),
         progress_callback=state.progress_publisher,
         provider_override=provider_override,
         user_id=state.user_id,
@@ -564,6 +582,7 @@ def build_image_iterator(state: GenerationRunState) -> Any:
         ),
         images=tuple(raw for _sha, raw in state.ref_for_body),
         mask=state.mask_bytes,
+        markup=getattr(state, "markup_bytes", None),
     )
     return provider.edit(edit_request)
 

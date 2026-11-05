@@ -46,6 +46,8 @@ def policy() -> PayloadPolicy:
         "gpt-image-2-2026-04-21",
         "gpt-image-2.5-flare",
         "gpt-image-2.5-sunburst",
+        "gpt-image-2.6-flare",
+        "gpt-image-2.6-sunburst",
         "chatgpt-image-latest",
     ],
 )

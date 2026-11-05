@@ -77,7 +77,7 @@ def test_inspect_rejects_oversized_raw_bytes_before_open(
         image_artifacts._inspect_generated_image_sync(b"1234")
 
 
-@pytest.mark.parametrize("image_format", ["PNG", "WEBP", "JPEG"])
+@pytest.mark.parametrize("image_format", ["PNG", "WEBP", "JPEG", "GIF"])
 def test_validate_generated_image_metadata_accepts_supported_formats(
     image_format: str,
 ) -> None:
@@ -90,7 +90,7 @@ def test_validate_generated_image_metadata_accepts_supported_formats(
 @pytest.mark.parametrize(
     ("image_format", "width", "height", "message"),
     [
-        ("GIF", 1, 1, "unexpected image format"),
+        ("BMP", 1, 1, "unexpected image format"),
         (None, 1, 1, "unexpected image format"),
         ("PNG", 0, 1, "dimensions out of range"),
         ("PNG", 1, 0, "dimensions out of range"),

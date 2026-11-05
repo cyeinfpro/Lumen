@@ -532,8 +532,8 @@ SUPPORTED_SETTINGS: tuple[SettingSpec, ...] = (
         key="image.primary_route",
         description=(
             "(DEPRECATED) 旧图像主路径；已迁移为 image.channel + image.engine。"
-            "responses = /v1/responses + image_generation tool（5.4 reasoning → gpt-image-2）；"
-            "image2 = /v1/images/generations 或 /v1/images/edits direct（gpt-image-2）；"
+            "responses = /v1/responses + image_generation tool（所选图像模型，需 Provider 支持）；"
+            "image2 = /v1/images/generations 或 /v1/images/edits direct（GPT Image 2.6）；"
             "image_jobs = sub2api 异步图片任务服务（/v1/image-jobs，当前仅文生图走此路，图生图保持私有图兼容路径）；"
             "dual_race = image2 + responses 两路并发，谁先完成谁赢，败方自动取消（每次任务消耗双倍上游配额）。"
             "默认 image2；直调失败只切换 Provider，不会自动启用 responses。"

@@ -26,6 +26,7 @@ export type { Stroke, Tool } from "./types";
 
 interface MaskBoardProps {
   imageSrc: string;
+  exportMode?: "mask" | "markup";
   /** 提交中：禁止笔画与工具切换 */
   disabled?: boolean;
   /** 初始 strokes（用于回填上次未提交的草稿，仅 mount 时生效） */
@@ -42,6 +43,7 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
   function MaskBoard(
     {
       imageSrc,
+      exportMode,
       disabled,
       initialStrokes,
       onStrokesChange,
@@ -55,6 +57,7 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
     const containerRef = useRef<HTMLDivElement | null>(null);
     const state = useMaskBoardState({
       imageSrc,
+      exportMode,
       initialStrokes,
       onStrokesChange,
       onStatsChange,

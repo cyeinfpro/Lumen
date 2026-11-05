@@ -93,7 +93,7 @@ from .message_submission_prompting import (
 
 logger = logging.getLogger(__name__)
 
-IMAGE_OUTPUT_FORMAT_VALUES = frozenset({"png", "jpeg", "webp"})
+IMAGE_OUTPUT_FORMAT_VALUES = frozenset({"png", "jpeg", "webp", "svg", "gif"})
 DEFAULT_IMAGE_OUTPUT_FORMAT = "jpeg"
 GENERATION_FAST_DEFAULT_KEY = "generation.fast_default"
 
@@ -240,6 +240,10 @@ def image_upstream_request(
             else "low"
         ),
     }
+    for option in ("complexity", "frame_count", "frame_duration_ms"):
+        value = getattr(image_params, option, None)
+        if value is not None:
+            upstream_request[option] = value
     billing_tier = requested_image_billing_tier(image_params)
     if billing_tier is not None:
         upstream_request["billing_tier"] = billing_tier
@@ -359,6 +363,12 @@ def message_request_metadata(
         metadata["mask_image_id"] = mask_image_id
         input_images = list(metadata.get("input_images") or [])
         input_images.append({"image_id": mask_image_id, "role": "mask"})
+        metadata["input_images"] = input_images
+    markup_image_id = _clean_optional_text(body.markup_image_id)
+    if markup_image_id:
+        metadata["markup_image_id"] = markup_image_id
+        input_images = list(metadata.get("input_images") or [])
+        input_images.append({"image_id": markup_image_id, "role": "markup"})
         metadata["input_images"] = input_images
     return metadata
 
@@ -701,6 +711,7 @@ async def create_assistant_task(
                 aspect=image_params.aspect_ratio,
                 mode=image_params.size_mode,
                 fixed=image_params.fixed_size,
+                output_format=image_params.output_format,
             )
             prompt_suffix = resolved_size.prompt_suffix
         except Exception as exc:  # noqa: BLE001

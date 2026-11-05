@@ -1096,7 +1096,7 @@ test("manager preserves mobile dialog, upload-purpose, and destructive copy cont
     managerSource,
     /!volcanoOperationBlocksMutation\(operation\) \? \(/,
   );
-  assert.match(apiSource, /purpose\?: "inpaint_mask" \| "volcano_asset"/);
+  assert.match(apiSource, /purpose\?: "inpaint_mask" \| "image_markup" \| "volcano_asset" \| "video_reference"/);
   assert.match(apiSource, /DEFAULT_VIDEO_ASSET_QUOTAS/);
   assert.match(typesSource, /quotas: VideoAssetQuotaLimitsOut/);
   assert.match(typesSource, /delivery_generation: number/);

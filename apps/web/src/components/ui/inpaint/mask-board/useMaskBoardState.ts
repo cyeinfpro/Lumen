@@ -44,6 +44,7 @@ const STROKES_DEBOUNCE_MS = 380;
 
 interface UseMaskBoardStateOptions {
   imageSrc: string;
+  exportMode?: "mask" | "markup";
   initialStrokes?: Stroke[] | null;
   onStrokesChange?: (strokes: Stroke[]) => void;
   onStatsChange?: (stats: MaskBoardStats) => void;
@@ -81,6 +82,7 @@ export interface MaskBoardState {
 
 export function useMaskBoardState({
   imageSrc,
+  exportMode = "mask",
   initialStrokes,
   onStrokesChange,
   onStatsChange,
@@ -210,8 +212,8 @@ export function useMaskBoardState({
   }, [liveCoverage, onStatsChange, strokes.length]);
 
   const exportMask = useCallback(
-    () => exportMaskCanvas(imgEl, displayDims.scale, strokes),
-    [displayDims.scale, imgEl, strokes],
+    () => exportMaskCanvas(imgEl, displayDims.scale, strokes, exportMode),
+    [displayDims.scale, imgEl, strokes, exportMode],
   );
   const retryImage = useCallback(() => {
     setImgError(null);

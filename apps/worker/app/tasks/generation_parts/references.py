@@ -62,6 +62,7 @@ async def load_reference_images(
                 Image.storage_key,
                 Image.sha256,
                 Image.metadata_jsonb,
+                Image.mime,
             ).where(
                 Image.id.in_(image_ids),
                 Image.deleted_at.is_(None),
@@ -81,6 +82,12 @@ async def load_reference_images(
                 status_code=404,
             )
         row = by_id[image_id]
+        if getattr(row, "mime", None) in {"image/svg+xml", "image/gif"}:
+            raise UpstreamError(
+                "SVG/GIF originals cannot be editing inputs; use a static PNG, JPEG or WebP",
+                error_code=EC.BAD_REFERENCE_IMAGE.value,
+                status_code=400,
+            )
         storage_key = row.storage_key
         sha = row.sha256
         normalized = normalized_ref_from_metadata(row.metadata_jsonb)
@@ -180,6 +187,61 @@ async def load_mask_image(
     if len(raw) > max_bytes:
         raise UpstreamError(
             "mask image exceeds size limit",
+            error_code=EC.REFERENCE_IMAGE_TOO_LARGE.value,
+            status_code=413,
+            payload={
+                "max_bytes": max_bytes,
+                "actual_bytes": len(raw),
+            },
+        )
+    return raw
+
+
+async def load_markup_image(
+    session: AsyncSession,
+    image_id: str,
+    *,
+    storage: ReferenceBlobStore,
+    timeout_seconds: float = REFERENCE_LOAD_TIMEOUT_S,
+    max_bytes: int = MASK_MAX_BYTES,
+) -> bytes:
+    """Load a markup/source image with the same hard-failure policy as references."""
+    row = (
+        await session.execute(
+            select(Image.id, Image.storage_key).where(
+                Image.id == image_id,
+                Image.deleted_at.is_(None),
+            )
+        )
+    ).first()
+    if row is None:
+        raise UpstreamError(
+            f"markup/source image not found id={image_id}",
+            error_code=EC.REFERENCE_MISSING.value,
+            status_code=404,
+        )
+    storage_key = row.storage_key
+    commit = getattr(session, "commit", None)
+    if callable(commit):
+        await commit()
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            raw = await storage.aget_bytes(storage_key)
+    except TimeoutError as exc:
+        raise UpstreamError(
+            f"markup/source image bytes read timed out key={storage_key}",
+            error_code=EC.REFERENCE_TIMEOUT.value,
+            status_code=None,
+        ) from exc
+    except FileNotFoundError as exc:
+        raise UpstreamError(
+            f"markup/source image bytes missing key={storage_key}",
+            error_code=EC.REFERENCE_MISSING.value,
+            status_code=404,
+        ) from exc
+    if len(raw) > max_bytes:
+        raise UpstreamError(
+            "markup/source image exceeds size limit",
             error_code=EC.REFERENCE_IMAGE_TOO_LARGE.value,
             status_code=413,
             payload={

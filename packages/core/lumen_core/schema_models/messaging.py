@@ -18,6 +18,7 @@ from ..image_models import (
 from ..message_content import public_message_content
 from ..sizing import AspectRatio as AspectRatioLiteral
 from .common import BaseOut
+from ..image_resource_limits import MAX_GIF_REQUEST_FRAMES, validate_gif_request_budget
 
 # ---------- Messages ----------
 
@@ -37,7 +38,10 @@ class ImageParamsIn(BaseModel):
     quality: Literal["1k", "2k", "4k"] | None = "4k"
     # Rendering quality is distinct from the UI's 1K/2K/4K resolution preset.
     render_quality: ImageRenderQuality = "high"
-    output_format: Literal["png", "jpeg", "webp"] | None = None
+    output_format: Literal["png", "jpeg", "webp", "svg", "gif"] | None = None
+    complexity: Literal["low", "medium", "high"] | None = None
+    frame_count: int | None = Field(default=None, ge=2, le=MAX_GIF_REQUEST_FRAMES)
+    frame_duration_ms: int | None = Field(default=None, ge=20, le=2000, multiple_of=10)
     # Only applies to jpeg/webp. None omits the provider compression option.
     output_compression: int | None = Field(default=None, ge=0, le=100)
     background: Literal["auto", "opaque", "transparent"] = "auto"
@@ -46,6 +50,18 @@ class ImageParamsIn(BaseModel):
     @model_validator(mode="after")
     def normalize_transparent_output(self) -> "ImageParamsIn":
         validate_image_model_quality(self.model, self.render_quality)
+        if self.output_format in {"svg", "gif"}:
+            if not self.model.startswith("gpt-image-2.6-"):
+                raise ValueError("SVG/GIF output requires GPT Image 2.6")
+            if self.count != 1:
+                raise ValueError("SVG/GIF output requires count=1")
+            self.output_compression = None
+        if self.output_format == "gif":
+            validate_gif_request_budget(self.fixed_size if self.size_mode == "fixed" else "auto", self.frame_count)
+        if self.output_format != "gif" and (
+            self.frame_count is not None or self.frame_duration_ms is not None
+        ):
+            raise ValueError("Animation parameters require GIF output")
         if self.background == "transparent" and self.output_format == "jpeg":
             self.output_format = "png"
             self.output_compression = None
@@ -135,6 +151,7 @@ class PostMessageIn(BaseModel):
     # RGBA PNG，alpha=0 处即要重画区域。复用 POST /images/upload 上传后把返回
     # 的 image_id 填到这里；worker 侧用 PIL 自适应 resize 到第一张参考图尺寸。
     mask_image_id: str | None = None
+    markup_image_id: str | None = None
     # intent 必须由前端显式给出；V1 删掉了 auto 启发式（命中率低，易误判）。
     # 历史客户端若仍带 "auto"，统一按 chat 处理（后端在 intent.resolve_intent 里兜底）。
     intent: Literal["auto", "chat", "vision_qa", "text_to_image", "image_to_image"] = (

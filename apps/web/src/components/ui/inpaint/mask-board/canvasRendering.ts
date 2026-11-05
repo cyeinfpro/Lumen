@@ -30,6 +30,7 @@ function drawStrokes(
   context: CanvasRenderingContext2D,
   strokes: Stroke[],
   coordinateScale: number,
+  mode: "mask" | "markup" = "mask",
 ) {
   context.lineCap = "round";
   context.lineJoin = "round";
@@ -53,7 +54,11 @@ function drawStrokes(
       );
     }
     context.lineWidth = stroke.radius * 2 * coordinateScale;
-    if (stroke.tool === "brush") {
+    if (mode === "markup") {
+      context.globalCompositeOperation = stroke.tool === "brush" ? "source-over" : "destination-out";
+      // Intentional annotation ink, not a UI surface or an inpaint mask.
+      context.strokeStyle = "#e53935";
+    } else if (stroke.tool === "brush") {
       context.globalCompositeOperation = "destination-out";
       context.strokeStyle = "rgba(0,0,0,1)";
     } else {
@@ -136,30 +141,51 @@ function renderMaskPreviewDataUrl(
   return preview.toDataURL("image/png");
 }
 
+function applyExportCoverage(context: CanvasRenderingContext2D, width: number, height: number, mode: "mask" | "markup"): number {
+  const imageData = context.getImageData(0, 0, width, height);
+  if (mode === "mask") {
+    const coverage = thresholdMaskAlpha(imageData.data);
+    context.putImageData(imageData, 0, 0);
+    return coverage;
+  }
+  let visible = 0;
+  for (let index = 3; index < imageData.data.length; index += 4) {
+    if (imageData.data[index] > 0) visible += 1;
+  }
+  if (visible === 0) throw new Error("标注没有可见笔画");
+  return visible / (width * height);
+}
+
 export async function exportMaskCanvas(
   image: HTMLImageElement | null,
   displayScale: number,
   strokes: Stroke[],
+  mode: "mask" | "markup" = "mask",
 ): Promise<MaskExport | null> {
   if (!image) return null;
   const { naturalWidth: width, naturalHeight: height } = image;
   if (!width || !height) return null;
+  if (mode === "markup" && (width * height > 16_777_216 || strokes.length === 0)) {
+    throw new Error("标注图片超限或没有笔画");
+  }
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext("2d");
   if (!context) return null;
-  context.fillStyle = "#ffffff";
-  context.fillRect(0, 0, width, height);
-  drawStrokes(context, strokes, displayScale === 0 ? 1 : 1 / displayScale);
+  if (mode === "mask") {
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, width, height);
+  }
+  // Markup remains a separate transparent layer; never draw the source image here.
+  drawStrokes(context, strokes, displayScale === 0 ? 1 : 1 / displayScale, mode);
 
-  const imageData = context.getImageData(0, 0, width, height);
-  const coverage = thresholdMaskAlpha(imageData.data);
-  context.putImageData(imageData, 0, 0);
+  const coverage = applyExportCoverage(context, width, height, mode);
   const blob = await new Promise<Blob | null>((resolve) =>
     canvas.toBlob(resolve, "image/png"),
   );
   if (!blob) return null;
+  if (mode === "markup" && blob.size > 50 * 1024 * 1024) throw new Error("标注超过 50 MB");
   return {
     blob,
     preview_data_url: renderMaskPreviewDataUrl(canvas, width, height),

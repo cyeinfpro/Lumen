@@ -97,6 +97,13 @@ def storage_streaming_response(
     if inline_filename:
         headers["Content-Disposition"] = f'inline; filename="{inline_filename}"'
 
+    if media_type.split(";", 1)[0].lower() == "image/svg+xml":
+        # Vector originals are downloads, never same-origin executable documents.
+        filename = inline_filename or "image.svg"
+        headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        headers["Content-Security-Policy"] = "sandbox; default-src 'none'; style-src 'none'"
+        headers["X-Content-Type-Options"] = "nosniff"
+
     if request is not None:
         if_none_match = request.headers.get("if-none-match")
         if if_none_match and etag_matches(etag, if_none_match):

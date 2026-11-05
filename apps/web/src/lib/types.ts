@@ -23,10 +23,10 @@ export type AspectRatio =
 
 export type SizeMode = "auto" | "fixed";
 export type Quality = "1k" | "2k" | "4k";
-export type ImageModel = "gpt-image-2" | "gpt-image-2.5-flare" | "gpt-image-2.5-sunburst";
+export type ImageModel = "gpt-image-2.6-flare" | "gpt-image-2.6-sunburst";
 export type RenderQuality = "auto" | "low" | "medium" | "high" | "xhigh" | "max";
 export type RenderQualityChoice = Exclude<RenderQuality, "auto">;
-export type ImageOutputFormat = "png" | "jpeg" | "webp";
+export type ImageOutputFormat = "png" | "jpeg" | "webp" | "svg" | "gif";
 
 export interface ImageParams {
   model?: ImageModel;
@@ -37,6 +37,9 @@ export interface ImageParams {
   count?: number;
   render_quality?: RenderQuality;
   output_format?: ImageOutputFormat;
+  complexity?: "low" | "medium" | "high";
+  frame_count?: number;
+  frame_duration_ms?: number;
   output_compression?: number;
   background?: "auto" | "opaque" | "transparent";
   moderation?: "auto" | "low";

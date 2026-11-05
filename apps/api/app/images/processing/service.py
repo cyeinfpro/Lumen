@@ -149,18 +149,35 @@ class ImageProcessor:
                     f"mime not allowed: {mime}",
                     400,
                 )
+            estimate = estimate_image_resources(
+                width=width,
+                height=height,
+                mode=mode,
+                upload_bytes=upload_bytes,
+            )
+            if mime == "image/gif" and mime in allowed_mime:
+                from lumen_core.gif_editing import MAX_GIF_BYTES, probe_gif
+
+                if upload_bytes > MAX_GIF_BYTES:
+                    raise ProcessingError("too_large", "GIF exceeds 32 MiB", 413)
+                with source_path.open("rb") as source:
+                    info = probe_gif(source.read(MAX_GIF_BYTES + 1))
+                pixels = info["width"] * info["height"] * info["frame_count"]
+                estimate = ImageResourceEstimate(
+                    upload_bytes,
+                    pixels * 4,
+                    pixels * 24,
+                    upload_bytes * 3 + 8 * 1024 * 1024,
+                    pixels,
+                    max(1, min(64, (pixels + 999999) // 1000000)),
+                )
             return ImageInspection(
                 mime=mime,
                 output_mime=output_mime,
                 mode=mode,
                 width=width,
                 height=height,
-                estimate=estimate_image_resources(
-                    width=width,
-                    height=height,
-                    mode=mode,
-                    upload_bytes=upload_bytes,
-                ),
+                estimate=estimate,
             )
         except ProcessingError:
             raise
@@ -201,6 +218,11 @@ class ImageProcessor:
         if lease is not None:
             lease.reserve_pixels(inspection.width * inspection.height)
         try:
+            if inspection.mime == "image/gif" and inspection.mime in allowed_mime:
+                from lumen_core.gif_editing import MAX_GIF_BYTES, inspect_gif
+
+                with Path(staged.path).open("rb") as source:
+                    inspect_gif(source.read(MAX_GIF_BYTES + 1))
             with PILImage.open(staged.path) as image:
                 metadata = (
                     metadata_reader(image, filename)

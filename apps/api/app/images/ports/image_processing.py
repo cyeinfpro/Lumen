@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 
 if TYPE_CHECKING:
@@ -66,5 +66,15 @@ class ImageProcessingExecutorPort(Protocol):
         self,
         request: ImageVariantProcessingRequest,
     ) -> PreparedImageVariant: ...
+
+    async def gif(
+        self,
+        source: bytes,
+        action: str,
+        *,
+        frame_index: int = 0,
+        speed: float = 1,
+        replacement: bytes = b"",
+    ) -> Any: ...
 
     async def aclose(self) -> None: ...

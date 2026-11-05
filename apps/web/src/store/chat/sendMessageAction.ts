@@ -86,6 +86,7 @@ type PreparedSend = {
   intent: Exclude<Intent, "auto">;
   isImage: boolean;
   maskImageId: string | undefined;
+  markupImageId: string | undefined;
   structuredAttachments: StructuredAttachment[];
   attachmentImageIds: string[];
   actionSource: string;
@@ -193,6 +194,20 @@ function resolveActionSource(
   }
 }
 
+function resolveMarkupImageId(composer: ComposerState, intent: Exclude<Intent, "auto">): string | undefined {
+  if (intent !== "image_to_image") return undefined;
+  return composer.markup?.target_attachment_id === composer.attachments[0]?.id
+    ? composer.markup?.image_id : undefined;
+}
+
+function image26SendError(composer: ComposerState, intent: Exclude<Intent, "auto">, mask?: string, markup?: string): string | null {
+  const special = composer.params.output_format === "svg" || composer.params.output_format === "gif";
+  if (isImageIntent(intent) && special && (mask || markup)) {
+    return "SVG / GIF 暂不支持蒙版或标注，请清除后重试；参考图会保留";
+  }
+  return mask && markup ? "标注和蒙版不能同时使用" : null;
+}
+
 function prepareSend(
   composer: ComposerState,
   options: SendMessageOptions,
@@ -218,10 +233,13 @@ function prepareSend(
     options?.intentOverride ??
     resolveIntent(snapshot.mode, attachments.length > 0, snapshot.forceIntent);
   const maskImageId = resolveMaskImageId(snapshot, intent);
+  const markupImageId = resolveMarkupImageId(snapshot, intent);
+  const imageError = image26SendError(snapshot, intent, maskImageId, markupImageId);
+  if (imageError) return { prepared: null, error: imageError };
   const structuredAttachments = structuredAttachmentsFromComposer(
     attachments,
     intent,
-    Boolean(maskImageId),
+    Boolean(maskImageId || markupImageId),
   );
   return {
     prepared: {
@@ -233,11 +251,12 @@ function prepareSend(
       intent,
       isImage: isImageIntent(intent),
       maskImageId,
+      markupImageId,
       structuredAttachments,
       attachmentImageIds: structuredAttachments.map(
         (attachment) => attachment.image_id,
       ),
-      actionSource: resolveActionSource(intent, maskImageId),
+      actionSource: markupImageId ? "composer.markup" : resolveActionSource(intent, maskImageId),
     },
     error: null,
   };
@@ -401,10 +420,9 @@ function buildImageParams(prepared: PreparedSend): ImageParams | undefined {
     ...rest
   } = prepared.params;
   const resolvedQuality = quality ?? "4k";
-  const resolvedSize = qualityToFixedSize(
-    resolvedQuality,
-    prepared.params.aspect_ratio,
-  );
+  const resolvedSize = outputFormat === "gif"
+    ? { fixed_size: prepared.params.fixed_size || "512x512", size_mode: "fixed" as const }
+    : qualityToFixedSize(resolvedQuality, prepared.params.aspect_ratio);
   const renderQuality = normalizeImageQuality(renderQualityOverride, prepared.params.model);
   const outputCompression =
     outputFormat === undefined
@@ -445,6 +463,7 @@ function buildPostPayload(prepared: PreparedSend): PostMessagePayload {
     ...(prepared.maskImageId
       ? { mask_image_id: prepared.maskImageId }
       : {}),
+    ...(prepared.markupImageId ? { markup_image_id: prepared.markupImageId } : {}),
     intent: prepared.intent,
     image_params: buildImageParams(prepared),
     chat_params: buildChatParams(prepared),

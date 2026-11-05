@@ -8,18 +8,22 @@ from lumen_core.canvas import canonical_hash
 from lumen_core.image_models import (
     DEFAULT_IMAGE_MODEL,
     IMAGE_MODELS,
+    LEGACY_IMAGE_MODELS,
     IMAGE_RENDER_QUALITIES,
     MAX_IMAGE_COUNT,
 )
 
 
-def image_capability(model: str | None) -> dict[str, Any]:
+def image_capability(
+    model: str | None, *, historical: bool = False
+) -> dict[str, Any]:
     resolved = model or DEFAULT_IMAGE_MODEL
-    if resolved not in IMAGE_MODELS:
+    supported = IMAGE_MODELS | LEGACY_IMAGE_MODELS if historical else IMAGE_MODELS
+    if resolved not in supported:
         raise ValueError("unsupported image model")
     qualities = sorted(
         IMAGE_RENDER_QUALITIES
-        - ({"xhigh", "max"} if resolved == DEFAULT_IMAGE_MODEL else set())
+        - ({"xhigh", "max"} if resolved == "gpt-image-2" else set())
     )
     capability = {
         "schema_version": 1,
@@ -51,7 +55,7 @@ def task_model_snapshot(owner: Any, *, kind: str) -> dict[str, Any]:
         if isinstance(value := getattr(owner, field, None), (str, int, bool))
     }
     if kind == "image":
-        capability = image_capability(parameters.get("model"))
+        capability = image_capability(parameters.get("model"), historical=True)
     else:
         # This is the admitted request contract, not a guessed provider catalog.
         capability = {

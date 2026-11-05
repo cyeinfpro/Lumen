@@ -7,6 +7,7 @@ from functools import partial
 from typing import Any, Callable
 
 from PIL import Image as PILImage
+from lumen_core.image_models import DEFAULT_IMAGE_MODEL
 
 from ....provider_runtime.errors import UpstreamError
 from .. import tool_images
@@ -93,7 +94,7 @@ async def chat_tools_from_content(
         tools.append(
             {
                 "type": image_generation_type,
-                "model": "gpt-image-2",
+                "model": DEFAULT_IMAGE_MODEL,
                 "size": image_size,
                 "quality": "medium",
                 "output_format": "png",

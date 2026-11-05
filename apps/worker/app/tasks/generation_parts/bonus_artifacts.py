@@ -229,11 +229,13 @@ def _build_bonus_artifact(
 
 def _bonus_format(orig_format: str) -> tuple[str, str]:
     return (
-        {"PNG": "png", "WEBP": "webp", "JPEG": "jpg"}[orig_format],
+        {"PNG": "png", "WEBP": "webp", "JPEG": "jpg", "SVG": "svg", "GIF": "gif"}[orig_format],
         {
             "PNG": "image/png",
             "WEBP": "image/webp",
             "JPEG": "image/jpeg",
+            "SVG": "image/svg+xml",
+            "GIF": "image/gif",
         }[orig_format],
     )
 
@@ -245,7 +247,7 @@ def _embed_bonus_metadata(
     orig_format: str,
     model_metadata: dict[str, Any],
 ) -> tuple[bytes, str]:
-    if not model_metadata:
+    if orig_format in {"SVG", "GIF"} or not model_metadata:
         return raw_image, sha
     try:
         with PILImage.open(io.BytesIO(raw_image)) as image:

@@ -23,6 +23,7 @@ import {
 
 import { Button, IconButton } from "@/components/ui/primitives";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
+import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
 import { DURATION, EASE } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 
@@ -40,6 +41,7 @@ const FULL_COVERAGE_WARN = 0.95;
 
 export interface MaskCanvasProps {
   open: boolean;
+  exportMode?: "mask" | "markup";
   /** 原图 data URL（与 attachment.data_url 一致） */
   imageSrc: string;
   /** 关闭弹窗（无论确认还是取消都会被调用前置） */
@@ -59,6 +61,7 @@ export function MaskCanvas(props: MaskCanvasProps) {
 
 function MaskCanvasInner({
   imageSrc,
+  exportMode = "mask",
   onClose,
   onConfirm,
   submitting,
@@ -66,25 +69,17 @@ function MaskCanvasInner({
   const boardRef = useRef<MaskBoardHandle | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const [hasStroke, setHasStroke] = useState(false);
+  const confirmLock = useRef(false);
+  const alive = useRef(true);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const onModalKeyDown = useModalLayer({
+    open: true, rootRef: dialogRef, onClose,
+    closeOnEscape: !submitting,
+  });
 
   // ———— Esc 关闭 + body 滚动锁 ————
-  const submittingRef = useRef(submitting);
   useBodyScrollLock(true);
-  useEffect(() => {
-    submittingRef.current = submitting;
-  }, [submitting]);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !submittingRef.current) {
-        e.preventDefault();
-        onClose();
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
 
   // hasStroke 由 MaskBoard 的 onStatsChange 回调驱动：撤销/清除/涂抹都会同步触发，
   // 避免原本只在外层 pointer 事件采样导致按钮"内部撤销"后仍 enabled 的脏状态。
@@ -96,25 +91,33 @@ function MaskCanvasInner({
   );
 
   const handleConfirm = useCallback(async () => {
-    if (submitting) return;
+    if (submitting || confirmLock.current) return;
+    confirmLock.current = true;
     setWarning(null);
-    const m = await boardRef.current?.exportMask();
-    if (!m) {
-      setWarning("画布未就绪或未涂抹任何区域");
-      return;
+    try {
+      const m = await boardRef.current?.exportMask();
+      if (!alive.current) return;
+      if (!m) {
+        setWarning("画布未就绪或没有笔画");
+        return;
+      }
+      if (exportMode === "mask" && m.coverage > FULL_COVERAGE_WARN) {
+        setWarning("涂抹接近全图，可撤销部分笔画");
+      }
+      await onConfirm(m);
+    } catch (error) {
+      setWarning(error instanceof Error ? error.message : "画布导出失败");
+    } finally {
+      confirmLock.current = false;
     }
-    if (m.coverage > FULL_COVERAGE_WARN) {
-      setWarning(
-        `已涂抹约 ${(m.coverage * 100).toFixed(0)}%，几乎全图重画 — 可继续，或撤销几笔后再试`,
-      );
-    }
-    await onConfirm(m);
-  }, [submitting, onConfirm]);
+  }, [submitting, onConfirm, exportMode]);
 
   return (
     <AnimatePresence>
       <motion.div
         key="mask-overlay"
+        data-lumen-modal-layer
+        data-lumen-composer-floating
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
@@ -127,9 +130,12 @@ function MaskCanvasInner({
         )}
       >
         <motion.div
+          ref={dialogRef}
+          tabIndex={-1}
+          onKeyDown={onModalKeyDown}
           role="dialog"
           aria-modal="true"
-          aria-label="局部修改 mask 画布"
+          aria-label={exportMode === "markup" ? "图像标注画布" : "局部修改 mask 画布"}
           initial={{ opacity: 0, scale: 0.96, y: 8 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.96, y: 8 }}
@@ -145,9 +151,9 @@ function MaskCanvasInner({
           {/* Header */}
           <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-[var(--border-subtle)]">
             <div className="flex flex-col">
-              <h2 className="type-card-title">局部修改</h2>
+              <h2 className="type-card-title">{exportMode === "markup" ? "图像标注" : "局部修改"}</h2>
               <p className="type-body-sm text-[var(--fg-1)]">
-                涂抹要被重画的区域；红色高亮即 mask
+                {exportMode === "markup" ? "在第一张图上圈画指示，配合提示词说明修改；标注单独提交" : "涂抹要被重画的区域；红色高亮即 mask"}
               </p>
             </div>
             <IconButton
@@ -184,6 +190,7 @@ function MaskCanvasInner({
                 <MaskBoard
                   ref={boardRef}
                   imageSrc={imageSrc}
+                  exportMode={exportMode}
                   disabled={submitting}
                   onStatsChange={handleStatsChange}
                 />

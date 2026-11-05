@@ -87,7 +87,7 @@ def upload_requests_mask_preflight(
     filename: str | None,
 ) -> bool:
     purpose_norm = (purpose or "").strip().lower()
-    if purpose_norm == VIDEO_REFERENCE_UPLOAD_PURPOSE:
+    if purpose_norm in {VIDEO_REFERENCE_UPLOAD_PURPOSE, "image_markup"}:
         return False
     if purpose_norm in {"mask", "inpaint_mask", "inpaint-mask"}:
         return True
@@ -107,6 +107,19 @@ def build_upload_policy(
     reference_size: tuple[int, int] | None,
 ) -> UploadPolicy:
     purpose_norm = (purpose or "").strip().lower()
+    if purpose_norm == "image_markup":
+        # Keep the original PNG and dimensions. Markup is not an inpainting mask.
+        return UploadPolicy(
+            allowed_mime=frozenset({"image/png"}),
+            normalizable_mime=frozenset(),
+            extensions=EXT_BY_MIME,
+            max_bytes=MAX_BYTES,
+            max_pixels=16_777_216,
+            max_long_side=16_777_216,
+            mask_requested=False,
+            reference_size=None,
+            purpose="image_markup",
+        )
     if purpose_norm == VIDEO_REFERENCE_UPLOAD_PURPOSE:
         return UploadPolicy(
             allowed_mime=ALLOWED_MIME,

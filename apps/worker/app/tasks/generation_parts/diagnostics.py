@@ -303,6 +303,10 @@ def image_requested_params_snapshot(
         "moderation",
         "billing_tier",
         "n",
+        "complexity",
+        "frame_count",
+        "frame_duration_ms",
+        "markup_image_id",
     ):
         if key in req:
             out[key] = compact_diag_value(req[key])
@@ -328,6 +332,9 @@ def image_effective_params_snapshot(
         "output_compression",
         "background",
         "moderation",
+        "complexity",
+        "frame_count",
+        "frame_duration_ms",
     ):
         if key in opts:
             out[key] = compact_diag_value(opts[key])

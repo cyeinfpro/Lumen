@@ -202,7 +202,18 @@ class Generation(Base, TimestampMixin):
     @property
     def requested_params(self) -> dict[str, Any] | None:
         value = self.diagnostics.get("requested_params")
-        return value if isinstance(value, dict) else None
+        out = dict(value) if isinstance(value, dict) else {}
+        request = self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        # Public generation controls only. Never expose the raw provider request.
+        for key in (
+            "model", "render_quality", "output_format", "output_compression",
+            "background", "moderation", "complexity", "frame_count",
+            "frame_duration_ms", "markup_image_id",
+        ):
+            item = request.get(key)
+            if isinstance(item, (str, int)) and not isinstance(item, bool):
+                out.setdefault(key, item)
+        return out or None
 
     @property
     def effective_params(self) -> dict[str, Any] | None:

@@ -9,7 +9,7 @@ from lumen_core.schema_models import ChatParamsIn
 
 
 IMAGE_RENDER_QUALITY_VALUES = frozenset(("auto", "low", "medium", "high", "xhigh", "max"))
-IMAGE_OUTPUT_FORMAT_VALUES = frozenset(("png", "jpeg", "webp"))
+IMAGE_OUTPUT_FORMAT_VALUES = frozenset(("png", "jpeg", "webp", "svg", "gif"))
 IMAGE_BACKGROUND_VALUES = frozenset(("auto", "opaque", "transparent"))
 IMAGE_MODERATION_VALUES = frozenset(("auto", "low"))
 

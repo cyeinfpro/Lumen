@@ -34,6 +34,9 @@ const IMAGE_CONFIG_KEYS = new Set([
   "count",
   "fast",
   "output_format",
+  "complexity",
+  "frame_count",
+  "frame_duration_ms",
   "output_compression",
   "background",
   "moderation",
@@ -114,8 +117,12 @@ function videoAssetConfigIsValid(config: CanvasConfigRecord): boolean {
 }
 
 function imageConfigIsValid(config: CanvasConfigRecord): boolean {
+  return hasOnlyKeys(config, IMAGE_CONFIG_KEYS) &&
+    imageSizingConfigIsValid(config) && imageRenderingConfigIsValid(config);
+}
+
+function imageSizingConfigIsValid(config: CanvasConfigRecord): boolean {
   return (
-    hasOnlyKeys(config, IMAGE_CONFIG_KEYS) &&
     optionalNullableString(config, "model", 128) &&
     optionalString(config, "aspect_ratio", 16) &&
     optionalSetValue(config, "size", new Set(["1K", "2K", "4K", "1k", "2k", "4k"])) &&
@@ -125,19 +132,26 @@ function imageConfigIsValid(config: CanvasConfigRecord): boolean {
       new Set(["standard", "high", "1k", "2k", "4k"]),
     ) &&
     optionalSetValue(config, "size_mode", new Set(["auto", "fixed"])) &&
-    optionalNullableString(config, "fixed_size", 32) &&
+    optionalNullableString(config, "fixed_size", 32)
+  );
+}
+
+function imageRenderingConfigIsValid(config: CanvasConfigRecord): boolean {
+  return (
     optionalSetValue(
       config,
       "render_quality",
-      new Set(["auto", "low", "medium", "high"]),
+      new Set(["auto", "low", "medium", "high", "xhigh", "max"]),
     ) &&
     optionalInteger(config, "count", 1, 10) &&
     optionalLegacyImageFast(config) &&
     optionalNullableSetValue(
       config,
       "output_format",
-      new Set(["png", "jpeg", "webp"]),
+      new Set(["png", "jpeg", "webp", "svg", "gif"]),
     ) &&
+    optionalNullableSetValue(config, "complexity", new Set(["low", "medium", "high"])) &&
+    imageAnimationConfigIsValid(config) &&
     optionalNullableInteger(config, "output_compression", 0, 100) &&
     optionalSetValue(
       config,
@@ -145,6 +159,16 @@ function imageConfigIsValid(config: CanvasConfigRecord): boolean {
       new Set(["auto", "opaque", "transparent"]),
     ) &&
     optionalSetValue(config, "moderation", new Set(["auto", "low"]))
+  );
+}
+
+function imageAnimationConfigIsValid(config: CanvasConfigRecord): boolean {
+  return (
+    optionalNullableInteger(config, "frame_count", 2, 16) &&
+    optionalNullableInteger(config, "frame_duration_ms", 20, 2000) &&
+    (config.frame_duration_ms == null || Number(config.frame_duration_ms) % 10 === 0) &&
+    (config.output_format === "gif" || (config.frame_count == null && config.frame_duration_ms == null)) &&
+    (!["svg", "gif"].includes(String(config.output_format)) || config.count == null || config.count === 1)
   );
 }
 

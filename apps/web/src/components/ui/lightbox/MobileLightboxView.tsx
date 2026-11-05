@@ -27,6 +27,7 @@ import { DURATION, EASE } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 import type { LightboxAction } from "@/store/useUiStore";
 
+import { isGifItem, openGifEditor } from "./gifEditorEvents";
 import { LightboxActionMenu } from "./LightboxActionMenu";
 import { LightboxParamsPanel } from "./LightboxParamsPanel";
 import {
@@ -168,6 +169,7 @@ export function MobileLightboxView({
         onReset={onResetZoom}
       />
       <LightboxFooter
+        onClose={onClose}
         activeThumbRef={activeThumbRef}
         chromeVisible={chromeVisible}
         current={current}
@@ -578,6 +580,8 @@ function LightboxThumbnailStrip({
 }
 
 function LightboxActionBar({
+  current,
+  onClose,
   chromeVisible,
   hasPrompt,
   onCopyPrompt,
@@ -588,6 +592,8 @@ function LightboxActionBar({
   onShare,
   onUpscale,
 }: {
+  current: LightboxItem;
+  onClose: () => void;
   chromeVisible: boolean;
   hasPrompt: boolean;
   onCopyPrompt: () => void;
@@ -600,6 +606,7 @@ function LightboxActionBar({
 }) {
   const tabIndex = chromeVisible ? undefined : -1;
   const actions = [
+    ...(isGifItem(current) ? [{ label: "编辑 GIF", icon: <Brush className="h-4 w-4" />, onSelect: () => openGifEditor(current, onClose) }] : []),
     {
       label: "局部修改",
       icon: <Brush className="h-4 w-4" />,
@@ -681,6 +688,7 @@ function LightboxInjectedAction({
 }
 
 function LightboxFooter({
+  onClose,
   activeThumbRef,
   chromeVisible,
   current,
@@ -701,6 +709,7 @@ function LightboxFooter({
   chromeVisible: boolean;
   current: LightboxItem;
   idx: number;
+  onClose: () => void;
   lightboxAction: LightboxAction | null;
   thumbItems: ThumbnailItem[];
   total: number;
@@ -721,7 +730,7 @@ function LightboxFooter({
       className={cn(
         "absolute inset-x-0 bottom-0 px-3 pt-6",
         "pb-[var(--mobile-dialog-footer-pad-bottom)]",
-        "mobile-dialog-scroll max-h-[min(42dvh,20rem)] overflow-y-auto overscroll-contain",
+        "overflow-visible",
         "bg-gradient-to-t from-[var(--media-control-bg)] via-[var(--media-control-bg)] to-transparent",
         "pointer-events-auto",
         !chromeVisible && "pointer-events-none",
@@ -738,6 +747,8 @@ function LightboxFooter({
         onSwitchItem={onSwitchItem}
       />
       <LightboxActionBar
+        current={current}
+        onClose={onClose}
         chromeVisible={chromeVisible}
         hasPrompt={Boolean(current.prompt)}
         onCopyPrompt={onCopyPrompt}

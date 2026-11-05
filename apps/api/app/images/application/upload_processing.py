@@ -230,7 +230,8 @@ class UploadProcessingOperation:
             sha256=state.staged.identity.sha256,
             blurhash=None,
             visibility=ImageVisibility.PRIVATE.value,
-            metadata_jsonb={},
+            parent_image_id=context.policy.parent_image_id,
+            metadata_jsonb=dict(context.policy.initial_metadata or {}),
             artifact_status=ArtifactStatus.STAGING.value,
             artifact_manifest_jsonb=_planned_manifest(
                 state.ticket,

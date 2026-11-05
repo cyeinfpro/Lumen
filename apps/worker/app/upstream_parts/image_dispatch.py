@@ -14,6 +14,7 @@ from ..provider_runtime.upstream_services import (
     resolve_image_upstream_services,
 )
 from . import direct_requests
+from .image_controls import requires_images_controls, validate_image_controls
 from .image_execution import (
     ImageExecutionRequest,
     ImageProviderRoute,
@@ -161,7 +162,10 @@ async def _prepare_provider_route(
     runtime = request.upstream_runtime
     services = _request_services(request)
     provider = request.provider_override
-    use_jobs = _should_use_image_jobs(channel, provider, runtime=runtime)
+    use_jobs = (
+        False if requires_images_controls(request)
+        else _should_use_image_jobs(channel, provider, runtime=runtime)
+    )
     provider_name = getattr(provider, "name", "unknown")
     if use_jobs:
         try:
@@ -515,6 +519,14 @@ async def _dispatch_fresh_image(
     services = _request_services(request)
     channel = await services.core.resolve_image_channel()
     engine = await services.core.resolve_image_engine()
+    if requires_images_controls(request):
+        if channel == services.core.IMAGE_CHANNEL_IMAGE_JOBS_ONLY:
+            raise services.infrastructure.UpstreamError(
+                "GPT Image 2.6 complexity, markup, SVG and GIF require direct Images API; image_jobs_only is unsupported",
+                error_code=services.infrastructure.EC.INVALID_REQUEST_ERROR.value,
+                status_code=400,
+            )
+        engine = services.core.IMAGE_ROUTE_IMAGE2
     dispatch_endpoint_kind = _image_endpoint_kind_for_engine(
         engine,
         runtime=runtime,
@@ -638,6 +650,15 @@ async def _dispatch_fresh_image(
 async def _dispatch_image(
     request: ImageExecutionRequest,
 ) -> AsyncIterator[tuple[str, str | None]]:
+    try:
+        request = validate_image_controls(request)
+    except ValueError as exc:
+        services = _request_services(request)
+        raise services.infrastructure.UpstreamError(
+            str(exc),
+            error_code=services.infrastructure.EC.INVALID_REQUEST_ERROR.value,
+            status_code=400,
+        ) from exc
     image_iter = (
         _resume_persisted_image_jobs(request)
         if request.request_context.sidecar_execution is not None

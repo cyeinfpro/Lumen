@@ -223,7 +223,9 @@ async def _postprocess_raw_generated_image(
         raise hooks.image_decode_upstream_error(exc) from exc
 
     try:
-        with PILImage.open(io.BytesIO(raw_image)) as pil:
+        # SVG originals remain vector bytes; hash the already-rendered preview.
+        blurhash_source = variants.preview.bytes if variants.orig_format == "SVG" else raw_image
+        with PILImage.open(io.BytesIO(blurhash_source)) as pil:
             pil.load()
             blurhash_str = hooks.compute_blurhash(pil)
     except Exception as exc:  # noqa: BLE001

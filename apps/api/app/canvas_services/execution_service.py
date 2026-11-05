@@ -30,6 +30,7 @@ from lumen_core.canvas_schemas import (
     IMAGE_EXECUTABLE_NODE_TYPES,
 )
 from lumen_core.canvas_capabilities import image_capability, task_model_snapshot
+from lumen_core.image_models import upgrade_legacy_image_model
 from lumen_core.models import Generation, User, VideoGeneration
 from lumen_core.schemas import (
     VideoCreateIn,
@@ -603,6 +604,11 @@ async def _prepare_node_execution(
     if replay is not None:
         return replay
     config = dict(resolved.node.get("config") or {})
+    image_model_capability = (
+        image_capability(upgrade_legacy_image_model(config.get("model")))
+        if node_type in IMAGE_EXECUTABLE_NODE_TYPES
+        else None
+    )
     definition_hash = canvas_node_definition_hash(resolved.node)
     input_hash = canvas_input_hash(resolved.snapshot)
     execution_fingerprint = canvas_execution_fingerprint(
@@ -610,15 +616,11 @@ async def _prepare_node_execution(
         input_hash=input_hash,
         node_schema_version=int(resolved.node.get("schema_version") or 1),
         effective_model=(
-            image_capability(config.get("model"))["model"]
-            if node_type in IMAGE_EXECUTABLE_NODE_TYPES
+            image_model_capability["model"]
+            if image_model_capability is not None
             else config.get("model")
         ),
-        effective_provider_capability=(
-            image_capability(config.get("model"))
-            if node_type in IMAGE_EXECUTABLE_NODE_TYPES
-            else None
-        ),
+        effective_provider_capability=image_model_capability,
         processor_version=_PROCESSOR_VERSION,
     )
     submission_key = f"cx:{stable_hash({'key': body.idempotency_key})}"
@@ -647,13 +649,13 @@ async def _prepare_node_execution(
         },
         input_snapshot_jsonb=resolved.snapshot,
         model_snapshot_jsonb={
-            "model": config.get("model"),
-            "node_type": node_type,
-            "capability": (
-                image_capability(config.get("model"))
-                if node_type in IMAGE_EXECUTABLE_NODE_TYPES
-                else None
+            "model": (
+                image_model_capability["model"]
+                if image_model_capability is not None
+                else config.get("model")
             ),
+            "node_type": node_type,
+            "capability": image_model_capability,
         },
         pricing_snapshot_jsonb={},
         processor_version=_PROCESSOR_VERSION,

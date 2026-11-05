@@ -50,7 +50,11 @@ async def image_out(db: AsyncSession, img: Image) -> ImageOut:
         mime=img.mime,
         blurhash=img.blurhash,
         url=image_url(img.id),
-        display_url=variant_url(img.id, DISPLAY_VARIANT),
+        display_url=(
+            image_url(img.id)
+            if img.mime == "image/gif"
+            else variant_url(img.id, DISPLAY_VARIANT)
+        ),
         preview_url=(
             variant_url(img.id, PREVIEW_VARIANT) if PREVIEW_VARIANT in kinds else None
         ),

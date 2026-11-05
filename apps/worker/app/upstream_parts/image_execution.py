@@ -109,6 +109,10 @@ class ImageExecutionRequest:
     upstream_runtime: ImageUpstreamRuntime | None = None
 
     image_model: str | None = None
+    complexity: str | None = None
+    markup: bytes | None = None
+    frame_count: int | None = None
+    frame_duration_ms: int | None = None
 
     def with_progress(
         self,

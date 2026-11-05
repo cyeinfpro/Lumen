@@ -3,6 +3,8 @@
 import { imageQualityOptions } from "@/lib/imageModels";
 import { useChatStore } from "@/store/useChatStore";
 import { ImageModelSelect } from "../shared/ImageModelSelect";
+import { ImageOutputControls } from "../shared/ImageOutputControls";
+import { Image26Controls } from "../shared/Image26Controls";
 
 import type { ReactNode } from "react";
 import {
@@ -129,6 +131,8 @@ export function AdvancedComposerSettings({
                   输出
                 </h3>
                 <ImageModelSelect />
+                <ImageOutputControls />
+                <Image26Controls />
                 <div className="grid grid-cols-2 gap-2">
                   <SettingSelect
                     label="尺寸"

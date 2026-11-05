@@ -155,6 +155,48 @@ async def validate_mask_image(
         raise http_error("mask_not_found", "mask image not found", 404)
 
 
+async def validate_markup_image(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    intent: Intent,
+    attachment_ids: list[str],
+    markup_image_id: str | None,
+    mask_image_id: str | None,
+    visibility_filter: Any | None,
+    http_error: HttpErrorFactory,
+) -> None:
+    """Authorize a separate markup layer before a generation can be admitted."""
+    if markup_image_id is None:
+        return
+    if mask_image_id is not None:
+        raise http_error("markup_mask_conflict", "markup and mask cannot be combined", 422)
+    if intent != Intent.IMAGE_TO_IMAGE or not attachment_ids:
+        raise http_error(
+            "markup_requires_image_to_image",
+            "markup requires image_to_image and at least one reference image",
+            422,
+        )
+    if markup_image_id in attachment_ids:
+        raise http_error(
+            "markup_requires_separate_layer",
+            "markup must be a separate transparent PNG layer",
+            422,
+        )
+    markup_row = (
+        await db.execute(
+            select(Image.id).where(
+                Image.id == markup_image_id,
+                Image.user_id == user_id,
+                Image.deleted_at.is_(None),
+                *((visibility_filter,) if visibility_filter is not None else ()),
+            )
+        )
+    ).scalar_one_or_none()
+    if markup_row is None:
+        raise http_error("markup_not_found", "markup image not found", 404)
+
+
 def build_user_content(
     body: PostMessageIn,
     *,

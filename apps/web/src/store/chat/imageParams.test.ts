@@ -44,14 +44,19 @@ test("render quality normalization uses the high-quality fallback", () => {
 });
 
 
-test("new model quality survives persistence and switching back clamps unsupported quality", () => {
-  for (const model of ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"] as const) {
+test("2.6 quality survives persistence and retired drafts upgrade without losing quality", () => {
+  for (const model of ["gpt-image-2.6-flare", "gpt-image-2.6-sunburst"] as const) {
     for (const render_quality of ["low", "medium", "high", "xhigh", "max"] as const) {
       const params = normalizeImageParams({ ...DEFAULT_PARAMS, model, render_quality });
       assert.equal(params.model, model);
       assert.equal(params.render_quality, render_quality);
       const original = normalizeImageParams({ ...params, model: "gpt-image-2" });
-      assert.equal(original.render_quality, ["xhigh", "max"].includes(render_quality) ? "high" : render_quality);
+      assert.equal(original.model, "gpt-image-2.6-flare");
+      assert.equal(original.render_quality, render_quality);
     }
   }
+});
+
+test("new chat preserves the Sunburst default in the 2.6 family", () => {
+  assert.equal(DEFAULT_PARAMS.model, "gpt-image-2.6-sunburst");
 });

@@ -77,11 +77,21 @@ async def execute_generation_batch_for_message(
             "image_to_image requires at least one reference image",
             400,
         )
+    if command.image_params.output_format in {"svg", "gif"} and (
+        command.mask_image_id
+        or (command.request_metadata or {}).get("markup_image_id")
+    ):
+        raise http_error(
+            "image_format_incompatible_overlay",
+            "SVG/GIF output currently cannot be combined with mask or markup",
+            422,
+        )
     try:
         resolved_size = resolve_size(
             aspect=command.image_params.aspect_ratio,
             mode=command.image_params.size_mode,
             fixed=command.image_params.fixed_size,
+            output_format=command.image_params.output_format,
         )
     except Exception as exc:  # noqa: BLE001
         raise http_error("invalid_size", f"size resolve failed: {exc}", 422) from exc

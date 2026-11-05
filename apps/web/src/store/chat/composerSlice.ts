@@ -50,6 +50,10 @@ export type ComposerActions = Pick<
   | "setFixedSize"
   | "setQuality"
   | "setImageModel"
+  | "setImageComplexity"
+  | "setImageOutputFormat"
+  | "setImageFrameCount"
+  | "setImageFrameDuration"
   | "setRenderQuality"
   | "setImageCount"
   | "setTransparentBackground"
@@ -64,6 +68,8 @@ export type ComposerActions = Pick<
   | "moveAttachment"
   | "setMask"
   | "clearMask"
+  | "setMarkup"
+  | "clearMarkup"
   | "clearComposer"
   | "promoteImageToReference"
 >;
@@ -98,6 +104,8 @@ export function cloneComposerState(composer: ComposerState): ComposerState {
     ...composer,
     attachments,
     params: clonePlainValue(composer.params),
+    markup: composer.markup?.target_attachment_id === attachments[0]?.id
+      ? clonePlainValue(composer.markup) : null,
     mask,
   };
 }
@@ -140,6 +148,7 @@ export function isResetComposerDraft(
     composer.text === "" &&
     composer.attachments.length === 0 &&
     composer.mask === null &&
+    !composer.markup &&
     composer.forceIntent === undefined &&
     (!preferenceBaseline ||
       hasSameComposerPreferences(composer, preferenceBaseline))
@@ -283,6 +292,33 @@ export function createComposerActions(
           params: normalizeImageParams({ ...state.composer.params, model }),
         },
       })),
+    setImageComplexity: (complexity) =>
+      set((state) => ({
+        composer: { ...state.composer, params: { ...state.composer.params, complexity } },
+      })),
+    setImageOutputFormat: (format) =>
+      set((state) => ({
+        composer: {
+          ...state.composer,
+          params: {
+            ...state.composer.params,
+            output_format: format,
+            ...(format === "svg" || format === "gif"
+              ? { count: 1, output_compression: undefined } : {}),
+            frame_count: format === "gif" ? (state.composer.params.frame_count ?? 9) : undefined,
+            frame_duration_ms: format === "gif" ? (state.composer.params.frame_duration_ms ?? 200) : undefined,
+            ...(format === "gif" ? { fixed_size: "512x512", quality: "1k" as const } : {}),
+          },
+        },
+      })),
+    setImageFrameCount: (frame_count) =>
+      set((state) => ({
+        composer: { ...state.composer, params: { ...state.composer.params, frame_count } },
+      })),
+    setImageFrameDuration: (frame_duration_ms) =>
+      set((state) => ({
+        composer: { ...state.composer, params: { ...state.composer.params, frame_duration_ms } },
+      })),
     setRenderQuality: (renderQuality) =>
       set((state) => ({
         composer: {
@@ -365,6 +401,8 @@ export function createComposerActions(
             ),
             attachments: nextAttachments,
             mask: nextMask,
+            markup: state.composer.markup?.target_attachment_id === nextAttachments[0]?.id
+              ? state.composer.markup : null,
           },
         };
       }),
@@ -393,6 +431,8 @@ export function createComposerActions(
             ),
             attachments: nextAttachments,
             mask: nextMask,
+            markup: state.composer.markup?.target_attachment_id === nextAttachments[0]?.id
+              ? state.composer.markup : null,
           },
         };
       }),
@@ -420,13 +460,25 @@ export function createComposerActions(
               nextAttachments,
             ),
             attachments: nextAttachments,
+            markup: state.composer.markup?.target_attachment_id === nextAttachments[0]?.id
+              ? state.composer.markup : null,
           },
         };
       }),
     setMask: (mask) =>
-      set((state) => ({ composer: { ...state.composer, mask } })),
+      set((state) => ({ composer: { ...state.composer, mask, markup: null } })),
     clearMask: () =>
       set((state) => ({ composer: { ...state.composer, mask: null } })),
+    setMarkup: (markup) =>
+      set((state) => ({
+        composer: {
+          ...state.composer,
+          markup: markup.target_attachment_id === state.composer.attachments[0]?.id ? markup : null,
+          mask: null,
+        },
+      })),
+    clearMarkup: () =>
+      set((state) => ({ composer: { ...state.composer, markup: null } })),
     clearComposer: () =>
       set((state) => ({
         composer: {
@@ -474,6 +526,7 @@ export function createComposerActions(
               : [attachment, ...state.composer.attachments],
             mode: "image",
             mask: atLimit ? state.composer.mask : null,
+            markup: atLimit ? state.composer.markup : null,
           },
         };
       });

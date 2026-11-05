@@ -6,6 +6,7 @@ import multiprocessing
 import os
 import signal
 import sys
+import tempfile
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from pathlib import Path
@@ -61,6 +62,16 @@ class _ProcessRequest:
 class _RenderVariantRequest:
     operation: Literal["render_variant"]
     request: ImageVariantProcessingRequest
+
+
+@dataclass(frozen=True)
+class _GifRequest:
+    operation: Literal["gif"]
+    source_path: str
+    action: str
+    frame_index: int = 0
+    speed: float = 1
+    replacement_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -124,8 +135,36 @@ def _install_parent_death_signal(expected_parent_pid: int) -> None:
 
 
 def _execute_request(
-    request: _InspectRequest | _ProcessRequest | _RenderVariantRequest,
+    request: _InspectRequest | _ProcessRequest | _RenderVariantRequest | _GifRequest,
 ) -> Any:
+    if request.operation == "gif":
+        from lumen_core.gif_editing import (
+            inspect_gif,
+            extract_gif_frame,
+            retime_gif,
+            replace_gif_frame,
+        )
+
+        try:
+            from lumen_core.gif_editing import MAX_GIF_BYTES
+
+            with open(request.source_path, "rb") as handle:
+                source = handle.read(MAX_GIF_BYTES + 1)
+            replacement = b""
+            if request.replacement_path:
+                with open(request.replacement_path, "rb") as handle:
+                    replacement = handle.read(MAX_GIF_BYTES + 1)
+            if request.action == "inspect":
+                return inspect_gif(source)
+            if request.action == "extract":
+                return extract_gif_frame(source, request.frame_index)
+            if request.action == "retime":
+                return retime_gif(source, request.speed)
+            if request.action == "replace":
+                return replace_gif_frame(source, request.frame_index, replacement)
+            raise ValueError("unsupported GIF operation")
+        except ValueError as exc:
+            raise ProcessingError("invalid_gif", str(exc), 400) from exc
     processor = ImageProcessor()
     if request.operation == "inspect":
         return processor.inspect(
@@ -161,7 +200,7 @@ def _execute_request(
 
 def _child_main(
     connection: Connection,
-    request: _InspectRequest | _ProcessRequest | _RenderVariantRequest,
+    request: _InspectRequest | _ProcessRequest | _RenderVariantRequest | _GifRequest,
     parent_pid: int,
 ) -> None:
     try:
@@ -212,7 +251,10 @@ class IsolatedImageProcessingExecutor:
 
     async def _run(
         self,
-        request: _InspectRequest | _ProcessRequest | _RenderVariantRequest,
+        request: _InspectRequest
+        | _ProcessRequest
+        | _RenderVariantRequest
+        | _GifRequest,
     ) -> Any:
         if self._closed:
             raise ProcessingError(
@@ -357,6 +399,34 @@ class IsolatedImageProcessingExecutor:
                 503,
             )
         return result
+
+    async def gif(
+        self,
+        source: bytes,
+        action: str,
+        *,
+        frame_index: int = 0,
+        speed: float = 1,
+        replacement: bytes = b"",
+    ) -> Any:
+        # Spawn arguments contain only small paths, not up to 64 MiB of pickle
+        # payload. Private temporary inputs are cleaned on success/error/cancel.
+        with tempfile.TemporaryDirectory(prefix="lumen-gif-") as directory:
+            source_path = Path(directory) / "source.gif"
+            replacement_path = Path(directory) / "replacement.png"
+            await asyncio.to_thread(source_path.write_bytes, source)
+            if replacement:
+                await asyncio.to_thread(replacement_path.write_bytes, replacement)
+            return await self._run(
+                _GifRequest(
+                    operation="gif",
+                    source_path=str(source_path),
+                    action=action,
+                    frame_index=frame_index,
+                    speed=speed,
+                    replacement_path=str(replacement_path) if replacement else "",
+                )
+            )
 
     async def aclose(self) -> None:
         self._closed = True

@@ -17,7 +17,7 @@ export interface UploadedImage {
 
 export interface UploadImageOptions {
   signal?: AbortSignal;
-  purpose?: "inpaint_mask" | "volcano_asset" | "video_reference";
+  purpose?: "inpaint_mask" | "image_markup" | "volcano_asset" | "video_reference";
 }
 
 export function uploadImage(

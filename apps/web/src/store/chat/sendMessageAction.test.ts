@@ -177,6 +177,94 @@ function resetAliases() {
   runtime.rememberCompletionAlias("other-real-comp", "opt-asst-other");
 }
 
+test("markup submits a distinct layer and preserves multi-turn primary source", async () => {
+  const composer = {
+    ...createComposerState(null), mode: "image", text: "Move the circled object",
+    params: { ...createComposerState(null).params, complexity: "low" },
+    attachments: [
+      { id: "local-ref", source_image_id: "previous-output", kind: "generated", data_url: "data:image/png;base64,aA==", mime: "image/png" },
+      { id: "other-ref", kind: "uploaded", data_url: "data:image/png;base64,aA==", mime: "image/png" },
+    ],
+    markup: { image_id: "markup-layer", target_attachment_id: "local-ref", preview_data_url: "" },
+  };
+  const harness = createHarness({ composer });
+  let sent: Record<string, unknown> | undefined;
+  stubHost.__conversationsStub = { postMessage: async (_conv, body) => {
+    sent = body as Record<string, unknown>;
+    return { user_message: backendUserMessage(), assistant_message: backendAssistantMessage(), generation_ids: ["gen-markup"] };
+  }};
+  await harness.sendMessage();
+  assert.ok(sent);
+  assert.equal(sent.markup_image_id, "markup-layer");
+  assert.equal(sent.mask_image_id, undefined);
+  assert.deepEqual(sent.attachment_image_ids, ["previous-output", "other-ref"]);
+  assert.equal((sent.image_params as Record<string, unknown>).complexity, "low");
+  assert.equal(sent.action_source, "composer.markup");
+});
+
+test("SVG and GIF preserve static references and image-to-image intent", async () => {
+  for (const output_format of ["svg", "gif"]) {
+    const harness = createHarness({ composer: {
+      ...createComposerState(null), mode: "image", text: "Transform this",
+      params: { ...createComposerState(null).params, output_format },
+      attachments: [
+        { id: "ref", source_image_id: "previous-output", kind: "generated", data_url: "data:image/png;base64,aA==", mime: "image/png" },
+        { id: "other", kind: "upload", data_url: "data:image/jpeg;base64,aA==", mime: "image/jpeg" },
+      ],
+    }});
+    let sent: Record<string, unknown> | undefined;
+    stubHost.__conversationsStub = { postMessage: async (_conv, body) => {
+      sent = body as Record<string, unknown>;
+      return { user_message: backendUserMessage(), assistant_message: backendAssistantMessage(), generation_ids: ["gen-" + output_format] };
+    }};
+    await harness.sendMessage();
+    assert.ok(sent);
+    assert.equal(sent.intent, "image_to_image");
+    assert.deepEqual(sent.attachment_image_ids, ["previous-output", "other"]);
+    assert.equal((sent.image_params as Record<string, unknown>).output_format, output_format);
+    assert.equal(harness.get().composerError, null);
+  }
+});
+
+test("SVG and GIF reject mask or markup without discarding reference or edit layer", async () => {
+  for (const output_format of ["svg", "gif"]) {
+    for (const layer of ["mask", "markup"] as const) {
+      const composer = {
+        ...createComposerState(null), mode: "image", text: "Transform this",
+        params: { ...createComposerState(null).params, output_format },
+        attachments: [{ id: "ref", kind: "upload", data_url: "data:image/png;base64,aA==", mime: "image/png" }],
+        [layer]: { image_id: "edit-layer", target_attachment_id: "ref", preview_data_url: "" },
+      };
+      const harness = createHarness({ composer });
+      let called = false;
+      stubHost.__conversationsStub = { postMessage: async () => { called = true; throw new Error("must not send"); } };
+      await harness.sendMessage();
+      assert.equal(called, false);
+      assert.match(harness.get().composerError ?? "", /SVG.*GIF.*蒙版或标注/);
+      assert.equal(harness.get().composer.attachments.length, 1);
+      const preservedLayer = harness.get().composer[layer];
+      assert.ok(preservedLayer);
+      assert.equal(preservedLayer.image_id, "edit-layer");
+    }
+  }
+});
+
+test("GIF request keeps animation size instead of overriding it with static 4K", async () => {
+  const harness = createHarness({ composer: {
+    ...createComposerState(null), mode: "image", text: "Animate a bouncing dot",
+    params: { ...createComposerState(null).params, output_format: "gif", fixed_size: "512x512", frame_count: 9, frame_duration_ms: 200 },
+  }});
+  let sent: Record<string, unknown> | undefined;
+  stubHost.__conversationsStub = { postMessage: async (_conv, body) => {
+    sent = body as Record<string, unknown>;
+    return { user_message: backendUserMessage(), assistant_message: backendAssistantMessage(), generation_ids: ["gen-gif"] };
+  }};
+  await harness.sendMessage();
+  assert.ok(sent);
+  assert.equal((sent.image_params as Record<string, unknown>).fixed_size, "512x512");
+  assert.equal((sent.image_params as Record<string, unknown>).frame_count, 9);
+});
+
 test("malformed send validation never registers generation aliases", async () => {
   resetAliases();
   const harness = createHarness();

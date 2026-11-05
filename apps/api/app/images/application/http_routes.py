@@ -30,8 +30,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from lumen_core.byok_retention import (
-    applies_to_user as byok_retention_applies_to_user,
-    cutoffs as byok_retention_cutoffs,
     is_user_visible as byok_retention_is_user_visible,
 )
 from lumen_core.image_signing import (
@@ -93,7 +91,7 @@ from .http_route_parts import (
     upload as route_upload,
 )
 from .upload import UploadCommandService
-from .visibility_batch import ImageVisibilityCandidate, visible_image_ids
+from .image_access import ensure_image_visible_to_user as _ensure_image_visible_to_user
 
 
 router = APIRouter(lifespan=create_image_route_lifespan())
@@ -132,47 +130,6 @@ def _http(code: str, msg: str, http: int = 400) -> HTTPException:
     return HTTPException(
         status_code=http, detail={"error": {"code": code, "message": msg}}
     )
-
-
-async def _image_referenced_by_visible_user_history(
-    db: AsyncSession,
-    img: Image,
-    user: Any,
-    policy: Any,
-) -> bool:
-    visible_after = byok_retention_cutoffs(policy=policy).visible_after
-    candidate = ImageVisibilityCandidate(
-        image_id=img.id,
-        owner_generation_id=getattr(img, "owner_generation_id", None),
-        created_at=img.created_at,
-    )
-    return img.id in await visible_image_ids(
-        db,
-        [candidate],
-        user_id=user.id,
-        visible_after=visible_after,
-    )
-
-
-async def _ensure_image_visible_to_user(
-    db: AsyncSession,
-    img: Image,
-    user: Any,
-) -> None:
-    if not byok_retention_applies_to_user(user):
-        return
-    created_at = getattr(img, "created_at", None)
-    if created_at is None:
-        return
-    policy = retention_policy_from_settings(await read_byok_settings_cached(db))
-    if not byok_retention_is_user_visible(
-        account_mode=getattr(user, "account_mode", None),
-        created_at=created_at,
-        policy=policy,
-    ):
-        if await _image_referenced_by_visible_user_history(db, img, user, policy):
-            return
-        raise _http("not_found", "image not found", 404)
 
 
 async def _ensure_public_image_visible(db: AsyncSession, img: Image) -> None:
@@ -819,3 +776,12 @@ async def delete_image_impl(
     )
     await db.commit()
     return {"ok": True}
+
+
+# Separate local animation workflow; ordinary static uploads still reject GIF.
+from .gif_routes import router as gif_router  # noqa: E402
+
+router.include_router(gif_router)
+from .gif_import import router as gif_import_router  # noqa: E402
+
+router.include_router(gif_import_router)

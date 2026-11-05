@@ -8,9 +8,9 @@ from lumen_core.canvas import canvas_execution_fingerprint
 
 def test_default_model_is_explicit_and_unknown_models_fail_closed():
     capability = image_capability(None)
-    assert capability["model"] == "gpt-image-2"
-    assert "max" not in capability["render_qualities"]
-    assert "max" in image_capability("gpt-image-2.5-flare")["render_qualities"]
+    assert capability["model"] == "gpt-image-2.6-flare"
+    assert "max" in capability["render_qualities"]
+    assert "max" in image_capability("gpt-image-2.6-sunburst")["render_qualities"]
     with pytest.raises(ValueError, match="unsupported"):
         image_capability("unknown")
 
@@ -20,7 +20,7 @@ def test_capability_versions_participate_in_execution_identity():
         definition_hash="a" * 64,
         input_hash="b" * 64,
         node_schema_version=1,
-        effective_model="gpt-image-2",
+        effective_model="gpt-image-2.6-flare",
         processor_version="v1",
     )
     cap = image_capability(None)
@@ -50,3 +50,15 @@ def test_task_model_snapshot_excludes_request_secrets_and_links():
     assert snapshot["capability"]["source"] == "admitted_task"
     assert "secret" not in str(snapshot)
     assert "signed-url" not in str(snapshot)
+
+
+@pytest.mark.parametrize("model", [
+    "gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst",
+])
+def test_historical_snapshots_keep_retired_model_and_capabilities(model):
+    with pytest.raises(ValueError):
+        image_capability(model)
+    snapshot = task_model_snapshot(SimpleNamespace(model=model), kind="image")
+    assert snapshot["model"] == model
+    assert snapshot["capability"]["model"] == model
+    assert ("max" in snapshot["capability"]["render_qualities"]) == (model != "gpt-image-2")

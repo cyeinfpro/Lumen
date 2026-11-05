@@ -24,6 +24,7 @@ from .constants import (
     PIXEL_BUDGET,
 )
 from .immutables import immutable_mapping
+from .image_resource_limits import validate_gif_resource_budget
 
 AspectRatio = Literal[
     "1:1",
@@ -173,11 +174,24 @@ def validate_explicit_size(w: int, h: int) -> None:
         )
 
 
+def validate_gif_frame_size(w: int, h: int) -> None:
+    """GIF sizes are per frame; the static-image minimum does not apply."""
+    validate_gif_resource_budget(w, h, 1)
+    if w <= 0 or h <= 0:
+        raise ValueError(f"size must be positive, got {w}x{h}")
+    if w % EXPLICIT_ALIGN or h % EXPLICIT_ALIGN:
+        raise ValueError(f"size must be multiple of {EXPLICIT_ALIGN}, got {w}x{h}")
+    if max(w, h) > 3 * min(w, h):
+        raise ValueError("GIF frame aspect ratio must be between 1:3 and 3:1")
+
+
 def resolve_size(
     aspect: AspectRatio,
     mode: SizeMode,
     fixed: str | None = None,
     budget: int = PIXEL_BUDGET,
+    *,
+    output_format: str | None = None,
 ) -> ResolvedSize:
     """根据比例 / 模式 / 可选固定尺寸，产出最终 size 字段 + prompt 后缀。
 
@@ -197,11 +211,19 @@ def resolve_size(
         if not _looks_like_size(fixed):
             raise ValueError(f"invalid fixed_size format: {fixed!r}")
         w, h = map(int, fixed.split("x"))
-        validate_explicit_size(w, h)  # 非法抛 ValueError
+        if output_format == "gif":
+            validate_gif_frame_size(w, h)
+        else:
+            validate_explicit_size(w, h)  # 非法抛 ValueError
         return ResolvedSize(size=f"{w}x{h}", width=w, height=h, prompt_suffix="")
 
     # fixed 为空：回退到 aspect preset（供 worker 把旧 size_requested="auto" 再次 resolve 时使用）
-    w, h = _PRESET.get(aspect) or _fallback_by_budget(aspect, budget)
+    if output_format == "gif":
+        # A small application default, not a claimed provider pixel-budget limit.
+        w, h = _fallback_by_budget(aspect, 512 * 512)
+        validate_gif_frame_size(w, h)
+    else:
+        w, h = _PRESET.get(aspect) or _fallback_by_budget(aspect, budget)
     return ResolvedSize(size=f"{w}x{h}", width=w, height=h, prompt_suffix="")
 
 

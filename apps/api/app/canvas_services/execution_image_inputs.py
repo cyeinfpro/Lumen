@@ -2,6 +2,7 @@
 
 from typing import Any
 from lumen_core.constants import MAX_MESSAGE_ATTACHMENTS
+from lumen_core.image_models import upgrade_legacy_image_model
 from lumen_core.schema_models import ImageParamsIn
 from .errors import canvas_http
 from .graph_resolution import ResolvedNode
@@ -17,7 +18,7 @@ def image_params(config: dict[str, Any]) -> ImageParamsIn:
             render_quality = "medium" if quality == "standard" else "high"
         return ImageParamsIn.model_validate(
             {
-                "model": config.get("model") or "gpt-image-2",
+                "model": upgrade_legacy_image_model(config.get("model")),
                 "aspect_ratio": config.get("aspect_ratio") or "1:1",
                 "size_mode": config.get("size_mode") or "auto",
                 "fixed_size": config.get("fixed_size"),
@@ -26,6 +27,9 @@ def image_params(config: dict[str, Any]) -> ImageParamsIn:
                 "render_quality": render_quality,
                 "output_format": config.get("output_format") or "webp",
                 "output_compression": config.get("output_compression"),
+                "complexity": config.get("complexity"),
+                "frame_count": config.get("frame_count"),
+                "frame_duration_ms": config.get("frame_duration_ms"),
                 "background": config.get("background") or "auto",
                 "moderation": config.get("moderation") or "low",
             }

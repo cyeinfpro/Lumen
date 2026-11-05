@@ -372,6 +372,15 @@ async def _persist_user_runtime_failure(
 
 
 def _apply_route_constraints(state: GenerationRunState) -> None:
+    request = getattr(state, "gen_upstream_request_snapshot", None) or {}
+    if (
+        request.get("complexity") is not None
+        or request.get("markup_image_id")
+        or request.get("output_format") in {"svg", "gif"}
+        or request.get("frame_count") is not None
+        or request.get("frame_duration_ms") is not None
+    ):
+        state.image_route = "image2"
     state.requires_mask_provider = (
         bool(state.mask_image_id) and state.action == GenerationAction.EDIT
     )

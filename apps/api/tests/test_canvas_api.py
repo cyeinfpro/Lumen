@@ -683,10 +683,23 @@ async def test_named_version_restore_creates_new_head_revision() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source_model, expected_model", [
+    (None, "gpt-image-2.6-flare"),
+    ("gpt-image-2", "gpt-image-2.6-flare"),
+    ("gpt-image-2.5-flare", "gpt-image-2.6-flare"),
+    ("gpt-image-2.5-sunburst", "gpt-image-2.6-sunburst"),
+    ("gpt-image-2.6-flare", "gpt-image-2.6-flare"),
+    ("gpt-image-2.6-sunburst", "gpt-image-2.6-sunburst"),
+])
 async def test_image_execute_persists_run_tasks_and_replays(
     monkeypatch: pytest.MonkeyPatch,
+    source_model: str | None,
+    expected_model: str,
 ) -> None:
-    async def fake_create_image_task(*_args, **_kwargs) -> CanvasImageSubmission:
+    submitted_models = []
+
+    async def fake_create_image_task(*_args, **kwargs) -> CanvasImageSubmission:
+        submitted_models.append(kwargs["image_params"].model)
         return CanvasImageSubmission(
             generation_ids=["generation-1"],
             conversation_id="conversation-1",
@@ -710,10 +723,13 @@ async def test_image_execute_persists_run_tasks_and_replays(
         fake_publish,
     )
     async with _session() as db:
+        graph = _graph()
+        if source_model is not None:
+            graph["nodes"][1]["config"]["model"] = source_model
         canvas = await create_canvas(
             db,
             user_id="user-1",
-            body=CanvasCreateIn(title="执行", graph=_graph()),
+            body=CanvasCreateIn(title="执行", graph=graph),
         )
         body = CanvasExecuteIn(
             document_revision=1,
@@ -764,6 +780,10 @@ async def test_image_execute_persists_run_tasks_and_replays(
         assert replay_run.id == run.id
         assert replay_execution.id == execution.id
         assert task.generation_id == "generation-1"
+        assert submitted_models == [expected_model]
+        assert execution.model_snapshot_jsonb["model"] == expected_model
+        assert execution.model_snapshot_jsonb["capability"]["model"] == expected_model
+        assert execution.config_snapshot_jsonb.get("model") == source_model
         assert execution.input_snapshot_jsonb["prompt"] == "一张产品海报"
 
         with pytest.raises(HTTPException) as excinfo:

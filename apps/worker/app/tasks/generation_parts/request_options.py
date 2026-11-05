@@ -5,12 +5,12 @@ from typing import Any
 from lumen_core.constants import (
     DEFAULT_IMAGE_RESPONSES_MODEL,
 )
-from lumen_core.image_models import DEFAULT_IMAGE_MODEL, validate_image_model_quality
-from lumen_core.sizing import validate_explicit_size
+from lumen_core.image_models import LEGACY_DEFAULT_IMAGE_MODEL, validate_image_model_quality
+from lumen_core.sizing import validate_explicit_size, validate_gif_frame_size
 
 
 IMAGE_RENDER_QUALITY_VALUES = frozenset({"low", "medium", "high", "xhigh", "max", "auto"})
-IMAGE_OUTPUT_FORMAT_VALUES = frozenset({"png", "jpeg", "webp"})
+IMAGE_OUTPUT_FORMAT_VALUES = frozenset({"png", "jpeg", "webp", "svg", "gif"})
 IMAGE_BACKGROUND_VALUES = frozenset({"auto", "opaque", "transparent"})
 IMAGE_MODERATION_VALUES = frozenset({"auto", "low"})
 
@@ -30,9 +30,13 @@ def validate_resolved_size(
     *,
     validate_aspect_ratio: bool = True,
     max_ratio_deviation: float = 0.02,
+    output_format: str | None = None,
 ) -> tuple[int, int]:
     width, height = parse_size_string(size)
-    validate_explicit_size(width, height)
+    if output_format == "gif":
+        validate_gif_frame_size(width, height)
+    else:
+        validate_explicit_size(width, height)
     if validate_aspect_ratio and isinstance(aspect_ratio, str) and ":" in aspect_ratio:
         raw_ratio_width, raw_ratio_height = aspect_ratio.split(":", 1)
         if raw_ratio_width.isdigit() and raw_ratio_height.isdigit():
@@ -170,8 +174,9 @@ def image_request_options(
     render_quality = request_render_quality(
         request, size=size
     )
-    image_model = request.get("model") or DEFAULT_IMAGE_MODEL
-    validate_image_model_quality(image_model, render_quality)
+    image_model = request.get("model") or LEGACY_DEFAULT_IMAGE_MODEL
+    # Already-admitted tasks keep their model and idempotency identity.
+    validate_image_model_quality(image_model, render_quality, allow_legacy=True)
     output_format = request_option(
         request,
         "output_format",
@@ -207,6 +212,14 @@ def image_request_options(
         )
         if options["output_compression"] is None:
             options["output_compression"] = 100
+    complexity = request.get("complexity")
+    if complexity is not None:
+        if complexity not in {"low", "medium", "high"}:
+            raise ValueError("complexity must be low, medium or high")
+        options["complexity"] = complexity
+    for key in ("frame_count", "frame_duration_ms"):
+        if request.get(key) is not None:
+            options[key] = request[key]
     options["n"] = image_requested_count(request)
     return options
 

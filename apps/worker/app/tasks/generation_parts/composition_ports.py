@@ -533,6 +533,15 @@ class DefaultGenerationProvider:
             storage_backend=self._reference_storage,
         )
 
+    async def load_markup_image(
+        self, session: AsyncSession, image_id: str,
+    ) -> bytes:
+        from .references import load_markup_image
+
+        return await load_markup_image(
+            session, image_id, storage=self._reference_storage,
+        )
+
     async def postprocess(
         self,
         raw_image: bytes,
@@ -604,6 +613,9 @@ class DefaultGenerationProvider:
                 moderation=request.moderation,
                 model=request.model,
                 image_model=request.image_model,
+                complexity=request.complexity,
+                frame_count=request.frame_count,
+                frame_duration_ms=request.frame_duration_ms,
                 progress_callback=request.progress_callback,
                 provider_override=request.provider_override,
                 user_id=request.user_id,
@@ -640,6 +652,10 @@ class DefaultGenerationProvider:
                 moderation=common.moderation,
                 model=common.model,
                 image_model=common.image_model,
+                complexity=common.complexity,
+                frame_count=common.frame_count,
+                frame_duration_ms=common.frame_duration_ms,
+                markup=request.markup,
                 progress_callback=common.progress_callback,
                 provider_override=common.provider_override,
                 user_id=common.user_id,

@@ -16,6 +16,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "@/lib/utils";
+import { getActiveModalRoot } from "@/components/ui/primitives/mobile/useModalLayer";
 import { DURATION, EASE } from "@/lib/motion";
 import {
   calculateDesktopPopoverPosition,
@@ -106,6 +107,7 @@ export function DesktopPopover({
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || getActiveModalRoot()) return;
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
@@ -127,7 +129,7 @@ export function DesktopPopover({
     const onDown = (e: MouseEvent) => {
       const panel = panelRef.current;
       const anchor = anchorRef.current;
-      if (!panel) return;
+      if (!panel || getActiveModalRoot()) return;
       const target = e.target as Node | null;
       if (!target) return;
       if (panel.contains(target)) return;
