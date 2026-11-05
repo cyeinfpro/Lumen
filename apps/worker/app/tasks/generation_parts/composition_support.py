@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Literal
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 
@@ -24,11 +25,57 @@ from . import image_artifact_contracts as artifacts
 from . import postprocess
 from . import references
 from .runtime import ImagePostprocessRuntime
+from .services import GenerationProviderRequest
+from ...upstream_parts.image_execution import ImageExecutionRequest, ImageRequestContext
 
 
 logger = logging.getLogger(__name__)
 IMAGE_POSTPROCESS_MODES = frozenset({"inline", "thread", "process_pool"})
 MASK_MAX_BYTES = 50 * 1024 * 1024
+
+
+def build_image_execution_request(
+    request: GenerationProviderRequest,
+    *,
+    action: Literal["generate", "edit"],
+    upstream_runtime: ImageUpstreamRuntime,
+    images: list[bytes] | None = None,
+    mask: bytes | None = None,
+    markup: bytes | None = None,
+) -> ImageExecutionRequest:
+    """Adapt application inputs without changing defaults or edit-layer identity."""
+    request_context = ImageRequestContext.create(
+        trace_id=request.context.trace_id,
+        retry_attempt=request.context.retry_attempt,
+        quota_task_id=request.context.quota_task_id,
+        quota_attempt_epoch=request.context.quota_attempt_epoch,
+        sidecar_execution=request.context.sidecar_execution,
+        upstream_runtime=upstream_runtime,
+    )
+    return ImageExecutionRequest(
+        action=action,
+        prompt=request.prompt,
+        size=request.size,
+        images=images,
+        mask=mask,
+        markup=markup,
+        n=request.n,
+        quality=request.quality,
+        output_format=request.output_format,
+        output_compression=request.output_compression,
+        background=request.background,
+        moderation=request.moderation,
+        model=request.model,
+        image_model=request.image_model,
+        complexity=request.complexity,
+        frame_count=request.frame_count,
+        frame_duration_ms=request.frame_duration_ms,
+        progress_callback=request.progress_callback,
+        provider_override=request.provider_override,
+        user_id=request.user_id,
+        request_context=request_context,
+        upstream_runtime=upstream_runtime,
+    )
 
 
 async def resolve_image_primary_route(
@@ -198,6 +245,7 @@ def inpaint_size_from_reference(
 
 
 __all__ = [
+    "build_image_execution_request",
     "get_image_postprocess_executor",
     "inpaint_size_from_reference",
     "load_mask_image",

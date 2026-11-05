@@ -28,7 +28,6 @@ from ...upstream_parts import GeneratedImageResult
 from ...storage import LocalStorage
 from ...storage_writes import StorageWriteCoordinator, wait_for_started_task
 from ...upstream_parts.image_dispatch import edit_image, generate_image
-from ...upstream_parts.image_execution import ImageExecutionRequest, ImageRequestContext
 from .event_delivery import (
     GenerationEventDelivery,
     deliver_generation_event,
@@ -590,37 +589,11 @@ class DefaultGenerationProvider:
         self,
         request: GenerationProviderRequest,
     ) -> AsyncIterator[GeneratedImageResult]:
-        request_context = ImageRequestContext.create(
-            trace_id=request.context.trace_id,
-            retry_attempt=request.context.retry_attempt,
-            quota_task_id=request.context.quota_task_id,
-            quota_attempt_epoch=request.context.quota_attempt_epoch,
-            sidecar_execution=request.context.sidecar_execution,
-            upstream_runtime=self._upstream_runtime,
-        )
+        from .composition_support import build_image_execution_request
+
         return generate_image(
-            ImageExecutionRequest(
-                action="generate",
-                prompt=request.prompt,
-                size=request.size,
-                images=None,
-                mask=None,
-                n=request.n,
-                quality=request.quality,
-                output_format=request.output_format,
-                output_compression=request.output_compression,
-                background=request.background,
-                moderation=request.moderation,
-                model=request.model,
-                image_model=request.image_model,
-                complexity=request.complexity,
-                frame_count=request.frame_count,
-                frame_duration_ms=request.frame_duration_ms,
-                progress_callback=request.progress_callback,
-                provider_override=request.provider_override,
-                user_id=request.user_id,
-                request_context=request_context,
-                upstream_runtime=self._upstream_runtime,
+            build_image_execution_request(
+                request, action="generate", upstream_runtime=self._upstream_runtime,
             )
         )
 
@@ -628,38 +601,12 @@ class DefaultGenerationProvider:
         self,
         request: GenerationProviderEditRequest,
     ) -> AsyncIterator[GeneratedImageResult]:
-        common = request.request
-        request_context = ImageRequestContext.create(
-            trace_id=common.context.trace_id,
-            retry_attempt=common.context.retry_attempt,
-            quota_task_id=common.context.quota_task_id,
-            quota_attempt_epoch=common.context.quota_attempt_epoch,
-            sidecar_execution=common.context.sidecar_execution,
-            upstream_runtime=self._upstream_runtime,
-        )
+        from .composition_support import build_image_execution_request
+
         return edit_image(
-            ImageExecutionRequest(
-                action="edit",
-                prompt=common.prompt,
-                size=common.size,
-                images=list(request.images),
-                mask=request.mask,
-                n=common.n,
-                quality=common.quality,
-                output_format=common.output_format,
-                output_compression=common.output_compression,
-                background=common.background,
-                moderation=common.moderation,
-                model=common.model,
-                image_model=common.image_model,
-                complexity=common.complexity,
-                frame_count=common.frame_count,
-                frame_duration_ms=common.frame_duration_ms,
-                markup=request.markup,
-                progress_callback=common.progress_callback,
-                provider_override=common.provider_override,
-                user_id=common.user_id,
-                request_context=request_context,
+            build_image_execution_request(
+                request.request, action="edit", images=list(request.images),
+                mask=request.mask, markup=request.markup,
                 upstream_runtime=self._upstream_runtime,
             )
         )
