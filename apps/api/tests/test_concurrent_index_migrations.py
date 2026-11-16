@@ -56,6 +56,7 @@ AGENT_FOUNDATION_REVISION = "0069_agent_foundation"
 AGENT_SESSION_CONTEXT_REVISION = "0070_agent_session_context"
 AGENT_AUDIT_HARDENING_REVISION = "0071_agent_audit_hardening"
 AGENT_RUNTIME_CONTRACTS_REVISION = "0072_agent_runtime_contracts"
+SEEDANCE_25_FLASH_REVISION = "0073_seedance_25_flash_defaults"
 
 
 @dataclass(frozen=True)
@@ -578,6 +579,7 @@ def test_repair_revision_remains_in_the_single_head_chain() -> None:
     agent_session_context = scripts.get_revision(AGENT_SESSION_CONTEXT_REVISION)
     agent_audit_hardening = scripts.get_revision(AGENT_AUDIT_HARDENING_REVISION)
     agent_runtime_contracts = scripts.get_revision(AGENT_RUNTIME_CONTRACTS_REVISION)
+    seedance_25_flash = scripts.get_revision(SEEDANCE_25_FLASH_REVISION)
 
     assert repair is not None
     assert repair.down_revision == "0056_outbox_due_index"
@@ -611,7 +613,9 @@ def test_repair_revision_remains_in_the_single_head_chain() -> None:
     assert agent_audit_hardening.down_revision == AGENT_SESSION_CONTEXT_REVISION
     assert agent_runtime_contracts is not None
     assert agent_runtime_contracts.down_revision == AGENT_AUDIT_HARDENING_REVISION
-    assert scripts.get_heads() == [AGENT_RUNTIME_CONTRACTS_REVISION]
+    assert seedance_25_flash is not None
+    assert seedance_25_flash.down_revision == AGENT_RUNTIME_CONTRACTS_REVISION
+    assert scripts.get_heads() == [SEEDANCE_25_FLASH_REVISION]
 
 
 @pytest.mark.parametrize(
