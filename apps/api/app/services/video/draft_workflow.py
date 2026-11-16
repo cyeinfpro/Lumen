@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from sqlalchemy import select
 
-from lumen_core.models import VideoGeneration, Video
+from lumen_core.model_entities import VideoGeneration, Video
 from lumen_core.video_providers import seedance_supports_draft
 from .errors import video_http_error
 
