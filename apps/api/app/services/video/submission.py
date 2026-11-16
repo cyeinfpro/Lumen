@@ -614,6 +614,68 @@ def _build_video_generation(
     )
 
 
+async def _normalize_video_workflow(
+    db: AsyncSession,
+    body: VideoCreateIn,
+    user_id: str,
+    context: VideoSubmissionContext,
+) -> tuple[VideoCreateIn, VideoSubmissionContext, Any]:
+    source = await load_workflow_source(db, body, user_id)
+    if body.draft_generation_id:
+        body = official_completion_body(body, source)
+        context = replace(context, reference_media_snapshot=list(
+            (source.upstream_request or {}).get("reference_media") or []
+        ))
+    metadata = {**(context.workflow_metadata or {}), **workflow_metadata(body, source)}
+    context = replace(context, workflow_metadata=metadata)
+
+    return body, context, source
+
+
+def _validate_completion_provider(
+    body: VideoCreateIn,
+    source: Any,
+    admission: _VideoBillingAdmission,
+) -> None:
+    if not body.draft_generation_id:
+        return
+    if (
+        admission.provider.name != source.provider_name
+        or admission.upstream_model != (source.upstream_request or {}).get("upstream_model")
+    ):
+        raise video_http_error("draft_provider_changed", "原草稿渠道或模型已变更，无法转成片", 409)
+
+
+async def _prepare_workflow_plan(
+    db: AsyncSession,
+    body: VideoCreateIn,
+    *,
+    source: Any,
+    user_id: str,
+    context: VideoSubmissionContext,
+    admission: _VideoBillingAdmission,
+    services: VideoSubmissionServices,
+) -> _VideoSubmissionPlan:
+    if body.draft_generation_id:
+        return _VideoSubmissionPlan(
+            provider=admission.provider,
+            input_storage_key=source.input_image_storage_key,
+            input_sha256=source.input_image_sha256,
+            input_image_url=None,
+            reference_snapshots=context.reference_media_snapshot or [],
+            reference_public_base=None, requires_public_media=False,
+            prefers_public_media_url=False, upstream_model=admission.upstream_model,
+            billing_model=admission.billing_model, pricing_variant=admission.pricing_variant,
+            cost=admission.cost, variant_diagnostics={},
+        )
+    return await _prepare_video_submission(
+        db, body, user_id=user_id, request=context.request,
+        input_image_snapshot=context.input_image_snapshot,
+        reference_media_snapshot=context.reference_media_snapshot,
+        admission=admission, services=services,
+    )
+
+
 async def create_video_generation_record(
     db: AsyncSession,
     body: VideoCreateIn,
@@ -645,14 +707,9 @@ async def create_video_generation_record(
         context=context,
     )
 
-    source = await load_workflow_source(db, body, user_id)
-    if body.draft_generation_id:
-        body = official_completion_body(body, source)
-        context = replace(context, reference_media_snapshot=list(
-            (source.upstream_request or {}).get("reference_media") or []
-        ))
-    metadata = {**(context.workflow_metadata or {}), **workflow_metadata(body, source)}
-    context = replace(context, workflow_metadata=metadata)
+    body, context, source = await _normalize_video_workflow(
+        db, body, user_id, context,
+    )
 
     admission = await _prepare_video_billing_admission(
         db,
@@ -661,11 +718,7 @@ async def create_video_generation_record(
         services=services,
         **({"source_provider_name": source.provider_name} if body.draft_generation_id else {}),
     )
-    if body.draft_generation_id and (
-        admission.provider.name != source.provider_name
-        or admission.upstream_model != (source.upstream_request or {}).get("upstream_model")
-    ):
-        raise video_http_error("draft_provider_changed", "原草稿渠道或模型已变更，无法转成片", 409)
+    _validate_completion_provider(body, source, admission)
     await _ensure_video_wallet_admission(
         db,
         user_id=user_id,
@@ -681,25 +734,10 @@ async def create_video_generation_record(
         if revalidate_after_preparation
         else _TRANSACTION_IDENTITY_UNAVAILABLE
     )
-    if body.draft_generation_id:
-        plan = _VideoSubmissionPlan(
-            provider=admission.provider,
-            input_storage_key=source.input_image_storage_key,
-            input_sha256=source.input_image_sha256,
-            input_image_url=None,
-            reference_snapshots=context.reference_media_snapshot or [],
-            reference_public_base=None, requires_public_media=False,
-            prefers_public_media_url=False, upstream_model=admission.upstream_model,
-            billing_model=admission.billing_model, pricing_variant=admission.pricing_variant,
-            cost=admission.cost, variant_diagnostics={},
-        )
-    else:
-        plan = await _prepare_video_submission(
-            db, body, user_id=user_id, request=context.request,
-            input_image_snapshot=context.input_image_snapshot,
-            reference_media_snapshot=context.reference_media_snapshot,
-            admission=admission, services=services,
-        )
+    plan = await _prepare_workflow_plan(
+        db, body, source=source, user_id=user_id, context=context,
+        admission=admission, services=services,
+    )
     transaction_after_preparation = (
         _transaction_identity(db)
         if revalidate_after_preparation
