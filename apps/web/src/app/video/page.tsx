@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { toast } from "@/components/ui/primitives";
+import { supportsOfficialDraft, referenceFinalMedia, referenceFinalResolution, type VideoDraftMode } from "./video-draft-mode";
+import { firstModelForAction, videoModelsForAction, resolutionOptionsForModel } from "./video-options-model";
 import type {
   VideoAction,
   VideoGenerationOut,
@@ -92,6 +94,8 @@ export default function VideoPage() {
   const [action, setAction] = useState<VideoAction>("t2v");
   const [prompt, setPrompt] = useState("");
   const [model, setModel] = useState("");
+  const [draftMode, setDraftMode] = useState<VideoDraftMode>("direct");
+  const [referenceSourceId, setReferenceSourceId] = useState<string | null>(null);
   const [durationS, setDurationS] = useState<number | null>(null);
   const [resolution, setResolution] = useState("");
   const [aspectRatio, setAspectRatio] = useState("");
@@ -166,6 +170,9 @@ export default function VideoPage() {
     inputImageConstraints,
     referenceImageConstraints,
   } = deriveVideoOptionSelection(options, action, model);
+  const officialDraftSupported = supportsOfficialDraft(availableModels.find((item) => item.model === selectedModel))
+    && resolutionOptionsForModel(options, selectedModel, effectiveAction).includes("480p");
+  const effectiveDraftMode = draftMode === "official" && !officialDraftSupported ? "direct" : draftMode;
   useEffect(() => {
     actionRef.current = effectiveAction;
   }, [effectiveAction]);
@@ -264,7 +271,7 @@ export default function VideoPage() {
     selectedModel,
     effectiveAction,
     {
-      resolution,
+      resolution: effectiveDraftMode === "official" ? "480p" : resolution,
       aspectRatio,
       durationS,
       generateAudio,
@@ -357,11 +364,15 @@ export default function VideoPage() {
   const {
     cancelMut,
     createMut,
+    finalizeMut,
     deleteMut,
     requestVideoRetry,
     retryMut,
   } = useVideoTaskMutations({
     abortGenerationRefresh,
+    draft: effectiveDraftMode === "official",
+    referenceDraft: effectiveDraftMode === "reference",
+    referenceGenerationId: referenceSourceId,
     action: effectiveAction,
     aspectRatio: effectiveAspectRatio,
     disableVideoSettling,
@@ -389,6 +400,8 @@ export default function VideoPage() {
     (item: VideoGenerationOut) => {
       switchDraftContext(item.id, item.action);
       setAction(item.action);
+      setDraftMode(item.draft ? "official" : item.reference_draft ? "reference" : "direct");
+      setReferenceSourceId(null);
       setModel(item.model);
       setDurationS(item.duration_s);
       setResolution(item.resolution);
@@ -415,6 +428,8 @@ export default function VideoPage() {
     [
       focusPromptTarget,
       loadDraftMedia,
+      setDraftMode,
+      setReferenceSourceId,
       setAction,
       setAspectRatio,
       setDurationS,
@@ -426,6 +441,39 @@ export default function VideoPage() {
       switchDraftContext,
     ],
   );
+
+  const prepareReferenceFinal = useCallback((item: VideoGenerationOut) => {
+    try {
+      const refs = referenceFinalMedia(item);
+      const counts = { image: 0, video: 0, audio: 0 };
+      for (const ref of refs) counts[ref.kind] += 1;
+      const models = videoModelsForAction(options, "reference", counts);
+      if (!models.length) throw new Error("原素材与参考草稿超过可用成片模型上限");
+      const targetModel = firstModelForAction(options, "reference", counts);
+      switchDraftContext(`reference-final:${item.id}`, "reference");
+      setAction("reference");
+      setDraftMode("direct");
+      setReferenceSourceId(item.id);
+      setModel(targetModel);
+      const finalResolution = referenceFinalResolution(resolutionOptionsForModel(options, targetModel, "reference"));
+      setResolution(finalResolution);
+      setDurationS(-1);
+      setAspectRatio("adaptive");
+      setGenerateAudio(item.generate_audio);
+      setSeed(item.seed != null ? String(item.seed) : "");
+      const media = refs.map((ref, index) => referenceDraftFromHistory(ref, index, refs));
+      loadDraftMedia("", "", media);
+      setPrompt(displayPromptReferenceMentions(item.prompt, media));
+      setSelectedVideoId("");
+      setIsTaskPanelOpen(false);
+      requestAnimationFrame(() => promptRef.current?.scrollIntoView({ block: "center" }));
+      toast.success("已载入参考草稿", { description: `${finalResolution ? "已预选1080p。" : "当前模型不支持1080p，使用模型默认分辨率。"}可修改原提示词与成片模型，确认后手动生成；另行计费，画面不保证一致。` });
+    } catch (error) {
+      toast.error("参考草稿不可用", { description: error instanceof Error ? error.message : undefined });
+    }
+  }, [options, switchDraftContext, loadDraftMedia, setSelectedVideoId, setIsTaskPanelOpen,
+    setAction, setDraftMode, setReferenceSourceId, setModel, setResolution,
+    setDurationS, setAspectRatio, setGenerateAudio, setSeed, setPrompt]);
 
   const {
     canEnhancePrompt,
@@ -635,7 +683,7 @@ export default function VideoPage() {
     composer: {
       action: effectiveAction,
       actionOptions: availableActions,
-      onActionChange: handleActionChange,
+      onActionChange: (value) => { setReferenceSourceId(null); handleActionChange(value); },
       firstFrame: {
         pending: firstFrameUploadPending,
         inputImageId,
@@ -685,13 +733,18 @@ export default function VideoPage() {
       },
     },
     parameters: {
+      draftMode: effectiveDraftMode,
+      officialDraftSupported,
+      referenceSourceId,
+      onDraftModeChange: (value) => { beforeMediaChange(); setDraftMode(value); setReferenceSourceId(null); },
+      onClearReferenceSource: () => setReferenceSourceId(null),
       selectedModel,
       modelOptions: modelOptionValues,
       modelOptionLabels,
       durationS: effectiveDurationS,
       durationOptions: durationOptionValues,
       resolution: effectiveResolution,
-      resolutionOptions: availableResolutions,
+      resolutionOptions: effectiveDraftMode === "official" ? availableResolutions.filter((value) => value === "480p") : availableResolutions,
       aspectRatio: effectiveAspectRatio,
       aspectRatioOptions: availableAspectRatios,
       seed,
@@ -703,7 +756,18 @@ export default function VideoPage() {
       loading: createMut.isPending,
       sourceReady,
       onSubmit: submitVideo,
-      onModelChange: handleModelChange,
+      onModelChange: (value) => {
+        if (draftMode === "official" && !supportsOfficialDraft(availableModels.find((item) => item.model === value))) {
+          setDraftMode("direct");
+          toast.success("已关闭草稿模式", { description: "所选模型不支持官方草稿，可使用参考草稿模式。" });
+        }
+        handleModelChange(value);
+        if (referenceSourceId) {
+          const finalResolution = referenceFinalResolution(resolutionOptionsForModel(options, value, effectiveAction));
+          setResolution(finalResolution);
+          if (!finalResolution) toast.success("使用模型默认分辨率", { description: "此成片模型不支持1080p，可选择其他模型。" });
+        }
+      },
       onDurationChange: handleDurationChange,
       onResolutionChange: handleResolutionChange,
       onAspectRatioChange: handleAspectRatioChange,
@@ -751,6 +815,11 @@ export default function VideoPage() {
     },
     playback: {
       item: playbackVideoItem,
+      relatedItems: playbackVideoItem ? effectiveItems.filter((item) => item.draft_generation_id === playbackVideoItem.id || item.reference_generation_id === playbackVideoItem.id) : [],
+      finalizing: finalizeMut.isPending,
+      onFinalize: () => { if (playbackVideoItem && !finalizeMut.isPending) finalizeMut.mutate(playbackVideoItem); },
+      onReferenceFinal: () => { if (playbackVideoItem) prepareReferenceFinal(playbackVideoItem); },
+      onRelatedPreview: previewTaskVideo,
       onClose: () => setSelectedVideoId(""),
       onUseDraft: () => {
         if (playbackVideoItem) loadAsDraft(playbackVideoItem);

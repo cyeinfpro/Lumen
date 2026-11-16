@@ -160,6 +160,8 @@ export function firstModelForAction(
   referenceCounts?: VideoReferenceCounts,
 ): string {
   const models = videoModelsForAction(options, action, referenceCounts);
+  const standard25 = models.find((item) => /seedance[-.]2[-.]5(?:$|[-.])/.test(item.model.toLowerCase()) && !/flash/i.test(item.model));
+  if (standard25) return standard25.model;
   const declaredDefault = options?.default_model?.trim();
   if (declaredDefault && models.some((item) => item.model === declaredDefault)) {
     return declaredDefault;

@@ -21,6 +21,9 @@ from lumen_core.schemas import (
 from lumen_core.url_security import is_private_host
 
 
+from .draft_workflow import draft_expiry
+
+
 _TEMPORARY_DOWNLOAD_MIN_REMAINING = timedelta(seconds=60)
 
 
@@ -290,7 +293,13 @@ async def generation_out(
 ) -> VideoGenerationOut:
     if video is None:
         video = await video_for_generation(db, row.id)
+    workflow = row.upstream_request or {}
     return VideoGenerationOut(
+        draft=bool(workflow.get("draft")),
+        draft_generation_id=workflow.get("draft_generation_id"),
+        draft_expires_at=draft_expiry(row),
+        reference_draft=bool(workflow.get("reference_draft")),
+        reference_generation_id=workflow.get("reference_generation_id"),
         id=row.id,
         action=row.action,
         model=row.model,

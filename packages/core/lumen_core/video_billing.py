@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .billing import pricing_price_micro
 from .pricing import MAX_BILLABLE_TOKENS, MAX_RATE_PER_1K_MICRO
-from .video_providers import is_seedance_25_identifier
+from .video_providers import is_seedance_25_identifier, is_seedance_25_flash_identifier
 
 VIDEO_PRICING_SCOPE = "video"
 VIDEO_PRICING_UNIT = "per_mtoken"
@@ -30,6 +30,7 @@ VIDEO_REFERENCE_IMAGE_PRICING_VARIANT = "reference_image"
 VIDEO_REFERENCE_VIDEO_PRICING_VARIANT = "reference_video"
 VIDEO_LEGACY_REFERENCE_PRICING_VARIANT = "reference"
 SEEDANCE_25_MODEL = "seedance-2.5"
+SEEDANCE_25_FLASH_MODEL = "seedance-2.5-flash"
 SEEDANCE_20_FAST_MODEL = "seedance-2.0-fast"
 SEEDANCE_20_MINI_MODEL = "seedance-2.0-mini"
 SEEDANCE_20_MODEL = "seedance-2.0"
@@ -210,6 +211,8 @@ def is_video_ds_20_standard_identifier(*identifiers: str | None) -> bool:
 
 
 def video_billing_model(model: str, upstream_model: str | None = None) -> str:
+    if is_seedance_25_flash_identifier(model, upstream_model):
+        return SEEDANCE_25_FLASH_MODEL
     if is_seedance_25_identifier(model, upstream_model):
         return SEEDANCE_25_MODEL
     if is_seedance_20_fast_identifier(model, upstream_model):
@@ -525,6 +528,7 @@ __all__ = [
     "SMART_VIDEO_DURATION_S",
     "SMART_VIDEO_HOLD_DURATION_S",
     "SEEDANCE_25_MODEL",
+    "SEEDANCE_25_FLASH_MODEL",
     "SEEDANCE_25_SMART_VIDEO_HOLD_DURATION_S",
     "SEEDANCE_25_SUPPORTED_VIDEO_DURATIONS_S",
     "SEEDANCE_20_FAST_MODEL",

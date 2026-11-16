@@ -139,10 +139,24 @@ class VideoCreateIn(BaseModel):
     generate_audio: bool = True
     seed: int | None = Field(default=None, ge=-1, le=4_294_967_295)
     watermark: bool = False
+    draft: bool = False
+    draft_generation_id: str | None = Field(default=None, min_length=1, max_length=36)
+    reference_draft: bool = False
+    reference_generation_id: str | None = Field(default=None, min_length=1, max_length=36)
     idempotency_key: str = Field(min_length=1, max_length=96)
 
     @model_validator(mode="after")
     def validate_action_image_contract(self) -> "VideoCreateIn":
+        if sum((self.draft, bool(self.draft_generation_id), self.reference_draft)) > 1:
+            raise ValueError("video draft modes are mutually exclusive")
+        if self.reference_generation_id and (self.draft or self.draft_generation_id or self.reference_draft):
+            raise ValueError("reference completion must be a normal generation")
+        if self.draft or self.draft_generation_id:
+            required = "480p" if self.draft else "1080p"
+            if self.resolution != required:
+                raise ValueError(f"draft mode requires {required}")
+        if self.reference_generation_id and self.action != "reference":
+            raise ValueError("reference completion requires action=reference")
         return validate_video_create(
             self,
             reference_id_re=_VIDEO_REFERENCE_ID_RE,
@@ -176,6 +190,7 @@ class VideoImageConstraintsOut(BaseModel):
 
 
 class VideoModelOptionOut(BaseModel):
+    supports_draft: bool = False
     model: str
     billing_model: str | None = None
     billing_models: dict[str, str] = Field(default_factory=dict)
@@ -208,6 +223,11 @@ class VideoOptionsOut(BaseModel):
 
 
 class VideoGenerationOut(BaseOut):
+    draft: bool = False
+    draft_generation_id: str | None = None
+    draft_expires_at: datetime | None = None
+    reference_draft: bool = False
+    reference_generation_id: str | None = None
     id: str
     action: str
     model: str

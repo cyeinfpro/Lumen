@@ -1,5 +1,8 @@
 "use client";
 
+import { VideoDraftResultActions } from "./video-draft-workflow";
+import { draftWorkflowLabel } from "./video-draft-mode";
+
 /* eslint-disable @next/next/no-img-element -- Video posters are authenticated API media URLs. */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -318,6 +321,11 @@ function StatusPill({ item }: { item: VideoGenerationOut }) {
 }
 
 export type VideoPreviewDialogProps = {
+  relatedItems?: VideoGenerationOut[];
+  finalizing?: boolean;
+  onFinalize?: () => void;
+  onReferenceFinal?: () => void;
+  onRelatedPreview?: (item: VideoGenerationOut) => void;
   item: VideoGenerationWithVideo;
   onClose: () => void;
   onUseDraft: () => void;
@@ -327,6 +335,11 @@ export type VideoPreviewDialogProps = {
 };
 
 export function VideoPreviewDialogContent({
+  relatedItems,
+  finalizing,
+  onFinalize,
+  onReferenceFinal,
+  onRelatedPreview,
   item,
   onClose,
   onUseDraft,
@@ -400,7 +413,7 @@ export function VideoPreviewDialogContent({
               id={`video-preview-${item.id}`}
               className="truncate type-body font-semibold text-[var(--fg-0)]"
             >
-              视频播放
+              {draftWorkflowLabel(item) || "视频播放"}
             </h2>
           </div>
           <Button
@@ -422,6 +435,10 @@ export function VideoPreviewDialogContent({
               />
             </div>
             <aside className="shrink-0 overflow-y-auto rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/64 p-3 shadow-[var(--shadow-1)] lg:h-full lg:max-h-none">
+              <VideoDraftResultActions
+                item={item} relatedItems={relatedItems} finalizing={finalizing}
+                onFinalize={onFinalize} onReferenceFinal={onReferenceFinal} onRelatedPreview={onRelatedPreview}
+              />
               <p className="type-caption text-[var(--fg-2)]">提示词</p>
               <p className="mt-2 type-body-sm leading-6 text-[var(--fg-0)]">
                 {item.prompt}

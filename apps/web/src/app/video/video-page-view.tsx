@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import type { VideoDraftMode } from "./video-draft-mode";
 import {
   ChevronDown,
   ImageIcon,
@@ -121,6 +122,11 @@ export type VideoPageViewModel = {
     prompt: VideoPromptEditorModel;
   };
   parameters: {
+  draftMode?: VideoDraftMode;
+  officialDraftSupported?: boolean;
+  referenceSourceId?: string | null;
+  onDraftModeChange?: (value: VideoDraftMode) => void;
+  onClearReferenceSource?: () => void;
     selectedModel: string;
     modelOptions: string[];
     modelOptionLabels: Record<string, string>;
@@ -180,6 +186,11 @@ export type VideoPageViewModel = {
     onPreview: (item: VideoGenerationOut) => void;
   };
   playback: {
+    relatedItems?: VideoGenerationOut[];
+    finalizing?: boolean;
+    onFinalize?: () => void;
+    onReferenceFinal?: () => void;
+    onRelatedPreview?: (item: VideoGenerationOut) => void;
     item: VideoGenerationWithVideo | undefined;
     onClose: () => void;
     onUseDraft: () => void;
@@ -554,6 +565,11 @@ function VideoPageOverlays({
       {model.playback.item && (
         <VideoPreviewDialog
           item={model.playback.item}
+          relatedItems={model.playback.relatedItems}
+          finalizing={model.playback.finalizing}
+          onFinalize={model.playback.onFinalize}
+          onReferenceFinal={model.playback.onReferenceFinal}
+          onRelatedPreview={model.playback.onRelatedPreview}
           onClose={model.playback.onClose}
           onUseDraft={model.playback.onUseDraft}
           onRetry={model.playback.onRetry}

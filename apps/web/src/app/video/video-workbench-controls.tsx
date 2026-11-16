@@ -1,6 +1,8 @@
 "use client";
 
 import type { ReactNode } from "react";
+import type { VideoDraftMode } from "./video-draft-mode";
+import { VideoDraftModeSelector } from "./video-draft-workflow";
 import {
   ChevronDown,
   CircleCheck,
@@ -28,6 +30,11 @@ type ModeCardCopy = {
 };
 
 export type VideoParameterPanelProps = {
+  draftMode?: VideoDraftMode;
+  officialDraftSupported?: boolean;
+  referenceSourceId?: string | null;
+  onDraftModeChange?: (value: VideoDraftMode) => void;
+  onClearReferenceSource?: () => void;
   className?: string;
   selectedModel: string;
   modelOptions: string[];
@@ -300,6 +307,11 @@ function SubmitPanel({
 export function VideoParameterPanelView({
   id,
   children,
+  draftMode,
+  officialDraftSupported,
+  referenceSourceId,
+  onDraftModeChange,
+  onClearReferenceSource,
   className,
   selectedModel,
   modelOptions,
@@ -360,6 +372,13 @@ export function VideoParameterPanelView({
       </div>
 
       <div className="min-w-0 flex-1 space-y-4 p-3 sm:p-3.5">
+        <VideoDraftModeSelector
+          mode={draftMode}
+          officialSupported={officialDraftSupported}
+          referenceSourceId={referenceSourceId}
+          onChange={onDraftModeChange}
+          onClearSource={onClearReferenceSource}
+        />
         <section className="space-y-2.5">
           <SelectField
             label="模型"

@@ -207,6 +207,10 @@ export interface VideoReferenceMediaOut {
 }
 
 export interface VideoCreateIn {
+  draft?: boolean;
+  reference_draft?: boolean;
+  draft_generation_id?: string | null;
+  reference_generation_id?: string | null;
   action: VideoAction;
   model: string;
   prompt: string;
@@ -289,6 +293,7 @@ export interface VideoActionCapabilityOut {
 }
 
 export interface VideoModelOptionOut {
+  supports_draft?: boolean;
   model: string;
   label?: string | null;
   display_name?: string | null;
@@ -341,6 +346,11 @@ export interface VideoOptionsOut {
 }
 
 export interface VideoGenerationOut {
+  draft?: boolean;
+  reference_draft?: boolean;
+  draft_generation_id?: string | null;
+  reference_generation_id?: string | null;
+  draft_expires_at?: string | null;
   id: string;
   action: VideoAction;
   model: string;

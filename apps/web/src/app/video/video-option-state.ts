@@ -19,6 +19,7 @@ import {
   defaultResolutionForModel,
   durationOptionsForModel,
   generateAudioOrDefault,
+  firstModelForAction,
   imageConstraintsForModel,
   resolutionOptionsForModel,
   selectedVideoAction,
@@ -61,7 +62,7 @@ export function deriveVideoOptionSelection(
     (item) => item.model === requestedModel,
   )
     ? requestedModel
-    : options?.default_model ?? "";
+    : firstModelForAction(options, effectiveAction);
   const selectedModel = selectedVideoModel(availableModels, modelCandidate);
   const selectedModelOption = availableModels.find(
     (item) => item.model === selectedModel,

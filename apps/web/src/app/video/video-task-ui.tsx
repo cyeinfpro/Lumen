@@ -21,6 +21,7 @@ import { Button, ErrorState, IconButton } from "@/components/ui/primitives";
 import { DURATION, EASE } from "@/lib/motion";
 import type { VideoGenerationOut } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { draftWorkflowLabel } from "./video-draft-mode";
 import { activeVideoTemporaryDownload } from "@/lib/videoEventSnapshot";
 
 import {
@@ -423,6 +424,7 @@ export function VideoPreviewDialog({
   onRetry,
   onCopy,
   onDelete,
+  relatedItems, finalizing, onFinalize, onReferenceFinal, onRelatedPreview,
 }: VideoPreviewDialogProps) {
   /*
    * Stable preview contracts implemented by video-task-preview.tsx:
@@ -435,6 +437,11 @@ export function VideoPreviewDialog({
    */
   return (
     <VideoPreviewDialogContent
+      relatedItems={relatedItems}
+      finalizing={finalizing}
+      onFinalize={onFinalize}
+      onReferenceFinal={onReferenceFinal}
+      onRelatedPreview={onRelatedPreview}
       item={item}
       onClose={onClose}
       onUseDraft={onUseDraft}
@@ -716,6 +723,7 @@ function TaskRow({
           <div className="flex flex-wrap items-center gap-2 type-caption text-[var(--fg-2)]">
             <span className="font-medium text-[var(--fg-1)]">{item.model}</span>
             <span>{actionLabel(item.action)}</span>
+            {draftWorkflowLabel(item) && <span>{draftWorkflowLabel(item)}</span>}
             <span>{item.resolution}</span>
             <span>{formatDurationLabel(item.duration_s)}</span>
             {elapsedLabel && <span>{elapsedLabel}</span>}

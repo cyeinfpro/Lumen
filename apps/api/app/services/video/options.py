@@ -39,6 +39,7 @@ from lumen_core.video_providers import (
     VIDEO_ACTIONS,
     parse_video_provider_config_json,
     is_seedance_25_identifier,
+    seedance_supports_draft,
     seedance_allowed_resolutions,
     seedance_duration_is_valid,
     seedance_model_version,
@@ -643,6 +644,11 @@ def _model_option(
         else None
     )
     return VideoModelOptionOut(
+        supports_draft={"480p", "1080p"}.issubset(catalog.model_resolutions.get(model, set())) and any(
+            provider.kind == "volcano" and provider.supports(model, action)
+            and seedance_supports_draft(model, provider.upstream_model_for(model, action))
+            for provider in providers for action in sorted_actions
+        ),
         model=model,
         billing_model=(
             next(iter(unique_billing_models))
@@ -787,6 +793,7 @@ async def require_video_create_ready(
     billing_enabled_loader: BoolLoader = billing_enabled,
     estimates_loader: EstimatesLoader = video_hold_estimates,
     provider_loader: ProviderStateLoader = video_provider_state,
+    source_provider_name: str | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     if not await video_enabled_loader(db):
         raise video_http_error(
@@ -821,6 +828,24 @@ async def require_video_create_ready(
             "; ".join(provider_errors),
             503,
         )
+    if body.draft or body.draft_generation_id:
+        # Resolve the public alias before checking capability. Never route an
+        # official draft to a third-party adapter or a final to another account.
+        providers = [
+            provider for provider in providers
+            if provider.kind == "volcano"
+            and provider.supports(body.model, body.action)
+            and seedance_supports_draft(
+                body.model, provider.upstream_model_for(body.model, body.action)
+            )
+            and (not body.draft_generation_id or provider.name == source_provider_name)
+        ]
+        if not providers:
+            raise video_http_error(
+                "draft_provider_changed" if body.draft_generation_id else "draft_provider_unsupported",
+                "原草稿渠道不可用，无法转成片" if body.draft_generation_id else "当前渠道不支持官方草稿模式",
+                409 if body.draft_generation_id else 422,
+            )
     provider = select_video_provider(
         providers,
         model=body.model,

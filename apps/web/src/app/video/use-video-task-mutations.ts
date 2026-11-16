@@ -11,7 +11,8 @@ import {
   deleteVideo,
   retryVideoGeneration,
 } from "@/lib/apiClient";
-import type { VideoAction } from "@/lib/types";
+import type { VideoAction, VideoGenerationOut } from "@/lib/types";
+import { officialFinalPayload, officialDraftBlockedReason } from "./video-draft-mode";
 import {
   isVideoRequestFenceCurrent,
   mergeVideoGenerationLists as mergeById,
@@ -49,6 +50,9 @@ type UseVideoTaskMutationsOptions = Pick<
   | "syncVideoSettling"
   | "terminalHistorySyncedRef"
 > & {
+  draft?: boolean;
+  referenceDraft?: boolean;
+  referenceGenerationId?: string | null;
   action: VideoAction;
   aspectRatio: string;
   durationS: number;
@@ -64,6 +68,9 @@ type UseVideoTaskMutationsOptions = Pick<
 
 export function useVideoTaskMutations({
   abortGenerationRefresh,
+  draft = false,
+  referenceDraft = false,
+  referenceGenerationId = null,
   action,
   aspectRatio,
   disableVideoSettling,
@@ -89,6 +96,9 @@ export function useVideoTaskMutations({
   const createMut = useMutation({
     mutationFn: () => {
       const body = {
+        draft,
+        reference_draft: referenceDraft,
+        reference_generation_id: referenceGenerationId,
         action,
         model,
         prompt: promptForVideoAction(action, prompt, referenceMedia),
@@ -118,6 +128,29 @@ export function useVideoTaskMutations({
         description: error instanceof Error ? error.message : undefined,
       });
     },
+  });
+
+  const finalizeMut = useMutation({
+    mutationFn: (source: VideoGenerationOut) => {
+      const blocked = officialDraftBlockedReason(source);
+      if (blocked) throw new Error(blocked);
+      // Uses the same durable semantic-idempotency journal as normal creation.
+      return createVideoGeneration(officialFinalPayload(source));
+    },
+    onSuccess: (generation) => {
+      terminalHistorySyncedRef.current.delete(generation.id);
+      enableVideoSettling(generation.id);
+      syncVideoSettling(generation);
+      setItems((previous) => mergeById(previous, [generation]));
+      setSelectedVideoId("");
+      setIsTaskPanelOpen(true);
+      scheduleGenerationRefresh(generation.id, { delayMs: 800 });
+      void invalidateHistory();
+      toast.success("成片已提交");
+    },
+    onError: (error) => toast.error("成片提交失败", {
+      description: error instanceof Error ? error.message : undefined,
+    }),
   });
 
   const cancelMut = useMutation({
@@ -212,6 +245,7 @@ export function useVideoTaskMutations({
   return {
     cancelMut,
     createMut,
+    finalizeMut,
     deleteMut,
     requestVideoRetry,
     retryMut,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -44,6 +44,8 @@ from ...services.active_user import (
 from ...video_reference_videos import VIDEO_REFERENCE_VIDEO_KIND
 from ..video_publish import publish_video_queued
 from .errors import video_http_error
+from lumen_core.video_providers import seedance_supports_draft
+from .draft_workflow import load_workflow_source, official_completion_body, workflow_metadata
 from .options import allow_negative_balance, require_video_create_ready
 from .presentation import generation_out
 from .submission_preflight import validate_provider_submission
@@ -74,6 +76,10 @@ async def invalidate_video_balance_cache(user_id: str) -> None:
 
 def request_fingerprint(body: VideoCreateIn) -> str:
     payload = body.model_dump(mode="json", exclude={"idempotency_key"})
+    # Keep historical idempotency hashes stable for ordinary requests.
+    for key in ("draft", "draft_generation_id", "reference_draft", "reference_generation_id"):
+        if not payload.get(key):
+            payload.pop(key, None)
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -389,9 +395,17 @@ async def _prepare_video_billing_admission(
     *,
     reference_media_snapshot: list[dict[str, Any]] | None,
     services: VideoSubmissionServices,
+    source_provider_name: str | None = None,
 ) -> _VideoBillingAdmission:
-    provider, estimates = await services.require_ready(db, body)
+    readiness_kwargs = (
+        {"source_provider_name": source_provider_name}
+        if body.draft_generation_id else {}
+    )
+    provider, estimates = await services.require_ready(db, body, **readiness_kwargs)
     upstream_model = provider.upstream_model_for(body.model, body.action)
+    if body.draft or body.draft_generation_id:
+        if provider.kind != "volcano" or not seedance_supports_draft(body.model, upstream_model):
+            raise video_http_error("draft_provider_unsupported", "当前渠道不支持官方草稿模式", 422)
     reference_media = _reference_media_for_admission(
         body,
         reference_media_snapshot,
@@ -631,12 +645,27 @@ async def create_video_generation_record(
         context=context,
     )
 
+    source = await load_workflow_source(db, body, user_id)
+    if body.draft_generation_id:
+        body = official_completion_body(body, source)
+        context = replace(context, reference_media_snapshot=list(
+            (source.upstream_request or {}).get("reference_media") or []
+        ))
+    metadata = {**(context.workflow_metadata or {}), **workflow_metadata(body, source)}
+    context = replace(context, workflow_metadata=metadata)
+
     admission = await _prepare_video_billing_admission(
         db,
         body,
         reference_media_snapshot=context.reference_media_snapshot,
         services=services,
+        **({"source_provider_name": source.provider_name} if body.draft_generation_id else {}),
     )
+    if body.draft_generation_id and (
+        admission.provider.name != source.provider_name
+        or admission.upstream_model != (source.upstream_request or {}).get("upstream_model")
+    ):
+        raise video_http_error("draft_provider_changed", "原草稿渠道或模型已变更，无法转成片", 409)
     await _ensure_video_wallet_admission(
         db,
         user_id=user_id,
@@ -652,16 +681,25 @@ async def create_video_generation_record(
         if revalidate_after_preparation
         else _TRANSACTION_IDENTITY_UNAVAILABLE
     )
-    plan = await _prepare_video_submission(
-        db,
-        body,
-        user_id=user_id,
-        request=context.request,
-        input_image_snapshot=context.input_image_snapshot,
-        reference_media_snapshot=context.reference_media_snapshot,
-        admission=admission,
-        services=services,
-    )
+    if body.draft_generation_id:
+        plan = _VideoSubmissionPlan(
+            provider=admission.provider,
+            input_storage_key=source.input_image_storage_key,
+            input_sha256=source.input_image_sha256,
+            input_image_url=None,
+            reference_snapshots=context.reference_media_snapshot or [],
+            reference_public_base=None, requires_public_media=False,
+            prefers_public_media_url=False, upstream_model=admission.upstream_model,
+            billing_model=admission.billing_model, pricing_variant=admission.pricing_variant,
+            cost=admission.cost, variant_diagnostics={},
+        )
+    else:
+        plan = await _prepare_video_submission(
+            db, body, user_id=user_id, request=context.request,
+            input_image_snapshot=context.input_image_snapshot,
+            reference_media_snapshot=context.reference_media_snapshot,
+            admission=admission, services=services,
+        )
     transaction_after_preparation = (
         _transaction_identity(db)
         if revalidate_after_preparation

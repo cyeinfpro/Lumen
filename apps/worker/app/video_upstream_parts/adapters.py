@@ -10,6 +10,7 @@ from lumen_core.video_providers import (
     VideoProviderDefinition,
     seedance_duration_is_valid,
     seedance_model_version,
+    seedance_supports_draft,
 )
 
 from ..video_artifacts import DownloadedVideo, downloaded_video_from_bytes
@@ -82,6 +83,53 @@ class VolcanoSeedanceAdapter:
             kwargs["proxy"] = proxy_url
         return self.runtime.httpx.AsyncClient(**kwargs)
 
+    def _submit_body(self, req: VideoSubmitRequest) -> dict[str, Any]:
+        if req.draft or req.draft_task_id:
+            if self.provider.kind != "volcano" or not seedance_supports_draft(
+                req.model, req.upstream_model
+            ):
+                raise VideoUpstreamError(
+                    "official drafts require native Seedance 2.5",
+                    error_code="invalid_input", status_code=422,
+                )
+            if req.draft and req.draft_task_id:
+                raise VideoUpstreamError(
+                    "draft creation and finalization are mutually exclusive",
+                    error_code="invalid_input", status_code=422,
+                )
+            expected_resolution = "1080p" if req.draft_task_id else "480p"
+            if req.resolution != expected_resolution:
+                raise VideoUpstreamError(
+                    f"draft operation requires {expected_resolution}",
+                    error_code="invalid_input", status_code=422,
+                )
+        body: dict[str, Any] = {
+            "model": req.upstream_model,
+            "resolution": req.resolution,
+            "watermark": req.watermark,
+            "safety_identifier": _safety_identifier(req.user_id),
+        }
+        if req.draft_task_id:
+            body["content"] = [
+                {"type": "draft_task", "draft_task": {"id": req.draft_task_id}}
+            ]
+            # The official API inherits all creative parameters. Even passing
+            # identical ratio/duration/seed/audio values causes rejection.
+            return body
+        body.update(
+            content=self.runtime.seedance_content(
+                req, use_official_reference_names=True
+            ),
+            ratio=req.aspect_ratio,
+            duration=req.duration_s,
+            generate_audio=req.generate_audio,
+        )
+        if req.draft:
+            body["draft"] = True
+        if req.seed is not None:
+            body["seed"] = req.seed
+        return body
+
     async def submit(self, req: VideoSubmitRequest) -> SubmitResult:
         if not seedance_duration_is_valid(
             req.duration_s,
@@ -97,21 +145,7 @@ class VolcanoSeedanceAdapter:
                 error_code="invalid_input",
                 status_code=422,
             )
-        body: dict[str, Any] = {
-            "model": req.upstream_model,
-            "content": self.runtime.seedance_content(
-                req,
-                use_official_reference_names=True,
-            ),
-            "ratio": req.aspect_ratio,
-            "resolution": req.resolution,
-            "duration": req.duration_s,
-            "generate_audio": req.generate_audio,
-            "watermark": req.watermark,
-            "safety_identifier": _safety_identifier(req.user_id),
-        }
-        if req.seed is not None:
-            body["seed"] = req.seed
+        body = self._submit_body(req)
         if req.callback_url:
             body["callback_url"] = req.callback_url
         async with self._client() as client:
@@ -199,6 +233,11 @@ class VolcanoThirdPartySeedanceAdapter(VolcanoSeedanceAdapter):
         return f"v1/{suffix}"
 
     async def submit(self, req: VideoSubmitRequest) -> SubmitResult:
+        if req.draft or req.draft_task_id:
+            raise VideoUpstreamError(
+                "official draft mode is unsupported by this adapter",
+                error_code="invalid_input", status_code=422,
+            )
         prompt = _prompt_with_reference_order(req)
         metadata: dict[str, Any] = {
             "content": self.runtime.seedance_content(
@@ -394,6 +433,11 @@ class VolcanoNewApiVideoAdapter(VolcanoSeedanceAdapter):
         return body
 
     async def submit(self, req: VideoSubmitRequest) -> SubmitResult:
+        if req.draft or req.draft_task_id:
+            raise VideoUpstreamError(
+                "official draft mode is unsupported by this adapter",
+                error_code="invalid_input", status_code=422,
+            )
         async with self._client() as client:
             response = await client.post(
                 self._path("videos"),
@@ -771,6 +815,11 @@ class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
         )
 
     async def submit(self, req: VideoSubmitRequest) -> SubmitResult:
+        if req.draft or req.draft_task_id:
+            raise VideoUpstreamError(
+                "official draft mode is unsupported by this adapter",
+                error_code="invalid_input", status_code=422,
+            )
         submit_path = self._path("video/generations")
         images = self._images(req)
         body = self._submit_body(req, images=images)
@@ -878,6 +927,11 @@ class FakeVideoAdapter:
         self.runtime = runtime or current_runtime()
 
     async def submit(self, req: VideoSubmitRequest) -> SubmitResult:
+        if req.draft or req.draft_task_id:
+            raise VideoUpstreamError(
+                "official draft mode is unsupported by this adapter",
+                error_code="invalid_input", status_code=422,
+            )
         digest = hashlib.sha256(req.task_id.encode("utf-8")).hexdigest()[:16]
         return SubmitResult(
             provider_task_id=f"fake-video-{digest}",

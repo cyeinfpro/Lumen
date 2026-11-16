@@ -483,6 +483,10 @@ async def retry_video_generation(
                 "generate_audio": row.generate_audio,
                 "seed": row.seed,
                 "watermark": row.watermark,
+                "draft": bool((row.upstream_request or {}).get("draft")),
+                "draft_generation_id": (row.upstream_request or {}).get("draft_generation_id"),
+                "reference_draft": bool((row.upstream_request or {}).get("reference_draft")),
+                "reference_generation_id": (row.upstream_request or {}).get("reference_generation_id"),
                 "idempotency_key": f"retry:{row.id}:{row.updated_at.isoformat()}",
             }
         )

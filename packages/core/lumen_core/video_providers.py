@@ -49,6 +49,10 @@ SEEDANCE_25_MIN_DURATION_S = 4
 SEEDANCE_25_MAX_DURATION_S = 30
 SEEDANCE_25_SMART_DURATION_S = -1
 SEEDANCE_25_RESOLUTIONS = ("480p", "720p", "1080p")
+SEEDANCE_25_FLASH_RESOLUTIONS = ("480p", "720p")
+SEEDANCE_25_FLASH_REFERENCE_MEDIA_LIMITS: Mapping[str, int] = immutable_mapping(
+    {"image": 10, "video": 5, "audio": 5}
+)
 SEEDANCE_25_REFERENCE_MEDIA_LIMITS: Mapping[str, int] = immutable_mapping(
     {"image": 30, "video": 10, "audio": 10}
 )
@@ -72,6 +76,7 @@ VIDEO_REFERENCE_MEDIA_LIMITS: Mapping[str, Mapping[str, int]] = (
 _VOLCANO_DOMESTIC_MODEL_ALIASES = immutable_mapping(
     {
         "dreamina-seedance-2-5-260628": "doubao-seedance-2-5-260628",
+        "dreamina-seedance-2-5-flash-261115": "doubao-seedance-2-5-flash-261115",
         "dreamina-seedance-2-0-mini-260615": "doubao-seedance-2-0-mini-260615",
     }
 )
@@ -81,6 +86,11 @@ _VOLCANO_REGION_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SEEDANCE_25_PATTERN = re.compile(
     r"(?<![a-z0-9-])"
     r"(?:(?:(?:doubao|dreamina)-)?seedance-2-5|video-ds-2-5)"
+    r"(?=$|-[0-9]{6}(?:$|[^a-z0-9-])|[^a-z0-9-])"
+)
+_SEEDANCE_25_FLASH_PATTERN = re.compile(
+    r"(?<![a-z0-9-])"
+    r"(?:(?:(?:doubao|dreamina)-)?seedance-2-5-flash|video-ds-2-5-flash)"
     r"(?=$|-[0-9]{6}(?:$|[^a-z0-9-])|[^a-z0-9-])"
 )
 _SEEDANCE_20_VARIANT_PATTERNS: tuple[
@@ -302,8 +312,22 @@ def seedance_20_variant(*identifiers: str | None) -> Seedance20Variant | None:
     return None
 
 
-def is_seedance_25_identifier(*identifiers: str | None) -> bool:
+def is_seedance_25_flash_identifier(*identifiers: str | None) -> bool:
     return any(
+        _SEEDANCE_25_FLASH_PATTERN.search(value) is not None
+        for value in _normalized_seedance_identifiers(identifiers)
+    )
+
+
+def seedance_supports_draft(*identifiers: str | None) -> bool:
+    """Only the standard 2.5 model supports official Draft tasks."""
+    return is_seedance_25_identifier(*identifiers) and not is_seedance_25_flash_identifier(
+        *identifiers
+    )
+
+
+def is_seedance_25_identifier(*identifiers: str | None) -> bool:
+    return is_seedance_25_flash_identifier(*identifiers) or any(
         _SEEDANCE_25_PATTERN.search(value) is not None
         for value in _normalized_seedance_identifiers(identifiers)
     )
@@ -335,6 +359,8 @@ def seedance_25_allowed_resolutions(
 ) -> tuple[str, ...] | None:
     if not is_seedance_25_identifier(*identifiers):
         return None
+    if is_seedance_25_flash_identifier(*identifiers):
+        return SEEDANCE_25_FLASH_RESOLUTIONS
     return SEEDANCE_25_RESOLUTIONS
 
 
@@ -397,6 +423,8 @@ def seedance_reference_media_limits(
 ) -> dict[str, int] | None:
     version = seedance_model_version(*identifiers)
     if version == "2.5":
+        if is_seedance_25_flash_identifier(*identifiers):
+            return dict(SEEDANCE_25_FLASH_REFERENCE_MEDIA_LIMITS)
         return dict(SEEDANCE_25_REFERENCE_MEDIA_LIMITS)
     if version == "2.0":
         return dict(SEEDANCE_20_REFERENCE_MEDIA_LIMITS)
@@ -708,6 +736,8 @@ __all__ = [
     "SEEDANCE_20_SMART_DURATION_S",
     "SEEDANCE_20_STANDARD_RESOLUTIONS",
     "SEEDANCE_25_ACTIONS",
+    "SEEDANCE_25_FLASH_RESOLUTIONS",
+    "SEEDANCE_25_FLASH_REFERENCE_MEDIA_LIMITS",
     "SEEDANCE_25_MAX_DURATION_S",
     "SEEDANCE_25_MIN_DURATION_S",
     "SEEDANCE_25_REFERENCE_IMAGE_MAX_ASPECT_RATIO",
@@ -723,6 +753,8 @@ __all__ = [
     "VIDEO_REFERENCE_MEDIA_LIMITS",
     "VideoProviderDefinition",
     "is_seedance_25_identifier",
+    "is_seedance_25_flash_identifier",
+    "seedance_supports_draft",
     "ordered_video_providers",
     "parse_video_provider_config_json",
     "parse_video_provider_item",

@@ -469,6 +469,8 @@ async def _wallet_video_options(db: AsyncSession) -> VideoOptionsOut:
 async def _require_video_create_ready(
     db: AsyncSession,
     body: VideoCreateIn,
+    *,
+    source_provider_name: str | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     return await video_options_service.require_video_create_ready(
         db,
@@ -477,6 +479,7 @@ async def _require_video_create_ready(
         billing_enabled_loader=_billing_enabled,
         estimates_loader=_video_hold_estimates,
         provider_loader=_video_provider_state,
+        **({"source_provider_name": source_provider_name} if body.draft_generation_id else {}),
     )
 
 

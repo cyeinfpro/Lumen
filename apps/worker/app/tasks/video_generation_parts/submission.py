@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -19,7 +19,7 @@ from lumen_core.constants import (
 from lumen_core.models import VideoGeneration
 
 from ...video_submit_cache import CachedSubmitResult
-from ...video_upstream_service import PollResult, SubmitResult, VideoSubmitRequest
+from ...video_upstream_service import PollResult, SubmitResult, VideoSubmitRequest, VideoUpstreamError
 from . import submit_delivery as submit_delivery_evidence
 from .errors import submit_delivery_proven_absent
 from .runtime import video_ports
@@ -297,6 +297,51 @@ async def _restore_cached_submit(
     return True
 
 
+def validate_draft_submission(generation: Any, provider: Any, upstream_model: str) -> dict[str, Any]:
+    raw = getattr(generation, "upstream_request", None)
+    request = raw if isinstance(raw, dict) else {}
+    if not (request.get("draft") or request.get("draft_task_id")):
+        return request
+    if provider.kind != "volcano":
+        raise VideoUpstreamError(
+            "official drafts require the native volcano adapter",
+            error_code="invalid_input", status_code=422,
+        )
+    if not request.get("draft_task_id"):
+        return request
+    if (request.get("source_provider_name") != provider.name
+            or request.get("source_upstream_model") != upstream_model):
+        raise VideoUpstreamError(
+            "draft provider/model binding changed",
+            error_code="provider_snapshot_unavailable", status_code=422,
+        )
+    source = request.get("source_provider_snapshot")
+    if not isinstance(source, dict) or not source.get("binding_fingerprint"):
+        raise VideoUpstreamError(
+            "draft provider binding snapshot unavailable",
+            error_code="provider_snapshot_unavailable", status_code=422,
+        )
+    if (source["binding_fingerprint"] != video_ports().provider._provider_binding_fingerprint(provider)
+            or str(source.get("base_url", "")).rstrip("/") != provider.base_url.rstrip("/")):
+        raise VideoUpstreamError(
+            "draft credentials or endpoint changed; refusing provider switch",
+            error_code="provider_snapshot_unavailable", status_code=422,
+        )
+    try:
+        expires_at = datetime.fromisoformat(str(request.get("draft_expires_at", "")).replace("Z", "+00:00"))
+        if expires_at.tzinfo is None:
+            raise ValueError("missing timezone")
+    except (TypeError, ValueError) as exc:
+        raise VideoUpstreamError(
+            "draft expiry unavailable", error_code="invalid_input", status_code=422,
+        ) from exc
+    if expires_at <= datetime.now(UTC):
+        raise VideoUpstreamError(
+            "draft task has expired", error_code="draft_expired", status_code=422,
+        )
+    return request
+
+
 async def _submit_fresh_video(
     session: Any,
     redis: Any,
@@ -332,11 +377,15 @@ async def _submit_fresh_video(
         lease_lost,
         "video submit lease lost before state transition",
     )
-    input_bytes, input_mime = await video_ports().provider._input_image_bytes(
-        session,
-        generation,
-    )
-    reference_media = await video_ports().provider._reference_media_bytes(generation)
+    draft_request = validate_draft_submission(generation, provider, upstream_model)
+    if draft_request.get("draft_task_id"):
+        input_bytes, input_mime, reference_media = None, None, []
+    else:
+        input_bytes, input_mime = await video_ports().provider._input_image_bytes(
+            session,
+            generation,
+        )
+        reference_media = await video_ports().provider._reference_media_bytes(generation)
     video_ports().lease_queue._raise_if_video_lease_lost(
         lease_lost,
         "video submit lease lost while loading request media",
@@ -418,6 +467,8 @@ async def _submit_fresh_video(
             generate_audio=generation.generate_audio,
             seed=generation.seed,
             watermark=generation.watermark,
+            draft=bool(draft_request.get("draft")),
+            draft_task_id=draft_request.get("draft_task_id"),
             input_image_url=video_ports().provider._input_image_url(generation),
             input_image_bytes=input_bytes,
             input_image_mime=input_mime,

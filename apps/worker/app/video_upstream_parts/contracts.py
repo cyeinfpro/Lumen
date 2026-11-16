@@ -49,6 +49,8 @@ class VideoSubmitRequest:
     reference_media: list[VideoReferenceMedia] = field(default_factory=list)
     callback_url: str | None = None
     idempotency_key: str | None = None
+    draft: bool = False
+    draft_task_id: str | None = None
 
 
 @dataclass(frozen=True)
