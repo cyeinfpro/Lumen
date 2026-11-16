@@ -100,6 +100,7 @@ const optionsModelSource = readFileSync(
 );
 const source = [
   pageSource,
+  readFileSync(new URL("./use-video-reference-final.ts", import.meta.url), "utf8"),
   videoPageDomainSource,
   videoPageViewSource,
   videoPromptEditorSource,
