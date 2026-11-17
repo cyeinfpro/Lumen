@@ -58,6 +58,13 @@ export function referenceFinalMedia(item: VideoGenerationOut): VideoReferenceMed
 export function referenceFinalResolution(resolutions: readonly string[]): string {
   return resolutions.includes("1080p") ? "1080p" : "";
 }
+// This opens the existing preview/confirmation panel, never submits a paid request.
+export function draftFinalEntryLabel(item: VideoGenerationOut): string | null {
+  if (item.status !== "succeeded" || !item.video) return null;
+  if (item.draft) return "生成1080p成片";
+  if (item.reference_draft) return "选择成片模型";
+  return null;
+}
 export function draftWorkflowLabel(item: VideoGenerationOut): string {
   if (item.draft) return "官方草稿";
   if (item.reference_draft) return "参考草稿";

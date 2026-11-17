@@ -1,14 +1,31 @@
-import { deepEqual, equal, throws } from "node:assert/strict";
+import { deepEqual, equal, match, throws } from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import type { VideoGenerationOut, VideoModelOptionOut } from "@/lib/types";
 const url = new URL("./video-draft-mode.ts", import.meta.url);
-const { supportsOfficialDraft, officialDraftBlockedReason, officialFinalPayload, referenceFinalMedia, draftWorkflowLabel, referenceFinalResolution } = await import(url.href) as typeof import("./video-draft-mode");
+const { draftFinalEntryLabel, supportsOfficialDraft, officialDraftBlockedReason, officialFinalPayload, referenceFinalMedia, draftWorkflowLabel, referenceFinalResolution } = await import(url.href) as typeof import("./video-draft-mode");
 const task = (overrides: Partial<VideoGenerationOut> = {}) => ({
   id: "draft-1", status: "succeeded", model: "seedance-2.5", action: "reference",
   prompt: "保留原描述", reference_media: [], input_image_id: null, duration_s: 5,
   aspect_ratio: "16:9", generate_audio: true, seed: 7, resolution: "480p",
   draft: true, draft_expires_at: "2030-01-01T00:00:00Z", ...overrides,
 }) as VideoGenerationOut;
+test("draft history exposes official and reference final entry without a paid submission", () => {
+  const video = { id: "preview" } as VideoGenerationOut["video"];
+  equal(draftFinalEntryLabel(task({ video })), "生成1080p成片");
+  equal(draftFinalEntryLabel(task({ video, draft: false, reference_draft: true })), "选择成片模型");
+  equal(draftFinalEntryLabel(task({ video, draft: false })), null);
+  equal(draftFinalEntryLabel(task()), null);
+  for (const status of ["queued", "running", "failed", "canceled", "expired"] as const) {
+    equal(draftFinalEntryLabel(task({ video, status })), null);
+  }
+  // Keep expired/unknown-expiry successful drafts discoverable: the dialog
+  // explains why finalization is blocked rather than hiding the action.
+  equal(draftFinalEntryLabel(task({ video, draft_expires_at: null })), "生成1080p成片");
+  const source = readFileSync(new URL("./video-task-ui.tsx", import.meta.url), "utf8");
+  match(source, /const label = draftFinalEntryLabel\(item\);[\s\S]*?if \(!label \|\| !onPreview\) return null;[\s\S]*?aria-haspopup="dialog"[\s\S]*?onClick=\{onPreview\}/);
+  match(source, /<TaskDraftFinalEntry item=\{item\} onPreview=\{onPreview\} \/>/);
+});
 test("reference final prefers supported 1080p and otherwise uses model default", () => {
   equal(referenceFinalResolution(["480p", "1080p"]), "1080p");
   equal(referenceFinalResolution(["480p", "720p"]), "");

@@ -21,7 +21,7 @@ import { Button, ErrorState, IconButton } from "@/components/ui/primitives";
 import { DURATION, EASE } from "@/lib/motion";
 import type { VideoGenerationOut } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { draftWorkflowLabel } from "./video-draft-mode";
+import { draftFinalEntryLabel, draftWorkflowLabel } from "./video-draft-mode";
 import { activeVideoTemporaryDownload } from "@/lib/videoEventSnapshot";
 
 import {
@@ -523,6 +523,25 @@ function TaskErrorDetails({
   );
 }
 
+function TaskDraftFinalEntry({ item, onPreview }: {
+  item: VideoGenerationOut;
+  onPreview?: () => void;
+}) {
+  const label = draftFinalEntryLabel(item);
+  if (!label || !onPreview) return null;
+  return (
+    <Button
+      variant="primary"
+      size="sm"
+      aria-haspopup="dialog"
+      onClick={onPreview}
+      leftIcon={<Film className="h-3.5 w-3.5" />}
+    >
+      {label}
+    </Button>
+  );
+}
+
 function TaskRowActions({
   cancelPending,
   item,
@@ -591,6 +610,7 @@ function TaskRowActions({
           预览
         </Button>
       )}
+      <TaskDraftFinalEntry item={item} onPreview={onPreview} />
       {canDownload && <VideoDownloadLink item={item} />}
       {onUseDraft && (
         <Button
