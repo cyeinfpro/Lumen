@@ -54,10 +54,10 @@ from lumen_core.schemas import (
     WalletTransactionOut,
 )
 
+from lumen_core.billing_cache import BillingCacheService
 from ..audit import request_ip_hash, write_audit
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting, update_settings
-from ..services.billing_cache import BillingCacheService
 from ..services.billing.errors import http_error as _http
 from ..services.billing.pricing_values import (
     ZERO_PRICE_ALLOWED_UNITS as _ZERO_PRICE_ALLOWED_UNITS,

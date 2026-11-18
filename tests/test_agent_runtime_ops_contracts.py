@@ -203,6 +203,7 @@ def test_release_workflow_builds_signs_attests_and_promotes_five_images() -> Non
     parsed = yaml.load(workflow, Loader=yaml.BaseLoader)
     matrix = parsed["jobs"]["build"]["strategy"]["matrix"]["image"]
     names = {item["name"] for item in matrix}
+    by_name = {item["name"]: item for item in matrix}
 
     assert names == {
         "lumen-api",
@@ -210,6 +211,10 @@ def test_release_workflow_builds_signs_attests_and_promotes_five_images() -> Non
         "lumen-tgbot",
         "lumen-agent-runtime",
     }
+    assert by_name["lumen-tgbot"]["target"] == "runtime-slim"
+    assert by_name["lumen-api"]["target"] in {"runtime", "runtime-media"}
+    assert by_name["lumen-worker"]["target"] in {"runtime", "runtime-media"}
+    assert "target: ${{ matrix.image.target }}" in workflow
     assert "merge-web" in parsed["jobs"]
     assert "expected five signed service digests" in workflow
     assert "services=(api worker agent-runtime tgbot web)" in workflow
@@ -248,11 +253,32 @@ def test_installer_update_and_rollback_manage_agent_runtime_explicitly() -> None
 
 def test_python_release_source_contains_runtime_local_build_payload() -> None:
     dockerfile = (ROOT / "Dockerfile.python").read_text(encoding="utf-8")
+    dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
     source_helpers = (ROOT / "scripts/update/release/source_helpers.sh").read_text(
         encoding="utf-8"
     )
 
-    assert "COPY apps/agent-runtime/ apps/agent-runtime/" in dockerfile
+    assert "COPY apps/agent-runtime/" not in dockerfile
+    assert "apps/agent-runtime/" in dockerignore.splitlines()
+    assert "FROM ${PYTHON_BASE} AS runtime-slim" in dockerfile
+    assert "FROM runtime-slim AS runtime-media" in dockerfile
+    assert "FROM runtime-media AS runtime" in dockerfile
+    _, slim_and_after = dockerfile.split("FROM ${PYTHON_BASE} AS runtime-slim", 1)
+    slim_stage, media_and_after = slim_and_after.split(
+        "FROM runtime-slim AS runtime-media", 1
+    )
+    media_stage, runtime_alias = media_and_after.split(
+        "FROM runtime-media AS runtime", 1
+    )
+    for pkg in ("curl", "ca-certificates", "libpq5"):
+        assert pkg in slim_stage
+    for heavy_pkg in ("ffmpeg", "libvips42", "openssh-client", "sshpass"):
+        assert heavy_pkg not in slim_stage
+        assert heavy_pkg in media_stage
+    assert "USER lumen" in slim_stage
+    assert "RUN --network=none python -c 'import tiktoken;" in slim_stage
+    assert "import pyvips" in media_stage
+    assert "USER lumen" in runtime_alias
     assert "docker-compose.dev.yml" in dockerfile
     assert "docker-compose.bluegreen.yml" in source_helpers
     assert "docker-compose.public-dns.yml" in source_helpers

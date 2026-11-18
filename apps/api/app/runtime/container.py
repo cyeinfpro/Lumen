@@ -3,15 +3,25 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 import httpx
 from arq.connections import ArqRedis
+from lumen_core.billing_cache import BillingCacheService
+from lumen_core.volcano_asset_media import VideoTranscodeRuntime
 
-from ..redis_client import ReconnectingRedis
-from ..services.billing_cache import BillingCacheService
 from ..services.admin_model_cache import AdminModelCache
 from ..services.poster_styles.tagging_runtime import PosterTaggingRuntime
 from .lifecycle import LifecycleDiagnostics, RuntimeLifecycle
+
+if TYPE_CHECKING:
+    from ..arq_pool import ArqPoolState
+    from ..billing_cache_state import BillingCacheState
+    from ..byok_service import ByokSettingsCache
+    from ..proxy_pool import ProxyPoolState
+    from ..redis_client import ReconnectingRedis, RedisClientState
+    from ..services.conversations.compaction import ContextSummaryAdapterRegistry
+    from ..services.upload_pipeline import UploadBudget
 
 
 class CapabilityStatus(StrEnum):
@@ -34,6 +44,94 @@ class ApiRuntimeDiagnostics:
 
 
 @dataclass(slots=True)
+class ApiProcessState:
+    """Lifecycle-bound process state containers owned by FastAPI lifespan."""
+
+    redis_state: RedisClientState
+    billing_cache_state: BillingCacheState
+    arq_pool_state: ArqPoolState
+    byok_settings_cache: ByokSettingsCache
+    proxy_pool_state: ProxyPoolState
+    context_summary_adapters: ContextSummaryAdapterRegistry
+    upload_budget: UploadBudget
+    volcano_media: VideoTranscodeRuntime = field(default_factory=VideoTranscodeRuntime)
+
+
+def new_api_process_state() -> ApiProcessState:
+    """Create fresh lifecycle-bound process state containers without import cycles."""
+    from ..arq_pool import ArqPoolState
+    from ..billing_cache_state import BillingCacheState
+    from ..byok_service import ByokSettingsCache
+    from ..proxy_pool import ProxyPoolState
+    from ..redis_client import RedisClientState
+    from ..services.conversations.compaction import ContextSummaryAdapterRegistry
+    from ..services.upload_pipeline import UploadBudget, UploadBudgetLimits
+
+    return ApiProcessState(
+        redis_state=RedisClientState(),
+        billing_cache_state=BillingCacheState(),
+        arq_pool_state=ArqPoolState(),
+        byok_settings_cache=ByokSettingsCache(),
+        proxy_pool_state=ProxyPoolState(),
+        context_summary_adapters=ContextSummaryAdapterRegistry(),
+        upload_budget=UploadBudget(UploadBudgetLimits.from_env()),
+    )
+
+
+def bind_api_process_state(lifecycle: RuntimeLifecycle) -> ApiProcessState:
+    """Install fresh process-scoped state containers and register reverse cleanup."""
+    from ..arq_pool import configure_arq_pool_state, reset_arq_pool_state
+    from ..billing_cache_state import (
+        configure_billing_cache_state,
+        reset_billing_cache_state,
+    )
+    from ..byok_service import configure_byok_settings_cache, reset_byok_settings_cache
+    from ..proxy_pool import configure_proxy_pool_state, shutdown_proxy_pool_state
+    from ..redis_client import configure_redis_state, reset_redis_state
+    from ..services.conversations.compaction import (
+        configure_context_summary_adapters,
+        reset_context_summary_adapters,
+    )
+    from ..services.upload_pipeline import (
+        configure_process_upload_budget,
+        reset_process_upload_budget,
+    )
+
+    state = new_api_process_state()
+    configure_redis_state(state.redis_state)
+    lifecycle.own("redis_state", lambda: reset_redis_state(state.redis_state))
+    configure_billing_cache_state(state.billing_cache_state)
+    lifecycle.own(
+        "billing_cache_state",
+        lambda: reset_billing_cache_state(state.billing_cache_state),
+    )
+    configure_arq_pool_state(state.arq_pool_state)
+    lifecycle.own("arq_pool_state", lambda: reset_arq_pool_state(state.arq_pool_state))
+    configure_byok_settings_cache(state.byok_settings_cache)
+    lifecycle.own(
+        "byok_settings_cache",
+        lambda: reset_byok_settings_cache(state.byok_settings_cache),
+    )
+    configure_proxy_pool_state(state.proxy_pool_state)
+    lifecycle.own(
+        "proxy_pool_state",
+        lambda: shutdown_proxy_pool_state(state.proxy_pool_state),
+    )
+    configure_context_summary_adapters(state.context_summary_adapters)
+    lifecycle.own(
+        "context_summary_adapters",
+        lambda: reset_context_summary_adapters(state.context_summary_adapters),
+    )
+    configure_process_upload_budget(state.upload_budget)
+    lifecycle.own(
+        "upload_budget",
+        lambda: reset_process_upload_budget(state.upload_budget),
+    )
+    lifecycle.own("volcano_media_runtime", state.volcano_media.reset)
+    return state
+
+
+@dataclass(slots=True)
 class ApiRuntime:
     """Typed owner for API process resources created by FastAPI lifespan."""
 
@@ -46,6 +144,7 @@ class ApiRuntime:
     _http: httpx.AsyncClient | None = None
     _image_reconciler_enabled: bool = False
     _proxy_pool_enabled: bool = False
+    _process_state: ApiProcessState = field(default_factory=new_api_process_state)
 
     def redis(self) -> ReconnectingRedis:
         return self._redis
@@ -61,6 +160,21 @@ class ApiRuntime:
 
     def admin_models(self) -> AdminModelCache:
         return self._admin_models
+
+    def byok_settings_cache(self) -> ByokSettingsCache:
+        return self._process_state.byok_settings_cache
+
+    def proxy_pool_state(self) -> ProxyPoolState:
+        return self._process_state.proxy_pool_state
+
+    def context_summary_adapters(self) -> ContextSummaryAdapterRegistry:
+        return self._process_state.context_summary_adapters
+
+    def upload_budget(self) -> UploadBudget:
+        return self._process_state.upload_budget
+
+    def volcano_media(self) -> VideoTranscodeRuntime:
+        return self._process_state.volcano_media
 
     def poster_tagging(self) -> PosterTaggingRuntime:
         if self._poster_tagging is None:

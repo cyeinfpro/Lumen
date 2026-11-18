@@ -480,7 +480,9 @@ def test_replay_payload_filter_matches_requested_channels() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pubsub_event_without_sse_id_is_persisted_for_live_id() -> None:
+async def test_pubsub_event_without_sse_id_warns_without_consumer_xadd(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     class Redis:
         def __init__(self) -> None:
             self.calls: list[dict[str, Any]] = []
@@ -498,20 +500,18 @@ async def test_pubsub_event_without_sse_id_is_persisted_for_live_id() -> None:
 
     redis = Redis()
 
-    stream_id = await events._stream_id_for_pubsub_event(  # noqa: SLF001
-        redis,
-        stream_key="events:user:user-1",
-        event_name="generation.completed",
-        envelope_event_id="event-1",
-        payload={"generation_id": "gen-1"},
-    )
+    with caplog.at_level("WARNING", logger=events.logger.name):
+        stream_id = await events._stream_id_for_pubsub_event(  # noqa: SLF001
+            redis,
+            stream_key="events:user:user-1",
+            event_name="generation.completed",
+            envelope_event_id="event-1",
+            payload={"generation_id": "gen-1"},
+        )
 
-    assert stream_id == "1710000000001-0"
-    assert redis.calls[0]["stream_key"] == "events:user:user-1"
-    assert redis.calls[0]["fields"]["event"] == "generation.completed"
-    payload = json.loads(redis.calls[0]["fields"]["data"])
-    assert payload["event_id"] == "event-1"
-    assert payload["data"]["generation_id"] == "gen-1"
+    assert stream_id is None
+    assert redis.calls == []
+    assert "skipping consumer xadd" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -525,7 +525,7 @@ async def test_pubsub_event_without_sse_id_has_no_id_when_streams_are_missing(
             _fields: dict[str, str],
             **_kwargs: Any,
         ) -> str:
-            raise RuntimeError("unknown command")
+            raise AssertionError("consumer must not call xadd")
 
     with caplog.at_level("WARNING", logger=events.logger.name):
         stream_id = await events._stream_id_for_pubsub_event(  # noqa: SLF001
@@ -543,64 +543,53 @@ async def test_pubsub_event_without_sse_id_has_no_id_when_streams_are_missing(
 
 @pytest.mark.asyncio
 async def test_pubsub_event_envelope_id_does_not_overwrite_payload_event_id() -> None:
-    class Redis:
-        def __init__(self) -> None:
-            self.fields: dict[str, str] | None = None
-
-        async def xadd(
-            self,
-            _stream_key: str,
-            fields: dict[str, str],
-            **_kwargs: Any,
-        ) -> str:
-            self.fields = fields
-            return "1710000000001-0"
-
-    redis = Redis()
-
-    await events._stream_id_for_pubsub_event(  # noqa: SLF001
-        redis,
+    state = SimpleNamespace(
+        redis=object(),
         stream_key="events:user:user-1",
-        event_name="generation.completed",
-        envelope_event_id="envelope-event",
-        payload={"event_id": "payload-event", "generation_id": "gen-1"},
+        event_deduper=events._ConnectionEventDeduper(),  # noqa: SLF001
+        last_upstream=0.0,
     )
+    message = {
+        "channel": "user:user-1",
+        "data": json.dumps(
+            {
+                "event": "generation.completed",
+                "sse_id": "1710000000001-0",
+                "event_id": "envelope-event",
+                "data": {"event_id": "payload-event", "generation_id": "gen-1"},
+            },
+            separators=(",", ":"),
+        ),
+    }
 
-    assert redis.fields is not None
-    envelope = json.loads(redis.fields["data"])
-    assert envelope["event_id"] == "envelope-event"
-    assert envelope["data"]["event_id"] == "payload-event"
+    emitted = await events._standard_pubsub_events(state, message)  # noqa: SLF001
+
+    assert len(emitted) == 1
+    assert emitted[0]["id"] == "1710000000001-0"
+    payload = json.loads(emitted[0]["data"])
+    assert payload["event_id"] == "payload-event"
+    assert payload["sse_id"] == "1710000000001-0"
 
 
 @pytest.mark.asyncio
-async def test_pubsub_event_fallback_preserves_falsy_envelope_event_id() -> None:
+async def test_pubsub_event_fallback_preserves_falsy_envelope_event_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     class Redis:
-        def __init__(self) -> None:
-            self.fields: dict[str, str] | None = None
+        async def xadd(self, *_args: Any, **_kwargs: Any) -> str:
+            raise AssertionError("consumer must not call xadd")
 
-        async def xadd(
-            self,
-            _stream_key: str,
-            fields: dict[str, str],
-            **_kwargs: Any,
-        ) -> str:
-            self.fields = fields
-            return "1710000000001-0"
+    with caplog.at_level("WARNING", logger=events.logger.name):
+        stream_id = await events._stream_id_for_pubsub_event(  # noqa: SLF001
+            Redis(),
+            stream_key="events:user:user-1",
+            event_name="generation.completed",
+            envelope_event_id=0,  # type: ignore[arg-type]
+            payload={"generation_id": "gen-1"},
+        )
 
-    redis = Redis()
-
-    await events._stream_id_for_pubsub_event(  # noqa: SLF001
-        redis,
-        stream_key="events:user:user-1",
-        event_name="generation.completed",
-        envelope_event_id=0,  # type: ignore[arg-type]
-        payload={"generation_id": "gen-1"},
-    )
-
-    assert redis.fields is not None
-    envelope = json.loads(redis.fields["data"])
-    assert envelope["event_id"] == "0"
-    assert redis.fields["event_id"] == "0"
+    assert stream_id is None
+    assert "event_id=0" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -819,6 +808,7 @@ async def test_live_pubsub_event_preserves_falsy_payload_event_id(
                 "data": json.dumps(
                     {
                         "event": "generation.completed",
+                        "sse_id": "1710000000001-0",
                         "event_id": 0,
                         "data": {"generation_id": "gen-1"},
                     },
@@ -829,7 +819,7 @@ async def test_live_pubsub_event_preserves_falsy_payload_event_id(
     class Redis:
         def __init__(self) -> None:
             self.pubsub_obj = PubSub()
-            self.xadd_fields: dict[str, str] | None = None
+            self.xadd_calls = 0
 
         def pubsub(self) -> PubSub:
             return self.pubsub_obj
@@ -837,10 +827,10 @@ async def test_live_pubsub_event_preserves_falsy_payload_event_id(
         async def xadd(
             self,
             _stream_key: str,
-            fields: dict[str, str],
+            _fields: dict[str, str],
             **_kwargs: Any,
         ) -> str:
-            self.xadd_fields = fields
+            self.xadd_calls += 1
             return "1710000000001-0"
 
     class Request:
@@ -883,9 +873,7 @@ async def test_live_pubsub_event_preserves_falsy_payload_event_id(
             ),
         }
     ]
-    assert redis.xadd_fields is not None
-    envelope = json.loads(redis.xadd_fields["data"])
-    assert envelope["event_id"] == "0"
+    assert redis.xadd_calls == 0
 
 
 @pytest.mark.asyncio
@@ -1625,3 +1613,214 @@ async def test_sse_replay_includes_user_events_without_leaking_other_channels() 
         "wallet.low_balance",
         "conv.message.appended",
     ]
+
+
+@pytest.mark.asyncio
+async def test_process_realtime_multiplexer_shares_single_pubsub_and_refcounts_channels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi import FastAPI
+    from app.realtime import (
+        KEEPALIVE_INTERVAL_SECONDS,
+        close_app_realtime_multiplexer,
+        get_app_realtime_multiplexer,
+        pubsub_timeout,
+    )
+
+    class SharedPubSub:
+        def __init__(self) -> None:
+            self.subscribe_calls: list[tuple[str, ...]] = []
+            self.unsubscribe_calls: list[tuple[str, ...]] = []
+            self.aclose_calls = 0
+            self.incoming: asyncio.Queue[dict[str, str]] = asyncio.Queue()
+
+        async def subscribe(self, *channels: str) -> None:
+            self.subscribe_calls.append(tuple(channels))
+
+        async def unsubscribe(self, *channels: str) -> None:
+            self.unsubscribe_calls.append(tuple(channels))
+
+        async def aclose(self) -> None:
+            self.aclose_calls += 1
+
+        async def get_message(
+            self,
+            *,
+            ignore_subscribe_messages: bool = True,
+            timeout: float = 1.0,
+        ) -> dict[str, str] | None:
+            _ = ignore_subscribe_messages
+            try:
+                return await asyncio.wait_for(self.incoming.get(), timeout=min(timeout, 0.05))
+            except TimeoutError:
+                return None
+
+    class SharedRedis:
+        def __init__(self) -> None:
+            self.pubsub_calls = 0
+            self.pubsub_obj = SharedPubSub()
+
+        def pubsub(self) -> SharedPubSub:
+            self.pubsub_calls += 1
+            return self.pubsub_obj
+
+    async def fake_validate_channels(
+        channels: list[str],
+        _user_id: str,
+        _db: Any,
+    ) -> list[str]:
+        return channels
+
+    async def fake_acquire_slot(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    redis = SharedRedis()
+    monkeypatch.setattr(events, "_validate_channels", fake_validate_channels)
+    monkeypatch.setattr(events, "_acquire_sse_connection_slot", fake_acquire_slot)
+    monkeypatch.setattr(events, "get_redis", lambda: redis)
+
+    app = FastAPI()
+
+    class TabRequest:
+        def __init__(self) -> None:
+            self.scope = {"type": "http", "app": app}
+            self.headers: dict[str, str] = {}
+            self.state = SimpleNamespace(session_id=None)
+            self.disconnected = False
+
+        async def is_disconnected(self) -> bool:
+            return self.disconnected
+
+    req1 = TabRequest()
+    req2 = TabRequest()
+    resp1 = await events.events(
+        req1,  # type: ignore[arg-type]
+        SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        channels="user:user-1,conv:conv-1",
+    )
+    resp2 = await events.events(
+        req2,  # type: ignore[arg-type]
+        SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        channels="user:user-1,conv:conv-2",
+    )
+
+    mux = get_app_realtime_multiplexer(app)
+    assert mux is not None
+    assert pubsub_timeout(SimpleNamespace(pending_compaction={})) == float(
+        KEEPALIVE_INTERVAL_SECONDS
+    )
+
+    task1 = asyncio.create_task(resp1.body_iterator.__anext__())
+    task2 = asyncio.create_task(resp2.body_iterator.__anext__())
+    await asyncio.sleep(0.02)
+
+    # Single Redis PubSub connection across both concurrent browser tabs!
+    assert redis.pubsub_calls == 1
+    assert set(mux.subscribers.keys()) == {
+        "user:user-1",
+        "conv:conv-1",
+        "conv:conv-2",
+        "lumen:events:conversation:conv-1",
+        "lumen:events:conversation:conv-2",
+    }
+    assert len(mux.subscribers["user:user-1"]) == 2
+
+    await redis.pubsub_obj.incoming.put(
+        _live_event_message(
+            channel="user:user-1",
+            event_name="generation.progress",
+            sse_id="1710000000010-0",
+            event_id="evt-shared",
+        )
+    )
+    frame1, frame2 = await asyncio.gather(task1, task2)
+    assert frame1["id"] == "1710000000010-0"
+    assert frame2["id"] == "1710000000010-0"
+
+    # Closing Tab 1 unsubscribes only conv-1; shared user:user-1 stays subscribed for Tab 2.
+    req1.disconnected = True
+    await resp1.body_iterator.aclose()
+    assert set(redis.pubsub_obj.unsubscribe_calls[-1]) == {
+        "conv:conv-1",
+        "lumen:events:conversation:conv-1",
+    }
+    assert "user:user-1" in mux.subscribers
+    assert redis.pubsub_obj.aclose_calls == 0
+
+    req2.disconnected = True
+    await resp2.body_iterator.aclose()
+    assert mux.subscribers == {}
+
+    await close_app_realtime_multiplexer(app)
+    assert redis.pubsub_obj.aclose_calls == 1
+    assert get_app_realtime_multiplexer(app) is None
+
+
+@pytest.mark.asyncio
+async def test_compaction_durable_publisher_assigns_sse_id_and_consumer_skips_xadd() -> None:
+    from fastapi import FastAPI
+    from app.realtime import get_app_realtime_multiplexer
+    from app.realtime.connection_hub import compaction_pubsub_events
+    from app.sse_publish import publish_compaction_sse_event
+
+    class DurableRedis:
+        def __init__(self) -> None:
+            self.eval_calls = 0
+            self.consumer_xadd_calls = 0
+            self.published: list[tuple[str, str]] = []
+
+        async def eval(self, *_args: Any, **_kwargs: Any) -> str:
+            self.eval_calls += 1
+            return "1763400000000-0"
+
+        async def expire(self, *_args: Any, **_kwargs: Any) -> int:
+            return 1
+
+        async def publish(self, channel: str, payload_json: str) -> int:
+            self.published.append((channel, payload_json))
+            return 1
+
+        async def xadd(self, *_args: Any, **_kwargs: Any) -> str:
+            self.consumer_xadd_calls += 1
+            raise AssertionError("consumer must never call xadd")
+
+    redis = DurableRedis()
+    sse_id = await publish_compaction_sse_event(
+        redis,
+        user_id="user-1",
+        conv_id="conv-1",
+        payload={"phase": "completed", "ok": True},
+    )
+    assert sse_id == "1763400000000-0"
+    assert redis.eval_calls == 1
+    assert len(redis.published) == 1
+    pub_channel, pub_data = redis.published[0]
+    assert pub_channel == "lumen:events:conversation:conv-1"
+
+    # Two independent browser tabs consume the same compaction broadcast: neither calls xadd.
+    for _tab in range(2):
+        state = SimpleNamespace(
+            redis=redis,
+            stream_key="events:user:user-1",
+            pending_compaction={},
+            event_deduper=events._ConnectionEventDeduper(),  # noqa: SLF001
+            last_upstream=0.0,
+        )
+        emitted = await compaction_pubsub_events(
+            state,  # type: ignore[arg-type]
+            {"channel": pub_channel, "data": pub_data},
+            {"lumen:events:conversation:conv-1": "conv:conv-1"},
+        )
+        assert len(emitted) == 1
+        assert emitted[0]["id"] == "1763400000000-0"
+        assert emitted[0]["event"] == "context.compaction"
+        assert json.loads(emitted[0]["data"])["sse_id"] == "1763400000000-0"
+
+    assert redis.consumer_xadd_calls == 0
+
+    app = FastAPI()
+    async with events.router.lifespan_context(app):
+        assert get_app_realtime_multiplexer(app) is not None
+    assert get_app_realtime_multiplexer(app) is None

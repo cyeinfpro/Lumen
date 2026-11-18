@@ -84,17 +84,21 @@ def test_compose_summary_guardrail_mentions_both_blocks():
 
 
 def test_estimate_system_prompt_tokens_uses_same_overhead_for_fallback():
+    assert SYSTEM_PROMPT_DUPLICATION_FACTOR == 1
     explicit = estimate_system_prompt_tokens("system prompt")
     assert explicit == (
-        SYSTEM_PROMPT_OVERHEAD_TOKENS
-        + SYSTEM_PROMPT_DUPLICATION_FACTOR * estimate_text_tokens("system prompt")
+        SYSTEM_PROMPT_OVERHEAD_TOKENS + estimate_text_tokens("system prompt")
+    )
+
+    duplicated = estimate_system_prompt_tokens("system prompt", duplication_factor=2)
+    assert duplicated == (
+        SYSTEM_PROMPT_OVERHEAD_TOKENS + 2 * estimate_text_tokens("system prompt")
     )
 
     fallback = estimate_system_prompt_tokens(None)
     assert fallback == (
         SYSTEM_PROMPT_OVERHEAD_TOKENS
-        + SYSTEM_PROMPT_DUPLICATION_FACTOR
-        * estimate_text_tokens(DEFAULT_CHAT_INSTRUCTIONS)
+        + estimate_text_tokens(DEFAULT_CHAT_INSTRUCTIONS)
     )
 
 

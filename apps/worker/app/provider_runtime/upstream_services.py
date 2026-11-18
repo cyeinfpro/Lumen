@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from collections import OrderedDict
+from contextlib import suppress
+from dataclasses import dataclass, field
 from functools import partial
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
+from urllib.parse import urlsplit
 
 _INFRASTRUCTURE_BINDING_NAMES = tuple(
     """
@@ -46,9 +49,11 @@ _CORE_BINDING_NAMES = tuple(
     MAX_REFERENCE_IMAGE_BYTES NON_SSE_JSON_MAX_BYTES PARTIAL_IMAGES_MAX_PIXELS
     PROXIED_CLIENT_CACHE_MAX PROXIED_CLIENT_CLOSE_DELAY_SECONDS
     PROXIED_CLIENT_IDLE_CLOSE_TIMEOUT_SECONDS RACE_CANCEL_WAIT_S
-    RACE_SINGLE_LANE_PIXELS REFERENCE_CACHE_HEAD_TIMEOUT_S
+    RACE_SINGLE_LANE_PIXELS REFERENCE_CACHE_EXPIRY_MARGIN_S
+    REFERENCE_CACHE_FRESH_WINDOW_S REFERENCE_CACHE_HEAD_TIMEOUT_S
     REFERENCE_CACHE_KEY_PREFIX REFERENCE_CACHE_LRU_SUFFIX
     REFERENCE_CACHE_MAX_ENTRIES REFERENCE_CACHE_TTL_S REFERENCE_PUSH_TIMEOUT_S
+    REFERENCE_UPLOAD_CONCURRENCY
     RETRY_HTTPX_EXC RETRY_STATUS SAFETY_POLICY_ERROR_MARKERS SSE_MAX_BYTES
     SSE_MAX_LINES SSE_MAX_LINE_BYTES TEXT_STREAM_INTERRUPTED_ERROR_CODE
     add_image_output_options apply_retry_cache_busters
@@ -243,11 +248,140 @@ class UpstreamServices:
     transport: SimpleNamespace
 
 
+_MAX_PROBE_CLIENTS = 16
+
+
+def _close_async_client_if_supported(client: Any) -> Any:
+    aclose_fn = getattr(client, "aclose", None)
+    if callable(aclose_fn):
+        return aclose_fn()
+    return None
+
+
+async def _aclose_client_safely(client: Any) -> None:
+    coro = _close_async_client_if_supported(client)
+    if coro is None:
+        return
+    close_task = asyncio.create_task(coro)
+    try:
+        await asyncio.shield(close_task)
+    except asyncio.CancelledError:
+        with suppress(Exception, asyncio.CancelledError):
+            await close_task
+        raise
+
+
+class ReferenceHttpClientPool:
+    """Runtime-owned HTTP/1.1 Keep-Alive client pool for reference upload & HEAD."""
+
+    def __init__(self, *, max_probe_clients: int = _MAX_PROBE_CLIENTS) -> None:
+        self._lock = asyncio.Lock()
+        self._max_probe_clients = max(1, int(max_probe_clients))
+        self._upload_client: Any | None = None
+        self._upload_key: tuple[Any, ...] | None = None
+        self._probe_clients: OrderedDict[tuple[Any, ...], Any] = OrderedDict()
+
+    async def get_upload_client(
+        self,
+        *,
+        client_cls: Any,
+        timeout: Any,
+    ) -> Any:
+        key = (
+            client_cls,
+            getattr(timeout, "connect", None),
+            getattr(timeout, "read", None),
+            getattr(timeout, "write", None),
+            getattr(timeout, "pool", None),
+        )
+        retired: Any | None = None
+        async with self._lock:
+            if self._upload_client is not None and self._upload_key == key:
+                return self._upload_client
+            retired = self._upload_client
+            self._upload_client = client_cls(
+                timeout=timeout,
+                trust_env=False,
+                follow_redirects=False,
+            )
+            self._upload_key = key
+            client = self._upload_client
+        if retired is not None:
+            await _aclose_client_safely(retired)
+        return client
+
+    async def get_probe_client(
+        self,
+        *,
+        client_cls: Any,
+        timeout: Any,
+        target: Any,
+        pinned_transport_factory: Any,
+    ) -> Any:
+        resolved_ips = tuple(
+            str(ip) for ip in (getattr(target, "resolved_ips", ()) or ())
+        )
+        parsed = urlsplit(str(getattr(target, "url", "")))
+        origin_key = (
+            (parsed.scheme.lower(), (parsed.hostname or "").lower(), parsed.port)
+            if resolved_ips
+            else None
+        )
+        key = (
+            client_cls,
+            pinned_transport_factory if resolved_ips else None,
+            getattr(timeout, "connect", None),
+            getattr(timeout, "read", None),
+            origin_key,
+            resolved_ips,
+        )
+        evicted: list[Any] = []
+        async with self._lock:
+            existing = self._probe_clients.get(key)
+            if existing is not None:
+                self._probe_clients.move_to_end(key)
+                return existing
+            client_kwargs: dict[str, Any] = {
+                "follow_redirects": False,
+                "trust_env": False,
+                "timeout": timeout,
+            }
+            if resolved_ips:
+                client_kwargs["transport"] = pinned_transport_factory(target)
+            created = client_cls(**client_kwargs)
+            self._probe_clients[key] = created
+            self._probe_clients.move_to_end(key)
+            while len(self._probe_clients) > self._max_probe_clients:
+                _old_key, old_client = self._probe_clients.popitem(last=False)
+                evicted.append(old_client)
+        for old_client in evicted:
+            await _aclose_client_safely(old_client)
+        return created
+
+    async def aclose(self) -> None:
+        async with self._lock:
+            clients: list[Any] = []
+            if self._upload_client is not None:
+                clients.append(self._upload_client)
+                self._upload_client = None
+                self._upload_key = None
+            clients.extend(self._probe_clients.values())
+            self._probe_clients.clear()
+        for client in clients:
+            await _aclose_client_safely(client)
+
+
 @dataclass(frozen=True, slots=True)
 class ImageUpstreamRuntime:
     """Explicit service graph carried by production image requests."""
 
     services: UpstreamServices
+    reference_http_pool: ReferenceHttpClientPool = field(
+        default_factory=ReferenceHttpClientPool
+    )
+
+    async def aclose(self) -> None:
+        await self.reference_http_pool.aclose()
 
 
 @dataclass
@@ -379,6 +513,7 @@ def bind_upstream_runtime(runtime: ImageUpstreamRuntime) -> ImageUpstreamRuntime
 
 __all__ = [
     "ImageUpstreamRuntime",
+    "ReferenceHttpClientPool",
     "UpstreamLifecycleState",
     "UpstreamServices",
     "bind_upstream_runtime",

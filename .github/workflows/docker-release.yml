@@ -482,10 +482,10 @@ jobs:
         # lumen-web 拆到 build-web/merge-web 用 native runner —— Next.js 16
         # Turbopack 在 QEMU emulated arm64 上 page collection 阶段会 SIGILL。
         image:
-          - { name: lumen-api,    file: ./Dockerfile.python,    context: .,           platforms: "linux/amd64,linux/arm64" }
-          - { name: lumen-worker, file: ./Dockerfile.python,    context: .,           platforms: "linux/amd64,linux/arm64" }
-          - { name: lumen-tgbot,  file: ./Dockerfile.python,    context: .,           platforms: "linux/amd64,linux/arm64" }
-          - { name: lumen-agent-runtime, file: ./apps/agent-runtime/Dockerfile, context: ./apps/agent-runtime, platforms: "linux/amd64,linux/arm64" }
+          - { name: lumen-api,    file: ./Dockerfile.python,    context: ., target: runtime,       platforms: "linux/amd64,linux/arm64" }
+          - { name: lumen-worker, file: ./Dockerfile.python,    context: ., target: runtime-media, platforms: "linux/amd64,linux/arm64" }
+          - { name: lumen-tgbot,  file: ./Dockerfile.python,    context: ., target: runtime-slim,  platforms: "linux/amd64,linux/arm64" }
+          - { name: lumen-agent-runtime, file: ./apps/agent-runtime/Dockerfile, context: ./apps/agent-runtime, target: "", platforms: "linux/amd64,linux/arm64" }
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -549,6 +549,7 @@ jobs:
         with:
           context: ${{ matrix.image.context }}
           file: ${{ matrix.image.file }}
+          target: ${{ matrix.image.target }}
           push: true
           platforms: ${{ matrix.image.platforms }}
           tags: ${{ steps.meta.outputs.tags }}

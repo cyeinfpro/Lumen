@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 import stat
 from datetime import datetime
 from email.utils import format_datetime
@@ -33,8 +34,48 @@ from ..video_reference_videos import (
 )
 
 
+_INTERNAL_REDIRECT_PREFIX = "/_internal_storage/"
+_INTERNAL_STORAGE_KEY_RE = re.compile(r"^u/(?!.*\.\.)[A-Za-z0-9._/-]+$")
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
 def _http(code: str, message: str, status_code: int) -> HTTPException:
     return video_http_error(code, message, status_code)
+
+
+def internal_redirect_enabled() -> bool:
+    configured = getattr(settings, "internal_redirect_enabled", None)
+    if configured is not None:
+        if isinstance(configured, bool):
+            return configured
+        return str(configured).strip().lower() in _TRUE_VALUES
+    return (
+        os.environ.get("LUMEN_INTERNAL_REDIRECT_ENABLED", "").strip().lower()
+        in _TRUE_VALUES
+    )
+
+
+def _uses_local_storage() -> bool:
+    storage_root = str(getattr(settings, "storage_root", "") or "").strip()
+    if not storage_root:
+        return False
+    backend = getattr(settings, "storage_backend", None)
+    if backend is None:
+        return True
+    return str(backend).strip().lower() in {"", "local", "filesystem", "fs"}
+
+
+def _internal_redirect_target(storage_key: str | None) -> str | None:
+    if not storage_key or not internal_redirect_enabled() or not _uses_local_storage():
+        return None
+    normalized = storage_key.lstrip("/")
+    if not _INTERNAL_STORAGE_KEY_RE.fullmatch(normalized):
+        return None
+    try:
+        fs_path(normalized)
+    except HTTPException:
+        return None
+    return _INTERNAL_REDIRECT_PREFIX + normalized
 
 
 def fs_path(storage_key: str) -> Path:
@@ -153,6 +194,7 @@ def media_response(
     immutable: bool,
     download_filename: str | None = None,
     inline_filename: str | None = None,
+    storage_key: str | None = None,
 ) -> Response:
     quoted_etag = quote_etag(etag)
     headers = {
@@ -172,6 +214,16 @@ def media_response(
         headers["Last-Modified"] = format_datetime(last_modified, usegmt=True)
     if etag_matches(request.headers.get("if-none-match"), quoted_etag):
         return Response(status_code=304, headers=headers)
+    redirect_target = _internal_redirect_target(storage_key)
+    if redirect_target is not None:
+        return Response(
+            status_code=200,
+            media_type=media_type,
+            headers={
+                **headers,
+                "X-Accel-Redirect": redirect_target,
+            },
+        )
     file, size = open_regular_file_no_symlink(path)
     range_header = request.headers.get("range")
     if range_header:
@@ -328,17 +380,19 @@ async def video_binary(
         if download
         else None
     )
+    target_path = fs_path(storage_key)
     rollback = getattr(db, "rollback", None)
     if callable(rollback):
         await rollback()
     return media_response(
         request,
-        fs_path(storage_key),
+        target_path,
         media_type=media_type,
         etag=etag,
         last_modified=last_modified,
         immutable=True,
         download_filename=download_filename,
+        storage_key=storage_key,
     )
 
 

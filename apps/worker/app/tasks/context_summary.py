@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,7 +17,14 @@ from typing import Any
 
 from sqlalchemy import select
 
-from lumen_core.constants import GenerationErrorCode as EC, Role
+import lumen_core.sse_durable as sse_durable
+from lumen_core.constants import (
+    EVENTS_STREAM_MAXLEN,
+    EVENTS_STREAM_PREFIX,
+    EVENTS_STREAM_TTL_SECONDS,
+    GenerationErrorCode as EC,
+    Role,
+)
 from lumen_core.context_window import (
     SUMMARY_KIND,
     SUMMARY_VERSION,
@@ -81,6 +90,12 @@ from .context_summary_parts.upstream_payloads import (
 logger = logging.getLogger(__name__)
 _SUMMARY_MODEL = _config.SUMMARY_MODEL
 _SUMMARY_MAX_SEGMENTS = _config.SUMMARY_MAX_SEGMENTS
+_COMPACTION_EVENTS_DEDUPE_TTL_SECONDS = 24 * 60 * 60
+_COMPACTION_DURABLE_APPEND_CONFIG = sse_durable.DurableSseAppendConfig(
+    maxlen=EVENTS_STREAM_MAXLEN,
+    dedupe_ttl_seconds=_COMPACTION_EVENTS_DEDUPE_TTL_SECONDS,
+    stream_ttl_seconds=EVENTS_STREAM_TTL_SECONDS,
+)
 
 
 def _message_to_summary_line(
@@ -365,9 +380,56 @@ async def _segment_and_summarize(
 
 
 async def _publish_compaction_event(
-    redis: Any, conv_id: str, payload: dict[str, Any]
+    redis: Any,
+    conv_id: str,
+    payload: dict[str, Any],
+    *,
+    user_id: str | None = None,
 ) -> None:
-    await _events.publish_compaction_event(redis, conv_id, payload, logger=logger)
+    if redis is None:
+        return
+    enriched = dict(payload)
+    raw_event_id = enriched.get("event_id")
+    event_id = str(raw_event_id if raw_event_id not in (None, "") else uuid.uuid4())
+    enriched["event_id"] = event_id
+    resolved_user_id = user_id or (
+        str(enriched["user_id"]) if enriched.get("user_id") else None
+    )
+    if resolved_user_id and callable(getattr(redis, "xadd", None)):
+        stream_key = f"{EVENTS_STREAM_PREFIX}{resolved_user_id}"
+        envelope = {
+            "event": "context.compaction",
+            "channel": f"conv:{conv_id}",
+            "event_id": event_id,
+            "ts_ms": int(time.time() * 1000),
+            "data": {"kind": "context.compaction", **enriched},
+        }
+        try:
+            stream_id = await sse_durable.append_sse_event_once(
+                redis,
+                stream_key=stream_key,
+                event_name="context.compaction",
+                event_id=event_id,
+                payload_json=json.dumps(
+                    envelope,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                config=_COMPACTION_DURABLE_APPEND_CONFIG,
+            )
+            if sse_durable.has_stream_id(
+                stream_id,
+                reservation_prefix=_COMPACTION_DURABLE_APPEND_CONFIG.reservation_prefix,
+            ):
+                enriched["sse_id"] = stream_id
+                enriched["msg_id"] = stream_id
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "context_summary.compaction_durable_append_failed conv=%s err=%r",
+                conv_id,
+                exc,
+            )
+    await _events.publish_compaction_event(redis, conv_id, enriched, logger=logger)
 
 
 _redis_text = _events.redis_text
@@ -528,7 +590,15 @@ async def _cas_write_summary(
     )
 
 
-def _service_dependencies() -> _service.SummaryServiceDependencies:
+def _service_dependencies(
+    *,
+    user_id: str | None = None,
+) -> _service.SummaryServiceDependencies:
+    publish_event = (
+        partial(_publish_compaction_event, user_id=user_id)
+        if user_id
+        else _publish_compaction_event
+    )
     return _service.SummaryServiceDependencies(
         load_messages=_load_messages_for_summary,
         load_position=_message_position,
@@ -545,7 +615,7 @@ def _service_dependencies() -> _service.SummaryServiceDependencies:
         lock_active_context=_lock_active_summary_context,
         release_transaction=_release_business_transaction,
         delete_partial=_safe_delete_partial,
-        publish_event=_publish_compaction_event,
+        publish_event=publish_event,
         is_circuit_open=_is_circuit_open,
         sleep=asyncio.sleep,
         logger=logger,
@@ -570,6 +640,7 @@ async def ensure_context_summary(
     trigger: str = "auto",
     image_upstream_runtime: ImageUpstreamRuntime | None = None,
 ) -> dict[str, Any] | None:
+    conv_user_id = getattr(conv, "user_id", None)
     return await _service.ensure_context_summary(
         session,
         conv,
@@ -580,7 +651,9 @@ async def ensure_context_summary(
         dry_run=dry_run,
         trigger=trigger,
         image_upstream_runtime=image_upstream_runtime,
-        deps=_service_dependencies(),
+        deps=_service_dependencies(
+            user_id=str(conv_user_id) if conv_user_id else None,
+        ),
     )
 
 

@@ -66,4 +66,4 @@ class PromptCompositionRequest:
     template: str
     aspect_ratio: str
     final_quality: str
-    rewrite_instruction: str | None
+    rewrite_instruction: str | None = None

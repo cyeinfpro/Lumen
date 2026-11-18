@@ -23,6 +23,7 @@ from lumen_core.context_window import (
 from lumen_core.models import Conversation, Message
 
 from ...arq_pool import get_arq_pool
+from ...runtime.slot import RuntimeSlot
 from .cursor import message_alive_filters
 from .context import (
     CIRCUIT_BREAKER_KEY,
@@ -53,7 +54,7 @@ class ContextSummaryAdapter:
     ensure_context_summary: Callable[..., Awaitable[dict[str, Any] | None]]
 
 
-class _ContextSummaryAdapterRegistry:
+class ContextSummaryAdapterRegistry:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._adapter: ContextSummaryAdapter | None = None
@@ -71,8 +72,33 @@ class _ContextSummaryAdapterRegistry:
         with self._lock:
             return self._adapter
 
+    def clear(self) -> None:
+        with self._lock:
+            self._adapter = None
 
-_CONTEXT_SUMMARY_ADAPTERS = _ContextSummaryAdapterRegistry()
+
+_CONTEXT_SUMMARY_ADAPTER_SLOT: RuntimeSlot[ContextSummaryAdapterRegistry] = RuntimeSlot(
+    "api-context-summary-adapters",
+    default_factory=ContextSummaryAdapterRegistry,
+)
+
+
+def configure_context_summary_adapters(
+    registry: ContextSummaryAdapterRegistry | None = None,
+) -> ContextSummaryAdapterRegistry:
+    active = registry or ContextSummaryAdapterRegistry()
+    _CONTEXT_SUMMARY_ADAPTER_SLOT.install_default(active)
+    return active
+
+
+def reset_context_summary_adapters(
+    registry: ContextSummaryAdapterRegistry | None = None,
+) -> None:
+    active = registry or _CONTEXT_SUMMARY_ADAPTER_SLOT.current_or_none()
+    if active is None:
+        return
+    active.clear()
+    _CONTEXT_SUMMARY_ADAPTER_SLOT.clear_default(active)
 
 
 def not_found() -> HTTPException:
@@ -490,28 +516,54 @@ async def _delete_quietly(redis: Any, key: str) -> None:
 
 def install_context_summary_adapter(
     ensure_context_summary: Callable[..., Awaitable[dict[str, Any] | None]] | None,
+    *,
+    registry: ContextSummaryAdapterRegistry | None = None,
 ) -> ContextSummaryAdapter | None:
     adapter = (
         ContextSummaryAdapter(ensure_context_summary)
         if ensure_context_summary is not None
         else None
     )
-    return _CONTEXT_SUMMARY_ADAPTERS.install(adapter)
+    active = registry or _CONTEXT_SUMMARY_ADAPTER_SLOT.current()
+    return active.install(adapter)
 
 
 def restore_context_summary_adapter(
     adapter: ContextSummaryAdapter | None,
+    *,
+    registry: ContextSummaryAdapterRegistry | None = None,
 ) -> None:
-    _CONTEXT_SUMMARY_ADAPTERS.install(adapter)
+    active = registry or _CONTEXT_SUMMARY_ADAPTER_SLOT.current()
+    active.install(adapter)
 
 
-def import_worker_context_summary() -> ContextSummaryAdapter | None:
+def import_worker_context_summary(
+    *,
+    request: Request | None = None,
+    registry: ContextSummaryAdapterRegistry | None = None,
+) -> ContextSummaryAdapter | None:
     """Compatibility accessor backed by explicit process composition."""
-    return _CONTEXT_SUMMARY_ADAPTERS.current()
+    if registry is not None:
+        return registry.current()
+    if request is not None:
+        app = request.scope.get("app") if isinstance(request.scope, dict) else None
+        runtime = getattr(getattr(app, "state", None), "runtime", None)
+        getter = getattr(runtime, "context_summary_adapters", None)
+        if callable(getter):
+            resolved = getter()
+            if isinstance(resolved, ContextSummaryAdapterRegistry):
+                current = resolved.current()
+                if current is not None:
+                    return current
+    return _CONTEXT_SUMMARY_ADAPTER_SLOT.current().current()
 
 
-def import_ensure_context_summary() -> Any | None:
-    module = import_worker_context_summary()
+def import_ensure_context_summary(
+    *,
+    request: Request | None = None,
+    registry: ContextSummaryAdapterRegistry | None = None,
+) -> Any | None:
+    module = import_worker_context_summary(request=request, registry=registry)
     return getattr(module, "ensure_context_summary", None) if module else None
 
 
@@ -823,11 +875,14 @@ __all__ = [
     "MANUAL_COMPACT_DEFAULT_COOLDOWN_SECONDS",
     "MANUAL_COMPACT_JOB_TTL_SECONDS",
     "MANUAL_COMPACT_RETRY_AFTER_SECONDS",
+    "ContextSummaryAdapter",
+    "ContextSummaryAdapterRegistry",
     "check_manual_compact_cooldown",
     "classify_compact_failure",
     "compact_conversation",
     "compact_payload_from_job",
     "compact_pending_payload",
+    "configure_context_summary_adapters",
     "build_compact_summary_payload",
     "enqueue_manual_compact_job",
     "get_compact_conversation_status",
@@ -841,5 +896,6 @@ __all__ = [
     "redis_get_json",
     "redis_set_json",
     "redis_set_nx_json",
+    "reset_context_summary_adapters",
     "restore_context_summary_adapter",
 ]

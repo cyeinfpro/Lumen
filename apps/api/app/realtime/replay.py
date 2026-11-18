@@ -5,13 +5,9 @@ from dataclasses import dataclass, field
 import json
 import logging
 import time
-import uuid
 from typing import Any, AsyncIterator
 
-from lumen_core.constants import (
-    EVENTS_REPLAY_MAX_SCAN,
-    EVENTS_STREAM_MAXLEN,
-)
+from lumen_core.constants import EVENTS_REPLAY_MAX_SCAN
 
 from ..services import event_replay as _event_replay
 
@@ -95,45 +91,31 @@ async def stream_id_for_pubsub_event(
     payload: object,
     channel: str | None = None,
 ) -> str | None:
-    event_id = normalize_event_id(envelope_event_id) or str(uuid.uuid4())
-    payload_for_stream = payload if isinstance(payload, dict) else {"data": payload}
-    envelope = {
-        "event": event_name,
-        "event_id": event_id,
-        "ts_ms": int(time.time() * 1000),
-        "data": payload_for_stream,
-    }
-    if channel:
-        envelope["channel"] = channel
-    try:
-        raw = await redis.xadd(  # type: ignore[attr-defined]
-            stream_key,
-            {
-                "event": event_name,
-                "data": json.dumps(envelope, separators=(",", ":")),
-                "event_id": event_id,
-            },
-            maxlen=EVENTS_STREAM_MAXLEN,
-            approximate=True,
-        )
-    except Exception as exc:  # noqa: BLE001
-        if is_stream_command_unsupported(exc):
-            logger.warning(
-                "sse pubsub event has no recoverable id because redis streams are unsupported stream=%s event=%s",
-                stream_key,
-                event_name,
-            )
-            return None
-        logger.warning(
-            "sse pubsub event missing sse_id and xadd fallback failed stream=%s event=%s",
-            stream_key,
-            event_name,
-            exc_info=True,
-        )
-        return None
-    if isinstance(raw, (bytes, bytearray)):
-        return raw.decode("ascii", errors="replace")
-    return str(raw)
+    """Read-only fallback when a live Pub/Sub payload arrives without ``sse_id``.
+
+    Publishers are solely responsible for durable ``XADD -> sse_id -> PUBLISH``
+    assignment via ``sse_durable``. Consumer coroutines must never write back to
+    the user stream, otherwise N open tabs receiving the same untagged broadcast
+    would append N duplicate entries to ``events:user:{uid}``.
+    """
+
+    _ = redis
+    if isinstance(payload, dict):
+        embedded_sse_id = normalize_recoverable_sse_id(payload.get("sse_id"))
+        if embedded_sse_id is not None:
+            return embedded_sse_id
+    event_id = normalize_event_id(envelope_event_id)
+    if event_id is None and isinstance(payload, dict):
+        event_id = normalize_event_id(payload.get("event_id"))
+    logger.warning(
+        "sse pubsub event has no recoverable id; skipping consumer xadd "
+        "stream=%s channel=%s event=%s event_id=%s",
+        stream_key,
+        channel or "",
+        event_name,
+        event_id or "",
+    )
+    return None
 
 
 async def iter_replay_events(

@@ -43,7 +43,7 @@ from .tgbot_health import (
     TgbotHealthReporter,
     TgbotRuntimeStatus,
 )
-from .tracker import tracker
+from .tracker import Tracker
 
 
 # FSM 状态过期时间。/new 走完一个生成或丢弃后状态被 clear()，正常路径不会留垃圾。
@@ -510,6 +510,7 @@ async def _amain(runtime_health: TgbotHealthReporter) -> None:
         return
     async with AsyncExitStack() as stack:
         api = LumenApi()
+        tracker = Tracker()
         stack.push_async_callback(api.aclose)
         stack.push_async_callback(tracker.aclose)
         proxy_mgr = ProxyManager(api)
@@ -667,8 +668,9 @@ async def _amain(runtime_health: TgbotHealthReporter) -> None:
             storage = MemoryStorage()
         dp = Dispatcher(storage=storage)
 
-        # DI：handler 用 `api: LumenApi` 注解就能拿到
+        # DI：handler 用 `api: LumenApi` / `tracker: Tracker` 注解就能拿到
         dp["api"] = api
+        dp["tracker"] = tracker
         dp["generation_runtime"] = GenerationRuntime()
 
         # 全局准入：拒非私聊 + 可选 TG user_id 白名单
@@ -680,7 +682,7 @@ async def _amain(runtime_health: TgbotHealthReporter) -> None:
 
         stop_event = asyncio.Event()
         listener_task = asyncio.create_task(
-            run_listener(bot, api, stop_event),
+            run_listener(bot, api, stop_event, tracker=tracker),
             name="lumen-listener",
         )
         stack.push_async_callback(_cancel_task, listener_task)

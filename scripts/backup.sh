@@ -42,7 +42,7 @@ fi
 ENV_FILE="$(lumen_find_shared_env "${LUMEN_DEPLOY_ROOT}" 2>/dev/null || true)"
 if [ -n "${ENV_FILE}" ]; then
     export LUMEN_ENV_FILE="${ENV_FILE}"
-    for key in DB_USER DB_NAME DB_PASSWORD REDIS_URL REDIS_PASSWORD BACKUP_ROOT LUMEN_BACKUP_ROOT PG_CONTAINER REDIS_CONTAINER; do
+    for key in DB_USER DB_NAME DB_PASSWORD REDIS_URL REDIS_PASSWORD BACKUP_ROOT LUMEN_BACKUP_ROOT STORAGE_ROOT LUMEN_DATA_ROOT LUMEN_STORAGE_BACKUP_HOOK LUMEN_STORAGE_BACKUP_HOOK_TIMEOUT LUMEN_STORAGE_BACKUP_HOOK_REQUIRED PG_CONTAINER REDIS_CONTAINER; do
         lumen_dotenv_export_if_unset "${key}" "${ENV_FILE}"
     done
 fi
@@ -50,6 +50,7 @@ fi
 TS="$(date -u +%Y%m%d-%H%M%S)"
 BACKUP_OPERATION_ID="${LUMEN_BACKUP_OPERATION_ID:-backup-${TS}-$$}"
 BACKUP_ROOT="${BACKUP_ROOT:-${LUMEN_BACKUP_ROOT:-/opt/lumendata/backup}}"
+STORAGE_ROOT="${STORAGE_ROOT:-${LUMEN_STORAGE_ROOT:-${LUMEN_DATA_ROOT:-$(dirname "$BACKUP_ROOT")}/storage}}"
 PG_DIR="$BACKUP_ROOT/pg"
 REDIS_DIR="$BACKUP_ROOT/redis"
 # MAX_KEEP=56 ≈ 4h 间隔 × 56 = 9.3 天，覆盖工作周末 + 周一来才发现问题的
@@ -92,6 +93,9 @@ BACKUP_LOCK_OWNER_TOKEN=""
 WRITERS_STOPPED=0
 BACKUP_WRITERS_RESUMED=0
 ACTIVE_WRITER_SERVICES=()
+STORAGE_WATERMARK_JSON='{"exists":false,"file_count":0,"root":"","total_bytes":0}'
+BACKUP_STORAGE_HOOK_STATUS="not_configured"
+BACKUP_STORAGE_HOOK_RC=0
 
 log() { printf '[backup %s] %s\n' "$(date -u +%FT%TZ)" "$*"; }
 
@@ -597,34 +601,62 @@ PY
 
 record_backup_success() {
     local marker="${BACKUP_ROOT}/.backup.last-success.json"
+    local storage_sidecar="${BACKUP_ROOT}/.backup-storage.${TS}.json"
     python3 - \
-            "${marker}" "${TS}" "${BACKUP_OPERATION_ID}" "${PAIR_MARKER}" <<'PY'
+            "${marker}" "${storage_sidecar}" "${TS}" "${BACKUP_OPERATION_ID}" "${PAIR_MARKER}" \
+            "${STORAGE_WATERMARK_JSON}" "${BACKUP_STORAGE_HOOK_STATUS}" "${BACKUP_STORAGE_HOOK_RC}" <<'PY'
 import json
 import os
 from pathlib import Path
 import sys
 
 path = Path(sys.argv[1])
-payload = {
-    "completed_at": sys.argv[2],
-    "operation_id": sys.argv[3],
-    "pair_marker": Path(sys.argv[4]).name,
-}
-tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
-data = (json.dumps(payload, sort_keys=True) + "\n").encode()
-fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
+sidecar_path = Path(sys.argv[2])
 try:
-    os.fchmod(fd, 0o640)
-    view = memoryview(data)
-    while view:
-        written = os.write(fd, view)
-        if written <= 0:
-            raise OSError("short write while persisting backup success receipt")
-        view = view[written:]
-    os.fsync(fd)
-finally:
-    os.close(fd)
-os.replace(tmp, path)
+    watermark = json.loads(sys.argv[6])
+    if not isinstance(watermark, dict):
+        watermark = {}
+except Exception:
+    watermark = {}
+file_count = int(watermark.get("file_count", 0) or 0)
+total_bytes = int(watermark.get("total_bytes", 0) or 0)
+payload = {
+    "completed_at": sys.argv[3],
+    "operation_id": sys.argv[4],
+    "pair_marker": Path(sys.argv[5]).name,
+    "storage_file_count": file_count,
+    "storage_hook_rc": int(sys.argv[8] or 0),
+    "storage_hook_status": sys.argv[7] or "not_configured",
+    "storage_total_bytes": total_bytes,
+    "storage_watermark": {
+        "exists": bool(watermark.get("exists", False)),
+        "file_count": file_count,
+        "root": str(watermark.get("root", "")),
+        "total_bytes": total_bytes,
+    },
+}
+
+
+def _atomic_write(dest: Path, doc: dict) -> None:
+    tmp = dest.with_name(f".{dest.name}.tmp.{os.getpid()}")
+    data = (json.dumps(doc, sort_keys=True) + "\n").encode()
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
+    try:
+        os.fchmod(fd, 0o640)
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short write while persisting backup success receipt")
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, dest)
+
+
+_atomic_write(sidecar_path, payload)
+_atomic_write(path, payload)
 dir_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
 try:
     os.fsync(dir_fd)
@@ -1153,7 +1185,8 @@ prune_timestamp() {
     fi
     rm -f \
         "$pg_dir/$ts.pg.dump.gz" \
-        "$redis_dir/$ts.redis.tgz"
+        "$redis_dir/$ts.redis.tgz" \
+        "$BACKUP_ROOT/.backup-storage.$ts.json"
     backup_fsync_directory "$pg_dir"
     backup_fsync_directory "$redis_dir"
 }
@@ -1226,8 +1259,14 @@ prune_paired() {
 # require paused writers; prove readiness before reporting success or pruning.
 # Keep the recovery journal through retention. A crash must be consumed as
 # recovery-only, rather than triggering another full backup and writer outage.
+STORAGE_WATERMARK_JSON="$(lumen_backup_capture_storage_watermark "$STORAGE_ROOT")"
+
 if ! lumen_backup_resume_writers 0; then
     exit 70
+fi
+
+if ! lumen_backup_run_storage_hook; then
+    exit 8
 fi
 
 if ! record_backup_success; then

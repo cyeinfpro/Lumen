@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from collections.abc import Awaitable, Callable, Mapping
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -54,6 +54,11 @@ from .memory_extraction_parts.delivery import (
     restore_undo_tokens,
 )
 from .memory_extraction_parts.prompt_assembly import (
+    QUERY_EMBEDDING_CACHE_TTL_SECONDS as _PROMPT_EMBEDDING_CACHE_TTL_S,
+    QUERY_EMBEDDING_SOFT_TIMEOUT_SECONDS as _PROMPT_EMBEDDING_SOFT_TIMEOUT_S,
+    PgPromptAssemblyHooks as _PgPromptAssemblyHooks,
+    PromptAssemblyOrchestrationDeps as _PromptAssemblyOrchestrationDeps,
+    assemble_user_memory_prompt_with_deps as _assemble_user_memory_prompt_with_deps,
     clipped_prompt_memories as _clipped_prompt_memories_impl,
     confirmation_instruction as _confirmation_instruction_impl,
     pick_confirmation_candidate as _pick_confirmation_candidate_impl,
@@ -120,6 +125,13 @@ _clip_lines = _memory_values._clip_lines
 _default_scope = _memory_prompt_storage._default_scope
 _memory_scope_context = _memory_prompt_storage._memory_scope_context
 _prompt_memory_rows = _memory_prompt_storage._prompt_memory_rows
+_prompt_mandatory_memory_rows = _memory_prompt_storage._prompt_mandatory_memory_rows
+_prompt_pg_vector_candidates = _memory_prompt_storage._prompt_pg_vector_candidates
+_prompt_pg_recent_fallback_candidates = (
+    _memory_prompt_storage._prompt_pg_recent_fallback_candidates
+)
+_prompt_pg_memory_similarities = _memory_prompt_storage._prompt_pg_memory_similarities
+_session_dialect_name = _memory_prompt_storage.session_dialect_name
 
 
 async def _embedding_provider_available(ctx: dict[str, Any] | None) -> bool:
@@ -398,6 +410,10 @@ async def _ranked_prompt_memories(
     *,
     user_text: str,
     now: datetime,
+    redis: Any | None = None,
+    precomputed_similarities: Mapping[str, float] | None = None,
+    query_vec_override: list[float] | None = None,
+    embedding_degraded: bool = False,
 ) -> tuple[list[UserMemory], list[UserMemory], list[UserMemory], list[float] | None]:
     return await _ranked_prompt_memories_impl(
         rows,
@@ -405,6 +421,11 @@ async def _ranked_prompt_memories(
         now=now,
         embedding_vector=_embedding_vector,
         decay=_decay,
+        redis=redis,
+        soft_timeout_s=_PROMPT_EMBEDDING_SOFT_TIMEOUT_S,
+        precomputed_similarities=precomputed_similarities,
+        query_vec_override=query_vec_override,
+        embedding_degraded=embedding_degraded,
     )
 
 
@@ -440,6 +461,20 @@ async def _record_used_memories(
 _confirmation_instruction = _confirmation_instruction_impl
 
 
+def _pg_prompt_assembly_hooks() -> _PgPromptAssemblyHooks:
+    return _PgPromptAssemblyHooks(
+        prompt_mandatory_memory_rows=_prompt_mandatory_memory_rows,
+        prompt_pg_vector_candidates=_prompt_pg_vector_candidates,
+        prompt_pg_recent_fallback_candidates=_prompt_pg_recent_fallback_candidates,
+        prompt_pg_memory_similarities=_prompt_pg_memory_similarities,
+        embedding_vector=_embedding_vector,
+        ranked_prompt_memories=_ranked_prompt_memories,
+        embedding_model=_EMBEDDING_MODEL,
+        soft_timeout_s=_PROMPT_EMBEDDING_SOFT_TIMEOUT_S,
+        cache_ttl_s=_PROMPT_EMBEDDING_CACHE_TTL_S,
+    )
+
+
 async def assemble_user_memory_prompt(
     session: Any,
     *,
@@ -449,78 +484,29 @@ async def assemble_user_memory_prompt(
     redis: Any | None = None,
     parent_user_message_id: str | None = None,
 ) -> AssembledMemoryPrompt:
-    if not await _embedding_provider_available(None):
-        return AssembledMemoryPrompt(None, None, None, [], [])
-    disabled_ids = await _conversation_disabled_memory_ids(redis, conversation_id)
-    user = await session.get(User, user_id)
-    conv = await session.get(Conversation, conversation_id)
-    if user is None or conv is None:
-        return AssembledMemoryPrompt(None, None, None, [], [])
-    if user.memory_disabled or conv.memory_disabled:
-        return AssembledMemoryPrompt(None, None, None, [], [])
-
-    scope_ids, active_scope = await _memory_scope_context(
+    deps = _PromptAssemblyOrchestrationDeps(
+        embedding_provider_available=_embedding_provider_available,
+        conversation_disabled_memory_ids=_conversation_disabled_memory_ids,
+        memory_scope_context=_memory_scope_context,
+        session_dialect_name=_session_dialect_name,
+        prompt_memory_rows=_prompt_memory_rows,
+        ranked_prompt_memories=_ranked_prompt_memories,
+        clipped_prompt_memories=_clipped_prompt_memories,
+        record_used_memories=_record_used_memories,
+        pick_confirmation_candidate=_pick_confirmation_candidate,
+        pg_hooks_factory=_pg_prompt_assembly_hooks,
+        memory_lines=_memory_lines,
+        user_model=User,
+        conversation_model=Conversation,
+    )
+    return await _assemble_user_memory_prompt_with_deps(
         session,
+        deps=deps,
         user_id=user_id,
-        conversation=conv,
-    )
-    rows = await _prompt_memory_rows(
-        session,
-        user_id=user_id,
-        scope_ids=scope_ids,
-        disabled_ids=disabled_ids,
-    )
-    commit = getattr(session, "commit", None)
-    if callable(commit):
-        await commit()
-    now = datetime.now(timezone.utc)
-    profiles, avoids, context_memories, query_vec = await _ranked_prompt_memories(
-        rows,
-        user_text=user_text,
-        now=now,
-    )
-    profiles, avoids, context_memories = _clipped_prompt_memories(
-        profiles,
-        avoids,
-        context_memories,
-    )
-
-    used = [*profiles, *avoids, *context_memories]
-    used_ids = [m.id for m in used]
-    used_summary = [{"id": m.id, "type": m.type, "content": m.content} for m in used]
-    await _record_used_memories(
-        session,
-        redis=redis,
-        used_ids=used_ids,
-        now=now,
-    )
-
-    confirmation_candidate = await _pick_confirmation_candidate(
-        session,
-        context_memories + avoids,
-        user=user,
-        user_text=user_text,
-        now=now,
         conversation_id=conversation_id,
+        user_text=user_text,
+        redis=redis,
         parent_user_message_id=parent_user_message_id,
-        query_vec=query_vec,
-    )
-
-    return AssembledMemoryPrompt(
-        profile_text=_memory_lines("user_profile", profiles),
-        constraints_text=_memory_lines("user_constraints", avoids),
-        context_text=_memory_lines("user_context", context_memories),
-        used_memory_ids=used_ids,
-        used_memory_summary=used_summary,
-        scope_hint_text=(
-            f"本会话上下文领域: {active_scope.name}"
-            if active_scope is not None and not active_scope.is_default
-            else None
-        ),
-        confirmation_candidate_id=confirmation_candidate.id
-        if confirmation_candidate
-        else None,
-        confirmation_instruction=_confirmation_instruction(confirmation_candidate),
     )
 
 
@@ -534,6 +520,7 @@ async def _pick_confirmation_candidate(
     conversation_id: str,
     parent_user_message_id: str | None,
     query_vec: list[float] | None = None,
+    precomputed_similarities: Mapping[str, float] | None = None,
 ) -> UserMemory | None:
     return await _pick_confirmation_candidate_impl(
         session,
@@ -546,6 +533,7 @@ async def _pick_confirmation_candidate(
         try_advisory_xact_lock=_try_advisory_xact_lock,
         confirm_weekly_limit=_CONFIRM_WEEKLY_LIMIT,
         query_vec=query_vec,
+        precomputed_similarities=precomputed_similarities,
     )
 
 

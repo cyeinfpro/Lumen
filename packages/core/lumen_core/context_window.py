@@ -12,6 +12,7 @@ from typing import Any, TypeGuard
 
 from .constants import DEFAULT_CHAT_INSTRUCTIONS, Role
 from .immutables import immutable_mapping
+from .runtime_slot import RuntimeSlot
 
 
 CONTEXT_TOTAL_TOKEN_TARGET = 256_000
@@ -51,7 +52,7 @@ HISTORY_FETCH_BATCH = 128
 HISTORY_SCAN_MAX_TOKENS = 512_000
 MESSAGE_OVERHEAD_TOKENS = 8
 SYSTEM_PROMPT_OVERHEAD_TOKENS = 16
-SYSTEM_PROMPT_DUPLICATION_FACTOR = 2
+SYSTEM_PROMPT_DUPLICATION_FACTOR = 1
 IMAGE_INPUT_ESTIMATED_TOKENS = 1_536
 SUMMARY_KIND = "rolling_conversation_summary"
 SUMMARY_VERSION = 2
@@ -90,15 +91,16 @@ def estimate_text_tokens(text: str) -> int:
     return ascii_tokens + non_ascii_like
 
 
-def estimate_system_prompt_tokens(system_prompt: str | None) -> int:
+def estimate_system_prompt_tokens(
+    system_prompt: str | None,
+    duplication_factor: int = SYSTEM_PROMPT_DUPLICATION_FACTOR,
+) -> int:
     prompt = system_prompt or DEFAULT_CHAT_INSTRUCTIONS
     if prompt:
-        # The current worker sends the prompt both as a system input item and as
-        # top-level instructions, so reserve budget for both copies.
-        return (
-            SYSTEM_PROMPT_OVERHEAD_TOKENS
-            + SYSTEM_PROMPT_DUPLICATION_FACTOR * estimate_text_tokens(prompt)
-        )
+        # Top-level instructions are sent once by default; legacy callers that
+        # duplicate instructions as a system item may pass duplication_factor=2.
+        factor = max(1, int(duplication_factor))
+        return SYSTEM_PROMPT_OVERHEAD_TOKENS + factor * estimate_text_tokens(prompt)
     return 0
 
 
@@ -332,7 +334,18 @@ class _TokenCounterRuntime:
             return self._encoding
 
 
-_TOKEN_COUNTER_RUNTIME = _TokenCounterRuntime()
+_TOKEN_COUNTER_SLOT: RuntimeSlot[_TokenCounterRuntime] = RuntimeSlot(
+    "core-token-counter",
+    default_factory=_TokenCounterRuntime,
+)
+
+
+class _TokenCounterRuntimeProxy:
+    def __getattr__(self, name: str) -> Any:
+        return getattr(_TOKEN_COUNTER_SLOT.current(), name)
+
+
+_TOKEN_COUNTER_RUNTIME: Any = _TokenCounterRuntimeProxy()
 _DEFAULT_TIKTOKEN_LOAD_TIMEOUT_SEC = 0.15
 
 
@@ -432,8 +445,8 @@ def messages_token_count(
 ) -> int:
     """估算消息列表的总 token，包含 per-message 与 system 开销。
 
-    注：system 开销用现有的 ``estimate_system_prompt_tokens``，含 duplication
-    factor（因为 worker 同时把 system_prompt 作为 input item 与 instructions 上送）。
+    注：system 开销用 ``estimate_system_prompt_tokens``（默认按单份 top-level
+    instructions 计费，不再重复双倍预扣）。
     入参 messages 按 ResponseItem dict 或 ORM Message 行均可，函数会自适应。
     """
     if not messages:

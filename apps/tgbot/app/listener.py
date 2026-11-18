@@ -48,9 +48,10 @@ from .handlers._helpers import mime_extension, truncate_text
 from .listener_metrics import metrics
 from .keyboards import post_success_keyboard, retry_keyboard
 from . import listener_runtime as _listener_support
-from .tracker import DELIVERY_LOCK_MS, TaskTrack, tracker
+from .tracker import DELIVERY_LOCK_MS, TaskTrack, Tracker
 
 logger = logging.getLogger(__name__)
+tracker: Any | None = None
 
 _STAGE_LABELS = MappingProxyType(
     {
@@ -81,6 +82,15 @@ def _listener_runtime() -> ListenerRuntimeState:
         runtime = ListenerRuntimeState()
         _LISTENER_RUNTIME.set(runtime)
     return runtime
+
+
+def _active_tracker() -> Tracker:
+    if tracker is not None:
+        return tracker
+    runtime = _listener_runtime()
+    if runtime.tracker is None:
+        runtime.tracker = Tracker()
+    return runtime.tracker
 
 
 _PARENT_GRACE_AFTER_SUCCESS_SEC = _listener_support._PARENT_GRACE_AFTER_SUCCESS_SEC
@@ -163,7 +173,10 @@ async def _send_document_with_backoff(
 
 
 async def _load_active_user_ids(redis: aioredis.Redis) -> set[str]:
-    return await _listener_support._load_active_user_ids(redis, tracker=tracker)
+    return await _listener_support._load_active_user_ids(
+        redis,
+        tracker=_active_tracker(),
+    )
 
 
 async def _recover_active_user_ids(
@@ -173,7 +186,7 @@ async def _recover_active_user_ids(
 ) -> set[str]:
     return await _listener_support._recover_active_user_ids(
         redis,
-        tracker=tracker,
+        tracker=_active_tracker(),
         max_scan_batches=max_scan_batches,
     )
 
@@ -271,7 +284,8 @@ def _validate_telegram_envelope(envelope: Any) -> ParsedTelegramEvent:
 
 @contextlib.asynccontextmanager
 async def _delivery_lease(gen_id: str) -> AsyncIterator[ActiveDeliveryLease]:
-    claim = await tracker.begin_delivery(gen_id)
+    active_tracker = _active_tracker()
+    claim = await active_tracker.begin_delivery(gen_id)
     if claim.state == "already_notified":
         raise _AlreadyTerminallyDelivered(gen_id)
     if claim.state != "acquired" or claim.owner_token is None:
@@ -284,7 +298,7 @@ async def _delivery_lease(gen_id: str) -> AsyncIterator[ActiveDeliveryLease]:
         while True:
             await asyncio.sleep(DELIVERY_LOCK_MS / 3000)
             try:
-                renewed = await tracker.renew_delivery(gen_id, owner_token)
+                renewed = await active_tracker.renew_delivery(gen_id, owner_token)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -333,7 +347,7 @@ async def _notify_dispatch_drop(
     if event != "generation.succeeded":
         return DropNoticeReceipt(delivered=False, error="not_applicable")
     try:
-        track = await tracker.get(gen_id)
+        track = await _active_tracker().get(gen_id)
         if track is None:
             return DropNoticeReceipt(delivered=False, error="tracker_missing")
         message_id = await _replace_status_with_receipt(
@@ -351,7 +365,13 @@ async def _notify_dispatch_drop(
     return DropNoticeReceipt(delivered=True, telegram_message_id=message_id)
 
 
-async def run_listener(bot: Bot, api: LumenApi, stop_event: asyncio.Event) -> None:
+async def run_listener(
+    bot: Bot,
+    api: LumenApi,
+    stop_event: asyncio.Event,
+    *,
+    tracker: Tracker | None = None,
+) -> None:
     """常驻 task：发现 user streams，按需起 / 重启 per-user worker。
 
     出错（包括 redis 抖动）只 warn 不抬，sleep 后重连。退避到 60s 上限；连续失败
@@ -360,7 +380,7 @@ async def run_listener(bot: Bot, api: LumenApi, stop_event: asyncio.Event) -> No
     死了用户拿不到推送，比"退出让 systemd 拉起"更糟）。
     """
     runtime_token: Token[ListenerRuntimeState | None] = _LISTENER_RUNTIME.set(
-        ListenerRuntimeState()
+        ListenerRuntimeState(tracker=tracker)
     )
     backoff = 1.0
     consecutive_failures = 0
@@ -685,7 +705,7 @@ async def _dispatch(
         return DispatchDisposition.DELIVERED
 
     gen_id = str(data["generation_id"])
-    track = await tracker.get(gen_id)
+    track = await _active_tracker().get(gen_id)
     if track is None:
         return DispatchDisposition.IGNORED_NOT_BOT_OWNED
     return await _dispatch_tracked_event(bot, api, event, gen_id, track, data)
@@ -759,13 +779,14 @@ def _precheck_generation_id(event: str, data: dict[str, Any]) -> str:
 
 
 async def _wait_for_bot_owned_track(event: str, gen_id: str) -> bool:
-    if await tracker.get(gen_id) is not None:
+    active_tracker = _active_tracker()
+    if await active_tracker.get(gen_id) is not None:
         return True
     if event not in ("generation.succeeded", "generation.attached"):
         return False
     for delay in _BONUS_PRECHECK_RETRIES:
         await asyncio.sleep(delay)
-        if await tracker.get(gen_id) is not None:
+        if await active_tracker.get(gen_id) is not None:
             return True
     return False
 
@@ -784,7 +805,7 @@ async def _refresh_stream_track(
         "generation.attached",
     }:
         return True
-    return await tracker.refresh(gen_id, stream_user_id)
+    return await _active_tracker().refresh(gen_id, stream_user_id)
 
 
 async def _on_attached(bot: Bot, data: dict[str, Any]) -> None:
@@ -804,10 +825,11 @@ async def _on_attached(bot: Bot, data: dict[str, Any]) -> None:
         raise ValueError(
             "generation.attached requires parent_generation_id and generation_id"
         )
-    parent = await tracker.get(parent_id)
+    active_tracker = _active_tracker()
+    parent = await active_tracker.get(parent_id)
     if parent is None:
         return  # 不是 bot 跟踪的任务
-    existing = await tracker.get(bonus_id)
+    existing = await active_tracker.get(bonus_id)
     if existing is not None and existing.status_message_id is not None:
         return
     if existing is None:
@@ -820,7 +842,7 @@ async def _on_attached(bot: Bot, data: dict[str, Any]) -> None:
             is_bonus=True,
             user_id=parent.user_id,
         )
-        await tracker.add(
+        await active_tracker.add(
             bonus_id,
             existing,
         )
@@ -830,7 +852,7 @@ async def _on_attached(bot: Bot, data: dict[str, Any]) -> None:
         f"📝 {_truncate(status_track.prompt, 200)}"
     )
     bonus_status = await bot.send_message(chat_id=status_track.chat_id, text=text)
-    await tracker.update_status_message(bonus_id, bonus_status.message_id)
+    await active_tracker.update_status_message(bonus_id, bonus_status.message_id)
 
 
 async def _on_progress(bot: Bot, track, data: dict[str, Any]) -> None:
@@ -860,10 +882,17 @@ async def _finish_succeeded_cleanup(bot: Bot, gen_id: str, track) -> None:
     await _maybe_finalize_batch(bot, track, gen_id)
     # bonus 自身没有再下一级 bonus，立即清理；winner（非 bonus）必须延迟清理，
     # 否则 dual_race 的 EV_GEN_ATTACHED 来了找不到 parent，loser 那张就丢了。
+    active_tracker = _active_tracker()
     if track.is_bonus:
-        await tracker.remove(gen_id)
+        await active_tracker.remove(gen_id)
     else:
-        asyncio.create_task(_expire_tracker(gen_id, _PARENT_GRACE_AFTER_SUCCESS_SEC))
+        asyncio.create_task(
+            _expire_tracker(
+                gen_id,
+                _PARENT_GRACE_AFTER_SUCCESS_SEC,
+                active_tracker=active_tracker,
+            )
+        )
 
 
 async def _resolve_succeeded_image_ids(
@@ -925,7 +954,7 @@ async def _on_succeeded(
             if not delivered:
                 raise RuntimeError(f"terminal delivery failed gen={gen_id}")
             lease.assert_owned(gen_id)
-            if not await tracker.mark_notified(
+            if not await _active_tracker().mark_notified(
                 gen_id,
                 owner_token=lease.owner_token,
             ):
@@ -1233,7 +1262,7 @@ async def _on_failed(bot: Bot, gen_id: str, track, data: dict[str, Any]) -> None
                         reply_markup=retry_keyboard(gen_id),
                     )
             lease.assert_owned(gen_id)
-            if not await tracker.mark_notified(
+            if not await _active_tracker().mark_notified(
                 gen_id,
                 owner_token=lease.owner_token,
             ):
@@ -1248,14 +1277,17 @@ async def _on_failed(bot: Bot, gen_id: str, track, data: dict[str, Any]) -> None
         raise
     await _maybe_finalize_batch(bot, track, gen_id)
     # 失败保留 tracker 一会儿，让重试能拿到原 prompt（5 分钟后过期清理）
-    asyncio.create_task(_expire_tracker(gen_id, 300))
+    asyncio.create_task(
+        _expire_tracker(gen_id, 300, active_tracker=_active_tracker())
+    )
 
 
 async def _maybe_finalize_batch(bot: Bot, track, gen_id: str) -> None:
     """batch 模式：每条 gen 终态扣计数；归零删 placeholder。单任务无操作。"""
     if not track.batch_id:
         return
-    remaining = await tracker.batch_decr(track.batch_id, gen_id)
+    active_tracker = _active_tracker()
+    remaining = await active_tracker.batch_decr(track.batch_id, gen_id)
     if remaining is None:
         logger.warning(
             "batch counter missing; skip placeholder delete batch=%s gen=%s",
@@ -1271,12 +1303,18 @@ async def _maybe_finalize_batch(bot: Bot, track, gen_id: str) -> None:
         )
     except TelegramBadRequest:
         pass
-    await tracker.batch_remove(track.batch_id)
+    await active_tracker.batch_remove(track.batch_id)
 
 
-async def _expire_tracker(gen_id: str, delay: float) -> None:
+async def _expire_tracker(
+    gen_id: str,
+    delay: float,
+    *,
+    active_tracker: Tracker | None = None,
+) -> None:
     await asyncio.sleep(delay)
-    await tracker.remove(gen_id)
+    resolved = active_tracker or _active_tracker()
+    await resolved.remove(gen_id)
 
 
 async def _replace_status(bot: Bot, track, text: str) -> None:
@@ -1335,7 +1373,7 @@ async def _release_delivery_if_owned(
     if lease is None or lease.lost.is_set():
         return
     try:
-        released = await tracker.clear_delivery(
+        released = await _active_tracker().clear_delivery(
             gen_id,
             owner_token=lease.owner_token,
         )

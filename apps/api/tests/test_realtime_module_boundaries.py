@@ -16,6 +16,10 @@ def test_realtime_capabilities_are_exported_through_public_index() -> None:
         "stream_events",
         "EventStreamState",
         "ConnectionEventDeduper",
+        "ProcessRealtimeMultiplexer",
+        "create_realtime_route_lifespan",
+        "resolve_realtime_multiplexer",
+        "close_app_realtime_multiplexer",
     }
 
     assert expected.issubset(set(realtime.__all__))

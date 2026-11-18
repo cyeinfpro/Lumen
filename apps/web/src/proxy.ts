@@ -120,6 +120,6 @@ export const config = {
   matcher: [
     "/api/:path*",
     "/events",
-    "/((?!_next/static|_next/image|favicon.ico|robots.txt).*)",
+    "/((?!_next/static|_next/image|fonts/|favicon.ico|robots.txt|sw.js|manifest.webmanifest).*)",
   ],
 };

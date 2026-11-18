@@ -136,7 +136,7 @@ async def test_read_repair_never_carries_run_lock_into_next_execution(
         async def reader():
             async with factory() as db:
                 await read_repair.repair_canvas_executions(
-                    db, user_id="u", canvas_id="c", limit=count
+                    db, user_id="u", canvas_id="c", limit=count, persist=True
                 )
 
         await asyncio.wait_for(asyncio.gather(reader(), worker()), timeout=8)

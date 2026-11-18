@@ -20,6 +20,16 @@ import { assistantHasGeneration } from "@/features/generation";
 import { createGenerationActions } from "./chat/generationActions";
 import { buildMessageListState } from "./chat/history";
 import { normalizeImageParams } from "./chat/imageParams";
+import {
+  CONVERSATION_HISTORY_MEDIA_CACHE_LIMIT,
+  MAX_RETAINED_TERMINAL_MEDIA_ITEMS,
+  buildTerminalMediaLruEvictionPatch,
+  clearMediaLruTracking,
+  dropRecentConversationMediaRefs,
+  rememberRecentConversationMedia,
+  syncChangedMediaKeysToLru,
+  touchMediaRecordKeys,
+} from "./chat/mediaLru";
 import { adaptBackendAssistantMessage } from "./chat/messageAdapters";
 import { mergeMessagesById } from "./chat/messageReconciliation";
 import { structuredAttachmentsFromComposer } from "./chat/payload";
@@ -31,6 +41,7 @@ import {
 import { createTaskRecoveryActions } from "./chat/taskRecovery";
 import {
   _conversationMutationFence,
+  _generationConvIds,
   _imageConvIds,
   _messageConvIds,
   _userSessionFence,
@@ -56,6 +67,7 @@ import {
 import type {
   ChatDataSlice,
   ChatState,
+  ChatStateSetter,
   ComposerState,
 } from "./chat/types";
 
@@ -68,6 +80,11 @@ import type {
 // rememberCompletionMessage(completionId, realAssistant.id);
 
 export type { ReasoningEffort } from "./chat/types";
+export {
+  CONVERSATION_HISTORY_MEDIA_CACHE_LIMIT,
+  MAX_RETAINED_TERMINAL_MEDIA_ITEMS,
+  buildTerminalMediaLruEvictionPatch,
+};
 
 let _runtimeFastDefault: boolean | null = null;
 let _fastTouchedByUser = false;
@@ -114,7 +131,19 @@ function appendMessage(
 }
 
 function createChatStore() {
-  return create<ChatState>((set, get) => {
+  return create<ChatState>((rawSet, get) => {
+    const set: ChatStateSetter = (partial) => {
+      const prev = get();
+      rawSet(partial);
+      const next = get();
+      syncChangedMediaKeysToLru(
+        prev.generations,
+        next.generations,
+        prev.imagesById,
+        next.imagesById,
+      );
+      dropRecentConversationMediaRefs(next.currentConvId);
+    };
     const sendMessageAction = createSendMessageAction(set, get, {
       createInitialComposer,
       facadeDelegates: CHAT_FACADE_DELEGATES,
@@ -132,6 +161,7 @@ function createChatStore() {
         _conversationMutationFence.advance();
         clearAppendedMessageRecoveryQueue();
         clearUserScopedRuntime();
+        clearMediaLruTracking();
         set({ ...createInitialChatData(), currentUserId: id });
       },
       applyRuntimeDefaults: (defaults) => {
@@ -148,28 +178,51 @@ function createChatStore() {
           };
         });
       },
-      // 切换会话只清当前消息；全局 generation / image 池继续承接后台任务。
+      // 切换会话只清当前消息；全局 generation / image 池继续承接后台任务，并对超上限终态非活跃条目按 LRU 回收。
       setCurrentConv: (id) => {
-        const previousConvId = get().currentConvId;
+        const previousState = get();
+        const previousConvId = previousState.currentConvId;
         if (previousConvId === id) return;
+        rememberRecentConversationMedia(
+          previousConvId,
+          previousState.messages,
+          previousState.generations,
+          previousState.imagesById,
+          true,
+        );
+        dropRecentConversationMediaRefs(id);
         _conversationMutationFence.advance();
         const cached = readConversationHistoryCache(id);
+        if (cached) {
+          touchMediaRecordKeys(cached.generations, cached.imagesById);
+        }
         abortAllHistoryRequests();
         abortAllSendRequests();
-        set((state) => ({
-          currentConvId: id,
-          messages: cached?.messages ?? [],
-          generations: cached
+        set((state) => {
+          const nextMessages = cached?.messages ?? [];
+          const mergedGenerations = cached
             ? { ...state.generations, ...cached.generations }
-            : state.generations,
-          imagesById: cached
+            : state.generations;
+          const mergedImagesById = cached
             ? { ...state.imagesById, ...cached.imagesById }
-            : state.imagesById,
-          messagesCursor: cached?.messagesCursor ?? null,
-          messagesHasMore: cached?.messagesHasMore ?? false,
-          messagesLoading: false,
-          messagesError: null,
-        }));
+            : state.imagesById;
+          const gcPatch = buildTerminalMediaLruEvictionPatch({
+            currentConvId: id,
+            messages: nextMessages,
+            generations: mergedGenerations,
+            imagesById: mergedImagesById,
+          });
+          return {
+            currentConvId: id,
+            messages: nextMessages,
+            generations: gcPatch ? gcPatch.generations : mergedGenerations,
+            imagesById: gcPatch ? gcPatch.imagesById : mergedImagesById,
+            messagesCursor: cached?.messagesCursor ?? null,
+            messagesHasMore: cached?.messagesHasMore ?? false,
+            messagesLoading: false,
+            messagesError: null,
+          };
+        });
         clearCompletionStreamBuffer();
         scheduleBase64Eviction();
       },
@@ -208,7 +261,10 @@ function createChatStore() {
       },
       upsertGeneration: (generation) => {
         const convId =
-          _messageConvIds.get(generation.message_id) ?? get().currentConvId;
+          generation.conversation_id ??
+          _generationConvIds.get(generation.id) ??
+          _messageConvIds.get(generation.message_id) ??
+          get().currentConvId;
         if (convId) rememberGenerationForConversation(convId, generation);
         invalidateConversationHistoryCache(convId);
         set((state) => ({
@@ -285,6 +341,7 @@ function createChatStore() {
         _conversationMutationFence.advance();
         clearAppendedMessageRecoveryQueue();
         clearUserScopedRuntime();
+        clearMediaLruTracking();
         if (typeof window !== "undefined") {
           window.dispatchEvent(new Event("lumen:chat-store-reset"));
         }
@@ -302,6 +359,7 @@ function getChatStore(): ChatStoreHook {
   if (typeof window === "undefined") {
     clearCompletionStreamBuffer();
     clearConversationIndexes();
+    clearMediaLruTracking();
     return createChatStore();
   }
   if (!browserChatStore) {
@@ -332,12 +390,26 @@ export const useChatStore: ChatStoreHook = new Proxy(
   },
 ) as ChatStoreHook;
 
+export function runTerminalMediaLruGc(
+  maxRetained = MAX_RETAINED_TERMINAL_MEDIA_ITEMS,
+): boolean {
+  const current = useChatStore.getState();
+  const patch = buildTerminalMediaLruEvictionPatch(current, maxRetained);
+  if (!patch) return false;
+  useChatStore.setState(patch);
+  return true;
+}
+
 bindChatStoreRuntime({
   getState: () => useChatStore.getState(),
-  setState: (partial) => useChatStore.setState(partial),
+  setState: (partial) => {
+    useChatStore.setState(partial);
+    runTerminalMediaLruGc();
+  },
 });
 
 export function disposeChatStoreRuntime(): void {
+  clearMediaLruTracking();
   disposeChatRuntime();
 }
 

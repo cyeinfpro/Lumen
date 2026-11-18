@@ -305,9 +305,12 @@ _RACE_CANCEL_WAIT_S = 5.0
 _REFERENCE_CACHE_TTL_S = 30 * 60
 _REFERENCE_CACHE_MAX_ENTRIES = 10
 _REFERENCE_CACHE_HEAD_TIMEOUT_S = 5.0
+_REFERENCE_CACHE_FRESH_WINDOW_S = 60.0
+_REFERENCE_CACHE_EXPIRY_MARGIN_S = 120.0
 _REFERENCE_CACHE_KEY_PREFIX = "lumen:ref_cache:"
 _REFERENCE_CACHE_LRU_SUFFIX = ":lru"
 _REFERENCE_PUSH_TIMEOUT_S = 30.0
+_REFERENCE_UPLOAD_CONCURRENCY = 4
 
 
 # 单例 client——进程内复用连接池
@@ -415,7 +418,10 @@ _LOG_API_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_\-]{6,}\b")
 
 
 async def close_client(*, runtime: ImageUpstreamRuntime) -> None:
-    await upstream_client_lifecycle.close_client(runtime=runtime)
+    try:
+        await upstream_client_lifecycle.close_client(runtime=runtime)
+    finally:
+        await runtime.aclose()
 
 
 @dataclass(frozen=True)
@@ -841,12 +847,15 @@ def build_image_upstream_runtime() -> ImageUpstreamRuntime:
             _PROXIED_CLIENT_IDLE_CLOSE_TIMEOUT_SECONDS,
             _RACE_CANCEL_WAIT_S,
             _RACE_SINGLE_LANE_PIXELS,
+            _REFERENCE_CACHE_EXPIRY_MARGIN_S,
+            _REFERENCE_CACHE_FRESH_WINDOW_S,
             _REFERENCE_CACHE_HEAD_TIMEOUT_S,
             _REFERENCE_CACHE_KEY_PREFIX,
             _REFERENCE_CACHE_LRU_SUFFIX,
             _REFERENCE_CACHE_MAX_ENTRIES,
             _REFERENCE_CACHE_TTL_S,
             _REFERENCE_PUSH_TIMEOUT_S,
+            _REFERENCE_UPLOAD_CONCURRENCY,
             _RETRY_HTTPX_EXC,
             _RETRY_STATUS,
             _SAFETY_POLICY_ERROR_MARKERS,

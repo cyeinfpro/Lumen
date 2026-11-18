@@ -87,7 +87,9 @@ from .messages_parts import submission as _submission
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+AssistantTaskCommand = _message_submission.AssistantTaskCommand
 AssistantTaskResult = _message_submission.AssistantTaskResult
+AssistantTaskServices = _message_submission.AssistantTaskServices
 _TaskCredentialPin = _message_submission.TaskCredentialPin
 _IMAGE_OUTPUT_FORMAT_VALUES = _message_submission.IMAGE_OUTPUT_FORMAT_VALUES
 _DEFAULT_IMAGE_OUTPUT_FORMAT = _message_submission.DEFAULT_IMAGE_OUTPUT_FORMAT
@@ -380,18 +382,28 @@ async def _resolve_task_credential_pin(
 _select_chat_task_model = _message_submission._select_chat_task_model
 
 
-async def _create_assistant_task(**kwargs: Any) -> AssistantTaskResult:
+async def _create_assistant_task(
+    command: AssistantTaskCommand | None = None,
+    **kwargs: Any,
+) -> AssistantTaskResult:
+    if command is not None and kwargs:
+        raise TypeError("cannot mix AssistantTaskCommand with keyword arguments")
+    resolved_command = (
+        command if command is not None else AssistantTaskCommand(**kwargs)
+    )
     return await _message_submission.create_assistant_task(
-        **kwargs,
-        resolve_task_credential_pin_fn=_resolve_task_credential_pin,
-        ensure_chat_wallet_preflight_fn=_ensure_chat_wallet_preflight,
-        billing_enabled_fn=_billing_enabled,
-        billing_allow_negative_fn=_billing_allow_negative,
-        billing_image_thresholds_fn=_billing_image_thresholds,
-        user_rate_multiplier_fn=_user_rate_multiplier_x10000,
-        apply_rate_multiplier_fn=_apply_rate_multiplier_micro,
-        requested_image_billing_tier_fn=_requested_image_billing_tier,
-        write_audit_fn=write_audit,
+        resolved_command,
+        services=AssistantTaskServices(
+            resolve_task_credential_pin_fn=_resolve_task_credential_pin,
+            ensure_chat_wallet_preflight_fn=_ensure_chat_wallet_preflight,
+            billing_enabled_fn=_billing_enabled,
+            billing_allow_negative_fn=_billing_allow_negative,
+            billing_image_thresholds_fn=_billing_image_thresholds,
+            user_rate_multiplier_fn=_user_rate_multiplier_x10000,
+            apply_rate_multiplier_fn=_apply_rate_multiplier_micro,
+            requested_image_billing_tier_fn=_requested_image_billing_tier,
+            write_audit_fn=write_audit,
+        ),
     )
 
 
@@ -413,9 +425,12 @@ async def _publish_assistant_task(**kwargs: Any) -> None:
     )
 
 
-async def create_assistant_task(**kwargs: Any) -> AssistantTaskResult:
+async def create_assistant_task(
+    command: AssistantTaskCommand | None = None,
+    **kwargs: Any,
+) -> AssistantTaskResult:
     """Public adapter preserving the legacy task-creation patch point."""
-    return await _create_assistant_task(**kwargs)
+    return await _create_assistant_task(command, **kwargs)
 
 
 async def publish_assistant_task(**kwargs: Any) -> None:

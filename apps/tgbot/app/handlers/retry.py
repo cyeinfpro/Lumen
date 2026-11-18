@@ -13,15 +13,28 @@ from aiogram.types import CallbackQuery
 from lumen_core.constants import MAX_MESSAGE_ATTACHMENTS
 
 from ..api_client import ApiError, LumenApi, make_idempotency_key
-from ..tracker import TaskTrack, tracker
+from ..tracker import TaskTrack, Tracker
 from ._helpers import require_message, resolution_from_size, telegram_user_id
 
 logger = logging.getLogger(__name__)
 router = Router()
+tracker: Tracker | None = None
+
+
+def _resolve_tracker(injected: Tracker | None = None) -> Tracker:
+    active = injected if injected is not None else tracker
+    if active is None:
+        raise RuntimeError("TgBot handler tracker is not configured")
+    return active
 
 
 @router.callback_query(F.data.startswith("retry:"))
-async def on_retry(cb: CallbackQuery, api: LumenApi) -> None:
+async def on_retry(
+    cb: CallbackQuery,
+    api: LumenApi,
+    tracker: Tracker | None = None,
+) -> None:
+    active_tracker = _resolve_tracker(tracker)
     gen_id = (cb.data or "").split(":", 1)[1] if cb.data else ""
     if not gen_id:
         await cb.answer()
@@ -38,7 +51,9 @@ async def on_retry(cb: CallbackQuery, api: LumenApi) -> None:
     # 第一次提交的任务、不会新建 —— 提前查标记,明确告知而不是静默返回旧任务
     # (或重复输出误导性的「已排队 #B」)。
     try:
-        prior_new_gen = await tracker.retry_source_new_gen("retry", msg.chat.id, gen_id)
+        prior_new_gen = await active_tracker.retry_source_new_gen(
+            "retry", msg.chat.id, gen_id
+        )
     except Exception as exc:  # noqa: BLE001
         # Redis 不可用：宁可放行也不要卡死用户;服务端幂等键仍是第二道防线。
         logger.warning("retry marker lookup failed gen=%s err=%r", gen_id, exc)
@@ -109,7 +124,9 @@ async def on_retry(cb: CallbackQuery, api: LumenApi) -> None:
 
     new_gen = new_ids[0]
     try:
-        await tracker.mark_retry_submitted("retry", msg.chat.id, gen_id, new_gen)
+        await active_tracker.mark_retry_submitted(
+            "retry", msg.chat.id, gen_id, new_gen
+        )
     except Exception as exc:  # noqa: BLE001
         # 标记写失败不阻塞提交;只是下一次重复点击会退回「回放旧任务」的旧行为。
         logger.warning("retry marker write failed gen=%s err=%r", new_gen, exc)
@@ -117,7 +134,7 @@ async def on_retry(cb: CallbackQuery, api: LumenApi) -> None:
         f"⏳ 重试已排队 #{new_gen[:8]}\n\n📝 {prompt[:200]}",
     )
     try:
-        await tracker.add(
+        await active_tracker.add(
             new_gen,
             TaskTrack(
                 chat_id=msg.chat.id,

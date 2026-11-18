@@ -60,7 +60,10 @@ from ..paid_idempotency import record_current_paid_operation
 from ...application.project_lifecycle import ProjectLifecycle
 from ...application.upsert_project import UpsertWorkflowProject
 from ...application.runtime_state import WorkflowRuntimeState
-from ...application.showcase_prompts import showcase_prompt as _showcase_prompt
+from ...application.showcase_prompts import (
+    ShowcasePromptRequest,
+    showcase_prompt as _showcase_prompt,
+)
 from ...application.values import dedupe_nonempty as _dedupe_nonempty
 from ...application.errors import WorkflowRequestError
 from ...domain.workflow_contracts import PublishBundle as _PublishBundle
@@ -672,21 +675,23 @@ async def _dispatch_showcase_images_generation(
             str(final_prompts[idx - 1])
             if idx - 1 < len(final_prompts) and final_prompts[idx - 1]
             else _showcase_prompt(
-                product_analysis=product_step.output_json or {},
-                selected_candidate=candidate,
-                accessory_plan=context["accessory_plan"],
-                template=body.template,
-                shot_type=shot_type,
-                shot_variant=variant,
-                age_segment=context["age_segment"],
-                final_quality=body.final_quality,
-                user_prompt=run.user_prompt,
-                aspect_ratio=body.aspect_ratio,
-                scene_environment=body.scene_environment,
-                scene_card=scene_card,
-                garment_lock=preflight.get("garment_lock"),
-                allow_pet=body.allow_pet,
-                allow_background_people=body.allow_background_people,
+                ShowcasePromptRequest(
+                    product_analysis=product_step.output_json or {},
+                    selected_candidate=candidate,
+                    accessory_plan=context["accessory_plan"],
+                    template=body.template,
+                    shot_type=shot_type,
+                    shot_variant=variant,
+                    age_segment=context["age_segment"],
+                    final_quality=body.final_quality,
+                    user_prompt=run.user_prompt,
+                    aspect_ratio=body.aspect_ratio,
+                    scene_environment=body.scene_environment,
+                    scene_card=scene_card,
+                    garment_lock=preflight.get("garment_lock"),
+                    allow_pet=body.allow_pet,
+                    allow_background_people=body.allow_background_people,
+                )
             )
         )
         bundle, _, gen_ids = await _create_workflow_task(

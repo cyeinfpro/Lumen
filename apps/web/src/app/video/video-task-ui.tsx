@@ -3,17 +3,8 @@
 import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import {
-  AlertCircle,
-  ChevronDown,
-  Copy,
-  Film,
-  ListVideo,
-  Play,
-  RefreshCw,
-  RotateCw,
-  Trash2,
-  X,
-  XCircle,
+  AlertCircle, ChevronDown, Copy, Film, ListVideo,
+  Play, RefreshCw, RotateCw, Trash2, X, XCircle,
 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 

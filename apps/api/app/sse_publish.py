@@ -8,6 +8,7 @@ write the per-user stream first, then publish an envelope carrying ``sse_id``.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 import json
 import logging
 import time
@@ -392,7 +393,10 @@ async def _publish_sse_event_single(
             if attempt < len(_XADD_RETRY_DELAYS_SECONDS):
                 await asyncio.sleep(_XADD_RETRY_DELAYS_SECONDS[attempt])
 
-    if stream_id is None:
+    if stream_id is None or not sse_durable.has_stream_id(
+        stream_id,
+        reservation_prefix=_DURABLE_APPEND_CONFIG.reservation_prefix,
+    ):
         raise RuntimeError(f"publish_sse_event: xadd failed for {stream_key}")
 
     await _refresh_stream_ttl(redis, stream_key)
@@ -408,4 +412,76 @@ async def _publish_sse_event_single(
     return stream_id
 
 
-__all__ = ["SSEPublishEvent", "publish_sse_event", "publish_sse_events"]
+async def publish_compaction_sse_event(
+    redis: Any,
+    *,
+    user_id: str,
+    conv_id: str,
+    payload: Mapping[str, Any],
+) -> str:
+    """Durably append ``context.compaction`` to the user stream, then publish with ``sse_id``."""
+
+    event_payload = dict(payload)
+    event_id = _payload_event_id(event_payload)
+    event_payload["kind"] = "context.compaction"
+    event_payload["conversation_id"] = conv_id
+    event_payload["event_id"] = event_id
+    channel = f"conv:{conv_id}"
+    stream_key = f"{EVENTS_STREAM_PREFIX}{user_id}"
+    envelope: dict[str, Any] = {
+        "event": "context.compaction",
+        "channel": channel,
+        "event_id": event_id,
+        "ts_ms": await _monotonic_ts_ms(),
+        "data": event_payload,
+    }
+    stream_id: str | None = None
+    for attempt in range(3):
+        try:
+            stream_id = await _xadd_event_once(
+                redis,
+                stream_key=stream_key,
+                event_name="context.compaction",
+                event_id=event_id,
+                payload_json=_json(envelope),
+            )
+            break
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "api publish_compaction_sse_event xadd failed key=%s attempt=%d err=%s",
+                stream_key,
+                attempt + 1,
+                exc,
+            )
+            if attempt < len(_XADD_RETRY_DELAYS_SECONDS):
+                await asyncio.sleep(_XADD_RETRY_DELAYS_SECONDS[attempt])
+
+    if stream_id is None or not sse_durable.has_stream_id(
+        stream_id,
+        reservation_prefix=_DURABLE_APPEND_CONFIG.reservation_prefix,
+    ):
+        raise RuntimeError(
+            f"publish_compaction_sse_event: xadd failed for {stream_key}"
+        )
+
+    await _refresh_stream_ttl(redis, stream_key)
+    live_body = {
+        **event_payload,
+        "sse_id": stream_id,
+        "msg_id": stream_id,
+    }
+    await _publish_live_channel(
+        redis,
+        user_id=user_id,
+        channel=f"lumen:events:conversation:{conv_id}",
+        payload_json=_json(live_body),
+    )
+    return stream_id
+
+
+__all__ = [
+    "SSEPublishEvent",
+    "publish_compaction_sse_event",
+    "publish_sse_event",
+    "publish_sse_events",
+]

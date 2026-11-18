@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TypedDict
 
-from ..provider_runtime.upstream_services import ImageUpstreamRuntime
 from ..agent_runtime_client import AgentRuntimeClient
 from ..observability import MetricsServerRuntime
+from ..provider_pool import ProviderPoolRuntime
+from ..provider_runtime.upstream_services import ImageUpstreamRuntime
 from ..runtime_settings import RuntimeSettingsCache
+from ..services.billing_cache import BillingCacheRuntime
 from ..storage_writes import StorageWriteCoordinator
+from ..tasks.auto_title import AutoTitleRuntime
 from ..tasks.completion_parts.runtime import CompletionRuntime
 from ..tasks.generation_parts.runtime import GenerationRuntime
 from ..tasks.video_generation_parts.runtime import VideoGenerationRuntime
@@ -38,6 +41,9 @@ class WorkerRuntimeValues(TypedDict):
     video_generation_runtime: VideoGenerationRuntime
     metrics_server_runtime: MetricsServerRuntime
     agent_runtime_client: AgentRuntimeClient
+    provider_pool_runtime: ProviderPoolRuntime
+    billing_cache_runtime: BillingCacheRuntime
+    auto_title_runtime: AutoTitleRuntime
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +65,9 @@ class WorkerRuntime:
     _metrics_server: MetricsServerRuntime
     _agent_runtime: AgentRuntimeClient
     _lifecycle: RuntimeLifecycle
+    _provider_pool: ProviderPoolRuntime = field(default_factory=ProviderPoolRuntime)
+    _billing_cache: BillingCacheRuntime = field(default_factory=BillingCacheRuntime)
+    _auto_title: AutoTitleRuntime = field(default_factory=AutoTitleRuntime)
 
     def runtime_settings(self) -> RuntimeSettingsCache:
         return self._runtime_settings
@@ -84,6 +93,15 @@ class WorkerRuntime:
     def agent_runtime(self) -> AgentRuntimeClient:
         return self._agent_runtime
 
+    def provider_pool(self) -> ProviderPoolRuntime:
+        return self._provider_pool
+
+    def billing_cache(self) -> BillingCacheRuntime:
+        return self._billing_cache
+
+    def auto_title(self) -> AutoTitleRuntime:
+        return self._auto_title
+
     def context_values(self) -> WorkerRuntimeValues:
         return WorkerRuntimeValues(
             runtime_settings_cache=self._runtime_settings,
@@ -94,6 +112,9 @@ class WorkerRuntime:
             video_generation_runtime=self._video,
             metrics_server_runtime=self._metrics_server,
             agent_runtime_client=self._agent_runtime,
+            provider_pool_runtime=self._provider_pool,
+            billing_cache_runtime=self._billing_cache,
+            auto_title_runtime=self._auto_title,
         )
 
     def start(self, *, logger: logging.Logger | None = None) -> None:

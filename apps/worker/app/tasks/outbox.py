@@ -1,9 +1,4 @@
-"""Compatibility entrypoint for outbox publishing and reconciliation.
-
-The implementation lives in ``app.outbox``, ``app.reconciliation``, and
-``app.locks``. This module preserves worker startup, cron schedules, and the
-legacy helper imports used by task event-delivery code.
-"""
+"""Compatibility entrypoint for outbox publishing and reconciliation."""
 
 from __future__ import annotations
 
@@ -13,6 +8,9 @@ import logging
 from typing import Any
 
 from arq.cron import cron
+from sqlalchemy import delete, select
+
+from lumen_core.models import OutboxEvent
 
 from .. import billing as worker_billing
 from .. import locks as redis_locks
@@ -23,7 +21,6 @@ from ..sse_publish import publish_event
 
 logger = logging.getLogger(__name__)
 
-# Legacy constants and types retained for tests and internal task imports.
 _OUTBOX_LOCK_KEY = outbox_domain.OUTBOX_LOCK_KEY
 _OUTBOX_LOCK_TTL_S = outbox_domain.OUTBOX_LOCK_TTL_S
 _OUTBOX_BATCH = outbox_domain.OUTBOX_BATCH
@@ -52,21 +49,17 @@ _RECON_TIMEOUT_CODE = reconciliation_domain.RECON_TIMEOUT_CODE
 _RECON_TIMEOUT_MESSAGE = reconciliation_domain.RECON_TIMEOUT_MESSAGE
 _EV_GEN_REQUEUED = reconciliation_domain.EV_GEN_REQUEUED
 _EV_COMP_REQUEUED = reconciliation_domain.EV_COMP_REQUEUED
+_OUTBOX_PRUNE_LOCK_KEY = "lock:outbox:prune"
+_OUTBOX_PRUNE_LOCK_TTL_S = 120
+_OUTBOX_PRUNE_RETENTION_DAYS = 7
+_OUTBOX_PRUNE_BATCH_SIZE = 5000
 
 
 async def _renew_owned_lock(
-    redis: Any,
-    *,
-    key: str,
-    token: str,
-    ttl_s: int,
+    redis: Any, *, key: str, token: str, ttl_s: int
 ) -> bool | None:
     return await redis_locks.renew_owned_lock(
-        redis,
-        key=key,
-        token=token,
-        ttl_s=ttl_s,
-        log=logger,
+        redis, key=key, token=token, ttl_s=ttl_s, log=logger
     )
 
 
@@ -79,11 +72,7 @@ def _owned_redis_lock(redis: Any, *, key: str, ttl_s: int):
 
 
 async def _deliver_outbox_event(
-    redis: Any,
-    *,
-    event_id: str,
-    kind: str,
-    payload: dict[str, Any],
+    redis: Any, *, event_id: str, kind: str, payload: dict[str, Any]
 ) -> tuple[str, str, bool]:
     return await outbox_domain.deliver_outbox_event(
         redis,
@@ -110,9 +99,7 @@ async def publish_outbox(ctx: dict[str, Any]) -> int:
     """Publish one due batch while preserving the legacy cron callable."""
     redis = ctx["redis"]
     async with _owned_redis_lock(
-        redis,
-        key=_OUTBOX_LOCK_KEY,
-        ttl_s=_OUTBOX_LOCK_TTL_S,
+        redis, key=_OUTBOX_LOCK_KEY, ttl_s=_OUTBOX_LOCK_TTL_S
     ) as acquired:
         if not acquired:
             return 0
@@ -128,22 +115,17 @@ _persist_outbox_dlq_once = outbox_domain.persist_once
 _persist_outbox_dlq = outbox_domain.persist
 _resolve_outbox_dlq_rows = outbox_domain.resolve
 _mirror_outbox_dlq = partial(outbox_domain.mirror, log=logger)
-
-
 _stage_outbox_event = outbox_domain.stage_outbox_event
 
 
 async def _mark_staged_outbox_published(event_id: str) -> bool:
     return await outbox_domain.mark_staged_outbox_published(
-        SessionLocal,
-        event_id,
-        log=logger,
+        SessionLocal, event_id, log=logger
     )
 
 
 async def _deliver_staged_outbox_events(
-    redis: Any,
-    deliveries: list[outbox_domain.PendingOutboxDelivery],
+    redis: Any, deliveries: list[outbox_domain.PendingOutboxDelivery]
 ) -> None:
     await outbox_domain.deliver_staged_outbox_events(
         redis,
@@ -190,29 +172,73 @@ async def reconcile_memory_extractions(ctx: dict[str, Any]) -> int:
     return touched
 
 
+async def _prune_published_batches(
+    *, cutoff: datetime, batch_size: int, session_factory: Any
+) -> int:
+    total_deleted = 0
+    while True:
+        due_ids = (
+            select(OutboxEvent.id)
+            .where(
+                OutboxEvent.published_at.is_not(None),
+                OutboxEvent.published_at < cutoff,
+            )
+            .order_by(OutboxEvent.published_at.asc(), OutboxEvent.id.asc())
+            .limit(batch_size)
+        )
+        async with session_factory() as session, session.begin():
+            result = await session.execute(
+                delete(OutboxEvent).where(OutboxEvent.id.in_(due_ids))
+            )
+            deleted = max(0, int(getattr(result, "rowcount", 0) or 0))
+        total_deleted += deleted
+        if deleted < batch_size:
+            return total_deleted
+
+
+async def prune_published_outbox_events(
+    ctx: dict[str, Any] | None = None,
+    *,
+    retention_days: int = _OUTBOX_PRUNE_RETENTION_DAYS,
+    batch_size: int = _OUTBOX_PRUNE_BATCH_SIZE,
+    now: datetime | None = None,
+    session_factory: Any = None,
+) -> int:
+    """Prune published outbox_events older than retention_days in bounded batches."""
+    effective_batch = max(1, int(batch_size))
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=retention_days)
+    factory = session_factory or SessionLocal
+    redis = (ctx or {}).get("redis")
+    if redis is None:
+        deleted = await _prune_published_batches(
+            cutoff=cutoff, batch_size=effective_batch, session_factory=factory
+        )
+    else:
+        async with _owned_redis_lock(
+            redis, key=_OUTBOX_PRUNE_LOCK_KEY, ttl_s=_OUTBOX_PRUNE_LOCK_TTL_S
+        ) as acquired:
+            if not acquired:
+                return 0
+            deleted = await _prune_published_batches(
+                cutoff=cutoff, batch_size=effective_batch, session_factory=factory
+            )
+    if deleted:
+        logger.info("outbox: pruned %d published events", deleted)
+    return deleted
+
+
 def _build_cron_jobs() -> list[Any]:
     return [
-        cron(
-            publish_outbox,
-            second=set(range(0, 60, 2)),
-            run_at_startup=True,
-        ),
-        cron(
-            reconcile_tasks,
-            minute=set(range(0, 60)),
-        ),
-        cron(
-            reconcile_memory_extractions,
-            second={20},
-            run_at_startup=True,
-        ),
+        cron(publish_outbox, second=set(range(0, 60, 2)), run_at_startup=True),
+        cron(reconcile_tasks, minute=set(range(0, 60))),
+        cron(reconcile_memory_extractions, second={20}, run_at_startup=True),
     ]
 
 
 cron_jobs = _build_cron_jobs()
-
 __all__ = (
     "cron_jobs",
+    "prune_published_outbox_events",
     "publish_outbox",
     "reconcile_memory_extractions",
     "reconcile_tasks",

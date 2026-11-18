@@ -365,6 +365,127 @@ def persist_pending_request(
     return journal
 
 
+def restore_storage_root(
+    source: Mapping[str, str],
+    backup_root: Path,
+) -> Path:
+    raw = source.get("STORAGE_ROOT") or source.get("LUMEN_STORAGE_ROOT")
+    if raw:
+        return Path(raw)
+    data_root = source.get("LUMEN_DATA_ROOT")
+    if data_root:
+        return Path(data_root) / "storage"
+    return backup_root.parent / "storage"
+
+
+def measure_storage_watermark(storage_root: Path) -> dict[str, object]:
+    file_count = 0
+    total_bytes = 0
+    try:
+        root_info = storage_root.lstat()
+        exists = stat.S_ISDIR(root_info.st_mode)
+    except OSError:
+        exists = False
+    if exists:
+        stack = [storage_root]
+        while stack:
+            current = stack.pop()
+            try:
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        if entry.name == ".quarantine" or entry.name.startswith(".tmp"):
+                            continue
+                        try:
+                            info = entry.stat(follow_symlinks=False)
+                        except OSError:
+                            continue
+                        if stat.S_ISLNK(info.st_mode):
+                            continue
+                        if stat.S_ISDIR(info.st_mode):
+                            stack.append(Path(entry.path))
+                        elif stat.S_ISREG(info.st_mode):
+                            file_count += 1
+                            total_bytes += int(info.st_size)
+            except OSError:
+                continue
+    return {
+        "exists": exists,
+        "file_count": file_count,
+        "root": str(storage_root),
+        "total_bytes": total_bytes,
+    }
+
+
+def _read_watermark_receipt(path: Path) -> dict[str, object] | None:
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size <= 0 or info.st_size > _MAX_JOURNAL_BYTES:
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def check_storage_watermark_drift(
+    backup_root: Path,
+    timestamp: str,
+    source: Optional[Mapping[str, str]] = None,
+) -> dict[str, object] | None:
+    env = source if source is not None else os.environ
+    receipt = _read_watermark_receipt(backup_root / f".backup-storage.{timestamp}.json")
+    if receipt is None:
+        receipt = _read_watermark_receipt(backup_root / ".backup.last-success.json")
+    if receipt is None:
+        return None
+    watermark = receipt.get("storage_watermark")
+    if isinstance(watermark, dict):
+        expected_files = watermark.get("file_count")
+        expected_bytes = watermark.get("total_bytes")
+    else:
+        expected_files = receipt.get("storage_file_count")
+        expected_bytes = receipt.get("storage_total_bytes")
+    if (
+        isinstance(expected_files, bool)
+        or isinstance(expected_bytes, bool)
+        or not isinstance(expected_files, int)
+        or not isinstance(expected_bytes, int)
+    ):
+        return None
+    storage_root = restore_storage_root(env, backup_root)
+    current = measure_storage_watermark(storage_root)
+    current_files = int(current["file_count"])  # type: ignore[arg-type]
+    current_bytes = int(current["total_bytes"])  # type: ignore[arg-type]
+    receipt_ts = str(receipt.get("completed_at") or "")
+    has_drift = (
+        current_files != expected_files
+        or current_bytes != expected_bytes
+        or (bool(receipt_ts) and receipt_ts != timestamp)
+    )
+    report: dict[str, object] = {
+        "drift": has_drift,
+        "timestamp": timestamp,
+        "receipt_timestamp": receipt_ts or None,
+        "recorded_files": expected_files,
+        "recorded_bytes": expected_bytes,
+        "current_files": current_files,
+        "current_bytes": current_bytes,
+        "delta_files": current_files - expected_files,
+        "delta_bytes": current_bytes - expected_bytes,
+        "storage_root": str(storage_root),
+    }
+    if has_drift:
+        print(
+            f"WARN: storage media watermark drift detected for restore timestamp={timestamp}: "
+            f"recorded=(files={expected_files}, bytes={expected_bytes}, receipt_ts={receipt_ts or 'unknown'}) "
+            f"current=(files={current_files}, bytes={current_bytes}) "
+            f"delta=(files={current_files - expected_files:+d}, bytes={current_bytes - expected_bytes:+d}); "
+            "verify /opt/lumendata/storage snapshot alignment.",
+            file=sys.stderr,
+        )
+    return report
+
+
 def sanitized_restore_environment(source: Mapping[str, str]) -> Dict[str, str]:
     env = {key: value for key, value in source.items() if key not in _UNSAFE_ENV_KEYS}
     env["PATH"] = _TRUSTED_PATH
@@ -660,6 +781,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("restore runner accepted persistent recovery journal", flush=True)
         restore_arg = "--recover-only"
     else:
+        if backup_root is not None:
+            check_storage_watermark_drift(backup_root, timestamp, os.environ)
         print(f"restore runner accepted timestamp={timestamp}", flush=True)
         restore_arg = timestamp
     child_env = sanitized_restore_environment(os.environ)

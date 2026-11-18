@@ -50,7 +50,7 @@ import {
 import { CanvasTopBar } from "./CanvasTopBar";
 import { CanvasRunPlanDialog } from "./CanvasRunPlanDialog";
 import { CanvasSaveStatus, canvasCanRetrySave } from "./CanvasSaveStatus";
-import type { CanvasViewportApi } from "./CanvasViewport";
+import type { CanvasViewportApi } from "./CanvasViewportTypes";
 import { CanvasMobileToolbar } from "./mobile/CanvasMobileToolbar";
 import {
   applyHistory,

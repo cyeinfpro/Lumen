@@ -240,7 +240,8 @@ async def probe_upstream(ctx: dict[str, Any] | None = None) -> dict[str, Any]:
     error_repr: str | None = None
 
     # 延迟 import：避免 worker 启动时无关探针把 upstream 模块拉起来（PIL / httpx 都重）。
-    from ..upstream_parts.entrypoints import UpstreamError, stream_completion
+    from ..provider_runtime.errors import UpstreamError
+    from ..upstream_parts.upstream_impl import stream_completion
 
     try:
         image_upstream_runtime = _require_image_upstream_runtime(ctx)

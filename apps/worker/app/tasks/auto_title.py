@@ -40,6 +40,7 @@ from ..provider_runtime.errors import UpstreamError
 from ..provider_runtime.http_headers import upstream_auth_headers
 from ..provider_pool import resolve_provider_proxy_url
 from ..sse_publish import publish_event
+from ..task_runtime import RuntimeSlot
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,41 @@ class AutoTitleRuntime:
     lock: Lock = field(default_factory=Lock)
 
 
-_RUNTIME = AutoTitleRuntime()
+_RUNTIME_SLOT: RuntimeSlot[AutoTitleRuntime] = RuntimeSlot(
+    "worker-auto-title",
+    default_factory=AutoTitleRuntime,
+)
+
+
+class _AutoTitleRuntimeView:
+    @property
+    def cache(self) -> dict[str, float]:
+        return _RUNTIME_SLOT.current().cache
+
+    @property
+    def lock(self) -> Lock:
+        return _RUNTIME_SLOT.current().lock
+
+
+_RUNTIME = _AutoTitleRuntimeView()
+
+
+def configure_runtime(runtime: AutoTitleRuntime | None = None) -> AutoTitleRuntime:
+    existing = _RUNTIME_SLOT.current_or_none()
+    active = runtime or AutoTitleRuntime()
+    if existing is not None and existing is not active:
+        _RUNTIME_SLOT.clear_default(existing)
+    _RUNTIME_SLOT.install_default(active)
+    return active
+
+
+def shutdown_runtime(runtime: AutoTitleRuntime | None = None) -> None:
+    active = runtime or _RUNTIME_SLOT.current_or_none()
+    if active is None:
+        return
+    with active.lock:
+        active.cache.clear()
+    _RUNTIME_SLOT.clear_default(active)
 _TITLE_CONFIRMED_SENTINEL: float = -1.0
 _TITLE_CACHE_TTL_S = 60.0
 
@@ -120,12 +155,22 @@ def _default_title_condition() -> Any:
     )
 
 
-def _mark_title_confirmed(conversation_id: str) -> None:
-    with _RUNTIME.lock:
-        _RUNTIME.cache[conversation_id] = _TITLE_CONFIRMED_SENTINEL
+def _mark_title_confirmed(
+    conversation_id: str,
+    *,
+    runtime: AutoTitleRuntime | None = None,
+) -> None:
+    active = runtime or _RUNTIME_SLOT.current()
+    with active.lock:
+        active.cache[conversation_id] = _TITLE_CONFIRMED_SENTINEL
 
 
-async def maybe_enqueue_auto_title(redis: Any, conversation_id: str) -> None:
+async def maybe_enqueue_auto_title(
+    redis: Any,
+    conversation_id: str,
+    *,
+    runtime: AutoTitleRuntime | None = None,
+) -> None:
     """由 run_completion / run_generation 在 succeeded 后调用。
 
     幂等：标题已设置则跳过；任务失败也不抛异常（不能阻塞主流程）。
@@ -134,9 +179,10 @@ async def maybe_enqueue_auto_title(redis: Any, conversation_id: str) -> None:
     避免每次 generation/completion succeeded 都 SELECT title FROM conversations。
     仅当缓存 miss 或缓存为旧时间戳（待确认状态）时才查 DB。
     """
+    active = runtime or _RUNTIME_SLOT.current()
     now = time.monotonic()
-    with _RUNTIME.lock:
-        cache_entry = _RUNTIME.cache.get(conversation_id)
+    with active.lock:
+        cache_entry = active.cache.get(conversation_id)
         if cache_entry is not None:
             if cache_entry == _TITLE_CONFIRMED_SENTINEL:
                 return  # permanently cached: title is set
@@ -148,7 +194,7 @@ async def maybe_enqueue_auto_title(redis: Any, conversation_id: str) -> None:
         # 仍能 dedupe；不过同一个 cache 时间戳本身 + 60s TTL 已经足够覆盖这个窗
         # 口。stamp 提前到这里：成功/失败都在 60s 内不再重试，避免上游短暂故障
         # 时被反复戳。confirmed sentinel 走单独分支（DB 查到非占位标题时）。
-        _RUNTIME.cache[conversation_id] = now
+        active.cache[conversation_id] = now
     try:
         async with SessionLocal() as session:
             row = (
@@ -160,7 +206,7 @@ async def maybe_enqueue_auto_title(redis: Any, conversation_id: str) -> None:
                 )
             ).scalar_one_or_none()
             if row is None or not _is_default_title(row):
-                _mark_title_confirmed(conversation_id)
+                _mark_title_confirmed(conversation_id, runtime=active)
                 return
         # enqueue 异步任务，避免阻塞 worker 当前任务收尾
         await redis.enqueue_job(
@@ -557,6 +603,12 @@ async def auto_title_conversation(ctx: dict[str, Any], conversation_id: str) -> 
     并发安全：进入时再检一次 title 是否仍为空；非空直接返回。
     """
     redis = ctx["redis"]
+    ctx_runtime = ctx.get("auto_title_runtime")
+    active_runtime = (
+        ctx_runtime
+        if isinstance(ctx_runtime, AutoTitleRuntime)
+        else _RUNTIME_SLOT.current()
+    )
 
     try:
         async with SessionLocal() as session:
@@ -564,7 +616,7 @@ async def auto_title_conversation(ctx: dict[str, Any], conversation_id: str) -> 
             if conv is None:
                 return
             if not _is_default_title(conv.title):
-                _mark_title_confirmed(conversation_id)
+                _mark_title_confirmed(conversation_id, runtime=active_runtime)
                 return  # 用户可能手动改过；尊重用户
             input_list = await _build_summary(session, conversation_id)
             if not input_list:
@@ -577,7 +629,7 @@ async def auto_title_conversation(ctx: dict[str, Any], conversation_id: str) -> 
             if current is None:
                 return
             if not _is_default_title(current.title):
-                _mark_title_confirmed(conversation_id)
+                _mark_title_confirmed(conversation_id, runtime=active_runtime)
                 return
             user_id = current.user_id
 
@@ -609,7 +661,7 @@ async def auto_title_conversation(ctx: dict[str, Any], conversation_id: str) -> 
                 .values(title=title)
             )
             if affected_rows(result) != 1:
-                _mark_title_confirmed(conversation_id)
+                _mark_title_confirmed(conversation_id, runtime=active_runtime)
                 return
             await session.commit()
 
@@ -627,7 +679,7 @@ async def auto_title_conversation(ctx: dict[str, Any], conversation_id: str) -> 
                 "auto_title publish_event failed conv=%s err=%s", conversation_id, exc
             )
 
-        _mark_title_confirmed(conversation_id)
+        _mark_title_confirmed(conversation_id, runtime=active_runtime)
         logger.info("auto_title set conv=%s title=%r", conversation_id, title)
     except Exception as exc:  # noqa: BLE001
         # 不抛异常以免触发 arq 重试（一次失败就算了）

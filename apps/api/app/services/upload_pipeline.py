@@ -23,6 +23,7 @@ from ..images.processing.service import (
     PreparedUpload,
     ProcessingError,
 )
+from ..runtime.slot import RuntimeSlot
 
 
 logger = logging.getLogger(__name__)
@@ -177,11 +178,28 @@ class UploadLease:
         )
 
 
-_PROCESS_UPLOAD_BUDGET = UploadBudget(UploadBudgetLimits.from_env())
+_UPLOAD_BUDGET_SLOT: RuntimeSlot[UploadBudget] = RuntimeSlot(
+    "api-process-upload-budget",
+    default_factory=lambda: UploadBudget(UploadBudgetLimits.from_env()),
+)
+
+
+def configure_process_upload_budget(
+    budget: UploadBudget | None = None,
+) -> UploadBudget:
+    active = budget or UploadBudget(UploadBudgetLimits.from_env())
+    _UPLOAD_BUDGET_SLOT.install_default(active)
+    return active
+
+
+def reset_process_upload_budget(budget: UploadBudget | None = None) -> None:
+    active = budget or _UPLOAD_BUDGET_SLOT.current_or_none()
+    if active is not None:
+        _UPLOAD_BUDGET_SLOT.clear_default(active)
 
 
 def process_upload_budget() -> UploadBudget:
-    return _PROCESS_UPLOAD_BUDGET
+    return _UPLOAD_BUDGET_SLOT.current()
 
 
 def _secure_temp_dir(storage_root: str | Path) -> Path:

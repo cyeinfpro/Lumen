@@ -383,6 +383,9 @@ async def test_worker_runtime_exposes_typed_context_and_idempotent_shutdown() ->
         "video_generation_runtime": video,
         "metrics_server_runtime": runtime.metrics_server(),
         "agent_runtime_client": agent_runtime,
+        "provider_pool_runtime": runtime.provider_pool(),
+        "billing_cache_runtime": runtime.billing_cache(),
+        "auto_title_runtime": runtime.auto_title(),
     }
     assert calls == ["generation", "upstream", "engine"]
     diagnostics = runtime.diagnostics()

@@ -127,6 +127,7 @@ _quote_etag = _video_media_routes.quote_etag
 _etag_matches = _video_media_routes.etag_matches
 _parse_range = _video_media_routes.parse_range
 _media_response = _video_media_routes.media_response
+_internal_redirect_enabled = _video_media_routes.internal_redirect_enabled
 _owned_video = _video_media_routes.owned_video
 
 

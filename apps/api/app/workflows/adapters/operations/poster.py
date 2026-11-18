@@ -36,9 +36,7 @@ from lumen_core.schemas import (
     WorkflowRunOut,
 )
 from ....deps import CurrentUser
-from ....services.message_submission import (
-    create_assistant_task,
-)
+from ....services.message_submission import AssistantTaskCommand, create_assistant_task
 from ...application import poster_generation as poster_generation_application
 from ...application.output_values import (
     failed_generation_output,
@@ -160,7 +158,7 @@ async def _create_poster_workflow_task(
     )
     context.db.add(user_msg)
     await context.db.flush()
-    result = await create_assistant_task(
+    result = await create_assistant_task(AssistantTaskCommand(
         db=context.db,
         user_id=context.user.id,
         account_mode=getattr(context.user, "account_mode", "wallet"),
@@ -176,7 +174,7 @@ async def _create_poster_workflow_task(
         attachment_ids=request.attachment_ids,
         text=request.text,
         mask_image_id=request.mask_image_id,
-    )
+    ))
     meta = {
         "workflow_run_id": request.workflow_run_id,
         "workflow_type": POSTER_WORKFLOW_TYPE,

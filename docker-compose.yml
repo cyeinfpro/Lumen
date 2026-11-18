@@ -48,6 +48,7 @@ services:
     restart: unless-stopped
     shm_size: "256m"
     stop_grace_period: 60s
+    command: ["postgres", "-c", "max_connections=200", "-c", "shared_buffers=256MB", "-c", "effective_cache_size=768MB", "-c", "work_mem=8MB", "-c", "random_page_cost=1.1"]
     environment:
       POSTGRES_USER: "${DB_USER:?Set DB_USER in .env}"
       POSTGRES_PASSWORD: "${DB_PASSWORD:?Set DB_PASSWORD in .env}"

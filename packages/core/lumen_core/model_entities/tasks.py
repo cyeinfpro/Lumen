@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from functools import cached_property
+from types import MappingProxyType
 from typing import Any
 
 from sqlalchemy import (
@@ -15,10 +16,12 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Table,
     Text,
     UniqueConstraint,
     text,
 )
+from sqlalchemy.dialects.postgresql.base import PGDialect
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..constants import DEFAULT_CHAT_MODEL
@@ -27,6 +30,30 @@ from ..queue_metadata import completion_queue_metadata, generation_queue_metadat
 from ..sqltypes import JsonType, StringListType
 from ..svg_options import public_svg_options
 from .accounts import UserApiCredential
+from .media_workflows import OutboxEvent
+
+_HOT_TABLE_AUTOVACUUM_WITH = MappingProxyType(
+    {
+        "autovacuum_vacuum_scale_factor": "0.02",
+        "autovacuum_analyze_scale_factor": "0.01",
+        "fillfactor": "90",
+    }
+)
+
+
+def _register_postgresql_table_with_option() -> None:
+    for target_cls, dialect_args in PGDialect.construct_arguments:
+        if target_cls is Table:
+            dialect_args.setdefault("with", None)
+    cached = Table._kw_registry.get("postgresql")
+    if isinstance(cached, dict):
+        cached.setdefault("with", None)
+
+
+_register_postgresql_table_with_option()
+OutboxEvent.__table__.dialect_kwargs["postgresql_with"] = dict(
+    _HOT_TABLE_AUTOVACUUM_WITH
+)
 
 # ---------- Tasks (generation / completion) ----------
 
@@ -74,6 +101,16 @@ class Generation(Base, TimestampMixin):
                 "cancel_requested_at IS NOT NULL AND status IN ('queued', 'running')"
             ),
         ),
+        Index(
+            "ix_generations_canvas_exec_id",
+            "user_id",
+            text("(upstream_request->>'canvas_execution_id')"),
+            postgresql_where=text("upstream_request ? 'canvas_execution_id'"),
+            sqlite_where=text(
+                "json_extract(upstream_request, '$.canvas_execution_id') IS NOT NULL"
+            ),
+        ),
+        {"postgresql_with": dict(_HOT_TABLE_AUTOVACUUM_WITH)},
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
@@ -385,6 +422,7 @@ class Completion(Base, TimestampMixin):
                 "cancel_requested_at IS NOT NULL AND status IN ('queued', 'streaming')"
             ),
         ),
+        {"postgresql_with": dict(_HOT_TABLE_AUTOVACUUM_WITH)},
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
@@ -553,6 +591,15 @@ class VideoGeneration(Base, TimestampMixin):
             unique=True,
             postgresql_where=text("provider_task_id IS NOT NULL"),
             sqlite_where=text("provider_task_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_video_generations_canvas_exec_id",
+            "user_id",
+            text("(upstream_request->>'canvas_execution_id')"),
+            postgresql_where=text("upstream_request ? 'canvas_execution_id'"),
+            sqlite_where=text(
+                "json_extract(upstream_request, '$.canvas_execution_id') IS NOT NULL"
+            ),
         ),
         CheckConstraint(
             "duration_s = -1 OR (duration_s >= 3 AND duration_s <= 30)",

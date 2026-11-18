@@ -2605,3 +2605,104 @@ async def test_reconcile_terminal_apply_and_release_are_idempotent(
 
     assert settles == ["generation", "completion"]
     assert [event.kind for event in session.outbox_events] == ["sse", "sse"]
+
+
+@pytest.mark.asyncio
+async def test_prune_published_outbox_events_deletes_expired_in_batches_and_preserves_live() -> None:
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from lumen_core.models import Base
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(
+            lambda sync_conn: Base.metadata.create_all(
+                sync_conn, tables=[OutboxEvent.__table__]
+            )
+        )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 11, 18, 2, 0, tzinfo=timezone.utc)
+    try:
+        async with factory() as session, session.begin():
+            for idx in range(7):
+                session.add(
+                    OutboxEvent(
+                        id=f"expired-{idx}",
+                        kind="sse",
+                        payload={"seq": idx},
+                        published_at=now - timedelta(days=8, minutes=idx),
+                    )
+                )
+            session.add_all(
+                [
+                    OutboxEvent(
+                        id="recent-published-1",
+                        kind="sse",
+                        payload={"seq": 101},
+                        published_at=now - timedelta(days=6, hours=23),
+                    ),
+                    OutboxEvent(
+                        id="recent-published-2",
+                        kind="generation",
+                        payload={"task_id": "gen-1"},
+                        published_at=now - timedelta(hours=1),
+                    ),
+                    OutboxEvent(
+                        id="unpublished-old",
+                        kind="generation",
+                        payload={"task_id": "gen-pending"},
+                        published_at=None,
+                        created_at=now - timedelta(days=30),
+                    ),
+                ]
+            )
+
+        redis = FakeRedis()
+        deleted = await outbox.prune_published_outbox_events(
+            {"redis": redis},
+            retention_days=7,
+            batch_size=3,
+            now=now,
+            session_factory=factory,
+        )
+        assert deleted == 7
+
+        async with factory() as session:
+            remaining = sorted(
+                (await session.execute(select(OutboxEvent.id))).scalars().all()
+            )
+        assert remaining == [
+            "recent-published-1",
+            "recent-published-2",
+            "unpublished-old",
+        ]
+
+        second_pass = await outbox.prune_published_outbox_events(
+            {"redis": redis},
+            retention_days=7,
+            batch_size=3,
+            now=now,
+            session_factory=factory,
+        )
+        assert second_pass == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_prune_published_outbox_events_respects_redis_lock_contention() -> None:
+    redis = FakeRedis()
+    redis.keys[outbox._OUTBOX_PRUNE_LOCK_KEY] = "held-by-peer"
+    called = False
+
+    def forbidden_factory():
+        nonlocal called
+        called = True
+        raise AssertionError("session_factory should not be entered when lock contended")
+
+    deleted = await outbox.prune_published_outbox_events(
+        {"redis": redis},
+        session_factory=forbidden_factory,
+    )
+    assert deleted == 0
+    assert called is False

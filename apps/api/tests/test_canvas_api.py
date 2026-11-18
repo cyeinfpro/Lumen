@@ -29,8 +29,19 @@ from lumen_core.canvas_models import (
     CanvasTaskTerminalReceipt,
     CanvasVersion,
 )
-from lumen_core.models import Base, User, VideoGeneration, WalletTransaction
+from lumen_core.models import (
+    Base,
+    Conversation,
+    Generation,
+    Image,
+    Message,
+    User,
+    Video,
+    VideoGeneration,
+    WalletTransaction,
+)
 
+import app.runtime  # noqa: F401
 from app import db as app_db
 from app import deps
 from app.canvas_services.api_schemas import (
@@ -53,10 +64,14 @@ from app.canvas_services.mutation_service import (
     _revision_conflict_details,
     apply_mutation,
 )
-from app.canvas_services.read_repair import repair_canvas_executions
+from app.canvas_services.read_repair import (
+    persist_canvas_executions,
+    repair_canvas_executions,
+)
 from app.canvas_services.run_serialization import (
     canvas_projections,
     list_run_events,
+    serialize_canvas_document,
 )
 from app.canvas_services.selection_service import select_execution_output
 from app.canvas_services.version_service import (
@@ -945,6 +960,20 @@ async def test_get_repair_links_video_by_execution_metadata() -> None:
             user_id="user-1",
             canvas_id=canvas.id,
         )
+        projected = await canvas_projections(db, canvas_id=canvas.id)
+        projected_exec = next(
+            item
+            for item in projected["recent_executions"]
+            if item["id"] == execution.id
+        )
+        assert projected_exec["tasks"][0]["kind"] == "video_generation"
+        assert projected_exec["tasks"][0]["video_generation_id"] == video.id
+
+        await persist_canvas_executions(
+            db,
+            user_id="user-1",
+            canvas_id=canvas.id,
+        )
         link = (
             await db.execute(
                 select(CanvasExecutionTask).where(
@@ -1059,6 +1088,18 @@ async def test_get_repair_scans_past_old_unrepairable_rows_and_task_window() -> 
         await db.commit()
 
         await repair_canvas_executions(
+            db,
+            user_id="user-1",
+            canvas_id=canvas.id,
+            limit=20,
+        )
+        projected = await canvas_projections(db, canvas_id=canvas.id)
+        projected_target = next(
+            item for item in projected["recent_executions"] if item["id"] == target.id
+        )
+        assert projected_target["tasks"][0]["video_generation_id"] == target_video.id
+
+        await persist_canvas_executions(
             db,
             user_id="user-1",
             canvas_id=canvas.id,
@@ -1476,3 +1517,234 @@ def test_canvas_run_events_route_bounds_and_forwards_query(
             ).status_code
             == 422
         )
+
+
+@pytest.mark.asyncio
+async def test_get_read_repair_is_lock_free_batches_queries_and_dedupes_async_reconcile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy import event
+    from sqlalchemy.dialects import sqlite
+    from sqlalchemy.schema import CreateIndex, CreateTable
+    from app.canvas_services import read_repair
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    non_gen_tables = [
+        User.__table__,
+        Conversation.__table__,
+        Message.__table__,
+        Image.__table__,
+        Video.__table__,
+        VideoGeneration.__table__,
+        WalletTransaction.__table__,
+        CanvasDocument.__table__,
+        CanvasMutation.__table__,
+        CanvasVersion.__table__,
+        CanvasRun.__table__,
+        CanvasNodeExecution.__table__,
+        CanvasExecutionTask.__table__,
+        CanvasNodeSelection.__table__,
+        CanvasAssetRef.__table__,
+        CanvasRunEvent.__table__,
+        CanvasTaskTerminalReceipt.__table__,
+    ]
+
+    def _init_sqlite_schema(sync_conn) -> None:
+        Base.metadata.create_all(sync_conn, tables=non_gen_tables)
+        gen_ddl = str(
+            CreateTable(Generation.__table__).compile(dialect=sqlite.dialect())
+        ).replace("DEFAULT (ARRAY[]::varchar[])", "DEFAULT '[]'")
+        sync_conn.exec_driver_sql(gen_ddl)
+        for idx in Generation.__table__.indexes:
+            idx_ddl = str(CreateIndex(idx).compile(dialect=sqlite.dialect()))
+            sync_conn.exec_driver_sql(idx_ddl)
+
+    async with engine.begin() as connection:
+        await connection.run_sync(_init_sqlite_schema)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    redis_set_calls: list[tuple[str, str, int | None, bool | None]] = []
+    enqueued_jobs: list[tuple[str, str]] = []
+    redis_store: dict[str, str] = {}
+
+    class StubRedis:
+        async def set(
+            self,
+            key: str,
+            value: str,
+            *,
+            ex: int | None = None,
+            nx: bool | None = None,
+        ) -> bool:
+            redis_set_calls.append((key, value, ex, nx))
+            if nx and key in redis_store:
+                return False
+            redis_store[key] = value
+            return True
+
+    class StubArqPool:
+        async def enqueue_job(self, job_name: str, execution_id: str) -> None:
+            enqueued_jobs.append((job_name, execution_id))
+
+    async def fake_get_arq_pool() -> StubArqPool:
+        return StubArqPool()
+
+    monkeypatch.setattr(read_repair, "get_redis", lambda: StubRedis())
+    monkeypatch.setattr(read_repair, "get_arq_pool", fake_get_arq_pool)
+
+    now = datetime(2026, 11, 18, 2, 0, tzinfo=timezone.utc)
+    try:
+        async with factory() as seed_db:
+            seed_db.add(User(id="user-1", email="u1@example.com", account_mode="wallet"))
+            conv = Conversation(id="conv-1", user_id="user-1", title="c")
+            msg = Message(id="msg-1", conversation_id="conv-1", role="assistant")
+            seed_db.add_all([conv, msg])
+            await seed_db.flush()
+
+            canvas = await create_canvas(
+                seed_db,
+                user_id="user-1",
+                body=CanvasCreateIn(title="CQRS 画布", graph=_graph()),
+            )
+            version = await create_named_version(
+                seed_db, user_id="user-1", canvas_id=canvas.id, name="v1"
+            )
+            run = CanvasRun(
+                id="run-cqrs",
+                canvas_id=canvas.id,
+                version_id=version.id,
+                user_id="user-1",
+                kind="single",
+                status="running",
+                target_node_ids=["image-1"],
+                idempotency_key="cqrs-run",
+                request_fingerprint="r" * 64,
+            )
+            execution = CanvasNodeExecution(
+                id="exec-cqrs",
+                canvas_id=canvas.id,
+                run_id=run.id,
+                user_id="user-1",
+                node_id="image-1",
+                node_type="image_generate",
+                node_schema_version=1,
+                sequence=0,
+                attempt=0,
+                attempt_epoch=0,
+                status="running",
+                definition_hash="d" * 64,
+                input_hash="i" * 64,
+                execution_fingerprint="e" * 64,
+                submission_idempotency_key="cqrs-exec",
+                request_fingerprint="r" * 64,
+                config_snapshot_jsonb={},
+                input_snapshot_jsonb={},
+                processor_version="test",
+                outputs_jsonb=[],
+                selection_base_revision=0,
+                started_at=now - timedelta(seconds=10),
+            )
+            seed_db.add_all([run, execution])
+            await seed_db.flush()
+
+            for ordinal in range(8):
+                gen = Generation(
+                    id=f"gen-cqrs-{ordinal}",
+                    message_id="msg-1",
+                    user_id="user-1",
+                    action="generate",
+                    model="gpt-image-1",
+                    prompt="海报",
+                    size_requested="1024x1024",
+                    aspect_ratio="1:1",
+                    status="succeeded",
+                    progress_stage="done",
+                    finished_at=now,
+                    idempotency_key=f"gen-idemp-{ordinal}",
+                )
+                img = Image(
+                    id=f"img-cqrs-{ordinal}",
+                    user_id="user-1",
+                    owner_generation_id=gen.id,
+                    source="generated",
+                    storage_key=f"u/user-1/{ordinal}.webp",
+                    mime="image/webp",
+                    width=1024,
+                    height=1024,
+                    size_bytes=4096,
+                    sha256=f"{ordinal:064x}",
+                    visibility="private",
+                    metadata_jsonb={},
+                )
+                task = CanvasExecutionTask(
+                    id=f"task-cqrs-{ordinal}",
+                    execution_id=execution.id,
+                    ordinal=ordinal,
+                    task_kind="generation",
+                    generation_id=gen.id,
+                    status="running",
+                    idempotency_key=f"task-idemp-{ordinal}",
+                    request_fingerprint="r" * 64,
+                    billing_ref_type="generation",
+                    billing_ref_id=gen.id,
+                    output_jsonb={},
+                )
+                seed_db.add_all([gen, img, task])
+            await seed_db.commit()
+            canvas_id = canvas.id
+
+        emitted_sql: list[str] = []
+
+        def _capture_sql(_conn, _cursor, statement, *_rest) -> None:
+            emitted_sql.append(statement)
+
+        event.listen(engine.sync_engine, "before_cursor_execute", _capture_sql)
+        try:
+            async with factory() as get_db_1:
+                owned = await get_owned_canvas(
+                    get_db_1, user_id="user-1", canvas_id=canvas_id
+                )
+                emitted_sql.clear()
+                due = await repair_canvas_executions(
+                    get_db_1, user_id="user-1", canvas_id=canvas_id
+                )
+                repair_queries = list(emitted_sql)
+                payload = await serialize_canvas_document(get_db_1, canvas=owned)
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", _capture_sql)
+
+        assert due == 1
+        # 8 tasks projected in fixed batch queries (executions + tasks + generations + images + run)
+        assert len(repair_queries) <= 5
+        assert all("FOR UPDATE" not in sql.upper() for sql in emitted_sql)
+        assert all(
+            not sql.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE"))
+            for sql in emitted_sql
+        )
+
+        # Frontend receives converged read-only view immediately
+        recent_exec = payload["recent_executions"][0]
+        assert recent_exec["status"] == "succeeded"
+        assert len(recent_exec["outputs"]) == 8
+        assert payload["active_runs"] == []
+
+        # Underlying DB remains untouched until background worker runs
+        async with factory() as verify_db:
+            durable_exec = await verify_db.get(CanvasNodeExecution, "exec-cqrs")
+            assert durable_exec is not None
+            assert durable_exec.status == "running"
+            assert durable_exec.outputs_jsonb == []
+
+        # Async worker job enqueued with 15s NX dedupe key
+        assert redis_set_calls == [(f"canvas:repair_due:{canvas_id}", "1", 15, True)]
+        assert enqueued_jobs == [("reconcile_canvas_execution", "exec-cqrs")]
+
+        # Second GET within TTL window does not re-enqueue
+        async with factory() as get_db_2:
+            await repair_canvas_executions(
+                get_db_2, user_id="user-1", canvas_id=canvas_id
+            )
+        assert len(redis_set_calls) == 2
+        assert len(enqueued_jobs) == 1
+    finally:
+        await engine.dispose()

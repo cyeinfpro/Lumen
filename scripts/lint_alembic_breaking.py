@@ -34,6 +34,10 @@ SAFE_VALIDATE_CONSTRAINT_RE = re.compile(
     r"^ALTER\s+TABLE\s+(?:ONLY\s+)?[\s\S]+?\s+VALIDATE\s+CONSTRAINT\s+[\s\S]+$",
     re.IGNORECASE,
 )
+SAFE_TABLE_STORAGE_PARAMS_RE = re.compile(
+    r'^ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?["a-zA-Z0-9_.]+\s+SET\s*\(\s*(?:(?:autovacuum_[a-z_]+|fillfactor)\s*=\s*[0-9.]+(?:\s*,\s*)?)+\)$',
+    re.IGNORECASE,
+)
 SQLALCHEMY_EXECUTABLE_METHODS = {"delete", "insert", "select", "update"}
 SQLALCHEMY_EXECUTABLE_CHAIN_METHODS = {
     "cte",
@@ -265,6 +269,7 @@ def _is_safe_raw_sql(sql: str) -> bool:
     return bool(
         SAFE_RAW_DML_RE.match(normalized)
         or SAFE_VALIDATE_CONSTRAINT_RE.fullmatch(normalized)
+        or SAFE_TABLE_STORAGE_PARAMS_RE.fullmatch(normalized)
     )
 
 

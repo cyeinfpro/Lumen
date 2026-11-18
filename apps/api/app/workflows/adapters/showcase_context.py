@@ -24,6 +24,8 @@ from .showcase_inputs import (
     validate_accessory_preview_image as _validate_accessory_preview_image,
 )  # noqa: F401
 from .showcase_orchestration import (
+    ShowcasePreflightCommand,
+    ShowcasePreflightRequest,
     prepare_showcase_preflight_impl as _prepare_showcase_preflight_impl,
 )  # noqa: F401
 from ..domain.showcase_shots import showcase_pick_shot_variants as _showcase_pick_shot_variants  # noqa: F401
@@ -214,24 +216,28 @@ async def _prepare_durable_showcase_preflight(
     product_step: WorkflowStep = context["product_step"]
     candidate: ModelCandidate = context["candidate"]
     preflight = await _prepare_showcase_preflight_impl(
-        db=db,
-        product_analysis=product_step.output_json or {},
-        selected_candidate=candidate,
-        accessory_plan=context["accessory_plan"],
-        template=body.template,
-        shot_picks=context["shot_picks"],
-        age_segment=context["age_segment"],
-        final_quality=body.final_quality,
-        user_prompt=context["run"].user_prompt,
-        aspect_ratio=body.aspect_ratio,
-        scene_environment=body.scene_environment,
-        scene_strategy=body.scene_strategy,
-        scene_variety=body.scene_variety,
-        scene_planner="rules_fallback",
-        continuity_anchor=body.continuity_anchor,
-        allow_pet=body.allow_pet,
-        allow_background_people=body.allow_background_people,
-        provider_runtime=provider_runtime,
+        ShowcasePreflightCommand(
+            db=db,
+            request=ShowcasePreflightRequest(
+                product_analysis=product_step.output_json or {},
+                selected_candidate=candidate,
+                accessory_plan=context["accessory_plan"],
+                template=body.template,
+                shot_picks=context["shot_picks"],
+                age_segment=context["age_segment"],
+                final_quality=body.final_quality,
+                user_prompt=context["run"].user_prompt,
+                aspect_ratio=body.aspect_ratio,
+                scene_environment=body.scene_environment,
+                scene_strategy=body.scene_strategy,
+                scene_variety=body.scene_variety,
+                scene_planner="rules_fallback",
+                continuity_anchor=body.continuity_anchor,
+                allow_pet=body.allow_pet,
+                allow_background_people=body.allow_background_people,
+            ),
+            provider_runtime=provider_runtime,
+        )
     )
     planning = dict(preflight.get("planning") or {})
     planning["requested_planner"] = body.scene_planner

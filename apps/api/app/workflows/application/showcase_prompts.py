@@ -272,25 +272,57 @@ def _composed_showcase_prompt(
     return prefix + body[: max(0, MAX_PROMPT_CHARS - len(prefix))]
 
 
+@dataclass(frozen=True, slots=True)
+class ShowcasePromptRequest:
+    product_analysis: dict[str, Any]
+    selected_candidate: _ModelCandidateLike
+    accessory_plan: dict[str, Any]
+    template: str
+    shot_type: str
+    final_quality: str
+    user_prompt: str = ""
+    shot_variant: ShotVariant | None = None
+    age_segment: str | None = None
+    aspect_ratio: str = "4:5"
+    scene_environment: str = "indoor"
+    scene_card: dict[str, Any] | None = None
+    garment_lock: dict[str, Any] | None = None
+    composed_prompt: str | None = None
+    allow_pet: bool = True
+    allow_background_people: bool = True
+
+
+def _resolve_showcase_prompt_request(
+    request: ShowcasePromptRequest | None,
+    legacy_kwargs: dict[str, Any],
+) -> ShowcasePromptRequest:
+    if request is not None:
+        if legacy_kwargs:
+            raise TypeError("cannot mix ShowcasePromptRequest with keyword arguments")
+        return request
+    return ShowcasePromptRequest(**legacy_kwargs)
+
+
 def _showcase_prompt(
-    *,
-    product_analysis: dict[str, Any],
-    selected_candidate: _ModelCandidateLike,
-    accessory_plan: dict[str, Any],
-    template: str,
-    shot_type: str,
-    final_quality: str,
-    user_prompt: str = "",
-    shot_variant: ShotVariant | None = None,
-    age_segment: str | None = None,
-    aspect_ratio: str = "4:5",
-    scene_environment: str = "indoor",
-    scene_card: dict[str, Any] | None = None,
-    garment_lock: dict[str, Any] | None = None,
-    composed_prompt: str | None = None,
-    allow_pet: bool = True,
-    allow_background_people: bool = True,
+    request: ShowcasePromptRequest | None = None,
+    **legacy_kwargs: Any,
 ) -> str:
+    req = _resolve_showcase_prompt_request(request, legacy_kwargs)
+    product_analysis = req.product_analysis
+    selected_candidate = req.selected_candidate
+    template = req.template
+    shot_type = req.shot_type
+    final_quality = req.final_quality
+    user_prompt = req.user_prompt
+    shot_variant = req.shot_variant
+    age_segment = req.age_segment
+    aspect_ratio = req.aspect_ratio
+    scene_environment = req.scene_environment
+    scene_card = req.scene_card
+    garment_lock = req.garment_lock
+    composed_prompt = req.composed_prompt
+    allow_pet = req.allow_pet
+    allow_background_people = req.allow_background_people
     brief = selected_candidate.model_brief_json or {}
     summary = str(brief.get("summary") or user_prompt or "自然电商模特")
     must_preserve = product_analysis.get("must_preserve")

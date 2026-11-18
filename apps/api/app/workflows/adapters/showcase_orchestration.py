@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from lumen_core.models import ModelCandidate
 
 from .apparel_scene_planner import (
     build_garment_lock as _build_garment_lock,
 )
-from ..domain.showcase_shot_pool import ShotClass, ShotVariant
 from .showcase_preflight_steps import (
     ShowcasePreflightProgressHook as _ShowcasePreflightProgressHook,
     ShowcasePreflightRequest,
@@ -23,52 +22,48 @@ from .showcase_preflight_steps import (
 from ..ports.runtime_state import ProviderRoundRobinStatePort
 
 
-async def _prepare_showcase_preflight_impl(
-    *,
-    db: AsyncSession,
-    product_analysis: dict[str, Any],
-    selected_candidate: ModelCandidate,
-    accessory_plan: dict[str, Any],
-    template: str,
-    shot_picks: list[tuple[ShotClass, ShotVariant]],
-    age_segment: str | None,
-    final_quality: str,
-    user_prompt: str,
-    aspect_ratio: str,
-    scene_environment: str,
-    scene_strategy: str,
-    scene_variety: str,
-    scene_planner: str,
-    continuity_anchor: str,
-    allow_pet: bool,
-    allow_background_people: bool,
-    provider_runtime: ProviderRoundRobinStatePort,
-    reference_images: list[dict[str, str]] | None = None,
-    progress_hook: _ShowcasePreflightProgressHook | None = None,
-) -> dict[str, Any]:
-    request = ShowcasePreflightRequest(
-        product_analysis=product_analysis,
-        selected_candidate=selected_candidate,
-        accessory_plan=accessory_plan,
-        template=template,
-        shot_picks=shot_picks,
-        age_segment=age_segment,
-        final_quality=final_quality,
-        user_prompt=user_prompt,
-        aspect_ratio=aspect_ratio,
-        scene_environment=scene_environment,
-        scene_strategy=scene_strategy,
-        scene_variety=scene_variety,
-        scene_planner=scene_planner,
-        continuity_anchor=continuity_anchor,
-        allow_pet=allow_pet,
-        allow_background_people=allow_background_people,
-        reference_images=reference_images,
-        reference_image_skips=None,
+@dataclass(frozen=True, slots=True)
+class ShowcasePreflightCommand:
+    db: AsyncSession
+    request: ShowcasePreflightRequest
+    provider_runtime: ProviderRoundRobinStatePort
+    progress_hook: _ShowcasePreflightProgressHook | None = None
+
+
+def _resolve_showcase_preflight_command(
+    command: ShowcasePreflightCommand | None,
+    legacy_kwargs: dict[str, Any],
+) -> ShowcasePreflightCommand:
+    if command is not None:
+        if legacy_kwargs:
+            raise TypeError("cannot mix ShowcasePreflightCommand with keyword arguments")
+        return command
+    params = dict(legacy_kwargs)
+    db = params.pop("db")
+    provider_runtime = params.pop("provider_runtime")
+    progress_hook = params.pop("progress_hook", None)
+    params.setdefault("reference_images", None)
+    params.setdefault("reference_image_skips", None)
+    return ShowcasePreflightCommand(
+        db=db,
+        request=ShowcasePreflightRequest(**params),
+        provider_runtime=provider_runtime,
+        progress_hook=progress_hook,
     )
-    brief = selected_candidate.model_brief_json or {}
-    model_summary = str(brief.get("summary") or user_prompt or "自然电商模特")
-    garment_lock = _build_garment_lock(product_analysis)
+
+
+async def _prepare_showcase_preflight_impl(
+    command: ShowcasePreflightCommand | None = None,
+    **legacy_kwargs: Any,
+) -> dict[str, Any]:
+    cmd = _resolve_showcase_preflight_command(command, legacy_kwargs)
+    db = cmd.db
+    request = cmd.request
+    provider_runtime = cmd.provider_runtime
+    progress_hook = cmd.progress_hook
+    brief = request.selected_candidate.model_brief_json or {}
+    model_summary = str(brief.get("summary") or request.user_prompt or "自然电商模特")
+    garment_lock = _build_garment_lock(request.product_analysis)
     provider_order = await resolve_preflight_provider_order(
         db,
         request,
@@ -106,7 +101,7 @@ async def _prepare_showcase_preflight_impl(
         "dispatching",
         "GPT-5.5 批量镜头和提示词已完成，正在派发生图任务",
         len(final_prompts),
-        len(shot_picks),
+        len(request.shot_picks),
     )
     return {
         "garment_lock": garment_lock,

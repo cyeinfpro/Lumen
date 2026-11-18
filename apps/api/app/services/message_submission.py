@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
@@ -14,28 +14,14 @@ from lumen_core import billing as billing_core
 from lumen_core.arq_jobs import arq_job_id
 from lumen_core.image_models import MAX_IMAGE_COUNT
 from lumen_core.constants import (
-    DEFAULT_IMAGE_RESPONSES_MODEL,
-    EV_COMP_QUEUED,
-    EV_CONV_MSG_APPENDED,
-    EV_GEN_QUEUED,
-    CompletionStage,
-    CompletionStatus,
-    GenerationAction,
-    Intent,
-    MessageStatus,
-    Role,
-    conv_channel,
-    task_channel,
+    DEFAULT_IMAGE_RESPONSES_MODEL, EV_COMP_QUEUED, EV_CONV_MSG_APPENDED, EV_GEN_QUEUED,
+    CompletionStage, CompletionStatus, GenerationAction, Intent, MessageStatus, Role,
+    conv_channel, task_channel,
 )
 from lumen_core.models import Completion, Conversation, Message, OutboxEvent
 from lumen_core.queue_metadata import generation_queue_metadata
 from lumen_core.runtime_settings import get_spec
-from lumen_core.schemas import (
-    ChatParamsIn,
-    ImageParamsIn,
-    MessageAttachmentIn,
-    PostMessageIn,
-)
+from lumen_core.schemas import ChatParamsIn, ImageParamsIn, MessageAttachmentIn, PostMessageIn
 from lumen_core.sizing import ResolvedSize, resolve_size
 
 from ..arq_pool import get_arq_pool
@@ -43,11 +29,8 @@ from ..audit import write_audit
 from ..runtime_settings import get_setting
 from ..sse_publish import publish_sse_event, publish_sse_events
 from ..task_billing import (
-    ChatWalletPreflight,
-    apply_rate_multiplier_micro,
-    requested_image_billing_tier,
-    resolve_image_render_quality,
-    user_rate_multiplier_x10000,
+    ChatWalletPreflight, apply_rate_multiplier_micro, requested_image_billing_tier,
+    resolve_image_render_quality, user_rate_multiplier_x10000,
 )
 from .message_completion_inputs import (
     chat_params_with_fast_default as chat_params_with_fast_default,
@@ -55,43 +38,24 @@ from .message_completion_inputs import (
     validate_vision_svg_source as _validate_vision_svg_source,
 )
 from .message_generation_tasks import (
-    GenerationBatch,
-    GenerationTaskCommand,
-    GenerationTaskServices,
-    generation_outbox_payload,
-    generation_upstream_request,
-    hold_generation_billing,
-    new_generation,
-    prepare_generation_billing,
+    GenerationBatch, GenerationTaskCommand, GenerationTaskServices,
+    generation_outbox_payload, generation_upstream_request, hold_generation_billing,
+    new_generation, prepare_generation_billing,
 )
 from .message_generation_batch import (
-    ExistingMessageGenerationCommand,
-    ExistingMessageGenerationServices,
+    ExistingMessageGenerationCommand, ExistingMessageGenerationServices,
     execute_generation_batch_for_message,
 )
-
 from .message_submission_billing import (
-    billing_http_error as _billing_http_error,
-    billing_allow_negative,
-    billing_enabled,
-    billing_image_thresholds,
-    billing_setting_raw,
-    chat_max_tool_invocations,
-    chat_tool_budget_setting_micro,
-    ensure_chat_wallet_preflight,
-    generation_child_idempotency_key,
-    idempotency_lock_key,
-    idempotency_lookup_keys,
-    image_multi_generation_defer_s,
-    http_error as _http,
-    stored_idempotency_key,
+    billing_http_error as _billing_http_error, billing_allow_negative, billing_enabled,
+    billing_image_thresholds, billing_setting_raw, chat_max_tool_invocations,
+    chat_tool_budget_setting_micro, ensure_chat_wallet_preflight,
+    generation_child_idempotency_key, idempotency_lock_key, idempotency_lookup_keys,
+    image_multi_generation_defer_s, http_error as _http, stored_idempotency_key,
 )
 from .message_submission_prompting import (
-    TaskCredentialPin,
-    build_structured_system_prompt,
-    resolve_system_prompt_for_message,
-    resolve_task_credential_pin,
-    sanitize_system_prompt_source as _sanitize_system_prompt_source,
+    TaskCredentialPin, build_structured_system_prompt, resolve_system_prompt_for_message,
+    resolve_task_credential_pin, sanitize_system_prompt_source as _sanitize_system_prompt_source,
 )
 
 
@@ -153,6 +117,73 @@ class CompletionTaskCommand:
     credential_pin: TaskCredentialPin | None
     chat_wallet_preflight_done: bool
     chat_wallet_preflight: ChatWalletPreflight | None
+
+
+@dataclass(frozen=True, slots=True)
+class AssistantTaskCommand:
+    db: AsyncSession
+    user_id: str
+    account_mode: str
+    conv: Conversation
+    user_msg: Message
+    intent: Intent
+    idempotency_key: str
+    image_params: ImageParamsIn
+    chat_params: ChatParamsIn
+    system_prompt: str | None
+    attachment_ids: list[str]
+    text: str
+    user_email: str | None = None
+    default_image_output_format: str = DEFAULT_IMAGE_OUTPUT_FORMAT
+    mask_image_id: str | None = None
+    credential_pin: TaskCredentialPin | None = None
+    credential_pin_resolved: bool = False
+    chat_wallet_preflight_done: bool = False
+    chat_wallet_preflight: ChatWalletPreflight | None = None
+    request_metadata: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AssistantTaskServices:
+    resolve_task_credential_pin_fn: AsyncCallable = resolve_task_credential_pin
+    ensure_chat_wallet_preflight_fn: AsyncCallable = ensure_chat_wallet_preflight
+    billing_enabled_fn: AsyncCallable = billing_enabled
+    billing_allow_negative_fn: AsyncCallable = billing_allow_negative
+    billing_image_thresholds_fn: AsyncCallable = billing_image_thresholds
+    user_rate_multiplier_fn: AsyncCallable = user_rate_multiplier_x10000
+    apply_rate_multiplier_fn: Callable[[int, int], int] = apply_rate_multiplier_micro
+    requested_image_billing_tier_fn: Callable[
+        [ImageParamsIn], str | None
+    ] = requested_image_billing_tier
+    write_audit_fn: AsyncCallable = write_audit
+
+
+_ASSISTANT_SERVICE_FIELDS = frozenset(AssistantTaskServices.__dataclass_fields__)
+
+
+def _resolve_assistant_task_inputs(
+    command: AssistantTaskCommand | None,
+    services: AssistantTaskServices | None,
+    legacy_kwargs: dict[str, Any],
+) -> tuple[AssistantTaskCommand, AssistantTaskServices]:
+    if not legacy_kwargs:
+        if command is None:
+            raise TypeError("AssistantTaskCommand is required")
+        return command, services or AssistantTaskServices()
+    svc_kwargs = {
+        k: v for k, v in legacy_kwargs.items() if k in _ASSISTANT_SERVICE_FIELDS
+    }
+    cmd_kwargs = {
+        k: v for k, v in legacy_kwargs.items() if k not in _ASSISTANT_SERVICE_FIELDS
+    }
+    if command is not None and cmd_kwargs:
+        raise TypeError("cannot mix AssistantTaskCommand with command keyword arguments")
+    resolved_cmd = command if command is not None else AssistantTaskCommand(**cmd_kwargs)
+    if services is None:
+        resolved_svc = AssistantTaskServices(**svc_kwargs)
+    else:
+        resolved_svc = replace(services, **svc_kwargs) if svc_kwargs else services
+    return resolved_cmd, resolved_svc
 
 
 @dataclass(frozen=True)
@@ -607,30 +638,17 @@ async def _create_generation_tasks(
     for image_index in range(1, requested_count + 1):
         upstream_request = generation_upstream_request(batch, image_index)
         generation = new_generation(
-            command,
-            services,
-            batch,
-            image_index=image_index,
-            upstream_request=upstream_request,
+            command, services, batch,
+            image_index=image_index, upstream_request=upstream_request,
         )
         db.add(generation)
         await db.flush()
         await hold_generation_billing(
-            command,
-            services,
-            batch,
-            billing,
-            generation,
-            image_index=image_index,
+            command, services, batch, billing, generation, image_index=image_index,
         )
         generation_ids.append(generation.id)
         outbox_payloads.append(
-            generation_outbox_payload(
-                command,
-                services,
-                generation,
-                image_index=image_index,
-            )
+            generation_outbox_payload(command, services, generation, image_index=image_index)
         )
     return generation_ids, outbox_payloads
 
@@ -657,42 +675,15 @@ async def _create_outbox_rows(
 
 
 async def create_assistant_task(
+    command: AssistantTaskCommand | None = None,
     *,
-    db: AsyncSession,
-    user_id: str,
-    account_mode: str,
-    conv: Conversation,
-    user_msg: Message,
-    intent: Intent,
-    idempotency_key: str,
-    image_params: ImageParamsIn,
-    chat_params: ChatParamsIn,
-    system_prompt: str | None,
-    attachment_ids: list[str],
-    text: str,
-    user_email: str | None = None,
-    default_image_output_format: str = DEFAULT_IMAGE_OUTPUT_FORMAT,
-    mask_image_id: str | None = None,
-    credential_pin: TaskCredentialPin | None = None,
-    credential_pin_resolved: bool = False,
-    chat_wallet_preflight_done: bool = False,
-    chat_wallet_preflight: ChatWalletPreflight | None = None,
-    request_metadata: dict[str, Any] | None = None,
-    resolve_task_credential_pin_fn: AsyncCallable = resolve_task_credential_pin,
-    ensure_chat_wallet_preflight_fn: AsyncCallable = ensure_chat_wallet_preflight,
-    billing_enabled_fn: AsyncCallable = billing_enabled,
-    billing_allow_negative_fn: AsyncCallable = billing_allow_negative,
-    billing_image_thresholds_fn: AsyncCallable = billing_image_thresholds,
-    user_rate_multiplier_fn: AsyncCallable = user_rate_multiplier_x10000,
-    apply_rate_multiplier_fn: Callable[[int, int], int] = apply_rate_multiplier_micro,
-    requested_image_billing_tier_fn: Callable[
-        [ImageParamsIn], str | None
-    ] = requested_image_billing_tier,
-    write_audit_fn: AsyncCallable = write_audit,
+    services: AssistantTaskServices | None = None,
+    **legacy_kwargs: Any,
 ) -> AssistantTaskResult:
     """Build assistant/task/outbox rows inside the caller's transaction."""
-    produces_image = intent in (Intent.TEXT_TO_IMAGE, Intent.IMAGE_TO_IMAGE)
-    if intent == Intent.IMAGE_TO_IMAGE and not attachment_ids:
+    cmd, svc = _resolve_assistant_task_inputs(command, services, legacy_kwargs)
+    produces_image = cmd.intent in (Intent.TEXT_TO_IMAGE, Intent.IMAGE_TO_IMAGE)
+    if cmd.intent == Intent.IMAGE_TO_IMAGE and not cmd.attachment_ids:
         raise _http(
             "missing_reference_image",
             "image_to_image requires at least one reference image",
@@ -704,96 +695,97 @@ async def create_assistant_task(
     if produces_image:
         try:
             resolved_size = resolve_size(
-                aspect=image_params.aspect_ratio,
-                mode=image_params.size_mode,
-                fixed=image_params.fixed_size,
-                output_format=image_params.output_format,
+                aspect=cmd.image_params.aspect_ratio,
+                mode=cmd.image_params.size_mode,
+                fixed=cmd.image_params.fixed_size,
+                output_format=cmd.image_params.output_format,
             )
             prompt_suffix = resolved_size.prompt_suffix
         except Exception as exc:  # noqa: BLE001
             raise _http("invalid_size", f"size resolve failed: {exc}", 422) from exc
 
-    if not credential_pin_resolved:
-        credential_pin = await resolve_task_credential_pin_fn(
-            db,
-            user_id,
+    credential_pin = cmd.credential_pin
+    if not cmd.credential_pin_resolved:
+        credential_pin = await svc.resolve_task_credential_pin_fn(
+            cmd.db,
+            cmd.user_id,
             "image" if produces_image else "chat",
-            account_mode,
+            cmd.account_mode,
         )
 
     assistant_msg = Message(
-        conversation_id=conv.id,
+        conversation_id=cmd.conv.id,
         role=Role.ASSISTANT.value,
         content={},
-        parent_message_id=user_msg.id,
-        intent=intent.value,
+        parent_message_id=cmd.user_msg.id,
+        intent=cmd.intent.value,
         status=MessageStatus.PENDING.value,
     )
-    db.add(assistant_msg)
-    await db.flush()
+    cmd.db.add(assistant_msg)
+    await cmd.db.flush()
 
-    stored_key = stored_idempotency_key(conv.id, idempotency_key)
+    stored_key = stored_idempotency_key(cmd.conv.id, cmd.idempotency_key)
     completion_id: str | None = None
     generation_ids: list[str] = []
-    if intent in (Intent.CHAT, Intent.VISION_QA):
+    if cmd.intent in (Intent.CHAT, Intent.VISION_QA):
         completion_id, outbox_payloads = await _create_completion_task(
-            db,
+            cmd.db,
             CompletionTaskCommand(
-                user_id=user_id,
-                user_email=user_email,
-                account_mode=account_mode,
+                user_id=cmd.user_id,
+                user_email=cmd.user_email,
+                account_mode=cmd.account_mode,
                 assistant_msg=assistant_msg,
-                intent=intent,
+                intent=cmd.intent,
                 stored_key=stored_key,
-                attachment_ids=attachment_ids,
-                chat_params=chat_params,
-                system_prompt=system_prompt,
-                request_metadata=request_metadata,
+                attachment_ids=cmd.attachment_ids,
+                chat_params=cmd.chat_params,
+                system_prompt=cmd.system_prompt,
+                request_metadata=cmd.request_metadata,
                 credential_pin=credential_pin,
-                chat_wallet_preflight_done=chat_wallet_preflight_done,
-                chat_wallet_preflight=chat_wallet_preflight,
+                chat_wallet_preflight_done=cmd.chat_wallet_preflight_done,
+                chat_wallet_preflight=cmd.chat_wallet_preflight,
             ),
             CompletionTaskServices(
-                ensure_chat_wallet_preflight=ensure_chat_wallet_preflight_fn,
-                billing_allow_negative=billing_allow_negative_fn,
-                write_audit=write_audit_fn,
+                ensure_chat_wallet_preflight=svc.ensure_chat_wallet_preflight_fn,
+                billing_allow_negative=svc.billing_allow_negative_fn,
+                write_audit=svc.write_audit_fn,
             ),
         )
     else:
         assert resolved_size is not None
         generation_ids, outbox_payloads = await _create_generation_tasks(
             GenerationTaskCommand(
-                db=db,
-                user_id=user_id,
-                account_mode=account_mode,
+                db=cmd.db,
+                user_id=cmd.user_id,
+                account_mode=cmd.account_mode,
                 assistant_msg=assistant_msg,
-                intent=intent,
+                intent=cmd.intent,
                 stored_key=stored_key,
-                attachment_ids=attachment_ids,
-                image_params=image_params,
-                text=text,
+                attachment_ids=cmd.attachment_ids,
+                image_params=cmd.image_params,
+                text=cmd.text,
                 resolved_size=resolved_size,
                 prompt_suffix=prompt_suffix,
-                default_image_output_format=default_image_output_format,
-                mask_image_id=mask_image_id,
+                default_image_output_format=cmd.default_image_output_format,
+                mask_image_id=cmd.mask_image_id,
                 credential_pin=credential_pin,
-                request_metadata=request_metadata,
+                request_metadata=cmd.request_metadata,
             ),
             GenerationTaskServices(
-                billing_enabled=billing_enabled_fn,
-                billing_allow_negative=billing_allow_negative_fn,
-                billing_image_thresholds=billing_image_thresholds_fn,
-                user_rate_multiplier=user_rate_multiplier_fn,
-                apply_rate_multiplier=apply_rate_multiplier_fn,
-                requested_image_billing_tier=requested_image_billing_tier_fn,
-                write_audit=write_audit_fn,
+                billing_enabled=svc.billing_enabled_fn,
+                billing_allow_negative=svc.billing_allow_negative_fn,
+                billing_image_thresholds=svc.billing_image_thresholds_fn,
+                user_rate_multiplier=svc.user_rate_multiplier_fn,
+                apply_rate_multiplier=svc.apply_rate_multiplier_fn,
+                requested_image_billing_tier=svc.requested_image_billing_tier_fn,
+                write_audit=svc.write_audit_fn,
                 child_idempotency_key=generation_child_idempotency_key,
                 defer_seconds=image_multi_generation_defer_s,
                 payload_context=_task_payload_context,
                 billing_http_error=_billing_http_error,
             ),
         )
-    outbox_rows = await _create_outbox_rows(db, outbox_payloads)
+    outbox_rows = await _create_outbox_rows(cmd.db, outbox_payloads)
     return AssistantTaskResult(
         assistant_msg=assistant_msg,
         completion_id=completion_id,
@@ -966,7 +958,9 @@ async def publish_assistant_task(
 
 
 __all__ = [
+    "AssistantTaskCommand",
     "AssistantTaskResult",
+    "AssistantTaskServices",
     "TaskCredentialPin",
     "ExistingMessageGenerationCommand",
     "_sanitize_system_prompt_source",

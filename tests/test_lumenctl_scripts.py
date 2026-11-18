@@ -4479,9 +4479,21 @@ def test_lumen_nginx_config_contains_sse_api_and_security_defaults(
     )
     config = out.read_text(encoding="utf-8")
     assert "return 301 https://$host$request_uri;" in config
-    assert "location /events" in config
+    assert "upstream lumen_api {" in config
+    assert "server 127.0.0.1:8000;" in config
+    assert "keepalive 64;" in config
+    assert "location = /events {" in config
+    assert "proxy_pass http://lumen_api/events;" in config
     assert "proxy_buffering off;" in config
-    assert "location /api/" in config
+    assert "location /api/ {" in config
+    assert "proxy_pass http://lumen_api/;" in config
+    assert "gzip on;" in config
+    assert "gzip_vary on;" in config
+    assert "gzip_min_length 1024;" in config
+    assert "gzip_comp_level 5;" in config
+    assert "application/manifest+json;" in config
+    assert "location ~ ^/_internal_storage/" in config
+    assert "Content-Security-Policy" not in config
     assert (
         "limit_req_zone $binary_remote_addr zone=lumen_api_lumen_example_com" in config
     )
@@ -4623,16 +4635,78 @@ def test_nginx_example_security_headers_are_not_duplicated() -> None:
         "Cross-Origin-Resource-Policy",
     ):
         assert config.count(f"add_header {header}") == 1
-    assert config.count("add_header Content-Security-Policy") == 1
-    assert (
-        "add_header Content-Security-Policy \"default-src 'self'; frame-ancestors 'none';\" always;"
-        in config
-    )
-    assert "Content-Security-Policy \"default-src 'none'" not in config
+    assert config.count("add_header Content-Security-Policy") == 0
+    assert "upstream lumen_api {" in config
+    assert "server 127.0.0.1:8000;" in config
+    assert "keepalive 64;" in config
+    assert "location = /events {" in config
+    assert "proxy_pass              http://lumen_api/events;" in config
+    assert "location /api/ {" in config
+    assert "proxy_pass              http://lumen_api/;" in config
+    assert "gzip on;" in config
+    assert "gzip_vary on;" in config
+    assert "gzip_min_length 1024;" in config
+    assert "gzip_comp_level 5;" in config
+    assert "application/manifest+json;" in config
+    assert config.count("gzip                    off;") == 2
     assert "${LUMEN_HSTS_ENABLED}:${LUMEN_HSTS_INCLUDE_SUBDOMAINS}" in config
     assert '"true:false" "max-age=31536000";' in config
     assert '"true:true"  "max-age=31536000; includeSubDomains";' in config
     assert "add_header Strict-Transport-Security $lumen_hsts_header always;" in config
+
+
+def test_validate_nginx_no_root_csp_blocks_server_level_csp(tmp_path: Path) -> None:
+    example_conf = ROOT / "deploy" / "nginx.conf.example"
+    assert_bash_ok(
+        f"""
+        . {LUMENCTL}
+        validate_nginx_no_root_csp {example_conf}
+        """
+    )
+
+    conflicting = tmp_path / "conflicting.conf"
+    conflicting.write_text(
+        """
+server {
+  listen 443 ssl;
+  server_name lumen.example.com;
+  add_header Content-Security-Policy "default-src 'self'; frame-ancestors 'none';" always;
+  location / {
+    proxy_pass http://127.0.0.1:3000;
+  }
+}
+""",
+        encoding="utf-8",
+    )
+    bad = run_bash(
+        f"""
+        . {LUMENCTL}
+        validate_nginx_no_root_csp {conflicting}
+        """
+    )
+    assert bad.returncode != 0
+    assert "Content-Security-Policy" in bad.stderr
+
+    scoped_only = tmp_path / "scoped.conf"
+    scoped_only.write_text(
+        """
+server {
+  listen 443 ssl;
+  server_name lumen.example.com;
+  # add_header Content-Security-Policy "default-src 'self';" always;
+  location = /raw.svg {
+    add_header Content-Security-Policy "sandbox" always;
+  }
+}
+""",
+        encoding="utf-8",
+    )
+    assert_bash_ok(
+        f"""
+        . {LUMENCTL}
+        validate_nginx_no_root_csp {scoped_only}
+        """
+    )
 
 
 def test_sub2api_nginx_configs_have_long_timeouts_and_buffering_off(

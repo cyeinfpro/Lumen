@@ -35,6 +35,8 @@ from lumen_core.providers_parts.proxy_runtime import (
     resolve_provider_proxy_url as _resolve_provider_proxy_url,
 )
 
+from .runtime.slot import RuntimeSlot
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_STRATEGY = "random"
@@ -71,12 +73,57 @@ _LOCAL_COOLDOWN_TTL_SECONDS = 30
 
 
 @dataclass
-class _ProxyPoolState:
+class ProxyPoolState:
     local_cooldown: dict[str, float] = field(default_factory=dict)
     provider_proxy: ProviderProxyRuntime = field(default_factory=ProviderProxyRuntime)
 
 
-_proxy_pool_state = _ProxyPoolState()
+_ProxyPoolState = ProxyPoolState
+_PROXY_POOL_SLOT: RuntimeSlot[ProxyPoolState] = RuntimeSlot(
+    "api-proxy-pool-state",
+    default_factory=ProxyPoolState,
+)
+
+
+class _ProxyPoolStateView:
+    @property
+    def local_cooldown(self) -> dict[str, float]:
+        return _PROXY_POOL_SLOT.current().local_cooldown
+
+    @property
+    def provider_proxy(self) -> ProviderProxyRuntime:
+        return _PROXY_POOL_SLOT.current().provider_proxy
+
+    @provider_proxy.setter
+    def provider_proxy(self, value: ProviderProxyRuntime) -> None:
+        _PROXY_POOL_SLOT.current().provider_proxy = value
+
+
+_proxy_pool_state = _ProxyPoolStateView()
+
+
+def configure_proxy_pool_state(
+    state: ProxyPoolState | None = None,
+) -> ProxyPoolState:
+    active = state or ProxyPoolState()
+    _PROXY_POOL_SLOT.install_default(active)
+    return active
+
+
+async def shutdown_proxy_pool_state(
+    state: ProxyPoolState | None = None,
+) -> None:
+    active = state or _PROXY_POOL_SLOT.current_or_none()
+    if active is None:
+        return
+    runtime = active.provider_proxy
+    try:
+        await _close_provider_proxy_tunnels(runtime=runtime)
+    finally:
+        active.local_cooldown.clear()
+        if active.provider_proxy is runtime:
+            active.provider_proxy = ProviderProxyRuntime()
+        _PROXY_POOL_SLOT.clear_default(active)
 
 
 class CooldownState(StrEnum):

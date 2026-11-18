@@ -3,6 +3,7 @@
 import dynamic from "next/dynamic";
 
 import { Spinner } from "@/components/ui/primitives/Spinner";
+import { useInpaintStore } from "@/store/useInpaintStore";
 
 const InpaintModalImpl = dynamic(
   () => import("./InpaintModal").then((mod) => mod.InpaintModal),
@@ -21,5 +22,7 @@ const InpaintModalImpl = dynamic(
 );
 
 export function LazyInpaintModal() {
+  const open = useInpaintStore((state) => state.open);
+  if (!open) return null;
   return <InpaintModalImpl />;
 }

@@ -24,6 +24,7 @@ from .tracker import (
     ACTIVE_USER_STREAMS_KEY,
     ACTIVE_USER_STREAM_TTL_SECONDS,
     TRACK_KEY_PREFIX,
+    Tracker,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ _CHAT_SEND_CACHE_CAP = 2048
 class ListenerRuntimeState:
     """Mutable state owned by one listener lifecycle."""
 
+    tracker: Tracker | None = None
     progress_last_edit: OrderedDict[str, float] = field(default_factory=OrderedDict)
     chat_send_locks: dict[int, asyncio.Lock] = field(default_factory=dict)
     chat_send_next_at: OrderedDict[int, float] = field(default_factory=OrderedDict)

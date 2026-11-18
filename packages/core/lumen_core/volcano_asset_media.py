@@ -92,7 +92,10 @@ _ffmpeg_command = _transcode._ffmpeg_command
 _make_video_poster_jpeg = _transcode._make_video_poster_jpeg
 
 
-class _VideoTranscodeRuntime:
+_LOOP_TRANSCODE_SEMAPHORE_ATTR = "_lumen_volcano_video_transcode_semaphore"
+
+
+class VideoTranscodeRuntime:
     def __init__(self) -> None:
         self.semaphores: weakref.WeakKeyDictionary[
             asyncio.AbstractEventLoop,
@@ -114,7 +117,7 @@ class _VideoTranscodeRuntime:
             self.semaphores.clear()
 
 
-_VIDEO_TRANSCODE_RUNTIME = _VideoTranscodeRuntime()
+_VideoTranscodeRuntime = VideoTranscodeRuntime
 
 
 def _storage_path(storage_root: str, storage_key: str) -> Path:
@@ -421,8 +424,18 @@ async def _reserve_media_capacity(
         ) from exc
 
 
-def _video_transcode_semaphore() -> asyncio.Semaphore:
-    return _VIDEO_TRANSCODE_RUNTIME.semaphore_for_running_loop()
+def _video_transcode_semaphore(
+    runtime: VideoTranscodeRuntime | None = None,
+) -> asyncio.Semaphore:
+    if runtime is not None:
+        return runtime.semaphore_for_running_loop()
+    loop = asyncio.get_running_loop()
+    semaphore = getattr(loop, _LOOP_TRANSCODE_SEMAPHORE_ATTR, None)
+    if isinstance(semaphore, asyncio.Semaphore):
+        return semaphore
+    semaphore = asyncio.Semaphore(2)
+    setattr(loop, _LOOP_TRANSCODE_SEMAPHORE_ATTR, semaphore)
+    return semaphore
 
 
 def make_volcano_asset_video_mp4(
@@ -658,7 +671,9 @@ def _video_variant_file_is_valid(
     )
 
 
-def _variant_workflow_runtime() -> Any:
+def _variant_workflow_runtime(
+    transcode_runtime: VideoTranscodeRuntime | None = None,
+) -> Any:
     from .volcano_asset_variant_contracts import VariantWorkflowRuntime
 
     return VariantWorkflowRuntime(
@@ -677,7 +692,7 @@ def _variant_workflow_runtime() -> Any:
         install_rendered_media=_install_rendered_media,
         video_variant_metadata=volcano_asset_video_variant_metadata,
         video_variant_file_is_valid=_video_variant_file_is_valid,
-        video_transcode_semaphore=_video_transcode_semaphore,
+        video_transcode_semaphore=lambda: _video_transcode_semaphore(transcode_runtime),
         make_video_mp4=make_volcano_asset_video_mp4,
         result_rows=_result_rows,
         video_reference_declared_bytes=_video_reference_declared_bytes,
@@ -692,6 +707,7 @@ async def ensure_volcano_asset_image_variant(
     storage_root: str,
     storage_capacity: StorageCapacityPort,
     storage_lease_ttl_seconds: float,
+    transcode_runtime: VideoTranscodeRuntime | None = None,
 ) -> tuple[ImageVariant, VolcanoAssetInstallReceipt | None]:
     from .volcano_asset_variant_workflow import ensure_image_variant
 
@@ -701,7 +717,7 @@ async def ensure_volcano_asset_image_variant(
         storage_root=storage_root,
         storage_capacity=storage_capacity,
         storage_lease_ttl_seconds=storage_lease_ttl_seconds,
-        runtime=_variant_workflow_runtime(),
+        runtime=_variant_workflow_runtime(transcode_runtime),
     )
 
 
@@ -712,6 +728,7 @@ async def ensure_volcano_asset_video_variant(
     storage_root: str,
     storage_capacity: StorageCapacityPort,
     storage_lease_ttl_seconds: float,
+    transcode_runtime: VideoTranscodeRuntime | None = None,
 ) -> tuple[dict[str, Any], VolcanoAssetInstallReceipt | None]:
     from .volcano_asset_variant_workflow import ensure_video_variant
 
@@ -721,7 +738,7 @@ async def ensure_volcano_asset_video_variant(
         storage_root=storage_root,
         storage_capacity=storage_capacity,
         storage_lease_ttl_seconds=storage_lease_ttl_seconds,
-        runtime=_variant_workflow_runtime(),
+        runtime=_variant_workflow_runtime(transcode_runtime),
     )
 
 
@@ -751,6 +768,7 @@ __all__ = [
     "VOLCANO_ASSET_VIDEO_MIN_DURATION_MS",
     "VOLCANO_ASSET_VIDEO_MIN_PIXELS",
     "VOLCANO_ASSET_VIDEO_TARGET_LONG_SIDE",
+    "VideoTranscodeRuntime",
     "VolcanoAssetImageJpeg",
     "VolcanoAssetInstallReceipt",
     "VolcanoAssetMediaError",

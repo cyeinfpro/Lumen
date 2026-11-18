@@ -13,6 +13,7 @@ from .channel_policy import (
     COMPACTION_CHANNEL_PREFIX,
     compaction_bridge_channels,
 )
+from .multiplexer import ClientEventQueue, ProcessRealtimeMultiplexer
 from .replay import (
     ConnectionEventDeduper,
     normalize_event_id,
@@ -94,6 +95,8 @@ class EventStreamState:
     event_deduper: ConnectionEventDeduper = field(
         default_factory=ConnectionEventDeduper
     )
+    multiplexer: ProcessRealtimeMultiplexer | None = None
+    owns_multiplexer: bool = False
 
 
 def sse_connection_key(user_id: str) -> str:
@@ -246,12 +249,13 @@ def expired_compaction_events(state: EventStreamState) -> list[dict]:
 
 
 def pubsub_timeout(state: EventStreamState) -> float:
+    default_timeout = float(KEEPALIVE_INTERVAL_SECONDS)
     if not state.pending_compaction:
-        return 1.0
+        return default_timeout
     next_deadline = min(
         deadline for deadline, _event in state.pending_compaction.values()
     )
-    return max(0.0, min(1.0, next_deadline - time.monotonic()))
+    return max(0.0, min(default_timeout, next_deadline - time.monotonic()))
 
 
 def decoded_live_event(data: object) -> tuple[dict | None, str, object] | None:
@@ -351,14 +355,16 @@ async def persisted_compaction_event(
 ) -> tuple[dict, str | None]:
     if payload is None:
         return event, None
-    event_id = await stream_id_for_pubsub_event(
-        state.redis,
-        stream_key=state.stream_key,
-        event_name=COMPACTION_EVENT,
-        envelope_event_id=normalize_event_id(payload.get("event_id")),
-        payload=payload,
-        channel=public_channel,
-    )
+    event_id = normalize_recoverable_sse_id(payload.get("sse_id"))
+    if event_id is None:
+        event_id = await stream_id_for_pubsub_event(
+            state.redis,
+            stream_key=state.stream_key,
+            event_name=COMPACTION_EVENT,
+            envelope_event_id=normalize_event_id(payload.get("event_id")),
+            payload=payload,
+            channel=public_channel,
+        )
     if not event_id:
         return event, event_id
     payload = payload_with_sse_id(payload, event_id)
@@ -467,62 +473,27 @@ async def heartbeat_events(state: EventStreamState) -> list[dict]:
 
 async def live_events(
     state: EventStreamState,
-    pubsub: Any,
+    client_queue: ClientEventQueue,
     bridge_channels: dict[str, str],
 ) -> AsyncIterator[dict]:
     while not await state.is_disconnected():
         for event in expired_compaction_events(state):
             yield event
-        message = await pubsub.get_message(
-            ignore_subscribe_messages=True,
-            timeout=pubsub_timeout(state),
-        )
+        try:
+            message = await asyncio.wait_for(
+                client_queue.get(),
+                timeout=pubsub_timeout(state),
+            )
+        except TimeoutError:
+            message = None
+        else:
+            if message is None:
+                break
         if message is not None:
             for event in await pubsub_events(state, message, bridge_channels):
                 yield event
         for event in await heartbeat_events(state):
             yield event
-
-
-async def subscribe_pubsub(
-    pubsub: Any,
-    subscribed: list[str],
-    user_id: str,
-) -> None:
-    try:
-        await pubsub.subscribe(*subscribed)
-    except Exception:
-        logger.warning(
-            "sse pubsub subscribe failed user_id=%s channels=%d",
-            user_id,
-            len(subscribed),
-            exc_info=True,
-        )
-        raise
-
-
-async def cleanup_pubsub(
-    state: EventStreamState,
-    pubsub: Any,
-    subscribed: list[str],
-    *,
-    subscription_started: bool,
-    release_slot: Any = release_sse_connection_slot,
-) -> None:
-    try:
-        if subscription_started:
-            try:
-                await pubsub.unsubscribe(*subscribed)
-            except Exception:
-                logger.warning("sse pubsub unsubscribe failed", exc_info=True)
-    finally:
-        try:
-            await pubsub.aclose()
-        except Exception:
-            logger.warning("sse pubsub close failed", exc_info=True)
-        finally:
-            if state.connection_slot is not None:
-                await release_slot(state.redis, state.connection_slot)
 
 
 async def stream_events(
@@ -531,13 +502,24 @@ async def stream_events(
     replay_events: Any = replay_connection_events,
     release_slot: Any = release_sse_connection_slot,
 ) -> AsyncIterator[dict]:
-    pubsub = state.redis.pubsub()
+    multiplexer = state.multiplexer
+    owns_multiplexer = state.owns_multiplexer
+    if multiplexer is None:
+        multiplexer = ProcessRealtimeMultiplexer(
+            state.redis,
+            close_pubsub_when_idle=True,
+        )
+        owns_multiplexer = True
+
     bridge_channels = compaction_bridge_channels(state.valid_channels)
-    subscribed = [*state.valid_channels, *bridge_channels.keys()]
-    subscription_started = False
+    requested_channels = [*state.valid_channels, *bridge_channels.keys()]
+    client_queue: ClientEventQueue | None = None
+    subscribed: list[str] = []
     try:
-        await subscribe_pubsub(pubsub, subscribed, state.user_id)
-        subscription_started = True
+        client_queue, subscribed = await multiplexer.subscribe_client(
+            requested_channels,
+            user_id=state.user_id,
+        )
         continue_with_live_events = True
         async for event in replay_events(
             state.redis,
@@ -555,18 +537,26 @@ async def stream_events(
                 "recovery_required",
             }:
                 continue_with_live_events = False
-        if continue_with_live_events:
-            async for event in live_events(state, pubsub, bridge_channels):
-                yield event
-                if event.get("event") == "recovery_required":
-                    break
+        if continue_with_live_events and client_queue is not None:
+            async with multiplexer.live_consumer(client_queue):
+                async for event in live_events(
+                    state,
+                    client_queue,
+                    bridge_channels,
+                ):
+                    yield event
+                    if event.get("event") == "recovery_required":
+                        break
     except asyncio.CancelledError:
         raise
     finally:
-        await cleanup_pubsub(
-            state,
-            pubsub,
-            subscribed,
-            subscription_started=subscription_started,
-            release_slot=release_slot,
-        )
+        try:
+            if client_queue is not None:
+                await multiplexer.unsubscribe_client(client_queue, subscribed)
+        finally:
+            try:
+                if owns_multiplexer:
+                    await multiplexer.aclose()
+            finally:
+                if state.connection_slot is not None:
+                    await release_slot(state.redis, state.connection_slot)

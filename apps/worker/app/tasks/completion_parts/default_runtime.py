@@ -421,9 +421,30 @@ async def _cleanup_completion_runtime(**kwargs: Any) -> None:
     )
 
 
-_attachment_to_data_url = _context_adapter.attachment_to_data_url
-_message_to_input_item = _context_adapter.message_to_input_item
-_build_input_from_packed_context = _context_adapter.build_input_from_packed_context
+_default_attachment_to_data_url = _context_adapter.attachment_to_data_url
+_default_message_to_input_item = _context_adapter.message_to_input_item
+_attachment_to_data_url = _default_attachment_to_data_url
+_message_to_input_item = _default_message_to_input_item
+
+
+async def _build_input_from_packed_context(
+    session: Any,
+    packed: PackedContext,
+    *,
+    attachment_cache: _completion_context_loading.AttachmentDataUrlCache | None = None,
+) -> list[dict[str, Any]]:
+    use_batch = (
+        _message_to_input_item is _default_message_to_input_item
+        and _attachment_to_data_url is _default_attachment_to_data_url
+    )
+    return await _completion_context_loading._build_input_from_packed_context(
+        session,
+        packed,
+        message_to_input_item=_message_to_input_item,
+        storage_get_bytes=(lambda key: storage.get_bytes(key)) if use_batch else None,
+        attachment_cache=attachment_cache,
+        logger=logger,
+    )
 _load_rows_desc = _context_adapter.load_rows_desc
 _load_rows_desc_after_summary = _context_adapter.load_rows_desc_after_summary
 _get_message = _context_adapter.get_message
@@ -504,9 +525,17 @@ def build_completion_runtime(
     image_upstream_runtime: ImageUpstreamRuntime,
     storage_writes: StorageWriteCoordinator | None = None,
 ) -> CompletionRuntime:
+    attachment_cache = _completion_context_loading.AttachmentDataUrlCache()
+    runtime_pack_recent_history = (
+        _completion_context_loading.bind_runtime_pack_recent_history(
+            hooks_provider=_context_loading_hooks,
+            build_input=_build_input_from_packed_context,
+            attachment_cache=attachment_cache,
+        )
+    )
     callbacks = composition.CompletionAdapterCallbacks(
         inject_user_memory_context=_inject_user_memory_context,
-        pack_recent_history=_pack_recent_history,
+        pack_recent_history=runtime_pack_recent_history,
         record_context_metadata=_record_completion_context_metadata,
         chat_tools_from_content=_chat_tools_from_content,
         configure_chat_tools=_configure_chat_tools,
@@ -554,9 +583,11 @@ def build_completion_runtime(
         image_upstream_runtime=image_upstream_runtime,
         storage_writes=storage_writes,
     )
-    return composition.build_runtime(
+    runtime = composition.build_runtime(
         bindings=bindings,
         build_services=build_completion_services,
         runner=_run_completion,
         image_upstream_runtime=image_upstream_runtime,
     )
+    setattr(runtime.runner, "attachment_cache", attachment_cache)
+    return runtime

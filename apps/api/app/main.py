@@ -19,6 +19,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from lumen_core import __version__ as lumen_core_version
+from lumen_core.billing_cache import BillingCacheService
 from lumen_core.context_window import warm_tiktoken
 from lumen_core.constants import MAX_PROMPT_CHARS
 from lumen_core.runtime_settings import get_spec
@@ -39,7 +40,7 @@ from .observability import (
 )
 from .ratelimit import user_rate_limits_effective, user_rate_limits_effective_reason
 from .redis_client import get_redis
-from .runtime import ApiRuntime, RuntimeLifecycle
+from .runtime import ApiRuntime, RuntimeLifecycle, bind_api_process_state
 from .services.admin_model_cache import AdminModelCache
 from .services.agent_health import agent_health_snapshot
 from .runtime_settings import (
@@ -47,7 +48,6 @@ from .runtime_settings import (
     migrate_image_primary_route,
     migrate_provider_purposes,
 )
-from .services.billing_cache import BillingCacheService
 from .services.poster_styles import tagging as poster_style_tagging
 from .services.poster_styles.tagging_runtime import build_poster_tagging_runtime
 
@@ -550,6 +550,7 @@ async def lifespan(app: FastAPI):
         # Register each resource immediately after it becomes usable. If any
         # later startup step fails, already-acquired resources are unwound in
         # reverse order instead of relying on the lifespan reaching ``yield``.
+        process_state = bind_api_process_state(lifecycle)
         r = get_redis()
         await r.ping()
         lifecycle.own("redis", r.aclose)
@@ -639,6 +640,8 @@ async def lifespan(app: FastAPI):
             _poster_tagging=poster_tagging,
             _lifecycle=lifecycle,
             _image_reconciler_enabled=True,
+            _proxy_pool_enabled=True,
+            _process_state=process_state,
         )
         app.state.runtime = runtime
         runtime.start(logger=logger)

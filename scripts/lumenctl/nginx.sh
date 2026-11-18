@@ -112,6 +112,12 @@ install_nginx_config_file() {
     backup=""
     created_target=0
     created_link=0
+
+    if ! validate_nginx_no_root_csp "${tmp_file}"; then
+        rm -f "${tmp_file}"
+        exit 1
+    fi
+
     as_sudo install -d "${target_dir}"
 
     if [ -f "${target_file}" ]; then
@@ -169,14 +175,18 @@ write_lumen_nginx_config() {
     local tls_mode="$5"
     local cert_file="$6"
     local key_file="$7"
-    local primary zone_suffix zone_api zone_events upstream_name
+    local api_upstream="${8:-${LUMEN_API_UPSTREAM:-127.0.0.1:8000}}"
+    local storage_dir="${9:-${LUMEN_STORAGE_DIR:-${LUMEN_DATA_ROOT:-/opt/lumendata}/storage}}"
+    local primary zone_suffix zone_api zone_events upstream_name api_upstream_name
     local hsts_enabled hsts_include_subdomains hsts_header
 
+    storage_dir="$(strip_trailing_slash "${storage_dir}")"
     primary="$(printf '%s' "${server_names}" | awk '{print $1}')"
     zone_suffix="$(sanitize_name "${primary}" | tr '.-' '__')"
     zone_api="lumen_api_${zone_suffix}"
     zone_events="lumen_events_${zone_suffix}"
     upstream_name="lumen_web_${zone_suffix}"
+    api_upstream_name="${LUMEN_NGINX_API_UPSTREAM_NAME:-lumen_api}"
     hsts_enabled="$(
         printf '%s' "${LUMEN_HSTS_ENABLED:-true}" | tr '[:upper:]' '[:lower:]'
     )"
@@ -211,7 +221,7 @@ write_lumen_nginx_config() {
     {
         cat <<EOF
 # Managed by scripts/lumenctl.sh.
-# Lumen reverse proxy: Next.js web, /api rewrite, and /events SSE.
+# Lumen reverse proxy: Next.js web, direct lumen_api (/api/ + /events), and X-Accel-Redirect sendfile.
 
 limit_req_zone \$binary_remote_addr zone=${zone_api}:10m rate=10r/s;
 limit_req_zone \$binary_remote_addr zone=${zone_events}:10m rate=30r/m;
@@ -221,6 +231,13 @@ EOF
         printf '  server %s;\n' "${web_upstream}"
         cat <<'EOF'
   keepalive 32;
+}
+
+EOF
+        cat <<EOF
+upstream ${api_upstream_name} {
+  server ${api_upstream};
+  keepalive 64;
 }
 
 EOF
@@ -263,12 +280,16 @@ EOF
         fi
         cat <<EOF
   add_header X-Content-Type-Options "nosniff" always;
-  add_header Referer-Policy "strict-origin-when-cross-origin" always;
+  add_header Referrer-Policy "strict-origin-when-cross-origin" always;
   limit_req_status 429;
 
   client_max_body_size 80m;
   client_body_buffer_size 1m;
-  gzip off;
+  gzip on;
+  gzip_vary on;
+  gzip_min_length 1024;
+  gzip_comp_level 5;
+  gzip_types text/plain text/css application/javascript application/json image/svg+xml application/manifest+json;
 
   proxy_http_version 1.1;
   proxy_set_header Connection "";
@@ -281,28 +302,50 @@ EOF
   proxy_send_timeout 3600s;
   proxy_read_timeout 1800s;
 
-  location /events {
+  location = /events {
     limit_req zone=${zone_events} burst=10 nodelay;
-    proxy_pass http://${upstream_name};
+    proxy_pass http://${api_upstream_name}/events;
+    gzip off;
     proxy_buffering off;
     proxy_cache off;
     proxy_request_buffering off;
     proxy_connect_timeout 30s;
     proxy_send_timeout 3600s;
     proxy_read_timeout 1800s;
+    add_header Cache-Control "no-cache" always;
     add_header X-Accel-Buffering no always;
     chunked_transfer_encoding on;
   }
 
   location /api/ {
     limit_req zone=${zone_api} burst=30 nodelay;
-    proxy_pass http://${upstream_name};
+    proxy_pass http://${api_upstream_name}/;
     proxy_buffering off;
     proxy_cache off;
     proxy_request_buffering off;
     proxy_connect_timeout 30s;
     proxy_send_timeout 3600s;
     proxy_read_timeout 1800s;
+  }
+
+  location ~ ^/_internal_storage/(?<storage_path>u/(?!.*\.\.)[A-Za-z0-9._/-]+)\$ {
+    internal;
+    alias ${storage_dir}/\$storage_path;
+    disable_symlinks on from=${storage_dir};
+    sendfile on;
+    sendfile_max_chunk 1m;
+    tcp_nopush on;
+    open_file_cache max=2000 inactive=10m;
+    open_file_cache_valid 30s;
+    open_file_cache_min_uses 2;
+    open_file_cache_errors off;
+    gzip off;
+    proxy_buffering off;
+  }
+
+  location /_internal_storage/ {
+    internal;
+    return 404;
   }
 
   location / {
@@ -315,6 +358,7 @@ EOF
 }
 EOF
     } > "${out}"
+    validate_nginx_no_root_csp "${out}" || return 1
 }
 
 write_sub2api_nginx_config() {
@@ -474,12 +518,16 @@ nginx_lumen_proxy() {
     require_sudo
     ensure_cmd nginx "请先安装 nginx"
 
-    local server_names web_upstream tls_mode cert_file key_file target_file tmp_file http_redirect
+    local server_names web_upstream api_upstream storage_dir tls_mode cert_file key_file target_file tmp_file http_redirect
     log_step "生成/更新 Lumen 反代配置"
     server_names="$(read_or_default 'Lumen 域名 server_name（可多个，空格分隔）' 'lumen.example.com')"
     web_upstream="$(read_or_default 'Lumen Web 上游（Next.js）' '127.0.0.1:3000')"
+    api_upstream="$(read_or_default 'Lumen API 上游（FastAPI）' '127.0.0.1:8000')"
+    storage_dir="$(strip_trailing_slash "$(read_or_default 'Lumen 存储目录（X-Accel-Redirect）' "${LUMEN_DATA_ROOT:-/opt/lumendata}/storage")")"
     validate_domain_list "Lumen 域名" "${server_names}" || exit 1
     validate_host_port_target "Lumen Web 上游" "${web_upstream}" || exit 1
+    validate_host_port_target "Lumen API 上游" "${api_upstream}" || exit 1
+    validate_absolute_path "Lumen 存储目录" "${storage_dir}" || exit 1
 
     tls_mode="$(ask_tls_mode)"
     cert_file=""
@@ -497,7 +545,7 @@ nginx_lumen_proxy() {
     validate_absolute_path "nginx 配置文件" "${target_file}" || exit 1
 
     tmp_file="$(mktemp)"
-    write_lumen_nginx_config "${tmp_file}" "${server_names}" "${web_upstream}" "${http_redirect}" "${tls_mode}" "${cert_file}" "${key_file}"
+    write_lumen_nginx_config "${tmp_file}" "${server_names}" "${web_upstream}" "${http_redirect}" "${tls_mode}" "${cert_file}" "${key_file}" "${api_upstream}" "${storage_dir}"
     install_nginx_config_file "${tmp_file}" "${target_file}"
 }
 
@@ -872,6 +920,11 @@ nginx_image_job_locations() {
         rm -f "${tmp_file}"
         log_info "目标配置已经包含 image-job 路由，无需修改。"
         return 0
+    fi
+
+    if ! validate_nginx_no_root_csp "${tmp_file}"; then
+        rm -f "${tmp_file}"
+        exit 1
     fi
 
     as_sudo cp "${tmp_file}" "${target_file}"

@@ -18,13 +18,14 @@ from redis.exceptions import RedisError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from .config import settings
+from .runtime.slot import RuntimeSlot
 
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class _ArqPoolState:
+class ArqPoolState:
     pool: ArqRedis | None = None
     loop: asyncio.AbstractEventLoop | None = None
     loop_id: int | None = None
@@ -37,19 +38,82 @@ class _ArqPoolState:
     )
 
 
-_pool_state = _ArqPoolState()
+_ArqPoolState = ArqPoolState
+_ARQ_POOL_SLOT: RuntimeSlot[ArqPoolState] = RuntimeSlot(
+    "api-arq-pool-state",
+    default_factory=ArqPoolState,
+)
+
+
+class _ArqPoolStateView:
+    @property
+    def pool(self) -> ArqRedis | None:
+        return _ARQ_POOL_SLOT.current().pool
+
+    @pool.setter
+    def pool(self, value: ArqRedis | None) -> None:
+        _ARQ_POOL_SLOT.current().pool = value
+
+    @property
+    def loop(self) -> asyncio.AbstractEventLoop | None:
+        return _ARQ_POOL_SLOT.current().loop
+
+    @loop.setter
+    def loop(self, value: asyncio.AbstractEventLoop | None) -> None:
+        _ARQ_POOL_SLOT.current().loop = value
+
+    @property
+    def loop_id(self) -> int | None:
+        return _ARQ_POOL_SLOT.current().loop_id
+
+    @loop_id.setter
+    def loop_id(self, value: int | None) -> None:
+        _ARQ_POOL_SLOT.current().loop_id = value
+
+    @property
+    def checked_at(self) -> float:
+        return _ARQ_POOL_SLOT.current().checked_at
+
+    @checked_at.setter
+    def checked_at(self, value: float) -> None:
+        _ARQ_POOL_SLOT.current().checked_at = value
+
+    @property
+    def locks(self) -> weakref.WeakValueDictionary[int, asyncio.Lock]:
+        return _ARQ_POOL_SLOT.current().locks
+
+
+_pool_state = _ArqPoolStateView()
 # Compatibility injection points retained for older loop-recreation tests.
 _pool: ArqRedis | None = None
 _pool_loop_id: int | None = None
 
 
-def _lock_for_current_loop() -> asyncio.Lock:
+def configure_arq_pool_state(state: ArqPoolState | None = None) -> ArqPoolState:
+    active = state or ArqPoolState()
+    _ARQ_POOL_SLOT.install_default(active)
+    return active
+
+
+def reset_arq_pool_state(state: ArqPoolState | None = None) -> None:
+    active = state or _ARQ_POOL_SLOT.current_or_none()
+    if active is None:
+        return
+    active.pool = None
+    active.loop = None
+    active.loop_id = None
+    active.checked_at = 0.0
+    _ARQ_POOL_SLOT.clear_default(active)
+
+
+def _lock_for_current_loop(state: ArqPoolState | None = None) -> asyncio.Lock:
+    active = state or _ARQ_POOL_SLOT.current()
     loop = asyncio.get_running_loop()
     loop_id = id(loop)
-    lock = _pool_state.locks.get(loop_id)
+    lock = active.locks.get(loop_id)
     if lock is None:
         lock = asyncio.Lock()
-        _pool_state.locks[loop_id] = lock
+        active.locks[loop_id] = lock
     return lock
 
 
@@ -98,57 +162,66 @@ async def _pool_is_healthy(pool: ArqRedis) -> bool:
     return True
 
 
-async def get_arq_pool() -> ArqRedis:
+async def get_arq_pool_for_state(state: ArqPoolState | None = None) -> ArqRedis:
     """Return a process-wide ArqRedis pool (initialized on first call)."""
-    async with _lock_for_current_loop():
-        if _pool_state.pool is None and _pool is not None:
-            _pool_state.pool = _pool
-            _pool_state.loop_id = _pool_loop_id
+    active = state or _ARQ_POOL_SLOT.current()
+    async with _lock_for_current_loop(active):
+        if active.pool is None and _pool is not None:
+            active.pool = _pool
+            active.loop_id = _pool_loop_id
         loop = asyncio.get_running_loop()
         loop_id = id(loop)
         loop_marker_mismatch = (
-            _pool_state.loop_id is not None and _pool_state.loop_id != loop_id
+            active.loop_id is not None and active.loop_id != loop_id
         )
-        if _pool_state.pool is not None and (
-            _pool_state.loop is not loop or loop_marker_mismatch
+        if active.pool is not None and (
+            active.loop is not loop or loop_marker_mismatch
         ):
-            old = _pool_state.pool
-            _pool_state.pool = None
-            _pool_state.loop = None
-            _pool_state.loop_id = None
-            _pool_state.checked_at = 0.0
+            old = active.pool
+            active.pool = None
+            active.loop = None
+            active.loop_id = None
+            active.checked_at = 0.0
             await _close_pool(old)
         if (
-            _pool_state.pool is not None
-            and loop.time() - _pool_state.checked_at
+            active.pool is not None
+            and loop.time() - active.checked_at
             >= _ARQ_HEALTH_CHECK_INTERVAL_SECONDS
         ):
-            healthy = await _pool_is_healthy(_pool_state.pool)
-            _pool_state.checked_at = loop.time()
+            healthy = await _pool_is_healthy(active.pool)
+            active.checked_at = loop.time()
             if not healthy:
-                old = _pool_state.pool
-                _pool_state.pool = None
-                _pool_state.loop = None
-                _pool_state.loop_id = None
-                _pool_state.checked_at = 0.0
+                old = active.pool
+                active.pool = None
+                active.loop = None
+                active.loop_id = None
+                active.checked_at = 0.0
                 await _close_pool(old)
-        if _pool_state.pool is None:
-            _pool_state.pool = await asyncio.wait_for(
+        if active.pool is None:
+            active.pool = await asyncio.wait_for(
                 create_pool(_redis_settings()),
                 timeout=_ARQ_POOL_CREATE_TIMEOUT_SECONDS,
             )
-            _pool_state.loop = loop
-            _pool_state.loop_id = loop_id
-            _pool_state.checked_at = loop.time()
-        return _pool_state.pool
+            active.loop = loop
+            active.loop_id = loop_id
+            active.checked_at = loop.time()
+        return active.pool
 
 
-async def close_arq_pool() -> None:
+async def get_arq_pool() -> ArqRedis:
+    """Return a process-wide ArqRedis pool (initialized on first call)."""
+    return await get_arq_pool_for_state()
+
+
+async def close_arq_pool(state: ArqPoolState | None = None) -> None:
     """Close the pool on shutdown. Safe to call when not initialized."""
-    async with _lock_for_current_loop():
-        if _pool_state.pool is not None:
-            await _close_pool(_pool_state.pool)
-            _pool_state.pool = None
-            _pool_state.loop = None
-            _pool_state.loop_id = None
-            _pool_state.checked_at = 0.0
+    active = state or _ARQ_POOL_SLOT.current_or_none()
+    if active is None:
+        return
+    async with _lock_for_current_loop(active):
+        if active.pool is not None:
+            await _close_pool(active.pool)
+            active.pool = None
+            active.loop = None
+            active.loop_id = None
+            active.checked_at = 0.0

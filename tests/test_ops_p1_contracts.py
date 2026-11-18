@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ast
 import os
 from pathlib import Path
 import pwd
+import re
 import shlex
 import shutil
 import signal
@@ -1458,3 +1460,102 @@ exit 3
 
     assert result.returncode != 0
     assert "systemd 兜底 writer 仍在运行" in result.stderr
+
+
+def _extract_settings_int_defaults(config_path: Path) -> dict[str, int]:
+    tree = ast.parse(config_path.read_text(encoding="utf-8"), filename=str(config_path))
+    defaults: dict[str, int] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef) or node.name != "Settings":
+            continue
+        for stmt in node.body:
+            if not isinstance(stmt, ast.AnnAssign) or not isinstance(
+                stmt.target, ast.Name
+            ):
+                continue
+            value = stmt.value
+            if isinstance(value, ast.Constant) and type(value.value) is int:
+                defaults[stmt.target.id] = value.value
+            elif isinstance(value, ast.Call):
+                for kw in value.keywords:
+                    if (
+                        kw.arg == "default"
+                        and isinstance(kw.value, ast.Constant)
+                        and type(kw.value.value) is int
+                    ):
+                        defaults[stmt.target.id] = kw.value.value
+    return defaults
+
+
+def test_postgres_connection_budget_conservation_contract() -> None:
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    pg_service = compose["services"]["postgres"]
+    pg_command = pg_service.get("command")
+    assert pg_command == [
+        "postgres",
+        "-c",
+        "max_connections=200",
+        "-c",
+        "shared_buffers=256MB",
+        "-c",
+        "effective_cache_size=768MB",
+        "-c",
+        "work_mem=8MB",
+        "-c",
+        "random_page_cost=1.1",
+    ]
+    pg_params: dict[str, str] = {}
+    for index, token in enumerate(pg_command):
+        if token == "-c" and index + 1 < len(pg_command):
+            key, value = pg_command[index + 1].split("=", 1)
+            pg_params[key] = value
+    pg_max_connections = int(pg_params["max_connections"])
+
+    api_command = list(compose["services"]["api"]["command"])
+    workers_arg = api_command[api_command.index("--workers") + 1]
+    match = re.fullmatch(r"\$\{[A-Z0-9_]+:-(\d+)\}|(\d+)", str(workers_arg))
+    assert match is not None, f"unexpected api --workers spec: {workers_arg!r}"
+    api_workers = int(match.group(1) or match.group(2))
+
+    api_cfg = _extract_settings_int_defaults(ROOT / "apps" / "api" / "app" / "config.py")
+    worker_cfg = _extract_settings_int_defaults(
+        ROOT / "apps" / "worker" / "app" / "config.py"
+    )
+    tgbot_cfg = _extract_settings_int_defaults(
+        ROOT / "apps" / "tgbot" / "app" / "config.py"
+    )
+
+    assert worker_cfg["db_pool_size"] == 20
+    assert worker_cfg["db_max_overflow"] == 12
+
+    api_max = api_workers * (api_cfg["db_pool_size"] + api_cfg["db_max_overflow"])
+    worker_max = worker_cfg["db_pool_size"] + worker_cfg["db_max_overflow"]
+    tgbot_max = tgbot_cfg.get("db_pool_size", 0) + tgbot_cfg.get("db_max_overflow", 0)
+
+    assert 2 * api_max + worker_max + tgbot_max + 15 < pg_max_connections
+
+
+def test_hot_tables_declare_autovacuum_and_canvas_expression_indexes() -> None:
+    import sys
+
+    core_src = str(ROOT / "packages" / "core")
+    if core_src not in sys.path:
+        sys.path.insert(0, core_src)
+    for mod_name in [name for name in sys.modules if name == "lumen_core" or name.startswith("lumen_core.")]:
+        sys.modules.pop(mod_name, None)
+
+    from lumen_core.canvas_models import CanvasNodeExecution
+    from lumen_core.models import Completion, Generation, OutboxEvent, VideoGeneration
+
+    expected_with = {
+        "autovacuum_vacuum_scale_factor": "0.02",
+        "autovacuum_analyze_scale_factor": "0.01",
+        "fillfactor": "90",
+    }
+    for model in (OutboxEvent, Generation, Completion, CanvasNodeExecution):
+        assert dict(model.__table__.dialect_options["postgresql"]["with"]) == expected_with
+
+    gen_indexes = {idx.name for idx in Generation.__table__.indexes}
+    video_indexes = {idx.name for idx in VideoGeneration.__table__.indexes}
+    assert "ix_generations_canvas_exec_id" in gen_indexes
+    assert "ix_video_generations_canvas_exec_id" in video_indexes

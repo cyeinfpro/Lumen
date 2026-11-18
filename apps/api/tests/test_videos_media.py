@@ -284,6 +284,133 @@ def test_video_media_response_rejects_invalid_range(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_video_binary_emits_x_accel_redirect_when_internal_redirect_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage_key = "u/user-1/videos/video-1.mp4"
+    updated_at = datetime(2026, 11, 18, 0, 0, tzinfo=timezone.utc)
+    video = SimpleNamespace(
+        id="video-1",
+        user_id="user-1",
+        storage_key=storage_key,
+        mime="video/mp4",
+        etag="etag-video-1",
+        sha256="sha-video-1",
+        updated_at=updated_at,
+        deleted_at=None,
+    )
+    rolled_back = False
+
+    class Result:
+        def scalar_one_or_none(self):
+            return video
+
+    class Db:
+        async def execute(self, _statement):
+            return Result()
+
+        async def rollback(self) -> None:
+            nonlocal rolled_back
+            rolled_back = True
+
+    monkeypatch.setattr(videos.settings, "storage_root", str(tmp_path))
+    monkeypatch.setenv("LUMEN_INTERNAL_REDIRECT_ENABLED", "1")
+
+    # Even with a Range header and without the file opened by Python, nginx sendfile
+    # owns byte-range slicing via X-Accel-Redirect.
+    response = await videos.video_binary(
+        "video-1",
+        _request([(b"range", b"bytes=0-1023")]),
+        SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+        Db(),  # type: ignore[arg-type]
+        download=True,
+    )
+
+    assert rolled_back is True
+    assert response.status_code == 200
+    assert (
+        response.headers["x-accel-redirect"]
+        == f"/_internal_storage/{storage_key}"
+    )
+    assert response.headers["content-type"].startswith("video/mp4")
+    assert response.headers["accept-ranges"] == "bytes"
+    assert "immutable" in response.headers["cache-control"]
+    assert response.headers["etag"] == '"etag-video-1"'
+    assert (
+        response.headers["content-disposition"]
+        == 'attachment; filename="lumen-video-video-1.mp4"'
+    )
+    assert response.body == b""
+
+
+@pytest.mark.asyncio
+async def test_video_binary_honors_settings_internal_redirect_and_falls_back_when_non_local(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage_key = "u/user-1/videos/video-2.mp4"
+    video_file = tmp_path / storage_key
+    video_file.parent.mkdir(parents=True)
+    video_file.write_bytes(b"0123456789abcdef")
+    video = SimpleNamespace(
+        id="video-2",
+        user_id="user-1",
+        storage_key=storage_key,
+        mime="video/mp4",
+        etag="etag-video-2",
+        sha256="sha-video-2",
+        updated_at=None,
+        deleted_at=None,
+    )
+
+    class Result:
+        def scalar_one_or_none(self):
+            return video
+
+    class Db:
+        async def execute(self, _statement):
+            return Result()
+
+    monkeypatch.delenv("LUMEN_INTERNAL_REDIRECT_ENABLED", raising=False)
+    custom_settings = SimpleNamespace(
+        storage_root=str(tmp_path),
+        internal_redirect_enabled=True,
+        storage_backend="local",
+    )
+    monkeypatch.setattr(
+        videos._video_media_routes,  # noqa: SLF001
+        "settings",
+        custom_settings,
+    )
+
+    redirected = await videos.video_binary(
+        "video-2",
+        _request(),
+        SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+        Db(),  # type: ignore[arg-type]
+        download=False,
+    )
+    assert (
+        redirected.headers["x-accel-redirect"]
+        == f"/_internal_storage/{storage_key}"
+    )
+
+    custom_settings.storage_backend = "s3"
+    streamed = await videos.video_binary(
+        "video-2",
+        _request([(b"range", b"bytes=4-7")]),
+        SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+        Db(),  # type: ignore[arg-type]
+        download=False,
+    )
+    assert streamed.status_code == 206
+    assert "x-accel-redirect" not in {k.lower() for k in streamed.headers}
+    assert streamed.headers["content-range"] == "bytes 4-7/16"
+    assert await _body(streamed) == b"4567"
+
+
+@pytest.mark.asyncio
 async def test_reference_video_binary_serves_upstream_variant(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

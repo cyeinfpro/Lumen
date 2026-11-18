@@ -3,19 +3,26 @@ import test from "node:test";
 import "../../store/chat/moduleResolution.test-helper.mjs";
 
 const {
+  MAX_EMERGENCY_DELTA_BYTES,
+  MAX_EMERGENCY_POINTER_BYTES,
   activatePrivateCanvasPersistence,
+  applyCanvasOperationsToGraph,
   canvasSaveBatchMatchesPending,
   canvasDraftSnapshotMatches,
   canvasEmergencyStorageAvailable,
   clearPrivateCanvasPersistence,
+  deleteCanvasDraft,
   deleteCanvasEmergencyDraft,
   getCanvasDraft,
   getCanvasEmergencyDraft,
+  getCanvasEmergencyPointer,
   getCanvasSaveBatch,
   isSuspiciousEmptyCanvasDraft,
   listCanvasDrafts,
   putCanvasDraft,
   putCanvasEmergencyDraft,
+  putCanvasSaveBatch,
+  resetCanvasPersistenceMemoryForTests,
   resumePrivateCanvasPersistence,
   SerialCanvasDraftWriter,
 } = await import("#canvas-persistence");
@@ -826,4 +833,330 @@ test("persisted save batches only replay against the exact pending prefix", () =
     ]),
     false,
   );
+});
+
+function installStatefulIndexedDb() {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "indexedDB");
+  const stores: Record<"drafts" | "save-batches", Map<string, unknown>> = {
+    drafts: new Map(),
+    "save-batches": new Map(),
+  };
+  const makeRequest = (result: unknown) => {
+    const req = { result } as IDBRequest;
+    queueMicrotask(() => req.onsuccess?.(new Event("success")));
+    return req;
+  };
+  const database = {
+    close() {},
+    transaction(storeNames: string | string[]) {
+      const tx = {
+        objectStore(storeName: "drafts" | "save-batches") {
+          const map = stores[storeName];
+          return {
+            get(key: string) {
+              return makeRequest(map.get(key));
+            },
+            put(value: { key: string }) {
+              map.set(value.key, structuredClone(value));
+              return makeRequest(value.key);
+            },
+            delete(key: string) {
+              map.delete(key);
+              return makeRequest(undefined);
+            },
+            clear() {
+              map.clear();
+              return makeRequest(undefined);
+            },
+            index() {
+              return {
+                getAll(canvasId: string) {
+                  const list = [...map.values()].filter(
+                    (entry) =>
+                      Boolean(entry) &&
+                      typeof entry === "object" &&
+                      (entry as { canvas_id?: string }).canvas_id === canvasId,
+                  );
+                  return makeRequest(list);
+                },
+              };
+            },
+          };
+        },
+      } as unknown as IDBTransaction;
+      void storeNames;
+      queueMicrotask(() => tx.oncomplete?.(new Event("complete")));
+      return tx;
+    },
+  };
+  Object.defineProperty(globalThis, "indexedDB", {
+    configurable: true,
+    value: {
+      open() {
+        return makeRequest(database);
+      },
+    },
+  });
+  return {
+    stores,
+    restore() {
+      if (descriptor) {
+        Object.defineProperty(globalThis, "indexedDB", descriptor);
+      } else {
+        delete (globalThis as { indexedDB?: IDBFactory }).indexedDB;
+      }
+    },
+  };
+}
+
+test("routine putCanvasDraft writes < 1KB pointer to localStorage without full-graph JSON.stringify", async () => {
+  const storage = new MemoryStorage();
+  const restoreStorage = installLocalStorage(storage);
+  const idb = installStatefulIndexedDb();
+  try {
+    await activatePrivateCanvasPersistence("pointer-owner");
+    const baseGraph = createDefaultCanvasGraph();
+    for (let i = 0; i < 120; i += 1) {
+      baseGraph.nodes.push(
+        createCanvasNode("prompt", { x: i * 40, y: 120 }, {
+          id: `bulk-prompt-${i}`,
+          config: { text: `scene description ${i} `.repeat(24) },
+        }),
+      );
+    }
+
+    let fullGraphStringified = 0;
+    Object.defineProperty(baseGraph.nodes[50]!.config, "toJSON", {
+      enumerable: false,
+      value() {
+        fullGraphStringified += 1;
+        return { text: "serialized" };
+      },
+    });
+
+    const op1 = {
+      op: "update_node_meta" as const,
+      operation_schema_version: 1 as const,
+      node_id: "prompt-1",
+      title: "第一幕",
+    };
+    baseGraph.nodes[0] = { ...baseGraph.nodes[0]!, title: "第一幕" };
+
+    const writePromise = putCanvasDraft({
+      canvas_id: "canvas-large",
+      client_id: "client-main",
+      base_revision: 7,
+      graph: baseGraph,
+      operations: [op1],
+      operation_group_sizes: [1],
+      updated_at: 1_000,
+    });
+
+    const pendingPointer = getCanvasEmergencyPointer("canvas-large", "client-main");
+    assert.ok(pendingPointer);
+    assert.equal(pendingPointer.has_pending_idb, true);
+    assert.equal(pendingPointer.dirty_revision, 7);
+    const rawPending = storage.getItem("lumen:canvas-emergency-drafts:v1") ?? "";
+    assert.ok(
+      Buffer.byteLength(rawPending, "utf8") < MAX_EMERGENCY_POINTER_BYTES,
+      `expected < 1KB pointer, got ${Buffer.byteLength(rawPending, "utf8")} bytes`,
+    );
+
+    await writePromise;
+    deleteCanvasEmergencyDraft("canvas-large", "client-main");
+
+    const ackedPointer = getCanvasEmergencyPointer("canvas-large", "client-main");
+    assert.ok(ackedPointer);
+    assert.equal(ackedPointer.has_pending_idb, false);
+    assert.equal(fullGraphStringified, 0, "routine edits must never JSON.stringify full graph");
+
+    // Pagehide when no unconfirmed delta exists keeps < 1KB pointer and never stringifies graph.
+    assert.equal(
+      putCanvasEmergencyDraft({
+        canvas_id: "canvas-large",
+        client_id: "client-main",
+        base_revision: 7,
+        graph: baseGraph,
+        operations: [op1],
+        operation_group_sizes: [1],
+        updated_at: 1_050,
+      }),
+      true,
+    );
+    assert.equal(fullGraphStringified, 0);
+    const rawClean = storage.getItem("lumen:canvas-emergency-drafts:v1") ?? "";
+    assert.ok(Buffer.byteLength(rawClean, "utf8") < MAX_EMERGENCY_POINTER_BYTES);
+
+    await deleteCanvasDraft("canvas-large", "client-main");
+    assert.equal(getCanvasEmergencyPointer("canvas-large", "client-main"), null);
+  } finally {
+    resetCanvasPersistenceMemoryForTests();
+    idb.restore();
+    restoreStorage();
+  }
+});
+
+test("pagehide writes compact delta ops and crash recovery merges IndexedDB snapshot, save-batches, and delta ops", async () => {
+  const storage = new MemoryStorage();
+  const restoreStorage = installLocalStorage(storage);
+  const idb = installStatefulIndexedDb();
+  try {
+    await activatePrivateCanvasPersistence("delta-owner");
+    const graphV1 = createDefaultCanvasGraph();
+    for (let i = 0; i < 80; i += 1) {
+      graphV1.nodes.push(
+        createCanvasNode("prompt", { x: i * 50, y: 200 }, {
+          id: `unchanged-node-${i}`,
+          config: { text: `background lore ${i} `.repeat(20) },
+        }),
+      );
+    }
+    let unchangedSerialized = 0;
+    Object.defineProperty(graphV1.nodes[25]!.config, "toJSON", {
+      enumerable: false,
+      value() {
+        unchangedSerialized += 1;
+        return { text: "touched" };
+      },
+    });
+
+    const op1 = {
+      op: "update_node_meta" as const,
+      operation_schema_version: 1 as const,
+      node_id: "prompt-1",
+      title: "镜头一",
+    };
+    graphV1.nodes[0] = { ...graphV1.nodes[0]!, title: "镜头一" };
+
+    await putCanvasDraft({
+      canvas_id: "canvas-delta",
+      client_id: "tab-1",
+      base_revision: 12,
+      graph: graphV1,
+      operations: [op1],
+      operation_group_sizes: [1],
+      updated_at: 2_000,
+    });
+
+    // Persist an incremental save-batch op2 in IndexedDB save-batches
+    const op2 = {
+      op: "move_nodes" as const,
+      operation_schema_version: 1 as const,
+      items: [{ node_id: "prompt-1", x: 320, y: 180 }],
+    };
+    await putCanvasSaveBatch({
+      canvas_id: "canvas-delta",
+      client_id: "tab-1",
+      base_revision: 12,
+      mutation_id: "mut-1",
+      operations: [op1, op2],
+      updated_at: 2_100,
+    });
+
+    // User makes additional edits (op3 + settings op4) right before pagehide before IDB draft flushes
+    const addedNode = createCanvasNode("note", { x: 640, y: 240 }, {
+      id: "note-emergency",
+      config: { text: "崩溃前最后一行批注" },
+    });
+    const op3 = {
+      op: "add_node" as const,
+      operation_schema_version: 1 as const,
+      node: addedNode,
+    };
+    const op4 = {
+      op: "update_document_settings" as const,
+      operation_schema_version: 1 as const,
+      settings: { snap_to_grid: true, grid_size: 24 },
+    };
+    const graphAtPageHide = applyCanvasOperationsToGraph(graphV1, [op2, op3, op4]);
+    // Preserve untouched node object identities just like Zustand store commits
+    graphAtPageHide.nodes = graphAtPageHide.nodes.map((node) => {
+      const original = graphV1.nodes.find((item) => item.id === node.id);
+      return original && node.id.startsWith("unchanged-node-") ? original : node;
+    });
+
+    assert.equal(
+      putCanvasEmergencyDraft({
+        canvas_id: "canvas-delta",
+        client_id: "tab-1",
+        base_revision: 12,
+        graph: graphAtPageHide,
+        operations: [op1, op2, op3, op4],
+        operation_group_sizes: [1, 1, 1, 1],
+        updated_at: 2_250,
+      }),
+      true,
+    );
+    assert.equal(
+      unchangedSerialized,
+      0,
+      "unchanged nodes must not be JSON.stringify'd during pagehide delta write",
+    );
+    const rawEmergency = storage.getItem("lumen:canvas-emergency-drafts:v1") ?? "";
+    const parsedEmergency = JSON.parse(rawEmergency) as {
+      version: number;
+      entries: Array<{ kind: string }>;
+    };
+    assert.equal(parsedEmergency.version, 2);
+    assert.equal(parsedEmergency.entries[0]?.kind, "delta");
+    assert.ok(Buffer.byteLength(rawEmergency, "utf8") < 4 * 1024);
+
+    // Oversized delta ops exceeding MAX_EMERGENCY_DELTA_BYTES are strictly rejected
+    const hugePromptNode = createCanvasNode("prompt", { x: 0, y: 0 }, {
+      id: "huge-delta-node",
+      config: { text: "z".repeat(MAX_EMERGENCY_DELTA_BYTES + 1024) },
+    });
+    assert.equal(
+      putCanvasEmergencyDraft({
+        canvas_id: "canvas-delta",
+        client_id: "tab-1",
+        base_revision: 12,
+        graph: { ...graphAtPageHide, nodes: [...graphAtPageHide.nodes, hugePromptNode] },
+        operations: [
+          op1,
+          { op: "add_node", operation_schema_version: 1, node: hugePromptNode },
+        ],
+        updated_at: 2_300,
+      }),
+      false,
+    );
+
+    // Simulate cold reload (clear in-memory baseline) and verify lossless recovery
+    resetCanvasPersistenceMemoryForTests();
+    const recovered = await getCanvasDraft("canvas-delta", "tab-1");
+    assert.ok(recovered);
+    assert.equal(recovered.updated_at, 2_250);
+    assert.equal(recovered.operations.length, 4);
+    assert.deepEqual(recovered.operation_group_sizes, [1, 1, 1, 1]);
+    assert.equal(recovered.graph.settings.grid_size, 24);
+    assert.equal(
+      recovered.graph.nodes.find((n) => n.id === "prompt-1")?.position.x,
+      320,
+    );
+    assert.equal(
+      recovered.graph.nodes.find((n) => n.id === "note-emergency")?.config.text,
+      "崩溃前最后一行批注",
+    );
+
+    resetCanvasPersistenceMemoryForTests();
+    const listed = await listCanvasDrafts("canvas-delta");
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0]?.operations.length, 4);
+    assert.equal(listed[0]?.updated_at, 2_250);
+
+    // Legacy v1 localStorage format remains 100% recoverable
+    const legacyDraft = emergencyDraft("legacy-v1-canvas", "legacy-tab");
+    storage.setItem(
+      "lumen:canvas-emergency-drafts:v1",
+      JSON.stringify({ version: 1, drafts: [legacyDraft] }),
+    );
+    assert.deepEqual(
+      getCanvasEmergencyDraft("legacy-v1-canvas", "legacy-tab"),
+      legacyDraft,
+    );
+  } finally {
+    resetCanvasPersistenceMemoryForTests();
+    idb.restore();
+    restoreStorage();
+  }
 });

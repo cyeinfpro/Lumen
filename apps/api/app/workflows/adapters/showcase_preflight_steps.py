@@ -11,6 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumen_core.models import ModelCandidate
 
 from .apparel_scene_planner import (
+    PromptCompositionRequest,
+    ScenePlanningRequest,
     SceneProviderSelection,
     compose_image_prompt_with_gpt55 as _compose_image_prompt_with_gpt55,
     fallback_risk_review as _fallback_risk_review,
@@ -21,9 +23,12 @@ from .apparel_scene_planner import (
 )
 from ..domain.showcase_shot_pool import ShotClass, ShotVariant
 from ..ports.runtime_state import ProviderRoundRobinStatePort
-from ..application.showcase_prompts import composition_shooting_brief as _composition_shooting_brief  # noqa: F401
-from ..application.showcase_prompts import guarded_shooting_brief as _guarded_shooting_brief  # noqa: F401
-from ..application.showcase_prompts import showcase_prompt as _build_showcase_prompt  # noqa: F401
+from ..application.showcase_prompts import (
+    ShowcasePromptRequest,
+    composition_shooting_brief as _composition_shooting_brief,  # noqa: F401
+    guarded_shooting_brief as _guarded_shooting_brief,  # noqa: F401
+    showcase_prompt as _build_showcase_prompt,  # noqa: F401
+)
 
 
 logger = logging.getLogger("app.routes.workflows")
@@ -63,8 +68,8 @@ class ShowcasePreflightRequest:
     continuity_anchor: str
     allow_pet: bool
     allow_background_people: bool
-    reference_images: list[dict[str, str]] | None
-    reference_image_skips: list[dict[str, str]] | None
+    reference_images: list[dict[str, str]] | None = None
+    reference_image_skips: list[dict[str, str]] | None = None
 
 
 async def notify_preflight_progress(
@@ -148,21 +153,23 @@ async def _initial_scene_planning(
     )
     return await _plan_scene_cards_with_gpt55(
         db,
-        product_analysis=request.product_analysis,
-        garment_lock=garment_lock,
-        model_summary=model_summary,
-        template=request.template,
-        scene_environment=request.scene_environment,
-        shot_picks=_serialized_shot_picks(request),
-        aspect_ratio=request.aspect_ratio,
-        output_count=total,
-        user_prompt=request.user_prompt,
-        accessory_plan=request.accessory_plan,
-        scene_strategy=request.scene_strategy,
-        scene_variety=request.scene_variety,
-        continuity_anchor=request.continuity_anchor,
-        allow_pet=request.allow_pet,
-        allow_background_people=request.allow_background_people,
+        ScenePlanningRequest(
+            product_analysis=request.product_analysis,
+            garment_lock=garment_lock,
+            model_summary=model_summary,
+            template=request.template,
+            scene_environment=request.scene_environment,
+            shot_picks=_serialized_shot_picks(request),
+            aspect_ratio=request.aspect_ratio,
+            output_count=total,
+            user_prompt=request.user_prompt,
+            accessory_plan=request.accessory_plan,
+            scene_strategy=request.scene_strategy,
+            scene_variety=request.scene_variety,
+            continuity_anchor=request.continuity_anchor,
+            allow_pet=request.allow_pet,
+            allow_background_people=request.allow_background_people,
+        ),
         provider_selection=_provider_selection(provider_order, provider_runtime),
         reference_images=request.reference_images,
     )
@@ -278,22 +285,24 @@ def _showcase_prompt(
     composed_prompt: str,
 ) -> str:
     return _build_showcase_prompt(
-        product_analysis=request.product_analysis,
-        selected_candidate=request.selected_candidate,
-        accessory_plan=request.accessory_plan,
-        template=request.template,
-        shot_type=shot_type,
-        shot_variant=variant,
-        age_segment=request.age_segment,
-        final_quality=request.final_quality,
-        user_prompt=request.user_prompt,
-        aspect_ratio=request.aspect_ratio,
-        scene_environment=request.scene_environment,
-        scene_card=scene_card,
-        garment_lock=garment_lock,
-        composed_prompt=composed_prompt,
-        allow_pet=request.allow_pet,
-        allow_background_people=request.allow_background_people,
+        ShowcasePromptRequest(
+            product_analysis=request.product_analysis,
+            selected_candidate=request.selected_candidate,
+            accessory_plan=request.accessory_plan,
+            template=request.template,
+            shot_type=shot_type,
+            shot_variant=variant,
+            age_segment=request.age_segment,
+            final_quality=request.final_quality,
+            user_prompt=request.user_prompt,
+            aspect_ratio=request.aspect_ratio,
+            scene_environment=request.scene_environment,
+            scene_card=scene_card,
+            garment_lock=garment_lock,
+            composed_prompt=composed_prompt,
+            allow_pet=request.allow_pet,
+            allow_background_people=request.allow_background_people,
+        )
     )
 
 
@@ -399,16 +408,18 @@ async def _attempt_safe_rewrite(
     prompt_item = record["prompt_item"]
     rewritten = await _compose_image_prompt_with_gpt55(
         db,
-        base_prompt=str(record["final_prompt"] or ""),
-        product_analysis=request.product_analysis,
-        garment_lock=garment_lock,
-        model_summary=model_summary,
-        scene_card=scene_card,
-        shot_class=shot_type,
-        template=request.template,
-        aspect_ratio=request.aspect_ratio,
-        final_quality=request.final_quality,
-        rewrite_instruction=rewrite_instruction,
+        PromptCompositionRequest(
+            base_prompt=str(record["final_prompt"] or ""),
+            product_analysis=request.product_analysis,
+            garment_lock=garment_lock,
+            model_summary=model_summary,
+            scene_card=scene_card,
+            shot_class=shot_type,
+            template=request.template,
+            aspect_ratio=request.aspect_ratio,
+            final_quality=request.final_quality,
+            rewrite_instruction=rewrite_instruction,
+        ),
         provider_selection=_provider_selection(provider_order, provider_runtime),
         reference_images=request.reference_images,
     )

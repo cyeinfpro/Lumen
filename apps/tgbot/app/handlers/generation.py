@@ -35,7 +35,7 @@ from ..generation_state import (
 )
 from ..keyboards import DEFAULT_PARAMS, enhance_choice_keyboard, render_params_summary
 from ..states import GenFlow
-from ..tracker import TaskTrack, tracker
+from ..tracker import TaskTrack, Tracker
 from ._helpers import (
     is_slash_command,
     message_prompt,
@@ -45,8 +45,16 @@ from ._helpers import (
 
 logger = logging.getLogger(__name__)
 router = Router()
+tracker: Tracker | None = None
 _PROMPT_ENHANCE_KEY_FIELD = "prompt_enhance_idempotency_key"
 _PROMPT_ENHANCE_PENDING_FIELD = "prompt_enhance_pending"
+
+
+def _resolve_tracker(injected: Tracker | None = None) -> Tracker:
+    active = injected if injected is not None else tracker
+    if active is None:
+        raise RuntimeError("TgBot handler tracker is not configured")
+    return active
 
 
 @dataclass
@@ -102,6 +110,7 @@ class _PromptFlow:
     flow_epoch: str
     actor_id: int
     update_token: str
+    tracker: Tracker | None = None
 
     async def is_current(self) -> bool:
         return await _prompt_flow_is_current(
@@ -205,14 +214,16 @@ async def _stage_durable_submission(
     payload: dict[str, Any],
     answer,
     expected_flow_epoch: str | None = None,
+    tracker: Tracker | None = None,
 ) -> DurableGenerationSubmission | None:
     if (
         expected_flow_epoch is not None
         and not await generation_flow_is_current(state, expected_flow_epoch)
     ):
         return None
+    active_tracker = _resolve_tracker(tracker)
     try:
-        submission = await tracker.stage_generation_submission(
+        submission = await active_tracker.stage_generation_submission(
             chat_id=chat_id,
             tg_user_id=tg_user_id,
             update_token=update_token,
@@ -242,14 +253,17 @@ async def _stage_durable_submission(
 async def _finish_durable_submission(
     submission: DurableGenerationSubmission,
     disposition: SubmissionDisposition,
+    *,
+    tracker: Tracker | None = None,
 ) -> None:
     status = {
         SubmissionDisposition.ACCEPTED: SubmissionJournalStatus.ACCEPTED,
         SubmissionDisposition.REJECTED: SubmissionJournalStatus.REJECTED,
         SubmissionDisposition.AMBIGUOUS: SubmissionJournalStatus.AMBIGUOUS,
     }[disposition]
+    active_tracker = _resolve_tracker(tracker)
     try:
-        await tracker.finish_generation_submission(submission, status)
+        await active_tracker.finish_generation_submission(submission, status)
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "durable generation journal update failed operation=%s status=%s err=%r",
@@ -265,6 +279,8 @@ async def _submit_generation(
     payload: dict[str, Any],
     api: LumenApi,
     answer,  # callable(text: str) -> Awaitable[Message]
+    *,
+    tracker: Tracker | None = None,
 ) -> SubmissionDisposition:
     """把 (提示词, params) 提交到 API 并注册 tracker。
 
@@ -329,11 +345,12 @@ async def _submit_generation(
         batch_id = gen_ids[0]
 
     status = await answer(status_text)
+    active_tracker = _resolve_tracker(tracker)
     try:
         if batch_id:
-            await tracker.init_batch(batch_id, len(gen_ids))
+            await active_tracker.init_batch(batch_id, len(gen_ids))
         for gen_id in gen_ids:
-            await tracker.add(
+            await active_tracker.add(
                 gen_id,
                 TaskTrack(
                     chat_id=chat_id,
@@ -357,6 +374,8 @@ async def _submit_durable_generation(
     submission: DurableGenerationSubmission,
     api: LumenApi,
     answer,
+    *,
+    tracker: Tracker | None = None,
 ) -> SubmissionDisposition:
     if submission.status is SubmissionJournalStatus.ACCEPTED:
         await answer("ℹ️ 这条 Telegram 请求已经提交，请用 /tasks 查看。")
@@ -370,8 +389,9 @@ async def _submit_durable_generation(
         submission.payload,
         api,
         answer,
+        tracker=tracker,
     )
-    await _finish_durable_submission(submission, disposition)
+    await _finish_durable_submission(submission, disposition, tracker=tracker)
     return disposition
 
 
@@ -396,6 +416,7 @@ async def _submit_prompt_flow_payload(
         payload=payload,
         answer=flow.message.answer,
         expected_flow_epoch=flow.flow_epoch,
+        tracker=flow.tracker,
     )
     if submission is None:
         return None
@@ -405,6 +426,7 @@ async def _submit_prompt_flow_payload(
         submission,
         flow.api,
         flow.message.answer,
+        tracker=flow.tracker,
     )
     if (
         disposition is not SubmissionDisposition.AMBIGUOUS
@@ -628,6 +650,7 @@ async def on_prompt(
     state: FSMContext,
     api: LumenApi,
     generation_runtime: GenerationRuntime,
+    tracker: Tracker | None = None,
 ) -> None:
     prompt_input = await _resolve_prompt_input(
         message,
@@ -657,6 +680,7 @@ async def on_prompt(
             flow_epoch=flow_epoch,
             actor_id=actor_id,
             update_token=update_token,
+            tracker=tracker,
         )
         if await _retry_pending_prompt_flow(flow, data, prompt):
             return
@@ -731,9 +755,14 @@ async def on_prompt(
         await generation_runtime.finish_prompt(message.chat.id, task)
 
 
-async def _acquire_submit_guard(idempotency_key: str) -> tuple[bool, bool]:
+async def _acquire_submit_guard(
+    idempotency_key: str,
+    *,
+    tracker: Tracker | None = None,
+) -> tuple[bool, bool]:
+    active_tracker = _resolve_tracker(tracker)
     try:
-        acquired = await tracker.acquire_submit_once(idempotency_key)
+        acquired = await active_tracker.acquire_submit_once(idempotency_key)
         return acquired, acquired
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -744,9 +773,14 @@ async def _acquire_submit_guard(idempotency_key: str) -> tuple[bool, bool]:
         return True, False
 
 
-async def _release_submit_guard(idempotency_key: str) -> None:
+async def _release_submit_guard(
+    idempotency_key: str,
+    *,
+    tracker: Tracker | None = None,
+) -> None:
+    active_tracker = _resolve_tracker(tracker)
     try:
-        await tracker.release_submit_once(idempotency_key)
+        await active_tracker.release_submit_once(idempotency_key)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "submit-once release failed key=%s err=%r",
@@ -766,6 +800,7 @@ async def _submit_enhance_choice_generation(
     params: dict[str, object],
     idempotency_key: str,
     actor_id: int,
+    tracker: Tracker | None = None,
 ) -> None:
     update_token = _callback_update_token(
         cb,
@@ -789,13 +824,15 @@ async def _submit_enhance_choice_generation(
         update_token=update_token,
         payload=payload,
         answer=msg.answer,
+        tracker=tracker,
     )
     if submission is None:
         await cb.answer("安全提交服务暂不可用", show_alert=True)
         return
 
     acquired, guard_acquired = await _acquire_submit_guard(
-        submission.idempotency_key
+        submission.idempotency_key,
+        tracker=tracker,
     )
     if not acquired:
         await cb.answer("已在提交中，请勿重复点击")
@@ -807,10 +844,14 @@ async def _submit_enhance_choice_generation(
         submission,
         api,
         msg.answer,
+        tracker=tracker,
     )
     if disposition is SubmissionDisposition.AMBIGUOUS:
         if guard_acquired:
-            await _release_submit_guard(submission.idempotency_key)
+            await _release_submit_guard(
+                submission.idempotency_key,
+                tracker=tracker,
+            )
         await cb.answer("提交结果未知，请再次点击同一选项")
         return
 
@@ -826,7 +867,10 @@ async def _submit_enhance_choice_generation(
 
 @router.callback_query(GenFlow.confirming_enhanced, F.data.startswith("enh:"))
 async def on_enhance_choice(
-    cb: CallbackQuery, state: FSMContext, api: LumenApi
+    cb: CallbackQuery,
+    state: FSMContext,
+    api: LumenApi,
+    tracker: Tracker | None = None,
 ) -> None:
     choice = (cb.data or "").split(":", 1)[1] if cb.data else ""
     msg = await require_message(cb)
@@ -889,11 +933,17 @@ async def on_enhance_choice(
         params=params,
         idempotency_key=idempotency_key,
         actor_id=actor_id,
+        tracker=tracker,
     )
 
 
 @router.message(GenFlow.editing_enhanced)
-async def on_edited_prompt(message: Message, state: FSMContext, api: LumenApi) -> None:
+async def on_edited_prompt(
+    message: Message,
+    state: FSMContext,
+    api: LumenApi,
+    tracker: Tracker | None = None,
+) -> None:
     text = message_prompt(message)
     if text == "/cancel":
         await state.clear()
@@ -941,6 +991,7 @@ async def on_edited_prompt(message: Message, state: FSMContext, api: LumenApi) -
         update_token=update_token,
         payload=payload,
         answer=message.answer,
+        tracker=tracker,
     )
     if submission is None:
         return
@@ -950,6 +1001,7 @@ async def on_edited_prompt(message: Message, state: FSMContext, api: LumenApi) -
         submission,
         api,
         message.answer,
+        tracker=tracker,
     )
     if disposition is not SubmissionDisposition.AMBIGUOUS:
         await state.clear()

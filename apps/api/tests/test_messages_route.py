@@ -704,20 +704,22 @@ async def test_create_assistant_task_holds_chat_wallet_preauth(
     )
 
     result = await messages._create_assistant_task(  # noqa: SLF001
-        db=db,  # type: ignore[arg-type]
-        user_id="user-1",
-        account_mode="wallet",
-        conv=_conv(),  # type: ignore[arg-type]
-        user_msg=SimpleNamespace(id="user-msg"),
-        intent=messages.Intent.CHAT,
-        idempotency_key="idem-chat-hold",
-        image_params=ImageParamsIn(),
-        chat_params=ChatParamsIn(web_search=True),
-        system_prompt=None,
-        attachment_ids=[],
-        text="hello",
-        chat_wallet_preflight_done=True,
-        chat_wallet_preflight=preflight,
+        messages.AssistantTaskCommand(
+            db=db,  # type: ignore[arg-type]
+            user_id="user-1",
+            account_mode="wallet",
+            conv=_conv(),  # type: ignore[arg-type]
+            user_msg=SimpleNamespace(id="user-msg"),
+            intent=messages.Intent.CHAT,
+            idempotency_key="idem-chat-hold",
+            image_params=ImageParamsIn(),
+            chat_params=ChatParamsIn(web_search=True),
+            system_prompt=None,
+            attachment_ids=[],
+            text="hello",
+            chat_wallet_preflight_done=True,
+            chat_wallet_preflight=preflight,
+        )
     )
 
     assert result.completion_id is not None

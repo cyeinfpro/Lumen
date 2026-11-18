@@ -40,7 +40,9 @@ from .apparel_scene_planner_parts import (
 logger = logging.getLogger(__name__)
 
 ContinuityAnchor = _contracts.ContinuityAnchor
+PromptCompositionRequest = _contracts.PromptCompositionRequest
 ScenePlannerMode = _contracts.ScenePlannerMode
+ScenePlanningRequest = _contracts.ScenePlanningRequest
 SceneProviderSelection = _contracts.SceneProviderSelection
 SceneStrategy = _contracts.SceneStrategy
 SceneVariety = _contracts.SceneVariety
@@ -112,46 +114,39 @@ def _prompt_dependencies() -> _prompt_composition.PromptCompositionDependencies:
     )
 
 
+def _resolve_scene_planning_request(
+    request: ScenePlanningRequest | None,
+    legacy_kwargs: dict[str, Any],
+) -> ScenePlanningRequest:
+    if request is not None:
+        if legacy_kwargs:
+            raise TypeError("cannot mix ScenePlanningRequest with keyword arguments")
+        return request
+    return ScenePlanningRequest(**legacy_kwargs)
+
+
+def _resolve_prompt_composition_request(
+    request: PromptCompositionRequest | None,
+    legacy_kwargs: dict[str, Any],
+) -> PromptCompositionRequest:
+    if request is not None:
+        if legacy_kwargs:
+            raise TypeError("cannot mix PromptCompositionRequest with keyword arguments")
+        return request
+    return PromptCompositionRequest(**legacy_kwargs)
+
+
 async def plan_scene_cards_with_gpt55(
     db: AsyncSession,
+    request: ScenePlanningRequest | None = None,
     *,
-    product_analysis: dict[str, Any],
-    garment_lock: dict[str, Any],
-    model_summary: str,
-    template: str,
-    scene_environment: str,
-    shot_picks: list[tuple[str, dict[str, Any]]],
-    aspect_ratio: str,
-    output_count: int,
-    user_prompt: str,
-    accessory_plan: dict[str, Any],
-    scene_strategy: str,
-    scene_variety: str,
-    continuity_anchor: str,
-    allow_pet: bool,
-    allow_background_people: bool,
     provider_selection: SceneProviderSelection | None = None,
     reference_images: list[dict[str, str]] | None = None,
+    **legacy_kwargs: Any,
 ) -> dict[str, Any]:
     return await _planning.plan_scene_cards_with_gpt55(
         db,
-        request=_contracts.ScenePlanningRequest(
-            product_analysis=product_analysis,
-            garment_lock=garment_lock,
-            model_summary=model_summary,
-            template=template,
-            scene_environment=scene_environment,
-            shot_picks=shot_picks,
-            aspect_ratio=aspect_ratio,
-            output_count=output_count,
-            user_prompt=user_prompt,
-            accessory_plan=accessory_plan,
-            scene_strategy=scene_strategy,
-            scene_variety=scene_variety,
-            continuity_anchor=continuity_anchor,
-            allow_pet=allow_pet,
-            allow_background_people=allow_background_people,
-        ),
+        request=_resolve_scene_planning_request(request, legacy_kwargs),
         provider_selection=provider_selection,
         reference_images=reference_images,
         dependencies=_planning_dependencies(),
@@ -209,34 +204,15 @@ def _gpt55_director_retry_count() -> int:
 
 async def compose_image_prompt_with_gpt55(
     db: AsyncSession,
+    request: PromptCompositionRequest | None = None,
     *,
-    base_prompt: str,
-    product_analysis: dict[str, Any],
-    garment_lock: dict[str, Any],
-    model_summary: str,
-    scene_card: dict[str, Any],
-    shot_class: str,
-    template: str,
-    aspect_ratio: str,
-    final_quality: str,
-    rewrite_instruction: str | None = None,
     provider_selection: SceneProviderSelection | None = None,
     reference_images: list[dict[str, str]] | None = None,
+    **legacy_kwargs: Any,
 ) -> dict[str, Any]:
     return await _prompt_composition.compose_image_prompt_with_gpt55(
         db,
-        request=_contracts.PromptCompositionRequest(
-            base_prompt=base_prompt,
-            product_analysis=product_analysis,
-            garment_lock=garment_lock,
-            model_summary=model_summary,
-            scene_card=scene_card,
-            shot_class=shot_class,
-            template=template,
-            aspect_ratio=aspect_ratio,
-            final_quality=final_quality,
-            rewrite_instruction=rewrite_instruction,
-        ),
+        request=_resolve_prompt_composition_request(request, legacy_kwargs),
         provider_selection=provider_selection,
         reference_images=reference_images,
         dependencies=_prompt_dependencies(),

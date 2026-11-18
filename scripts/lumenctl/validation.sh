@@ -257,3 +257,145 @@ probe_sub2api_upstream() {
     log_error "请先启动 sub2api，并确认当前机器可访问你填写的地址，例如：curl -i ${upstream_base}/v1/models"
     exit 1
 }
+
+validate_nginx_no_root_csp() {
+    local file="$1"
+    if [ ! -f "${file}" ]; then
+        log_error "nginx 配置文件不存在：${file}"
+        return 1
+    fi
+    local check_rc=0
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "${file}" <<'PY' || check_rc=$?
+from pathlib import Path
+import re
+import sys
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+
+def matching_brace(text: str, start: int) -> int:
+    depth = 0
+    quote = None
+    comment = False
+    escaped = False
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if comment:
+            if ch == "\n":
+                comment = False
+            continue
+        if quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch == "#":
+            comment = True
+        elif ch in {"'", '"'}:
+            quote = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return idx
+    return -1
+
+def server_root_statements(body: str) -> list[str]:
+    statements: list[str] = []
+    buf: list[str] = []
+    nested = 0
+    quote = None
+    comment = False
+    escaped = False
+    for ch in body:
+        if comment:
+            if ch == "\n":
+                comment = False
+                if nested == 0:
+                    buf.append(" ")
+            continue
+        if quote:
+            if nested == 0:
+                buf.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch == "#":
+            comment = True
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            if nested == 0:
+                buf.append(ch)
+            continue
+        if ch == "{":
+            if nested == 0:
+                buf.clear()
+            nested += 1
+            continue
+        if ch == "}":
+            nested = max(0, nested - 1)
+            if nested == 0:
+                buf.clear()
+            continue
+        if nested == 0:
+            if ch == ";":
+                stmt = "".join(buf).strip()
+                if stmt:
+                    statements.append(stmt)
+                buf.clear()
+            else:
+                buf.append(ch)
+    return statements
+
+csp_re = re.compile(r"(?is)^add_header\s+[\"']?content-security-policy[\"']?(?:\s|$)")
+for match in re.finditer(r"(?m)^[ \t]*server[ \t]*\{", source):
+    brace = source.find("{", match.start())
+    end = matching_brace(source, brace)
+    if end == -1:
+        continue
+    for stmt in server_root_statements(source[brace + 1 : end]):
+        if csp_re.match(stmt):
+            sys.exit(2)
+PY
+    else
+        awk '
+            BEGIN { in_server = 0; depth = 0; bad = 0 }
+            {
+                line = $0
+                sub(/#.*/, "", line)
+                if (!in_server && line ~ /^[[:space:]]*server[[:space:]]*\{/) {
+                    in_server = 1
+                    depth = 1
+                    sub(/^[[:space:]]*server[[:space:]]*\{/, "", line)
+                }
+                if (in_server) {
+                    if (depth == 1 && tolower(line) ~ /(^|[[:space:];])add_header[[:space:]]+["\x27]?content-security-policy(["\x27[:space:]]|$)/) {
+                        bad = 1
+                    }
+                    n_open = gsub(/\{/, "{", line)
+                    n_close = gsub(/\}/, "}", line)
+                    depth += n_open - n_close
+                    if (depth <= 0) {
+                        in_server = 0
+                        depth = 0
+                    }
+                }
+            }
+            END { exit(bad ? 2 : 0) }
+        ' "${file}" || check_rc=$?
+    fi
+    if [ "${check_rc}" -ne 0 ]; then
+        log_error "禁止在 nginx server {} 根块配置 add_header Content-Security-Policy（会与 Next.js / API CSP 交集锁死）：${file}"
+        return 1
+    fi
+    return 0
+}

@@ -23,6 +23,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 
 from lumen_core.context_window import warm_tiktoken
 from lumen_core.storage_capacity import build_storage_capacity
+from lumen_core.volcano_asset_media import VideoTranscodeRuntime
 
 from .config import settings
 from .agent_runtime_client import AgentRuntimeClient
@@ -36,7 +37,12 @@ from .observability import (
     start_metrics_server,
     stop_metrics_server,
 )
-from .provider_pool import probe_providers
+from .provider_pool import (
+    ProviderPoolRuntime,
+    configure_provider_pool_runtime,
+    probe_providers,
+    shutdown_provider_pool_runtime,
+)
 from .provider_runtime.upstream_services import ImageUpstreamRuntime
 from . import runtime_settings
 from .runtime import RuntimeLifecycle, WorkerRuntime
@@ -51,21 +57,22 @@ from .tasks import context_summary as context_summary_tasks
 from .tasks import generation as generation_tasks
 from .tasks import memory_extraction as memory_tasks
 from .tasks import outbox as outbox_tasks
+from .tasks import storage_orphan_gc as storage_orphan_gc_tasks
 from .tasks import storyboard_assembly as storyboard_assembly_tasks
 from .tasks import volcano_asset_orchestrator as volcano_asset_tasks
 from .tasks import volcano_asset_recovery as volcano_asset_recovery_tasks
 from .tasks.completion_parts import entrypoints as completion_tasks
 from .tasks.completion_parts.default_runtime import build_completion_runtime
-from .tasks.generation_parts.default_runtime import build_generation_runtime
+from .tasks.generation_parts.composition import build_generation_runtime
 from .tasks.video_generation_parts import entrypoints as video_generation_tasks
 from .tasks.video_generation_parts.default_runtime import (
     build_video_generation_runtime,
 )
-from .upstream_parts.entrypoints import (
+from .upstream_parts.upstream_impl import (
+    build_image_upstream_runtime,
     close_client,
     validate_effective_image_job_configuration,
 )
-from .upstream_parts.upstream_impl import build_image_upstream_runtime
 
 _startup_logger = logging.getLogger(__name__)
 _PROVIDER_CRON_TIMEOUT_S = 30.0
@@ -140,6 +147,19 @@ async def _cleanup_resources(ctx: dict[str, Any]) -> None:
         return
 
     await _cleanup_resource("billing_cache", billing_cache.shutdown)
+    provider_pool_runtime = ctx.pop("provider_pool_runtime", None)
+    if isinstance(provider_pool_runtime, ProviderPoolRuntime):
+        await _cleanup_resource(
+            "provider_pool",
+            lambda: shutdown_provider_pool_runtime(provider_pool_runtime),
+        )
+    auto_title_runtime = ctx.pop("auto_title_runtime", None)
+    if isinstance(auto_title_runtime, auto_title_tasks.AutoTitleRuntime):
+        await _cleanup_resource(
+            "auto_title_runtime",
+            lambda: auto_title_tasks.shutdown_runtime(auto_title_runtime),
+        )
+    ctx.pop("billing_cache_runtime", None)
     cache = ctx.pop("runtime_settings_cache", None)
     if isinstance(cache, runtime_settings.RuntimeSettingsCache):
         await _cleanup_resource(
@@ -182,6 +202,20 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
             "runtime_settings_cache",
             lambda: runtime_settings.shutdown_cache(runtime_settings_cache),
         )
+        provider_pool_runtime = configure_provider_pool_runtime()
+        ctx["provider_pool_runtime"] = provider_pool_runtime
+        lifecycle.own(
+            "provider_pool",
+            lambda: shutdown_provider_pool_runtime(provider_pool_runtime),
+        )
+        auto_title_runtime = auto_title_tasks.configure_runtime()
+        ctx["auto_title_runtime"] = auto_title_runtime
+        lifecycle.own(
+            "auto_title_runtime",
+            lambda: auto_title_tasks.shutdown_runtime(auto_title_runtime),
+        )
+        volcano_media_runtime = VideoTranscodeRuntime()
+        lifecycle.own("volcano_media_runtime", volcano_media_runtime.reset)
         image_upstream_runtime = build_image_upstream_runtime()
         ctx["image_upstream_runtime"] = image_upstream_runtime
         lifecycle.own(
@@ -249,8 +283,12 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
         # 失败不阻塞启动——count_tokens 内部会回落到 estimate_text_tokens。
         loaded = warm_tiktoken()
         _startup_logger.info("worker.tiktoken_warm loaded=%s", loaded)
+        billing_cache_runtime = billing_cache.BillingCacheRuntime()
+        ctx["billing_cache_runtime"] = billing_cache_runtime
         await billing_cache.configure(ctx.get("redis"))
         lifecycle.own("billing_cache", billing_cache.shutdown)
+        billing_cache_runtime = billing_cache.current_runtime()
+        ctx["billing_cache_runtime"] = billing_cache_runtime
 
         agent_runtime_client = AgentRuntimeClient(
             base_url=settings.agent_runtime_url,
@@ -280,6 +318,9 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
             _metrics_server=metrics_server_runtime,
             _agent_runtime=agent_runtime_client,
             _lifecycle=lifecycle,
+            _provider_pool=provider_pool_runtime,
+            _billing_cache=billing_cache_runtime,
+            _auto_title=auto_title_runtime,
         )
         ctx["worker_runtime"] = worker_runtime
         ctx.update(worker_runtime.context_values())
@@ -361,6 +402,18 @@ class WorkerSettings:
                 byok_retention_tasks.cleanup_byok_retention,
                 hour={3},
                 minute={27},
+                run_at_startup=False,
+            ),
+            cron(
+                outbox_tasks.prune_published_outbox_events,
+                hour={3},
+                minute={37},
+                run_at_startup=False,
+            ),
+            cron(
+                storage_orphan_gc_tasks.run_storage_orphan_gc,
+                hour={3},
+                minute={47},
                 run_at_startup=False,
             ),
             # last_used_at 批量 flush: 每分钟 0/30 秒各一次, 把 redis ZSET 累积的

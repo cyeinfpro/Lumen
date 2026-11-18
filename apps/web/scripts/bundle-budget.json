@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "budgets": {
+    "sharedRootMainGzipBytes": 150000,
+    "sharedLayoutFirstLoadGzipBytes": 385000,
+    "chatRouteFirstLoadGzipBytes": 585000,
+    "agentRouteFirstLoadGzipBytes": 555000
+  },
+  "forbiddenInitialChunkPatterns": [
+    {
+      "id": "konva",
+      "description": "konva / react-konva must only load dynamically when opening Inpaint / Mask editors",
+      "pattern": "\\bKonva\\b|react-konva|konvajs"
+    },
+    {
+      "id": "xyflow",
+      "description": "@xyflow/react must stay isolated inside the dynamic CanvasViewport boundary",
+      "pattern": "@xyflow\\/react|\\bReactFlowProvider\\b|\\bNodeResizer\\b"
+    },
+    {
+      "id": "sync-highlight-bundle",
+      "description": "highlight.js / lowlight must load asynchronously only when fenced code blocks exist",
+      "pattern": "\\brehypeHighlight\\b|\\blowlight\\b|\\bregisterLanguage\\b|highlight\\.js"
+    }
+  ],
+  "auditedInitialRoutes": [
+    "/page",
+    "/agent/page",
+    "/video/page",
+    "/projects/page",
+    "/projects/canvas/page",
+    "/admin/page"
+  ],
+  "requiredDynamicBoundaries": [
+    "LazyInpaintModal",
+    "InpaintModal",
+    "MaskBoard",
+    "CanvasViewport",
+    "markdownHighlight"
+  ]
+}

@@ -868,3 +868,35 @@ async def test_load_messages_for_compaction_has_limit() -> None:
     assert conversations.COMPACTION_MESSAGE_LOAD_LIMIT in (
         db.statements[-1].compile().params.values()
     )
+
+
+def test_context_summary_adapters_resolve_from_app_runtime_state() -> None:
+    assert not hasattr(compaction_service, "_CONTEXT_SUMMARY_ADAPTERS")
+    registry = compaction_service.ContextSummaryAdapterRegistry()
+
+    async def fake_ensure(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"status": "ok"}
+
+    compaction_service.install_context_summary_adapter(
+        fake_ensure,
+        registry=registry,
+    )
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            runtime=SimpleNamespace(context_summary_adapters=lambda: registry)
+        )
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/",
+            "headers": [],
+            "client": ("127.0.0.1", 12345),
+            "app": app,
+        }
+    )
+
+    assert (
+        compaction_service.import_ensure_context_summary(request=request) is fake_ensure
+    )

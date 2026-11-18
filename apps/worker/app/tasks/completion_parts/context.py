@@ -111,7 +111,8 @@ def _pack_with_existing_summary(
 
     used_tokens = (
         estimate_system_prompt_tokens(
-            _with_summary_guardrail(system_prompt, enabled=True)
+            _with_summary_guardrail(system_prompt, enabled=True),
+            duplication_factor=1,
         )
         + sticky_tokens
         + MESSAGE_OVERHEAD_TOKENS

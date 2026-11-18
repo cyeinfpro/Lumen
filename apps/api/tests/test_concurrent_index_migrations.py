@@ -57,6 +57,8 @@ AGENT_SESSION_CONTEXT_REVISION = "0070_agent_session_context"
 AGENT_AUDIT_HARDENING_REVISION = "0071_agent_audit_hardening"
 AGENT_RUNTIME_CONTRACTS_REVISION = "0072_agent_runtime_contracts"
 SEEDANCE_25_FLASH_REVISION = "0073_seedance_25_flash_defaults"
+MEMORY_HALFVEC_HNSW_REVISION = "0074_memory_halfvec_hnsw"
+CANVAS_SIDEBAR_IDX_VACUUM_REVISION = "0075_canvas_sidebar_idx_vacuum"
 
 
 @dataclass(frozen=True)
@@ -580,6 +582,10 @@ def test_repair_revision_remains_in_the_single_head_chain() -> None:
     agent_audit_hardening = scripts.get_revision(AGENT_AUDIT_HARDENING_REVISION)
     agent_runtime_contracts = scripts.get_revision(AGENT_RUNTIME_CONTRACTS_REVISION)
     seedance_25_flash = scripts.get_revision(SEEDANCE_25_FLASH_REVISION)
+    memory_halfvec_hnsw = scripts.get_revision(MEMORY_HALFVEC_HNSW_REVISION)
+    canvas_sidebar_idx_vacuum = scripts.get_revision(
+        CANVAS_SIDEBAR_IDX_VACUUM_REVISION
+    )
 
     assert repair is not None
     assert repair.down_revision == "0056_outbox_due_index"
@@ -615,7 +621,11 @@ def test_repair_revision_remains_in_the_single_head_chain() -> None:
     assert agent_runtime_contracts.down_revision == AGENT_AUDIT_HARDENING_REVISION
     assert seedance_25_flash is not None
     assert seedance_25_flash.down_revision == AGENT_RUNTIME_CONTRACTS_REVISION
-    assert scripts.get_heads() == [SEEDANCE_25_FLASH_REVISION]
+    assert memory_halfvec_hnsw is not None
+    assert memory_halfvec_hnsw.down_revision == SEEDANCE_25_FLASH_REVISION
+    assert canvas_sidebar_idx_vacuum is not None
+    assert canvas_sidebar_idx_vacuum.down_revision == MEMORY_HALFVEC_HNSW_REVISION
+    assert scripts.get_heads() == [CANVAS_SIDEBAR_IDX_VACUUM_REVISION]
 
 
 @pytest.mark.parametrize(

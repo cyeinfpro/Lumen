@@ -134,7 +134,7 @@ from ...services.billing.wallet_activity import (
     wallet_activity_24h as _wallet_activity_24h,
     wallet_activity_window_end as _wallet_activity_window_end,
 )
-from ...services.billing_cache import BillingCacheService
+from lumen_core.billing_cache import BillingCacheService
 from .presenters import (
     audit_out as _audit_out,
     cursor_filter as _cursor_filter,

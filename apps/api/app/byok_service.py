@@ -63,6 +63,7 @@ from lumen_core.url_security import (
 
 from .config import settings
 from .proxy_pool import resolve_provider_proxy_url
+from .runtime.slot import RuntimeSlot
 
 
 _SLUG_RE = re.compile(r"[^a-z0-9-]+")
@@ -296,14 +297,40 @@ _BYOK_SETTINGS_TTL_SECONDS = 30.0
 
 
 @dataclass
-class _ByokSettingsCacheState:
+class ByokSettingsCache:
     value: tuple[float, dict[str, str | None]] | None = None
 
+    def clear(self) -> None:
+        self.value = None
 
-_byok_settings_cache_state = _ByokSettingsCacheState()
+
+_BYOK_SETTINGS_CACHE_SLOT: RuntimeSlot[ByokSettingsCache] = RuntimeSlot(
+    "api-byok-settings-cache",
+    default_factory=ByokSettingsCache,
+)
 
 
-async def read_byok_settings_cached(db: AsyncSession) -> ByokSettingsOut:
+def configure_byok_settings_cache(
+    cache: ByokSettingsCache | None = None,
+) -> ByokSettingsCache:
+    active = cache or ByokSettingsCache()
+    _BYOK_SETTINGS_CACHE_SLOT.install_default(active)
+    return active
+
+
+def reset_byok_settings_cache(cache: ByokSettingsCache | None = None) -> None:
+    active = cache or _BYOK_SETTINGS_CACHE_SLOT.current_or_none()
+    if active is None:
+        return
+    active.clear()
+    _BYOK_SETTINGS_CACHE_SLOT.clear_default(active)
+
+
+async def read_byok_settings_cached(
+    db: AsyncSession,
+    *,
+    cache: ByokSettingsCache | None = None,
+) -> ByokSettingsOut:
     """Cached variant of read_byok_settings (TTL ~30 s).
 
     Use this on hot read paths (POST /messages). For write paths or when
@@ -312,21 +339,26 @@ async def read_byok_settings_cached(db: AsyncSession) -> ByokSettingsOut:
     from the DB, so an admin toggle applies immediately on every worker
     process instead of lingering for the TTL.
     """
+    active_cache = cache or _BYOK_SETTINGS_CACHE_SLOT.current()
     now = time.monotonic()
-    cached = _byok_settings_cache_state.value
+    cached = active_cache.value
     if cached is not None and now - cached[0] < _BYOK_SETTINGS_TTL_SECONDS:
-        base_raw = cached[1]
+        base_raw = dict(cached[1])
     else:
         base_raw = await _read_raw_byok_settings(db, _BYOK_SETTINGS_ALL_KEYS)
-        _byok_settings_cache_state.value = (now, base_raw)
+        active_cache.value = (now, dict(base_raw))
     fresh = await _read_raw_byok_settings(db, _BYOK_SECURITY_KEYS)
     base_raw.update(fresh)
     return _byok_settings_out_from_raw(base_raw)
 
 
-def invalidate_byok_settings_cache() -> None:
+def invalidate_byok_settings_cache(
+    cache: ByokSettingsCache | None = None,
+) -> None:
     """Clear the BYOK settings cache. Call after admin PATCH commits."""
-    _byok_settings_cache_state.value = None
+    active_cache = cache or _BYOK_SETTINGS_CACHE_SLOT.current_or_none()
+    if active_cache is not None:
+        active_cache.clear()
 
 
 async def supplier_to_out(

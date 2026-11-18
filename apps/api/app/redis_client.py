@@ -12,6 +12,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from .config import settings
+from .runtime.slot import RuntimeSlot
 
 _REDIS_RETRY_DELAYS = (0.05, 0.2, 0.5)
 _REDIS_CONNECT_TIMEOUT_S = 5.0
@@ -58,16 +59,17 @@ class ReconnectingRedis(redis.Redis):
         try:
             await super().aclose(*args, **kwargs)
         finally:
-            for loop, client in list(_redis_state.by_loop.items()):
+            state = _active_redis_state()
+            for loop, client in list(state.by_loop.items()):
                 if client is self:
-                    _redis_state.by_loop.pop(loop, None)
-            if _redis_state.client is self:
-                _redis_state.client = None
-                _redis_state.loop = None
+                    state.by_loop.pop(loop, None)
+            if state.client is self:
+                state.client = None
+                state.loop = None
 
 
 @dataclass
-class _RedisState:
+class RedisClientState:
     client: "ReconnectingRedis | None" = None
     loop: asyncio.AbstractEventLoop | None = None
     by_loop: WeakKeyDictionary[asyncio.AbstractEventLoop, "ReconnectingRedis"] = field(
@@ -76,7 +78,72 @@ class _RedisState:
     pid: int = field(default_factory=os.getpid)
 
 
-_redis_state = _RedisState()
+_RedisState = RedisClientState
+_REDIS_STATE_SLOT: RuntimeSlot[RedisClientState] = RuntimeSlot(
+    "api-redis-client-state",
+    default_factory=RedisClientState,
+)
+
+
+class _RedisStateView:
+    @property
+    def client(self) -> "ReconnectingRedis | None":
+        return _REDIS_STATE_SLOT.current().client
+
+    @client.setter
+    def client(self, value: "ReconnectingRedis | None") -> None:
+        _REDIS_STATE_SLOT.current().client = value
+
+    @property
+    def loop(self) -> asyncio.AbstractEventLoop | None:
+        return _REDIS_STATE_SLOT.current().loop
+
+    @loop.setter
+    def loop(self, value: asyncio.AbstractEventLoop | None) -> None:
+        _REDIS_STATE_SLOT.current().loop = value
+
+    @property
+    def by_loop(
+        self,
+    ) -> WeakKeyDictionary[asyncio.AbstractEventLoop, "ReconnectingRedis"]:
+        return _REDIS_STATE_SLOT.current().by_loop
+
+    @property
+    def pid(self) -> int:
+        return _REDIS_STATE_SLOT.current().pid
+
+    @pid.setter
+    def pid(self, value: int) -> None:
+        _REDIS_STATE_SLOT.current().pid = value
+
+
+_redis_state: RedisClientState | _RedisStateView = _RedisStateView()
+
+
+def _active_redis_state(state: RedisClientState | None = None) -> RedisClientState:
+    if state is not None:
+        return state
+    if isinstance(_redis_state, RedisClientState):
+        return _redis_state
+    return _REDIS_STATE_SLOT.current()
+
+
+def configure_redis_state(
+    state: RedisClientState | None = None,
+) -> RedisClientState:
+    active = state or RedisClientState()
+    _REDIS_STATE_SLOT.install_default(active)
+    return active
+
+
+def reset_redis_state(state: RedisClientState | None = None) -> None:
+    active = state or _REDIS_STATE_SLOT.current_or_none()
+    if active is None:
+        return
+    active.by_loop.clear()
+    active.client = None
+    active.loop = None
+    _REDIS_STATE_SLOT.clear_default(active)
 
 
 def _current_loop() -> asyncio.AbstractEventLoop | None:
@@ -100,58 +167,60 @@ def _new_redis() -> ReconnectingRedis:
     )
 
 
-def _reset_after_fork() -> None:
+def _reset_after_fork(state: RedisClientState) -> None:
     pid = os.getpid()
-    if _redis_state.pid == pid:
+    if state.pid == pid:
         return
-    _redis_state.by_loop.clear()
-    _redis_state.client = None
-    _redis_state.loop = None
-    _redis_state.pid = pid
+    state.by_loop.clear()
+    state.client = None
+    state.loop = None
+    state.pid = pid
 
 
-def get_redis() -> ReconnectingRedis:
-    _reset_after_fork()
+def get_redis_for_state(state: RedisClientState | None = None) -> ReconnectingRedis:
+    active = _active_redis_state(state)
+    _reset_after_fork(active)
     loop = _current_loop()
     if loop is None:
-        if _redis_state.client is None:
-            _redis_state.client = _new_redis()
-            _redis_state.loop = None
-        return _redis_state.client
+        if active.client is None:
+            active.client = _new_redis()
+            active.loop = None
+        return active.client
 
-    client = _redis_state.by_loop.get(loop)
+    client = active.by_loop.get(loop)
     if client is None:
-        # New event loop: drop the global pointer to a client that belonged to a
-        # different (potentially closed) loop so it can be GC'd instead of
-        # piling up connections forever. WeakKeyDictionary already handles the
-        # per-loop cache; this just stops `_redis` from pinning a stale client.
         if (
-            _redis_state.client is not None
-            and _redis_state.loop is not None
-            and _redis_state.loop is not loop
+            active.client is not None
+            and active.loop is not None
+            and active.loop is not loop
         ):
-            _redis_state.client = None
-            _redis_state.loop = None
+            active.client = None
+            active.loop = None
         client = _new_redis()
-        _redis_state.by_loop[loop] = client
-    _redis_state.client = client
-    _redis_state.loop = loop
+        active.by_loop[loop] = client
+    active.client = client
+    active.loop = loop
     return client
 
 
-async def close_redis() -> None:
-    _reset_after_fork()
+def get_redis() -> ReconnectingRedis:
+    return get_redis_for_state()
+
+
+async def close_redis(state: RedisClientState | None = None) -> None:
+    active = _active_redis_state(state)
+    _reset_after_fork(active)
     loop = _current_loop()
     if loop is not None:
-        client = _redis_state.by_loop.pop(loop, None)
+        client = active.by_loop.pop(loop, None)
         if client is not None:
             await client.aclose()
-            if _redis_state.client is client:
-                _redis_state.client = None
-                _redis_state.loop = None
+            if active.client is client:
+                active.client = None
+                active.loop = None
             return
-    if _redis_state.client is not None and _redis_state.loop is None:
-        client = _redis_state.client
-        _redis_state.client = None
-        _redis_state.loop = None
+    if active.client is not None and active.loop is None:
+        client = active.client
+        active.client = None
+        active.loop = None
         await client.aclose()

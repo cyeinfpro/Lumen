@@ -1,63 +1,117 @@
 #!/usr/bin/env bash
-# Storage, infrastructure, and database migration phases.
+# Storage, infrastructure, fast-anchor, and database migration phases.
+
+_lumen_fast_sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" 2>/dev/null | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+    elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 "$1" 2>/dev/null | awk '{print $NF}'
+    fi
+}
+
+lumen_update_write_fast_anchor() {
+    local out_dir="${UPDATE_LOG_DIR:-}" anchor_file="${LUMEN_FAST_ANCHOR_FILE:-}"
+    [ -n "${anchor_file}" ] || [ -n "${out_dir}" ] || return 0
+    [ -n "${anchor_file}" ] || anchor_file="${out_dir}/fast-anchor.json"
+    mkdir -p "$(dirname "${anchor_file}")" 2>/dev/null || return 0
+    local env_sha="" db_user="${DB_USER:-}" db_name="${DB_NAME:-}" pg_c="${PG_CONTAINER:-lumen-pg}"
+    if [ -n "${SHARED_ENV:-}" ] && [ -f "${SHARED_ENV}" ]; then
+        env_sha="$(_lumen_fast_sha256_file "${SHARED_ENV}" || true)"
+        [ -n "${db_user}" ] || db_user="$(awk -F= '/^DB_USER=/{gsub(/^["'\'']|["'\'']$/,"",$2); print $2; exit}' "${SHARED_ENV}" 2>/dev/null || true)"
+        [ -n "${db_name}" ] || db_name="$(awk -F= '/^DB_NAME=/{gsub(/^["'\'']|["'\'']$/,"",$2); print $2; exit}' "${SHARED_ENV}" 2>/dev/null || true)"
+    fi
+    db_user="${db_user:-lumen}"; db_name="${db_name:-lumen}"
+    local raw_rows="" reachable="false" sql=""
+    if [ "${LUMEN_FAST_ANCHOR_SKIP_DOCKER:-0}" != "1" ] && command -v docker >/dev/null 2>&1; then
+        sql="SET LOCAL lock_timeout = '200ms'; SET LOCAL statement_timeout = '500ms'; SELECT 'A', version_num, '', '' FROM alembic_version LIMIT 1; SELECT 'S', key, coalesce(value, ''), encode(sha256(convert_to(coalesce(value, ''), 'UTF8')), 'hex') FROM system_settings ORDER BY key;"
+        if command -v timeout >/dev/null 2>&1 && timeout 1 true >/dev/null 2>&1; then
+            raw_rows="$(timeout "${LUMEN_FAST_ANCHOR_TIMEOUT_SEC:-1}" docker exec -e PGCONNECT_TIMEOUT=1 "${pg_c}" psql -q -U "${db_user}" -d "${db_name}" -AtF $'\t' -c "${sql}" 2>/dev/null)" && reachable="true" || true
+        elif declare -F lumen_docker >/dev/null 2>&1; then
+            raw_rows="$(lumen_docker exec -e PGCONNECT_TIMEOUT=1 "${pg_c}" psql -q -U "${db_user}" -d "${db_name}" -AtF $'\t' -c "${sql}" 2>/dev/null)" && reachable="true" || true
+        else
+            raw_rows="$(docker exec -e PGCONNECT_TIMEOUT=1 "${pg_c}" psql -q -U "${db_user}" -d "${db_name}" -AtF $'\t' -c "${sql}" 2>/dev/null)" && reachable="true" || true
+        fi
+    fi
+    local ts_iso tmp_file="${anchor_file}.tmp.$$"
+    ts_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo 1970-01-01T00:00:00Z)"
+    printf '%s\n' "${raw_rows}" | awk -F'\t' \
+        -v op="${OPERATION_ID:-}" -v env_sha="${env_sha}" -v reach="${reachable}" \
+        -v hint="${LUMEN_FAST_ANCHOR_ALEMBIC_HINT:-}" -v ts="${ts_iso}" '
+    function jesc(s,    r) { r = s; gsub(/\\/, "\\\\", r); gsub(/"/, "\\\"", r); gsub(/\r/, "\\r", r); gsub(/\n/, "\\n", r); gsub(/\t/, "\\t", r); return r }
+    function hhex(s,    i, n, h, c) { h = 2166136261; n = length(s); for (i = 1; i <= n; i++) { c = index(" !\"#$%&'\''()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~", substr(s, i, 1)); h = ((h + c) * 16777619) % 4294967296 }; return sprintf("%08x%08x", h, (n * 2654435761) % 4294967296) }
+    BEGIN { rev = hint; cnt = 0 }
+    $1 == "A" && $2 != "" { rev = $2 }
+    $1 == "S" && $2 != "" {
+        k = $2; v = $3; vh = ($4 != "" ? substr($4, 1, 16) : hhex(v)); kl = tolower(k)
+        red = (kl ~ /(secret|password|token|key|provider|proxy|credential|dsn)/ || length(v) > 64) ? 1 : 0
+        if (!(k in seen)) { seen[k] = 1; keys[++cnt] = k }
+        red_m[k] = red; hash_m[k] = vh; prev_m[k] = (red ? "[REDACTED]" : v)
+    }
+    END {
+        for (i = 2; i <= cnt; i++) { t = keys[i]; j = i - 1; while (j >= 1 && keys[j] > t) { keys[j + 1] = keys[j]; j-- }; keys[j + 1] = t }
+        op_j = (op != "" ? "\"" jesc(op) "\"" : "null"); env_j = (env_sha != "" ? "\"" jesc(env_sha) "\"" : "null"); rev_j = (rev != "" ? "\"" jesc(rev) "\"" : "null")
+        klist = ""; items = ""; dig_in = ""
+        for (i = 1; i <= cnt; i++) {
+            k = keys[i]; klist = klist (i > 1 ? "," : "") "\"" jesc(k) "\""
+            items = items (i > 1 ? "," : "") "\"" jesc(k) "\":{\"preview\":\"" jesc(prev_m[k]) "\",\"redacted\":" (red_m[k] ? "true" : "false") ",\"value_sha256\":\"" jesc(hash_m[k]) "\"}"
+            dig_in = dig_in k ":" hash_m[k] "\n"
+        }
+        sdig = (cnt > 0 ? "\"" hhex(dig_in) "\"" : "null")
+        printf "{\"alembic_current\":%s,\"container_reachable\":%s,\"env_sha256\":%s,\"mode\":\"fast\",\"operation_id\":%s,\"recorded_at\":\"%s\",\"schema\":1,\"system_settings\":{\"count\":%d,\"digest_sha256\":%s,\"items\":{%s},\"keys\":[%s]}}\n", rev_j, reach, env_j, op_j, jesc(ts), cnt, sdig, items, klist
+    }' > "${tmp_file}" 2>/dev/null || { rm -f "${tmp_file}" 2>/dev/null || true; return 0; }
+    chmod 600 "${tmp_file}" 2>/dev/null || true
+    mv -f "${tmp_file}" "${anchor_file}" 2>/dev/null || rm -f "${tmp_file}" 2>/dev/null || true
+}
+
+if declare -F update_phase_backup_preflight >/dev/null 2>&1 \
+        && ! declare -F _lumen_base_update_phase_backup_preflight >/dev/null 2>&1; then
+    eval "_lumen_base_$(declare -f update_phase_backup_preflight)"
+    update_phase_backup_preflight() {
+        if [ "${LUMEN_UPDATE_MODE:-}" = "fast" ] \
+                && ! lumen_env_truthy "${LUMEN_UPDATE_SKIP_BACKUP:-0}" \
+                && ! lumen_env_truthy "${LUMEN_UPDATE_FAST_BACKUP:-0}" \
+                && ! update_requires_migration_restore_point; then
+            lumen_update_write_fast_anchor || true
+        fi
+        _lumen_base_update_phase_backup_preflight "$@"
+    }
+fi
 
 lumen_update_running_writer_services() {
     local entry="" service="" container="" running_ids="" running=""
     for entry in api:lumen-api worker:lumen-worker tgbot:lumen-tgbot; do
-        service="${entry%%:*}"
-        container="${entry#*:}"
-        if ! running_ids="$(
-            lumen_docker ps --quiet --filter "name=^/${container}$" 2>/dev/null
-        )"; then
-            return 1
-        fi
-        if [ -n "${running_ids}" ]; then
-            running="${running}${running:+ }${service}"
-        fi
+        service="${entry%%:*}"; container="${entry#*:}"
+        running_ids="$(lumen_docker ps --quiet --filter "name=^/${container}$" 2>/dev/null)" || return 1
+        [ -z "${running_ids}" ] || running="${running}${running:+ }${service}"
     done
     printf '%s\n' "${running}"
 }
 
 lumen_update_record_original_tgbot_state() {
-    local tgbot_active="$1"
-    local state_file="" state_tmp=""
+    local tgbot_active="$1" state_file="" state_tmp=""
     case "${tgbot_active}" in
         0|1) ;;
-        *)
-            log_error "无法记录非法的更新前 tgbot 状态：${tgbot_active:-<empty>}。"
-            return 1
-            ;;
+        *) log_error "无法记录非法的更新前 tgbot 状态：${tgbot_active:-<empty>}。"; return 1 ;;
     esac
     if [ "${UPDATE_ORIGINAL_TGBOT_ACTIVE_KNOWN:-0}" -eq 1 ]; then
-        [ "${UPDATE_ORIGINAL_TGBOT_ACTIVE:-}" = "${tgbot_active}" ] || {
-            log_error "更新前 tgbot 状态与已绑定状态冲突，拒绝覆盖。"
-            return 1
-        }
-        return 0
+        [ "${UPDATE_ORIGINAL_TGBOT_ACTIVE:-}" = "${tgbot_active}" ] && return 0
+        log_error "更新前 tgbot 状态与已绑定状态冲突，拒绝覆盖。"; return 1
     fi
     state_file="$(lumen_update_original_service_state_file)" || {
-        log_error "shared env 快照路径未知，无法持久化更新前服务状态。"
-        return 1
+        log_error "shared env 快照路径未知，无法持久化更新前服务状态。"; return 1
     }
     if [ -e "${state_file}" ] || [ -L "${state_file}" ]; then
-        if lumen_update_load_original_service_state \
-                && [ "${UPDATE_ORIGINAL_TGBOT_ACTIVE}" = "${tgbot_active}" ]; then
-            return 0
-        fi
-        log_error "更新前服务状态文件无效或与当前观测冲突：${state_file}"
-        return 1
+        lumen_update_load_original_service_state && [ "${UPDATE_ORIGINAL_TGBOT_ACTIVE}" = "${tgbot_active}" ] && return 0
+        log_error "更新前服务状态文件无效或与当前观测冲突：${state_file}"; return 1
     fi
     state_tmp="$(mktemp "${SHARED_DIR}/.update-services.XXXXXX")" || return 1
     if ! printf 'schema=1\ntgbot_active=%s\n' "${tgbot_active}" > "${state_tmp}" \
             || ! chmod 600 "${state_tmp}" \
             || ! lumen_update_copy_file_durable "${state_tmp}" "${state_file}"; then
         rm -f "${state_tmp}" 2>/dev/null || true
-        log_error "无法持久化更新前服务状态：${state_file}"
-        return 1
+        log_error "无法持久化更新前服务状态：${state_file}"; return 1
     fi
     rm -f "${state_tmp}" 2>/dev/null || true
-    UPDATE_ORIGINAL_TGBOT_ACTIVE="${tgbot_active}"
-    UPDATE_ORIGINAL_TGBOT_ACTIVE_KNOWN=1
+    UPDATE_ORIGINAL_TGBOT_ACTIVE="${tgbot_active}"; UPDATE_ORIGINAL_TGBOT_ACTIVE_KNOWN=1
 }
 
 lumen_update_capture_original_tgbot_state() {
@@ -120,13 +174,10 @@ if ! lumen_update_require_storage_identity start_infra; then
     exit 1
 fi
 
-# self-heal: 如果历史上有人手工 `cd current && docker compose up` 起过容器
-# (project=current 而非 lumen)，先 down 掉，避免新 project=lumen 撞容器名。
-# idempotent — 无 stale 直接返回。
+# self-heal: 清理非标准 project=current 容器，避免与 project=lumen 撞名。
 lumen_compose_project_unify
 
-# v1.0.48 镜像切到 pgvector/pgvector:pg16, postgres uid 70 → 999.
-# 老老 install 留下的 alpine 数据目录 uid=70, 必须先 chown 否则 PG 起不来.
+# v1.0.48 切到 pgvector:pg16，旧 alpine 数据目录 uid=70 需迁至 999。
 if ! migrate_postgres_uid; then
     log_error "[start_infra] postgres 数据目录 chown 999 失败,中止升级."
     emit_fail start_infra 1
@@ -199,6 +250,10 @@ MIGRATE_NEEDED=1
 if [ "${LUMEN_UPDATE_MODE}" = "fast" ]; then
     _alembic_heads_pre="$(target_alembic_head "${NEW_RELEASE}" 2>/dev/null || true)"
     _alembic_current_pre="$(current_alembic_revision "${NEW_RELEASE}" 2>/dev/null || true)"
+    if [ -n "${UPDATE_LOG_DIR:-}" ] && [ ! -f "${UPDATE_LOG_DIR}/fast-anchor.json" ] \
+            && ! lumen_env_truthy "${LUMEN_UPDATE_FAST_BACKUP:-0}"; then
+        LUMEN_FAST_ANCHOR_ALEMBIC_HINT="${_alembic_current_pre:-}" lumen_update_write_fast_anchor || true
+    fi
     if [ -n "${_alembic_heads_pre}" ] && [ "${_alembic_current_pre}" = "${_alembic_heads_pre}" ]; then
         MIGRATE_NEEDED=0
         UPDATE_MIGRATION_VERIFIED=1
@@ -261,11 +316,7 @@ if [ "${MIGRATE_NEEDED}" = "1" ]; then
     fi
 fi
 
-# Verify alembic 真到 head — 已观察到 alembic upgrade 在某些情况下 silent
-# exit=0 但 transaction rollback（lock_timeout / FK 验证 abort 时异常被
-# SA 内部吞掉）。仅看 docker compose run 的 exit code 不可靠：必须二次
-# query alembic_version 与 heads 比对。否则 update.sh 误以为 success 后切
-# current → api 用新代码查旧 schema → 全站 500（v1.1.0 prod 已踩过）。
+# 二次 query alembic_version 与 heads 比对，防止 transaction rollback 被吞导致假成功。
 if [ "${MIGRATE_NEEDED}" = "1" ]; then
     _alembic_heads="$(target_alembic_head "${NEW_RELEASE}" 2>/dev/null || true)"
     _alembic_current="$(current_alembic_revision "${NEW_RELEASE}" 2>/dev/null || true)"

@@ -2509,8 +2509,16 @@ async def test_create_showcase_images_persists_generation_outbox_before_publish(
     async def fake_build_run_out(db: Any, current_run: Any) -> Any:
         return current_run
 
-    async def fake_preflight_impl(**kwargs: Any) -> dict[str, Any]:
-        assert kwargs["scene_planner"] == "rules_fallback"
+    async def fake_preflight_impl(
+        command: Any = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        planner = (
+            command.request.scene_planner
+            if command is not None
+            else kwargs["scene_planner"]
+        )
+        assert planner == "rules_fallback"
         return {
             "garment_lock": {"category": "衬衫"},
             "planning": {

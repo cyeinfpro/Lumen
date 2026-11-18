@@ -1,6 +1,6 @@
 {
   "name": "web",
-  "version": "1.2.190",
+  "version": "1.2.191",
   "private": true,
   "imports": {
     "#canvas-autosave": "./src/lib/canvas/autosave.ts",
@@ -30,6 +30,7 @@
     "check:complexity:update": "node scripts/check-complexity.mjs --update-baseline",
     "check:ui-governance": "node scripts/check-ui-governance.mjs",
     "check:ui-governance:update": "node scripts/check-ui-governance.mjs --update-baseline",
+    "check:bundle-budget": "node scripts/check-bundle-budget.mjs",
     "type-check": "tsc --noEmit",
     "type-check:full": "tsc -p tsconfig.full.json"
   },

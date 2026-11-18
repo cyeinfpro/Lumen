@@ -4,23 +4,45 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .services.billing_cache import BillingCacheService
+from lumen_core.billing_cache import BillingCacheService
+
+from .runtime.slot import RuntimeSlot
 
 
 @dataclass
-class _BillingCacheState:
+class BillingCacheState:
     service: BillingCacheService | None = None
 
 
-_billing_cache_state = _BillingCacheState()
+_BILLING_CACHE_SLOT: RuntimeSlot[BillingCacheState] = RuntimeSlot(
+    "api-billing-cache-state",
+    default_factory=BillingCacheState,
+)
+
+
+def configure_billing_cache_state(
+    state: BillingCacheState | None = None,
+) -> BillingCacheState:
+    active = state or BillingCacheState()
+    _BILLING_CACHE_SLOT.install_default(active)
+    return active
+
+
+def reset_billing_cache_state(state: BillingCacheState | None = None) -> None:
+    active = state or _BILLING_CACHE_SLOT.current_or_none()
+    if active is None:
+        return
+    active.service = None
+    _BILLING_CACHE_SLOT.clear_default(active)
 
 
 def configure_billing_cache(service: BillingCacheService | None) -> None:
-    _billing_cache_state.service = service
+    _BILLING_CACHE_SLOT.current().service = service
 
 
 def billing_cache() -> BillingCacheService | None:
-    return _billing_cache_state.service
+    active = _BILLING_CACHE_SLOT.current_or_none()
+    return active.service if active is not None else None
 
 
 async def invalidate_balance_cache(user_id: str) -> None:

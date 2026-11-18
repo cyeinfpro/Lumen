@@ -15,8 +15,9 @@ from app.runtime import (
     CapabilityStatus,
     LifecycleState,
     RuntimeLifecycle,
+    bind_api_process_state,
 )
-from app.services.billing_cache import BillingCacheService
+from lumen_core.billing_cache import BillingCacheService
 
 
 class _Session:
@@ -236,3 +237,33 @@ async def test_api_runtime_reports_cleanup_failure_without_skipping_resources() 
     assert calls == ["arq", "redis"]
     assert runtime.diagnostics().lifecycle.cleanup_failures[0].resource == "arq"
     assert runtime.capability_matrix()[0].status is CapabilityStatus.DEGRADED
+
+
+@pytest.mark.asyncio
+async def test_bind_api_process_state_installs_and_resets_scoped_containers() -> None:
+    from app import billing_cache_state, byok_service, proxy_pool
+    from app.services import upload_pipeline
+    from app.services.conversations import compaction
+
+    lifecycle = RuntimeLifecycle("api")
+    state = bind_api_process_state(lifecycle)
+    fake_cache = cast(BillingCacheService, _BillingCache())
+
+    billing_cache_state.configure_billing_cache(fake_cache)
+    state.byok_settings_cache.value = (1.0, {"byok.mode_enabled": "1"})
+    state.proxy_pool_state.local_cooldown["p1"] = 999.0
+    compaction.install_context_summary_adapter(lambda *_a, **_kw: _noop())
+
+    assert billing_cache_state.billing_cache() is fake_cache
+    assert upload_pipeline.process_upload_budget() is state.upload_budget
+    assert compaction.import_worker_context_summary() is not None
+
+    lifecycle.start()
+    await lifecycle.close()
+
+    assert state.billing_cache_state.service is None
+    assert state.byok_settings_cache.value is None
+    assert state.proxy_pool_state.local_cooldown == {}
+    assert state.context_summary_adapters.current() is None
+    assert proxy_pool._PROXY_POOL_SLOT.current_or_none() is None
+    assert byok_service._BYOK_SETTINGS_CACHE_SLOT.current_or_none() is None

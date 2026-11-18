@@ -21,7 +21,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..model_base import Base, SoftDeleteMixin, TimestampMixin, new_uuid7
-from ..sqltypes import JsonType
+from ..sqltypes import EmbeddingVectorType, JsonType
 
 # ---------- Conversations / Messages ----------
 
@@ -57,6 +57,18 @@ class Conversation(Base, TimestampMixin, SoftDeleteMixin):
         String(36),
         ForeignKey("user_memory_scopes.id", ondelete="SET NULL", use_alter=True),
         nullable=True,
+    )
+    __table_args__ = (
+        Index(
+            "ix_conversations_user_sidebar_active",
+            user_id,
+            archived,
+            pinned.desc(),
+            last_activity_at.desc(),
+            id.desc(),
+            postgresql_where=text("deleted_at IS NULL"),
+            sqlite_where=text("deleted_at IS NULL"),
+        ),
     )
 
     messages: Mapped[list["Message"]] = relationship(
@@ -159,11 +171,12 @@ class UserMemory(Base, TimestampMixin, SoftDeleteMixin):
     )
     source_excerpt: Mapped[str | None] = mapped_column(Text, nullable=True)
     source: Mapped[str] = mapped_column(String(16), nullable=False, default="auto")
-    # The PostgreSQL migration stores this as pgvector vector(3072). The ORM uses
-    # a string representation so SQLite tests can create metadata and the worker
-    # can still write pgvector-compatible "[...]" literals without pgvector as a
-    # Python dependency.
-    embedding: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # PostgreSQL stores this as pgvector halfvec(3072) via EmbeddingVectorType,
+    # while SQLite tests transparently map it to TEXT "[...]" literals without
+    # requiring pgvector as a Python dependency.
+    embedding: Mapped[str | None] = mapped_column(
+        EmbeddingVectorType(3072), nullable=True
+    )
     confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     pinned: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, server_default=text("false")
@@ -209,7 +222,9 @@ class UserMemoryStaging(Base, TimestampMixin):
     )
     source_excerpt: Mapped[str | None] = mapped_column(Text, nullable=True)
     source: Mapped[str] = mapped_column(String(16), nullable=False, default="auto")
-    embedding: Mapped[str | None] = mapped_column(Text, nullable=True)
+    embedding: Mapped[str | None] = mapped_column(
+        EmbeddingVectorType(3072), nullable=True
+    )
     confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     scope_id: Mapped[str] = mapped_column(
         String(36),

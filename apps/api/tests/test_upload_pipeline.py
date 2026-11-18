@@ -456,3 +456,14 @@ def test_publish_fallback_removes_partial_destination_on_copy_failure(
         upload_pipeline.publish_temp_file(source, destination)
 
     assert not destination.exists()
+
+
+def test_process_upload_budget_can_be_bound_and_reset_explicitly() -> None:
+    assert not hasattr(upload_pipeline, "_PROCESS_UPLOAD_BUDGET")
+    custom = upload_pipeline.UploadBudget(_limits(concurrency=3))
+    upload_pipeline.configure_process_upload_budget(custom)
+    try:
+        assert upload_pipeline.process_upload_budget() is custom
+    finally:
+        upload_pipeline.reset_process_upload_budget(custom)
+    assert upload_pipeline.process_upload_budget() is not custom

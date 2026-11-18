@@ -14,6 +14,7 @@ for module_name in list(sys.modules):
 from app.handlers.generation import GenerationRuntime  # noqa: E402
 from app.keyboards import DEFAULT_PARAMS  # noqa: E402
 from app.listener import ListenerRuntimeState  # noqa: E402
+import app.tracker as tracker_module  # noqa: E402
 
 
 def test_listener_runtime_instances_do_not_share_mutable_state() -> None:
@@ -42,3 +43,10 @@ def test_generation_runtime_instances_do_not_share_auth_log_state() -> None:
 def test_default_generation_params_are_immutable() -> None:
     with pytest.raises(TypeError):
         DEFAULT_PARAMS["count"] = 2  # type: ignore[index]
+
+
+def test_tracker_module_does_not_expose_global_singleton() -> None:
+    assert not hasattr(tracker_module, "tracker")
+    first = tracker_module.Tracker()
+    second = tracker_module.Tracker()
+    assert first is not second

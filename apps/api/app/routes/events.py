@@ -22,11 +22,15 @@ from ..realtime import (
     ConnectionEventDeduper,
     ConnectionLimitError,
     EventStreamState,
+    ProcessRealtimeMultiplexer,
     acquire_sse_connection_slot,
+    close_app_realtime_multiplexer,
     compaction_bridge_channels,
+    create_realtime_route_lifespan,
     decode_replay_fields,
     event_channels_from_payload,
     format_compaction_sse,
+    get_app_realtime_multiplexer,
     iter_replay_events,
     normalize_event_id,
     normalize_recoverable_sse_id,
@@ -38,6 +42,7 @@ from ..realtime import (
     replay_channel_selection,
     replay_connection_events,
     replay_payload_matches_channels,
+    resolve_realtime_multiplexer,
     sanitize_last_event_id,
     select_channels,
     standard_pubsub_events,
@@ -51,9 +56,14 @@ from ..realtime import (
 )
 from ..redis_client import get_redis
 
-
-__all__ = ["MAX_SSE_CHANNELS", "time"]
-router = APIRouter()
+__all__ = [
+    "MAX_SSE_CHANNELS",
+    "ProcessRealtimeMultiplexer",
+    "close_app_realtime_multiplexer",
+    "get_app_realtime_multiplexer",
+    "time",
+]
+router = APIRouter(lifespan=create_realtime_route_lifespan(lambda: get_redis()))
 logger = logging.getLogger(__name__)
 _REPLAY_BATCH_SIZE = 500
 _REPLAY_MAX_EVENTS = EVENTS_REPLAY_MAX_SCAN
@@ -98,12 +108,7 @@ def _http(
 def _policy_http_error(
     error: ChannelPolicyError | ConnectionLimitError,
 ) -> HTTPException:
-    return _http(
-        error.code,
-        error.message,
-        error.status_code,
-        error.extra,
-    )
+    return _http(error.code, error.message, error.status_code, error.extra)
 
 
 async def _validate_channels(
@@ -142,11 +147,7 @@ async def _refresh_sse_connection_slot(
     *,
     ttl_seconds: int = 90,
 ) -> bool:
-    return await refresh_sse_connection_slot(
-        redis,
-        slot,
-        ttl_seconds=ttl_seconds,
-    )
+    return await refresh_sse_connection_slot(redis, slot, ttl_seconds=ttl_seconds)
 
 
 async def _release_sse_connection_slot(redis: Any, slot) -> None:
@@ -211,12 +212,9 @@ async def _event_stream_state(
     valid_channels = await _validate_channels(selection.requested, user_id, db)
     replay_channels = replay_channel_selection(valid_channels, selection)
     redis = get_redis()
-    last_event_id = await _resolved_last_event_id(
-        redis,
-        request,
-        last_event_id_query,
-    )
+    last_event_id = await _resolved_last_event_id(redis, request, last_event_id_query)
     connection_slot = await _acquire_sse_connection_slot(redis, user_id)
+    multiplexer, owns_multiplexer = resolve_realtime_multiplexer(request, redis)
     return EventStreamState(
         is_disconnected=request.is_disconnected,
         redis=redis,
@@ -228,6 +226,8 @@ async def _event_stream_state(
         stream_key=f"{EVENTS_STREAM_PREFIX}{user_id}",
         last_event_id=last_event_id,
         connection_slot=connection_slot,
+        multiplexer=multiplexer,
+        owns_multiplexer=owns_multiplexer,
     )
 
 

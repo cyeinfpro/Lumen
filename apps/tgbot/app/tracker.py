@@ -646,6 +646,3 @@ class Tracker:
             return
         client = self._client()
         await client.delete(_batch_key(batch_id), _batch_done_key(batch_id))
-
-
-tracker = Tracker()

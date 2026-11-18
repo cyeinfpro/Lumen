@@ -53,7 +53,6 @@ COPY packages/ packages/
 COPY apps/api/ apps/api/
 COPY apps/worker/ apps/worker/
 COPY apps/tgbot/ apps/tgbot/
-COPY apps/agent-runtime/ apps/agent-runtime/
 COPY image-job/ image-job/
 
 # Release-time files: 打包到 image 让 update.sh 能在 host 不是 git repo 时用
@@ -64,7 +63,7 @@ COPY deploy/ deploy/
 COPY scripts/ scripts/
 
 
-FROM ${PYTHON_BASE} AS runtime
+FROM ${PYTHON_BASE} AS runtime-slim
 
 ARG LUMEN_VERSION=0.0.0
 ARG LUMEN_GIT_SHA=unknown
@@ -86,10 +85,6 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         curl \
         ca-certificates \
-        openssh-client \
-        sshpass \
-        ffmpeg \
-        libvips42 \
         libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -106,6 +101,28 @@ ENV TIKTOKEN_CACHE_DIR=/app/.cache/tiktoken
 
 COPY --from=builder --chown=lumen:lumen /app /app
 
+USER lumen
+
+# Prove the final, unprivileged image can load its cache without network access.
+RUN --network=none python -c 'import tiktoken; assert tiktoken.get_encoding("o200k_base").encode("hello world")'
+
+CMD ["python"]
+
+
+FROM runtime-slim AS runtime-media
+
+USER root
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        openssh-client \
+        sshpass \
+        ffmpeg \
+        libvips42 \
+    && rm -rf /var/lib/apt/lists/*
+
+USER lumen
+
 RUN python - <<'PY'
 import pyvips
 
@@ -115,9 +132,11 @@ if version < (8, 14):
 print(f"libvips runtime OK: {pyvips.major}.{pyvips.minor}.{pyvips.micro}")
 PY
 
-USER lumen
+CMD ["python"]
 
-# Prove the final, unprivileged image can load its cache without network access.
-RUN --network=none python -c 'import tiktoken; assert tiktoken.get_encoding("o200k_base").encode("hello world")'
+
+FROM runtime-media AS runtime
+
+USER lumen
 
 CMD ["python"]

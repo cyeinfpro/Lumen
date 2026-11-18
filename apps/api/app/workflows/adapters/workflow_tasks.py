@@ -22,6 +22,7 @@ from lumen_core.schema_models import (
 
 from ...redis_client import get_redis
 from ...services.message_submission import (
+    AssistantTaskCommand,
     create_assistant_task,
     publish_assistant_task,
     publish_message_appended,
@@ -170,18 +171,20 @@ async def create_workflow_task(
     await db.flush()
 
     result = await create_assistant_task(
-        db=db,
-        user_id=user.id,
-        account_mode=getattr(user, "account_mode", "wallet"),
-        conv=conv,
-        user_msg=user_msg,
-        intent=intent,
-        idempotency_key=idempotency_key[:64],
-        image_params=image_params or ImageParamsIn(),
-        chat_params=chat_params or ChatParamsIn(),
-        system_prompt=None,
-        attachment_ids=attachment_ids,
-        text=text,
+        AssistantTaskCommand(
+            db=db,
+            user_id=user.id,
+            account_mode=getattr(user, "account_mode", "wallet"),
+            conv=conv,
+            user_msg=user_msg,
+            intent=intent,
+            idempotency_key=idempotency_key[:64],
+            image_params=image_params or ImageParamsIn(),
+            chat_params=chat_params or ChatParamsIn(),
+            system_prompt=None,
+            attachment_ids=attachment_ids,
+            text=text,
+        )
     )
 
     meta = {

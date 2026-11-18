@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
 import tempfile
+import threading
+import time
 from typing import Any
 
 import pytest
@@ -13,6 +17,8 @@ os.environ.setdefault(
     "STORAGE_ROOT", str(Path(tempfile.gettempdir()) / "lumen-worker-test-storage")
 )
 
+from app.provider_runtime.upstream_services import ImageUpstreamRuntime
+from app.tasks.completion_parts import context_loading
 from app.tasks.completion_parts import default_runtime as completion
 from app.tasks.completion_parts import tool_images
 from lumen_core.constants import Role
@@ -278,7 +284,6 @@ async def test_custom_system_prompt_is_sent_once_and_estimated_once() -> None:
     assert all(item.get("role") != "system" for item in input_list)
     assert completion._estimate_system_prompt_tokens_once(instructions) == (
         completion.estimate_system_prompt_tokens(instructions)
-        - completion.estimate_text_tokens(instructions)
     )
 
 
@@ -761,3 +766,302 @@ async def test_compression_failure_fallback_still_keeps_current_user_message(
     assert packed.fallback_reason == "summary_failed"
     assert packed.truncated_without_summary is True
     assert "current question " in "\n".join(_texts(packed.input_list))
+
+
+@pytest.mark.asyncio
+async def test_context_loading_batches_sql_commits_before_parallel_io_and_preserves_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    execute_calls = 0
+    tx_open = True
+    tx_closed_before_reads: list[bool] = []
+    read_threads: set[int] = set()
+    main_thread_id = threading.get_ident()
+    active_reads = 0
+    max_active_reads = 0
+    read_keys: list[str] = []
+
+    rows = [
+        (
+            "img-1",
+            "orig/1.png",
+            "image/png",
+            hashlib.sha256(b"preview-1").hexdigest(),
+            "variants/1-preview.webp",
+        ),
+        (
+            "img-2",
+            "orig/2.png",
+            "image/png",
+            hashlib.sha256(b"orig-2").hexdigest(),
+            None,
+        ),
+        (
+            "img-3",
+            "orig/3.jpg",
+            "image/jpeg",
+            hashlib.sha256(b"preview-3").hexdigest(),
+            "variants/3-preview.webp",
+        ),
+        (
+            "img-4",
+            "orig/4.png",
+            "image/png",
+            hashlib.sha256(b"preview-4").hexdigest(),
+            "variants/4-preview.webp",
+        ),
+        (
+            "img-5",
+            "orig/5.png",
+            "image/png",
+            hashlib.sha256(b"preview-5").hexdigest(),
+            "variants/5-preview.webp",
+        ),
+    ]
+
+    class _BatchResult:
+        def all(self) -> list[tuple[Any, ...]]:
+            return list(rows)
+
+    class _BatchSession:
+        async def get(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("per-image session.get must not run in batch mode")
+
+        async def execute(self, _stmt: Any) -> _BatchResult:
+            nonlocal execute_calls, tx_open
+            execute_calls += 1
+            tx_open = True
+            events.append("sql")
+            return _BatchResult()
+
+        async def commit(self) -> None:
+            nonlocal tx_open
+            tx_open = False
+            events.append("commit")
+
+    payloads = {
+        "variants/1-preview.webp": b"webp-bytes-1",
+        "orig/2.png": b"png-bytes-2",
+        "variants/3-preview.webp": b"webp-bytes-3",
+        "variants/4-preview.webp": b"webp-bytes-4",
+        "variants/5-preview.webp": b"webp-bytes-5",
+    }
+
+    def fake_get_bytes(key: str) -> bytes:
+        nonlocal active_reads, max_active_reads
+        tx_closed_before_reads.append(not tx_open)
+        read_threads.add(threading.get_ident())
+        read_keys.append(key)
+        active_reads += 1
+        max_active_reads = max(max_active_reads, active_reads)
+        try:
+            time.sleep(0.02)
+            return payloads[key]
+        finally:
+            active_reads -= 1
+
+    monkeypatch.setattr(completion.storage, "get_bytes", fake_get_bytes)
+
+    msg1 = _message(1, "first turn")
+    msg1.content = {
+        "text": "first turn",
+        "attachments": [
+            {"image_id": "img-1"},
+            {"image_id": "img-deleted"},
+            {"image_id": "img-2"},
+        ],
+    }
+    msg2 = _message(2, "assistant reply", Role.ASSISTANT.value)
+    msg3 = _message(3, "second turn")
+    msg3.content = {
+        "text": "second turn",
+        "attachments": [
+            {"image_id": "img-1"},
+            {"image_id": "img-3"},
+            {"image_id": "img-4"},
+            {"image_id": "img-5"},
+        ],
+    }
+
+    packed = completion.PackedContext(
+        input_list=[],
+        estimated_tokens=100,
+        summary_used=False,
+        summary_created=False,
+        summary_up_to_message_id=None,
+        sticky_used=False,
+        included_messages_count=3,
+        truncated_without_summary=False,
+        fallback_reason=None,
+        _recent_rows=(msg1, msg2, msg3),
+    )
+
+    input_list = await completion._build_input_from_packed_context(
+        _BatchSession(),
+        packed,
+    )
+
+    assert execute_calls == 1
+    assert events == ["sql", "commit"]
+    assert tx_closed_before_reads and all(tx_closed_before_reads)
+    assert len(read_keys) == 5
+    assert 1 < max_active_reads <= 4
+    assert read_threads and main_thread_id not in read_threads
+
+    first_images = [
+        part["image_url"]
+        for part in input_list[0]["content"]
+        if part["type"] == "input_image"
+    ]
+    second_images = [
+        part["image_url"]
+        for part in input_list[2]["content"]
+        if part["type"] == "input_image"
+    ]
+    assert first_images == [
+        f"data:image/webp;base64,{base64.b64encode(b'webp-bytes-1').decode('ascii')}",
+        f"data:image/png;base64,{base64.b64encode(b'png-bytes-2').decode('ascii')}",
+    ]
+    assert second_images == [
+        f"data:image/webp;base64,{base64.b64encode(b'webp-bytes-1').decode('ascii')}",
+        f"data:image/webp;base64,{base64.b64encode(b'webp-bytes-3').decode('ascii')}",
+        f"data:image/webp;base64,{base64.b64encode(b'webp-bytes-4').decode('ascii')}",
+        f"data:image/webp;base64,{base64.b64encode(b'webp-bytes-5').decode('ascii')}",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_completion_runtime_attachment_lru_cache_zero_disk_reread_and_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_upstream = ImageUpstreamRuntime(services=object())  # type: ignore[arg-type]
+    runtime_a = completion.build_completion_runtime(
+        image_upstream_runtime=fake_upstream
+    )
+    runtime_b = completion.build_completion_runtime(
+        image_upstream_runtime=fake_upstream
+    )
+    cache_a = getattr(runtime_a.runner, "attachment_cache", None)
+    cache_b = getattr(runtime_b.runner, "attachment_cache", None)
+    assert isinstance(cache_a, context_loading.AttachmentDataUrlCache)
+    assert isinstance(cache_b, context_loading.AttachmentDataUrlCache)
+    assert cache_a is not cache_b
+    assert cache_a.max_bytes == 32 * 1024 * 1024
+    assert cache_a.ttl_seconds == 300.0
+
+    sha_1 = hashlib.sha256(b"cached-image-1").hexdigest()
+    sha_2 = hashlib.sha256(b"cached-image-2").hexdigest()
+    disk_reads: list[str] = []
+
+    class _TurnSession:
+        def __init__(
+            self,
+            *,
+            target: Message,
+            messages: list[Message],
+            image_rows: list[tuple[Any, ...]],
+        ) -> None:
+            self._target = target
+            self._batches = [list(reversed(messages))]
+            self._image_rows = image_rows
+            self.commits = 0
+
+        async def get(self, model: Any, object_id: str) -> Any:
+            if model is Message and object_id == self._target.id:
+                return self._target
+            return None
+
+        async def execute(self, stmt: Any) -> Any:
+            sql_text = str(stmt)
+            if "images" in sql_text:
+                rows = list(self._image_rows)
+
+                class _ImgResult:
+                    def all(self) -> list[tuple[Any, ...]]:
+                        return rows
+
+                return _ImgResult()
+            batch = self._batches.pop(0) if self._batches else []
+            return _Result(batch)
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+    async def _disable_compression(key: str, default: int) -> int:
+        if key == "context.compression_enabled":
+            return 0
+        return default
+
+    monkeypatch.setattr(
+        completion.runtime_settings, "resolve_int", _disable_compression
+    )
+    monkeypatch.setattr(
+        completion.storage,
+        "get_bytes",
+        lambda key: (disk_reads.append(key), f"bytes:{key}".encode("ascii"))[1],
+    )
+
+    u1 = _message(1, "look at image 1")
+    u1.content = {"text": "look at image 1", "attachments": [{"image_id": "img-c1"}]}
+    t1 = _message(2, "", Role.ASSISTANT.value)
+    t1.parent_message_id = u1.id
+
+    pack_fn = runtime_a.services.context_builder.adapter.context._pack_recent_history  # type: ignore[attr-defined]
+    packed_turn_1 = await pack_fn(
+        _TurnSession(
+            target=t1,
+            messages=[u1, t1],
+            image_rows=[("img-c1", "orig/c1.png", "image/png", sha_1, "prev/c1.webp")],
+        ),
+        conversation_id="conv-1",
+        up_to_message_id=t1.id,
+        system_prompt=None,
+    )
+    assert disk_reads == ["prev/c1.webp"]
+    assert len(packed_turn_1.input_list) == 1
+
+    a1 = _message(2, "saw image 1", Role.ASSISTANT.value)
+    u2 = _message(3, "compare with image 2")
+    u2.content = {
+        "text": "compare with image 2",
+        "attachments": [{"image_id": "img-c2"}],
+    }
+    t2 = _message(4, "", Role.ASSISTANT.value)
+    t2.parent_message_id = u2.id
+
+    packed_turn_2 = await pack_fn(
+        _TurnSession(
+            target=t2,
+            messages=[u1, a1, u2, t2],
+            image_rows=[
+                ("img-c1", "orig/c1.png", "image/png", sha_1, "prev/c1.webp"),
+                ("img-c2", "orig/c2.png", "image/png", sha_2, "prev/c2.webp"),
+            ],
+        ),
+        conversation_id="conv-1",
+        up_to_message_id=t2.id,
+        system_prompt=None,
+    )
+    # Turn 2 hits SHA-256 LRU cache for img-c1 -> zero repeat disk read!
+    assert disk_reads == ["prev/c1.webp", "prev/c2.webp"]
+    assert len(packed_turn_2.input_list) == 3
+
+    # Direct verification of byte-cap LRU eviction and TTL expiration.
+    now_clock = 100.0
+    bounded = context_loading.AttachmentDataUrlCache(
+        max_bytes=60,
+        ttl_seconds=300.0,
+        clock=lambda: now_clock,
+    )
+    bounded.put("sha-a", "a" * 30, mime="image/webp", is_preview=True)
+    bounded.put("sha-b", "b" * 30, mime="image/webp", is_preview=True)
+    assert bounded.get("sha-a", mime="image/webp", is_preview=True) == "a" * 30
+    bounded.put("sha-c", "c" * 30, mime="image/webp", is_preview=True)
+    assert bounded.get("sha-b", mime="image/webp", is_preview=True) is None
+    assert bounded.get("sha-a", mime="image/webp", is_preview=True) == "a" * 30
+    assert bounded.get("sha-c", mime="image/webp", is_preview=True) == "c" * 30
+
+    now_clock = 401.0
+    assert bounded.get("sha-a", mime="image/webp", is_preview=True) is None
+    assert bounded.current_bytes == 0

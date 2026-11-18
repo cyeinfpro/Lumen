@@ -56,6 +56,7 @@ from .provider_pool_parts.config_loading import (
     ProviderLoad,  # noqa: F401 - compatibility export for tests and callers
 )
 from .provider_pool_parts.proxy_lifecycle import ProviderProxyLifecycle
+from .task_runtime import RuntimeSlot
 from .validation import validate_provider_base_url
 
 logger = logging.getLogger(__name__)
@@ -806,7 +807,7 @@ class ProviderPool(
 
 
 # ---------------------------------------------------------------------------
-# 单例
+# Runtime ownership
 # ---------------------------------------------------------------------------
 @dataclass(slots=True)
 class ProviderPoolRuntime:
@@ -816,8 +817,43 @@ class ProviderPoolRuntime:
     last_image_probe_at: float = 0.0
 
 
-_RUNTIME = ProviderPoolRuntime()
+_RUNTIME_SLOT: RuntimeSlot[ProviderPoolRuntime] = RuntimeSlot(
+    "worker-provider-pool",
+    default_factory=ProviderPoolRuntime,
+)
+
+
+class _ProviderPoolRuntimeView:
+    def __getattr__(self, name: str) -> Any:
+        return getattr(_RUNTIME_SLOT.current(), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(_RUNTIME_SLOT.current(), name, value)
+
+
+_RUNTIME = _ProviderPoolRuntimeView()
 _PROVIDER_PROXY_LIFECYCLE = ProviderProxyLifecycle()
+
+
+def configure_provider_pool_runtime(
+    runtime: ProviderPoolRuntime | None = None,
+) -> ProviderPoolRuntime:
+    existing = _RUNTIME_SLOT.current_or_none()
+    active = runtime or ProviderPoolRuntime()
+    if existing is not None and existing is not active:
+        _RUNTIME_SLOT.clear_default(existing)
+    _RUNTIME_SLOT.install_default(active)
+    return active
+
+
+async def shutdown_provider_pool_runtime(
+    runtime: ProviderPoolRuntime | None = None,
+) -> None:
+    active = runtime or _RUNTIME_SLOT.current_or_none()
+    if active is not None:
+        active.pool = None
+        _RUNTIME_SLOT.clear_default(active)
+    await close_provider_proxy_tunnels()
 
 
 async def resolve_provider_proxy_url(
@@ -833,9 +869,7 @@ async def resolve_agent_provider_proxy_url(
     advertise_host: str,
 ) -> str | None:
     return await _PROVIDER_PROXY_LIFECYCLE.resolve_for_agent(
-        proxy,
-        bind_host=bind_host,
-        advertise_host=advertise_host,
+        proxy, bind_host=bind_host, advertise_host=advertise_host
     )
 
 
@@ -843,12 +877,13 @@ async def close_provider_proxy_tunnels() -> None:
     await _PROVIDER_PROXY_LIFECYCLE.close()
 
 
-async def get_pool() -> ProviderPool:
-    if _RUNTIME.pool is None:
-        async with _RUNTIME.lock:
-            if _RUNTIME.pool is None:
-                _RUNTIME.pool = ProviderPool()
-    return _RUNTIME.pool
+async def get_pool(runtime: ProviderPoolRuntime | None = None) -> ProviderPool:
+    active = runtime or _RUNTIME_SLOT.current()
+    if active.pool is None:
+        async with active.lock:
+            if active.pool is None:
+                active.pool = ProviderPool()
+    return active.pool
 
 
 # ---------------------------------------------------------------------------
@@ -858,32 +893,23 @@ _DEFAULT_PROBE_INTERVAL_S = 120
 
 
 async def probe_providers(ctx: dict[str, Any]) -> int | None:
-    """cron 入口：按 runtime setting 决定是否探活，同时刷统计到 Redis。
-
-    两类探活独立调度：
-    - 文本算术 probe：providers.auto_probe_interval（默认 120s）
-    - image probe：providers.auto_image_probe_interval（默认 3600s）
-
-    返回值：本轮跑了文本 probe 时返回 healthy 数（int）；跳过时返回 None
-    （旧版返回 -1 看起来像错误码，arq cron 完成日志里会刷 `● -1` 噪音）。
-    """
-    pool = await get_pool()
+    """cron 入口：按 runtime setting 决定是否探活，同时刷统计到 Redis。"""
+    ctx_runtime = ctx.get("provider_pool_runtime")
+    if isinstance(ctx_runtime, ProviderPoolRuntime):
+        active_runtime = ctx_runtime
+        pool = await get_pool(runtime=active_runtime)
+    else:
+        active_runtime = _RUNTIME_SLOT.current()
+        pool = await get_pool()
     redis = ctx.get("redis")
-    # cron 第一次跑就把 redis 注入 pool（image route 配额检查依赖此引用）。
-    # generation 任务也会 attach，但 worker 启动后 cron 比第一个生图任务先跑。
     if redis is not None:
         pool.attach_redis(redis)
-
-    # 无论是否探活，都刷统计
-    if redis is not None:
         await pool.flush_stats_to_redis(redis)
-    # image route gauge 每轮都刷一次（state + quota_used），不依赖探活
     try:
         await pool.flush_image_metrics()
     except Exception:  # noqa: BLE001
         logger.warning("flush_image_metrics failed", exc_info=True)
 
-    # 读取自动探活间隔设置
     from .runtime_settings import resolve_int
 
     text_interval = await resolve_int(
@@ -896,9 +922,8 @@ async def probe_providers(ctx: dict[str, Any]) -> int | None:
     now = time.monotonic()
     healthy: int | None = None
 
-    # ---- 文本算术 probe ----
-    if text_interval > 0 and now - _RUNTIME.last_probe_at >= text_interval:
-        _RUNTIME.last_probe_at = now
+    if text_interval > 0 and now - active_runtime.last_probe_at >= text_interval:
+        active_runtime.last_probe_at = now
         results = await pool.probe_all()
         healthy = sum(1 for v in results.values() if v)
         total = len(results)
@@ -910,9 +935,8 @@ async def probe_providers(ctx: dict[str, Any]) -> int | None:
                 "probe_providers: %d/%d healthy (%s)", healthy, total, summary
             )
 
-    # ---- image probe（独立间隔，默认 1h）----
-    if image_interval > 0 and now - _RUNTIME.last_image_probe_at >= image_interval:
-        _RUNTIME.last_image_probe_at = now
+    if image_interval > 0 and now - active_runtime.last_image_probe_at >= image_interval:
+        active_runtime.last_image_probe_at = now
         try:
             from .upstream_parts.image_stream import run_image_probe
 
@@ -954,10 +978,13 @@ __all__ = [
     "ProviderConfig",
     "ProviderHealth",
     "ProviderPool",
+    "ProviderPoolRuntime",
     "ResolvedProvider",
     "TextProviderAttempt",
+    "configure_provider_pool_runtime",
     "get_pool",
     "probe_providers",
     "resolve_agent_provider_proxy_url",
+    "shutdown_provider_pool_runtime",
     "text_provider_attempt",
 ]

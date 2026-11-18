@@ -14,15 +14,29 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Table,
     Text,
     UniqueConstraint,
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql.base import PGDialect
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .model_base import Base, SoftDeleteMixin, TimestampMixin, new_uuid7
 from .sqltypes import JsonType, StringListType
+
+
+def _register_postgresql_table_with_option() -> None:
+    for target_cls, dialect_args in PGDialect.construct_arguments:
+        if target_cls is Table:
+            dialect_args.setdefault("with", None)
+    cached = Table._kw_registry.get("postgresql")
+    if isinstance(cached, dict):
+        cached.setdefault("with", None)
+
+
+_register_postgresql_table_with_option()
 
 
 class CanvasDocument(Base, TimestampMixin, SoftDeleteMixin):
@@ -334,6 +348,13 @@ class CanvasNodeExecution(Base, TimestampMixin):
             ")",
             name="ck_canvas_node_executions_status",
         ),
+        {
+            "postgresql_with": {
+                "autovacuum_vacuum_scale_factor": "0.02",
+                "autovacuum_analyze_scale_factor": "0.01",
+                "fillfactor": "90",
+            }
+        },
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)

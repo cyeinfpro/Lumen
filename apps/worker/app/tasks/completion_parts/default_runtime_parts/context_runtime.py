@@ -65,14 +65,18 @@ def estimate_system_prompt_tokens_once(
     system_prompt: str | None,
     *,
     default_instructions: str,
-    estimate_system_prompt_tokens: Callable[[str], int],
-    estimate_text_tokens: Callable[[str], int],
+    estimate_system_prompt_tokens: Callable[..., int],
+    estimate_text_tokens: Callable[[str], int] | None = None,
 ) -> int:
+    _ = estimate_text_tokens
     prompt = system_prompt or default_instructions
-    estimated = estimate_system_prompt_tokens(prompt)
-    if estimated <= 0:
+    if not prompt:
         return 0
-    return max(0, estimated - estimate_text_tokens(prompt))
+    try:
+        estimated = estimate_system_prompt_tokens(prompt, duplication_factor=1)
+    except TypeError:
+        estimated = estimate_system_prompt_tokens(prompt)
+    return max(0, estimated)
 
 
 async def attachment_to_data_url(

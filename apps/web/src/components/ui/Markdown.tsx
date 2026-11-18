@@ -1,7 +1,7 @@
 "use client";
 
 // Lumen 统一 Markdown 渲染器。
-// react-markdown + remark-gfm（表格/任务列表/删除线）+ rehype-highlight（代码高亮）。
+// react-markdown + remark-gfm（表格/任务列表/删除线）+ 按需轻量 highlight.js/lib/core（代码高亮）。
 // 外层加 .lumen-md 类，在 globals.css 中控制段落/列表/代码块节奏。
 // highlight.js 的主题样式由 globals.css 里的 @import 统一注入，避免组件重复 side-effect。
 //
@@ -11,10 +11,9 @@
 //  - 图片点击统一打开全局 Lightbox（移动端保留手势缩放 / 下拉关闭 / safe-area）
 //  - components 对象 useMemo 缓存，避免每次渲染重建引用
 
-import { memo, useCallback, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
 import { Check, Copy } from "lucide-react";
 import { Button } from "./primitives";
 import { cn } from "@/lib/utils";
@@ -26,6 +25,31 @@ export interface MarkdownProps {
   children: string;
   className?: string;
   autoDetectCode?: boolean;
+}
+
+type RehypeHighlightPlugin = typeof import("./markdownHighlight").rehypeHighlightLite;
+
+let cachedHighlightPlugin: RehypeHighlightPlugin | null = null;
+let highlightPluginPromise: Promise<RehypeHighlightPlugin> | null = null;
+
+export function hasFencedCodeBlock(markdown: string): boolean {
+  return markdown.includes("```") || markdown.includes("~~~");
+}
+
+function loadHighlightPlugin(): Promise<RehypeHighlightPlugin> {
+  if (cachedHighlightPlugin) return Promise.resolve(cachedHighlightPlugin);
+  if (!highlightPluginPromise) {
+    highlightPluginPromise = import("./markdownHighlight")
+      .then((mod) => {
+        cachedHighlightPlugin = mod.rehypeHighlightLite;
+        return cachedHighlightPlugin;
+      })
+      .catch((err) => {
+        highlightPluginPromise = null;
+        throw err;
+      });
+  }
+  return highlightPluginPromise;
 }
 
 // 递归把 react children 拍平为字符串。code/pre 的内容多为字符串或 <code>…</code>。
@@ -266,15 +290,38 @@ function MarkdownImpl({
       },
     } satisfies Components;
   }, [openLightbox]);
+  const needsCodeHighlight = useMemo(
+    () => hasFencedCodeBlock(children),
+    [children],
+  );
+  const [loadedHighlightPlugin, setLoadedHighlightPlugin] =
+    useState<RehypeHighlightPlugin | null>(() => cachedHighlightPlugin);
+  useEffect(() => {
+    if (!needsCodeHighlight || cachedHighlightPlugin) return;
+    let active = true;
+    void loadHighlightPlugin()
+      .then((plugin) => {
+        if (active) setLoadedHighlightPlugin(() => plugin);
+      })
+      .catch((err) => {
+        logWarn("markdown.highlight_load_failed", {
+          scope: "markdown",
+          extra: { err: String(err) },
+        });
+      });
+    return () => {
+      active = false;
+    };
+  }, [needsCodeHighlight]);
+  const activeHighlightPlugin = needsCodeHighlight
+    ? (loadedHighlightPlugin ?? cachedHighlightPlugin)
+    : null;
   const rehypePlugins = useMemo(
     () =>
-      [
-        [
-          rehypeHighlight,
-          { detect: autoDetectCode, ignoreMissing: true },
-        ],
-      ] as const,
-    [autoDetectCode],
+      activeHighlightPlugin
+        ? ([[activeHighlightPlugin, { detect: autoDetectCode }]] as const)
+        : undefined,
+    [activeHighlightPlugin, autoDetectCode],
   );
   const remarkPlugins = useMemo(() => [remarkGfm], []);
   return (

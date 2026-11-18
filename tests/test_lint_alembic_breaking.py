@@ -468,3 +468,71 @@ def test_untracked_migration_is_linted_without_a_git_baseline(
     monkeypatch.chdir(tmp_path)
 
     assert lint_alembic.main([]) == 1
+
+
+def test_safe_table_storage_params_autovacuum_and_fillfactor_are_accepted(
+    tmp_path: Path,
+) -> None:
+    migration = tmp_path / "apps/api/alembic/versions/0001_storage_params.py"
+    _write_migration(
+        migration,
+        "    op.execute(\n"
+        "        sa.text(\n"
+        "            'ALTER TABLE outbox_events SET ('\n"
+        "            'autovacuum_vacuum_scale_factor = 0.02, '\n"
+        "            'autovacuum_analyze_scale_factor = 0.01, '\n"
+        "            'fillfactor = 90)'\n"
+        "        )\n"
+        "    )\n"
+        "    op.execute(\n"
+        "        'ALTER TABLE IF EXISTS ONLY \"public\".\"generations\" '\n"
+        "        'SET (fillfactor=90, autovacuum_vacuum_threshold=50);'\n"
+        "    )",
+        imports="import sqlalchemy as sa",
+    )
+
+    assert lint_alembic.lint_file(migration) == []
+    real_0075 = ROOT / "apps/api/alembic/versions/0075_canvas_sidebar_idx_vacuum.py"
+    assert lint_alembic.lint_file(real_0075) == []
+
+
+@pytest.mark.parametrize(
+    "unsafe_sql",
+    [
+        "ALTER TABLE users SET (toast_tuple_target = 128)",
+        "ALTER TABLE users SET (autovacuum_enabled = false)",
+        "ALTER TABLE users SET UNLOGGED",
+        "ALTER TABLE users SET SCHEMA archive",
+        "ALTER TABLE users SET (fillfactor = 90); DROP TABLE users",
+    ],
+)
+def test_unsafe_alter_table_set_variants_are_rejected(
+    tmp_path: Path,
+    unsafe_sql: str,
+) -> None:
+    migration = tmp_path / "apps/api/alembic/versions/0001_unsafe_storage.py"
+    _write_migration(
+        migration,
+        f"    op.execute({unsafe_sql!r})",
+    )
+
+    violations = lint_alembic.lint_file(migration)
+
+    assert [violation.message for violation in violations] == [
+        "raw SQL DDL via Alembic execution is not an approved expand operation"
+    ]
+
+
+def test_interpolated_table_storage_params_sql_is_rejected(tmp_path: Path) -> None:
+    migration = tmp_path / "apps/api/alembic/versions/0001_dynamic_storage.py"
+    _write_migration(
+        migration,
+        "    table_name = 'outbox_events'\n"
+        "    op.execute(f'ALTER TABLE {table_name} SET (fillfactor = 90)')",
+    )
+
+    violations = lint_alembic.lint_file(migration)
+
+    assert [violation.message for violation in violations] == [
+        "raw SQL DDL via Alembic execution is not an approved expand operation"
+    ]

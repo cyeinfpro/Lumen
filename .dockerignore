@@ -16,6 +16,7 @@ tests/
 **/tests/
 
 node_modules/
+apps/agent-runtime/
 apps/web/node_modules/
 apps/web/.next/
 apps/web/.next-build/
