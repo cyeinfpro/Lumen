@@ -90,11 +90,11 @@ test("admin page and user modules compile under the web TypeScript config", () =
   const configPath = fileURLToPath(
     new URL("../../../../tsconfig.json", import.meta.url),
   );
-  // Include the app's ambient CSS/Next declarations explicitly rather than
-  // relying on declarations incidentally imported by a monitoring SDK.
+  // Use Next's installed ambient CSS declarations. next-env.d.ts is generated
+  // by Next and does not exist when tests run first in a clean checkout.
   const rootNames = [
     ...moduleUrls.map((url) => fileURLToPath(url)),
-    fileURLToPath(new URL("../../../../next-env.d.ts", import.meta.url)),
+    fileURLToPath(new URL("../../../../node_modules/next/types/global.d.ts", import.meta.url)),
   ];
   const rootNameSet = new Set(rootNames);
   const config = ts.readConfigFile(configPath, ts.sys.readFile);
