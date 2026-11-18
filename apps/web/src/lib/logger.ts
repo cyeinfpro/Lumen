@@ -1,12 +1,12 @@
 // 轻量日志层。生产环境通过 Sentry 上报；dev 同时保留 console 便于调试。
-// 为什么不直接到处 import @sentry/nextjs：
+// 为什么不直接到处 import @sentry/react：
 // 1. instrumentation 未启用 DSN 时，captureException 是 no-op，但仍会触发 SDK lazy-init
 // 2. 生产 console.warn 会被浏览器扩展、隐私模式、CI 不一致地处理；统一走这一层
 // 3. 也方便后续接 PII 脱敏 / 降采样
 
 const isDev = process.env.NODE_ENV !== "production";
 const sentryDsn = process.env.NEXT_PUBLIC_SENTRY_DSN;
-type SentryModule = typeof import("@sentry/nextjs");
+type SentryModule = typeof import("@sentry/react");
 let sentryPromise: Promise<SentryModule> | null = null;
 
 interface LogContext {
@@ -85,7 +85,7 @@ function toError(input: unknown): Error {
 
 function loadSentry(): Promise<SentryModule> | null {
   if (!sentryDsn) return null;
-  sentryPromise ??= import("@sentry/nextjs");
+  sentryPromise ??= import("@sentry/react");
   return sentryPromise;
 }
 

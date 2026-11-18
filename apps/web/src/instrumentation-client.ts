@@ -3,16 +3,17 @@
 // 仅在配置了 NEXT_PUBLIC_SENTRY_DSN 时初始化 Sentry，否则完全静默（CI/本地/预览环境不需要）。
 // V1 不启用 Session Replay（replaysSessionSampleRate = 0 / replaysOnErrorSampleRate = 0）。
 
-import type { Breadcrumb, ErrorEvent as SentryErrorEvent } from "@sentry/nextjs";
+import type { Breadcrumb, ErrorEvent as SentryErrorEvent } from "@sentry/react";
+import { monitoringRoute } from "./lib/monitoringRoute";
 
-type SentryModule = typeof import("@sentry/nextjs");
+type SentryModule = typeof import("@sentry/react");
 
 const dsn = process.env.NEXT_PUBLIC_SENTRY_DSN;
 let sentryPromise: Promise<SentryModule> | null = null;
 
 function loadSentry(): Promise<SentryModule> | null {
   if (!dsn) return null;
-  sentryPromise ??= import("@sentry/nextjs");
+  sentryPromise ??= import("@sentry/react");
   return sentryPromise;
 }
 
@@ -60,6 +61,7 @@ if (dsn) {
     Sentry.init({
       dsn,
       tracesSampleRate: 0.1,
+      integrations: [Sentry.browserTracingIntegration({ instrumentNavigation: false })],
       replaysSessionSampleRate: 0,
       replaysOnErrorSampleRate: 0,
       environment: process.env.NEXT_PUBLIC_SENTRY_ENV ?? process.env.NODE_ENV,
@@ -90,6 +92,15 @@ if (dsn) {
   });
 }
 
+// History traversal does not consistently invoke Next's navigation hook.
+if (dsn && typeof window !== "undefined") {
+  window.addEventListener("popstate", () => {
+    onRouterTransitionStart(window.location.href, "traverse");
+  });
+}
+let lastNavigation = "";
+let lastNavigationAt = 0;
+
 // Router 过渡事件转发到 Sentry（无 DSN 时走 no-op）
 export function onRouterTransitionStart(
   href: string,
@@ -97,7 +108,20 @@ export function onRouterTransitionStart(
 ): void {
   if (!dsn) return;
   void loadSentry()?.then((Sentry) => {
-    Sentry.captureRouterTransitionStart?.(href, navigationType);
+    const client = Sentry.getClient();
+    if (!client) return;
+    // Keep navigation tracing without importing the Next build-tool dependency graph.
+    const pathname = monitoringRoute(href, window.location.href);
+    const key = `${navigationType}:${pathname}`;
+    const now = Date.now();
+    if (key === lastNavigation && now - lastNavigationAt < 200) return;
+    lastNavigation = key;
+    lastNavigationAt = now;
+    Sentry.addBreadcrumb({ category: "navigation", data: { to: pathname, navigationType } });
+    Sentry.startBrowserTracingNavigationSpan(client, {
+      name: pathname,
+      attributes: { "sentry.source": "url", "navigation.type": navigationType },
+    });
   }).catch(() => {
     // swallow
   });
