@@ -18,10 +18,11 @@ from typing import Any, AsyncIterator, cast
 
 import pytest
 
+from app.provider_runtime.errors import UpstreamError
 from app.provider_runtime.upstream_services import ImageUpstreamRuntime
 from app.jobs import upstream_probe
 from app.jobs.upstream_probe import EXPECTED_FIELDS, probe_upstream
-from app.upstream_parts import entrypoints as upstream_mod
+from app.upstream_parts import upstream_impl as upstream_mod
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +206,7 @@ async def test_probe_failure_on_upstream_5xx(
         upstream_mod,
         "stream_completion",
         _make_failing_stream(
-            upstream_mod.UpstreamError(
+            UpstreamError(
                 "upstream http 503", status_code=503, error_code="upstream_error"
             )
         ),
