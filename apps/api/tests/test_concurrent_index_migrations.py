@@ -59,6 +59,7 @@ AGENT_RUNTIME_CONTRACTS_REVISION = "0072_agent_runtime_contracts"
 SEEDANCE_25_FLASH_REVISION = "0073_seedance_25_flash_defaults"
 MEMORY_HALFVEC_HNSW_REVISION = "0074_memory_halfvec_hnsw"
 CANVAS_SIDEBAR_IDX_VACUUM_REVISION = "0075_canvas_sidebar_idx_vacuum"
+VOICE_JOBS_REVISION = "0076_voice_jobs"
 
 
 @dataclass(frozen=True)
@@ -625,7 +626,17 @@ def test_repair_revision_remains_in_the_single_head_chain() -> None:
     assert memory_halfvec_hnsw.down_revision == SEEDANCE_25_FLASH_REVISION
     assert canvas_sidebar_idx_vacuum is not None
     assert canvas_sidebar_idx_vacuum.down_revision == MEMORY_HALFVEC_HNSW_REVISION
-    assert scripts.get_heads() == [CANVAS_SIDEBAR_IDX_VACUUM_REVISION]
+    voice_jobs = scripts.get_revision(VOICE_JOBS_REVISION)
+    assert voice_jobs is not None
+    assert voice_jobs.down_revision == CANVAS_SIDEBAR_IDX_VACUUM_REVISION
+
+    # Later revisions may extend this chain, but may not introduce another head.
+    heads = scripts.get_heads()
+    assert len(heads) == 1, heads
+    chain = {
+        migration.revision for migration in scripts.iterate_revisions(heads[0], "base")
+    }
+    assert {REPAIR_REVISION, CANVAS_SIDEBAR_IDX_VACUUM_REVISION, VOICE_JOBS_REVISION} <= chain
 
 
 @pytest.mark.parametrize(
