@@ -251,3 +251,18 @@ class SpeechTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAdditionalResultHosts(unittest.TestCase):
+    def test_allows_exact_documented_regional_hosts_without_rewriting_signature(self):
+        from lumen_core.aliyun_speech import _output_url
+
+        suffix = "/fixture.wav?Signature=fixture%2B%2F%3D&Expires=1792105032"
+        for host in (
+            "dashscope-result-sh.oss-cn-shanghai.aliyuncs.com",
+            "dashscope-result-hz.oss-cn-hangzhou.aliyuncs.com",
+            "dashscope-result-sz.oss-cn-shenzhen.aliyuncs.com",
+            "dashscope-result-wlcb.oss-cn-wulanchabu.aliyuncs.com",
+        ):
+            with self.subTest(host=host):
+                self.assertEqual(_output_url(f"https://{host}{suffix}"), (f"https://{host}{suffix}", host))

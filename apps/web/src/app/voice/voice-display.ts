@@ -26,6 +26,18 @@ export function pendingPreviewStates(jobs: readonly Pick<SpeechJob, "kind" | "st
   return states;
 }
 
+/** Jobs are returned newest first. Never let an older failure replace a newer result. */
+export function failedPreviewStates(jobs: readonly Pick<SpeechJob, "kind" | "state" | "voice_id" | "output_retrieval_failed">[]) {
+  const seen = new Set<string>();
+  const failed = new Map<string, "retrieval" | "other">();
+  for (const job of jobs) {
+    if (job.kind !== "preview" || seen.has(job.voice_id)) continue;
+    seen.add(job.voice_id);
+    if (job.state === "failed") failed.set(job.voice_id, job.output_retrieval_failed ? "retrieval" : "other");
+  }
+  return failed;
+}
+
 const LABELS: Record<string, string> = {
   pending: "排队中", queued: "排队中", validating: "正在检查录音", creating: "正在创建音色",
   enrolling: "正在创建音色", deploying: "音色准备中", processing: "处理中", running: "生成中",

@@ -36,6 +36,14 @@ OUTPUT_HOST = re.compile(
     r"dashscope-result(?:-[a-z0-9-]{1,30})?\.oss-(?:cn-beijing|ap-southeast-1)"
     r"\.aliyuncs\.com\Z"
 )
+# Exact additional result buckets shown in Alibaba Model Studio documentation.
+# Do not grant a generic OSS-region suffix: it could authorize customer buckets.
+_ADDITIONAL_OUTPUT_HOSTS = frozenset({
+    "dashscope-result-sh.oss-cn-shanghai.aliyuncs.com",
+    "dashscope-result-hz.oss-cn-hangzhou.aliyuncs.com",
+    "dashscope-result-sz.oss-cn-shenzhen.aliyuncs.com",
+    "dashscope-result-wlcb.oss-cn-wulanchabu.aliyuncs.com",
+})
 MAX_SAMPLE_BYTES = 10_000_000
 MAX_RESULT_BYTES = 16_000_000
 MAX_RESPONSE_BYTES = 256_000
@@ -82,7 +90,7 @@ def _output_url(value: str) -> tuple[str, str]:
         host = parsed.hostname or ""
         if (
             parsed.scheme not in {"http", "https"}
-            or not OUTPUT_HOST.fullmatch(host)
+            or not (OUTPUT_HOST.fullmatch(host) or host in _ADDITIONAL_OUTPUT_HOSTS)
             or parsed.netloc != host
             or not parsed.path.startswith("/")
             or parsed.fragment

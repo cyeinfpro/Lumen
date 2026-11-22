@@ -5,8 +5,13 @@ import { Button, ConfirmDialog, Input } from "@/components/ui/primitives";
 import type { SpeechJob, VoiceProfile } from "./voice-api";
 import { hasUnknownOutcome, privateAudioPath, stateLabel, yuan } from "./voice-display";
 
+type VoiceWithPreviewState = VoiceProfile & {
+  previewPending?: "pending" | "unknown";
+  previewFailure?: "retrieval" | "other";
+};
+
 export function VoiceLibrary({ voices, onPreview, onSave, onRevoke, busy, canGenerate, previewPrice }: {
-  voices: (VoiceProfile & { previewPending?: "pending" | "unknown" })[];
+  voices: VoiceWithPreviewState[];
   canGenerate: boolean;
   previewPrice?: number | null;
   onPreview: (id: string) => Promise<boolean>;
@@ -47,7 +52,7 @@ export function VoiceLibrary({ voices, onPreview, onSave, onRevoke, busy, canGen
 }
 
 function VoiceRow({ voice, busy, canGenerate, previewPrice, onPreview, onSave, onSelectRevoke }: {
-  voice: VoiceProfile & { previewPending?: "pending" | "unknown" };
+  voice: VoiceWithPreviewState;
   busy: boolean;
   canGenerate: boolean;
   previewPrice?: number | null;
@@ -69,6 +74,7 @@ function VoiceRow({ voice, busy, canGenerate, previewPrice, onPreview, onSave, o
       </div>
       {preview && removable && <audio aria-label={`${voice.name}试听`} controls className="w-full min-w-0" src={preview} preload="none" />}
       {hasUnknownOutcome(voice.state) && <p className="type-body-sm text-[var(--fg-muted-aa)]">上游可能已收到请求。请稍后刷新，不要重复提交。</p>}
+      <PreviewFailureNotice voice={voice} hasPreview={!!preview} />
       {allowSave && (
         <label className="grid gap-1 type-body-sm">保存为
           <Input value={name} maxLength={80} onChange={(event) => setNameDraft(event.target.value)} disabled={busy} />
@@ -81,6 +87,17 @@ function VoiceRow({ voice, busy, canGenerate, previewPrice, onPreview, onSave, o
         onSave={() => void onSave(voice.id, name.trim())} onRevoke={() => onSelectRevoke(voice)}
       />
     </li>
+  );
+}
+
+function PreviewFailureNotice({ voice, hasPreview }: { voice: VoiceWithPreviewState; hasPreview: boolean }) {
+  if (voice.state !== "ready" || hasPreview || voice.previewPending || !voice.previewFailure) return null;
+  return (
+    <p role="status" className="type-body-sm text-[var(--danger-fg)]">
+      {voice.previewFailure === "retrieval"
+        ? "语音已合成，但未能取回试听文件。重新生成可能再次计费。"
+        : "上次试听未完成。"}
+    </p>
   );
 }
 

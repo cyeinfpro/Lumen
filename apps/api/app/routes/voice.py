@@ -189,6 +189,9 @@ def _job_item(row, segments):
         "segments": [{"segment_no": s.segment_no, "revision": s.revision, "state": s.state} for s in segments],
         "download_url": f"/api/speech/jobs/{row.id}/audio" if row.artifact_key else None,
         "estimated_characters": sum(_chars(s.body) for s in segments),
+        "output_retrieval_failed": row.state == "failed" and bool(row.usage_chars)
+        and any(s.last_error_code == "speech_download_failed"
+                or (s.last_error_code or "").startswith("speech_output_") for s in segments),
     }
 
 

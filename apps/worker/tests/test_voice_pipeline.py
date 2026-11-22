@@ -346,3 +346,66 @@ async def test_workspace_switch_pauses_older_job_without_releasing_or_resending(
             assert (await session.get(pipeline.SpeechJob, "job")).state == "ready"
     assert len(provider.sent) == 2
     assert paid == [("s0", "settle"), ("s1", "settle")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        ("network", "speech_output_network"),
+        ("url", "speech_output_url_rejected"),
+        ("wav", "speech_output_format"),
+        ("storage", "speech_output_storage"),
+    ],
+)
+async def test_preview_output_failure_is_precise_and_retries_only_the_saved_receipt(
+    tmp_path, speech_db, monkeypatch, failure, expected,
+):
+    import errno
+
+    class Provider(StubProvider):
+        async def download(self, receipt):
+            self.downloaded.append(receipt.request_id)
+            if failure == "network":
+                raise pipeline.SpeechProviderError("retryable", "audio_download_unavailable")
+            if failure == "url":
+                raise pipeline.SpeechProviderError("rejected", "untrusted_audio_url")
+            return b"not wave" if failure == "wav" else _wav(b"\x00\x01")
+
+    def deny_write(*_args):
+        raise PermissionError(errno.EACCES, "private path must not reach error code")
+
+    if failure == "storage":
+        monkeypatch.setattr(pipeline, "_save", deny_write)
+    monkeypatch.setattr(pipeline, "_MAX_DOWNLOAD_ATTEMPTS", 2)
+    provider = Provider()
+    settled = []
+
+    async def settle(_session, _job, segment, action):
+        settled.append((segment.id, action))
+
+    async with speech_db() as factory:
+        async with factory() as session, session.begin():
+            (await session.get(pipeline.SpeechJob, "job")).kind = "preview"
+            await session.delete(await session.get(pipeline.SpeechSegment, "s1"))
+        worker = pipeline.VoicePipeline(factory, lambda _: provider, tmp_path, settle)
+        await worker.synthesize("owner", "job")
+        if failure == "network":
+            async with factory() as session, session.begin():
+                job = await session.get(pipeline.SpeechJob, "job")
+                row = await session.get(pipeline.SpeechSegment, "s0")
+                assert row.state == "download" and row.result_url == "stub"
+                assert row.last_error_code == expected
+                job.due_at = pipeline._now() - pipeline.timedelta(seconds=1)
+            await worker.synthesize("owner", "job")
+        async with factory() as session:
+            row = await session.get(pipeline.SpeechSegment, "s0")
+            job = await session.get(pipeline.SpeechJob, "job")
+            assert row.state == job.state == "failed"
+            assert row.last_error_code == job.last_error_code == expected
+            assert row.result_url is None and row.provider_request_id == "r1"
+            assert job.artifact_key is None and job.usage_chars == 3
+
+    assert provider.sent == [("甲。", "remote")]
+    assert provider.downloaded == ["r1"] * (2 if failure == "network" else 1)
+    assert settled == [("s0", "settle")]

@@ -26,6 +26,7 @@ export interface SpeechJob {
   segments?: { segment_no: number; state: string; revision?: number }[];
   download_url?: string | null;
   estimated_characters?: number;
+  output_retrieval_failed?: boolean;
 }
 interface ListResponse<T> { items: T[] }
 interface Quote { characters: number; estimated_micro: number; currency: "CNY" }

@@ -14,7 +14,7 @@ import {
   regenerateSpeechSegment, requestPreview, revokeVoice,
   saveVoice, speechKey, voiceCapabilitiesKey, voiceKey, type VoiceSample,
 } from "./voice-api";
-import { draftAfterAcceptedSubmission, hasUnknownOutcome, isInProgress, pendingPreviewStates, yuan } from "./voice-display";
+import { draftAfterAcceptedSubmission, failedPreviewStates, hasUnknownOutcome, isInProgress, pendingPreviewStates, yuan } from "./voice-display";
 import { VoiceCapture } from "./voice-capture";
 import { SpeechHistory, VoiceLibrary } from "./voice-history";
 
@@ -133,7 +133,10 @@ function WorkspaceContent({ model }: { model: ReturnType<typeof useVoiceWorkspac
   const speechJobs = jobs.data?.items ?? [];
   const busy = active !== null || !ready;
   const pendingPreviews = pendingPreviewStates(speechJobs);
-  const previewProfiles = profiles.map((voice) => ({ ...voice, previewPending: pendingPreviews.get(voice.id) }));
+  const failedPreviews = failedPreviewStates(speechJobs);
+  const previewProfiles = profiles.map((voice) => ({
+    ...voice, previewPending: pendingPreviews.get(voice.id), previewFailure: failedPreviews.get(voice.id),
+  }));
   return (
     <>
       <WorkspaceNotices model={model} />

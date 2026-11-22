@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { draftAfterAcceptedSubmission, hasUnknownOutcome, isInProgress, pendingPreviewStates, privateAudioPath, stateLabel } from "./voice-display.ts";
+import { draftAfterAcceptedSubmission, failedPreviewStates, hasUnknownOutcome, isInProgress, pendingPreviewStates, privateAudioPath, stateLabel } from "./voice-display.ts";
 
 test("private audio links must remain same-origin API paths", () => {
   assert.equal(privateAudioPath("/speech/jobs/id/audio"), "/api/speech/jobs/id/audio");
@@ -41,4 +41,12 @@ test("uncertain work stays distinct from active and terminal work", () => {
   assert.equal(isInProgress("ambiguous"), false);
   assert.equal(stateLabel("ambiguous"), "结果待确认");
   assert.equal(isInProgress("completed"), false);
+});
+
+test("latest preview failure stays visible without replacing a newer result", () => {
+  const failure = { kind: "preview", state: "failed", voice_id: "original", output_retrieval_failed: true };
+  assert.deepEqual(failedPreviewStates([failure]), new Map([["original", "retrieval"]]));
+  assert.equal(failedPreviewStates([{ ...failure, state: "ready" }, failure]).size, 0);
+  assert.equal(failedPreviewStates([{ ...failure, state: "running" }, failure]).size, 0);
+  assert.deepEqual(failedPreviewStates([{ ...failure, kind: "speech" }]), new Map());
 });

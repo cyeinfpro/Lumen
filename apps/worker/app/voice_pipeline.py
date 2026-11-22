@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import io
 import os
 import shutil
@@ -16,7 +17,7 @@ from typing import Any
 
 from sqlalchemy import or_, select
 
-from lumen_core.aliyun_speech import SpeechReceipt
+from lumen_core.aliyun_speech import SpeechProviderError, SpeechReceipt
 from lumen_core.model_entities.accounts import User
 from lumen_core.voice_domain import (
     MAX_OUTPUT_BYTES,
@@ -84,6 +85,40 @@ def _category(exc: Exception) -> str:
         "not_sent", "throttled", "rate_limited", "rejected", "ambiguous",
         "unknown", "not_found", "invalid_response", "download",
     } else "unknown"
+
+
+def _speech_output_failure(exc: Exception, stage: str) -> tuple[str, bool]:
+    """Stable public code and retryability, never raw provider/OS exception text."""
+    if stage == "storage":
+        return "speech_output_storage", isinstance(exc, OSError) and exc.errno in {
+            errno.EINTR, errno.EAGAIN, errno.EBUSY, errno.ETIMEDOUT, errno.EIO,
+        }
+    if stage == "format":
+        return "speech_output_format", False
+    if not isinstance(exc, SpeechProviderError):
+        return "speech_output_download", False
+    if exc.code in {"invalid_wav", "unexpected_speech_format", "unexpected_content_encoding"}:
+        return "speech_output_format", False
+    if exc.code in {"audio_url_expired", "not_found", "upstream_rejected"}:
+        return "speech_output_link_unavailable", False
+    if exc.code in {"untrusted_audio_url", "invalid_audio_address", "private_audio_address"}:
+        return "speech_output_url_rejected", False
+    if exc.code == "response_too_large":
+        return "speech_output_too_large", False
+    if exc.code == "rate_limit":
+        return "speech_output_rate_limited", True
+    if exc.code == "upstream_unavailable":
+        return "speech_output_provider_unavailable", True
+    if exc.code in {"not_connected", "audio_download_unavailable", "transport_uncertain"}:
+        return "speech_output_network", True
+    return "speech_output_download", exc.category == "retryable"
+
+
+def _plan_output_retry(exc: Exception, stage: str, attempts: int) -> tuple[str, str, timedelta]:
+    code, retryable = _speech_output_failure(exc, stage)
+    if retryable and attempts < _MAX_DOWNLOAD_ATTEMPTS:
+        return "download", code, _retry(exc)
+    return "failed", code, timedelta()
 
 
 def _wav_pcm(data: bytes, *, sample_rate: int = SAMPLE_RATE) -> bytes:
@@ -422,6 +457,7 @@ class VoicePipeline:
         delay = timedelta()
         next_state = None
         provider_started = False
+        output_stage = "download"
         try:
             if action == "join":
                 keys = segment
@@ -443,7 +479,9 @@ class VoicePipeline:
                     request_id=segment.provider_request_id,
                 )
                 data = await client.download(receipt)
+                output_stage = "format"
                 await asyncio.to_thread(_wav_pcm, data)
+                output_stage = "storage"
                 key = f"outputs/{job_id}/{segment.id}-{token}.wav"
                 await asyncio.to_thread(_save, self._root, key, data)
                 next_state = "ready"
@@ -462,9 +500,7 @@ class VoicePipeline:
                 else:
                     next_state = "unknown"
             else:
-                next_state = "download" if segment.attempts < _MAX_DOWNLOAD_ATTEMPTS else "failed"
-                delay = _retry(exc)
-                code = "speech_download_failed"
+                next_state, code, delay = _plan_output_retry(exc, output_stage, segment.attempts)
         if action == "send" and next_state == "download":
             if not await self._remember_receipt(user_id, job_id, token, segment.id, receipt):
                 return False
@@ -580,8 +616,10 @@ class VoicePipeline:
     def _queue_speech_step(self, job, voice, latest):
         selected = next((row for row in latest if row.state in {"queued", "download"}), None)
         if selected is None:
-            if any(row.state != "ready" for row in latest):
-                job.state, job.last_error_code = "failed", "speech_segment_failed"
+            unsuccessful = next((row for row in latest if row.state != "ready"), None)
+            if unsuccessful is not None:
+                job.state = "failed"
+                job.last_error_code = unsuccessful.last_error_code or "speech_segment_failed"
                 _unlock(job)
                 return None
             return self._lease_speech_step(job, voice, "join", [row.artifact_key for row in latest])
