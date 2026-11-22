@@ -22,6 +22,43 @@ const QUERY_KEY = ["admin", "voice-provider"] as const;
 const fieldClass =
   "mt-1 h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-[var(--fg-0)] placeholder:text-[var(--fg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
 
+function VoiceProviderReadState({ status, pending, failed, fetching, onRefresh }: {
+  status?: VoiceProviderStatus;
+  pending: boolean;
+  failed: boolean;
+  fetching: boolean;
+  onRefresh: () => void;
+}) {
+  return (
+    <>
+    <header className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex min-w-0 items-center gap-3">
+        <AudioLines aria-hidden="true" className="size-5 shrink-0 text-accent" />
+        <div>
+          <h3 id="voice-provider-heading" className="type-card-title">声音 · 阿里云百炼</h3>
+          <p className="mt-0.5 type-caption text-[var(--fg-2)]">保存百炼 Key 后自动启用音色复刻与配音，无需重启。</p>
+        </div>
+      </div>
+      {status && (
+        <span role="status" className={status.ready ? "type-caption text-success" : "type-caption text-[var(--fg-2)]"}>
+          {voiceProviderStatusLabel(status)}
+        </span>
+      )}
+    </header>
+
+    {pending && <p role="status" className="type-caption text-[var(--fg-2)]">正在读取配置…</p>}
+    {failed && (
+      <div className="flex flex-wrap items-center gap-2">
+        <p role="alert" className="type-caption text-[var(--danger-fg)]">无法读取最新配置。</p>
+        <Button type="button" variant="secondary" size="sm" onClick={onRefresh} loading={fetching}>
+          重新读取
+        </Button>
+      </div>
+    )}
+    </>
+  );
+}
+
 export function VoiceProviderPanel() {
   const cache = useQueryClient();
   const regionId = useId();
@@ -98,30 +135,13 @@ export function VoiceProviderPanel() {
 
   return (
     <section aria-labelledby="voice-provider-heading" className="surface-card-v2 space-y-4 rounded-[var(--radius-card)] border border-[var(--border)] p-4 sm:p-5">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-3">
-          <AudioLines aria-hidden="true" className="size-5 shrink-0 text-accent" />
-          <div>
-            <h3 id="voice-provider-heading" className="type-card-title">声音 · 阿里云百炼</h3>
-            <p className="mt-0.5 type-caption text-[var(--fg-2)]">保存百炼 Key 后自动启用音色复刻与配音，无需重启。</p>
-          </div>
-        </div>
-        {status && (
-          <span role="status" className={status.ready ? "type-caption text-success" : "type-caption text-[var(--fg-2)]"}>
-            {voiceProviderStatusLabel(status)}
-          </span>
-        )}
-      </header>
-
-      {query.isPending && <p role="status" className="type-caption text-[var(--fg-2)]">正在读取配置…</p>}
-      {query.isError && (
-        <div className="flex flex-wrap items-center gap-2">
-          <p role="alert" className="type-caption text-[var(--danger-fg)]">无法读取最新配置。</p>
-          <Button type="button" variant="secondary" size="sm" onClick={() => void query.refetch()} loading={query.isFetching}>
-            重新读取
-          </Button>
-        </div>
-      )}
+      <VoiceProviderReadState
+        status={status}
+        pending={query.isPending}
+        failed={query.isError}
+        fetching={query.isFetching}
+        onRefresh={() => void query.refetch()}
+      />
 
       {status && !query.isError && (
         <form onSubmit={save} className="space-y-3" aria-busy={busy}>

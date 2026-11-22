@@ -14,7 +14,7 @@ import {
   regenerateSpeechSegment, requestPreview, revokeVoice,
   saveVoice, speechKey, voiceCapabilitiesKey, voiceKey, type VoiceSample,
 } from "./voice-api";
-import { draftAfterAcceptedSubmission, hasUnknownOutcome, isInProgress, yuan } from "./voice-display";
+import { draftAfterAcceptedSubmission, hasUnknownOutcome, isInProgress, pendingPreviewStates, yuan } from "./voice-display";
 import { VoiceCapture } from "./voice-capture";
 import { SpeechHistory, VoiceLibrary } from "./voice-history";
 
@@ -132,14 +132,7 @@ function WorkspaceContent({ model }: { model: ReturnType<typeof useVoiceWorkspac
   const profiles = voices.data?.items ?? [];
   const speechJobs = jobs.data?.items ?? [];
   const busy = active !== null || !ready;
-  const pendingPreviews = new Map<string, "pending" | "unknown">();
-  // Unknown takes precedence over active; do not prompt users to resubmit an
-  // earlier preview whose charge or outcome has not been reconciled.
-  for (const job of speechJobs) {
-    if (job.kind !== "preview") continue;
-    if (hasUnknownOutcome(job.state)) pendingPreviews.set(job.voice_id, "unknown");
-    else if (isInProgress(job.state) && !pendingPreviews.has(job.voice_id)) pendingPreviews.set(job.voice_id, "pending");
-  }
+  const pendingPreviews = pendingPreviewStates(speechJobs);
   const previewProfiles = profiles.map((voice) => ({ ...voice, previewPending: pendingPreviews.get(voice.id) }));
   return (
     <>

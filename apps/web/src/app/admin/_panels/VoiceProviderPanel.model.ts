@@ -18,12 +18,8 @@ export function voiceProviderPatch(
   const workspace = (draft.workspace ?? status.workspace_id ?? "").trim().toLowerCase();
   const region = draft.region ?? status.region;
   const apiKey = rawKey.trim();
-  if (workspace && !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(workspace)) {
-    return { error: "Workspace ID 只能包含字母、数字和连字符，不能以连字符开头或结尾。" };
-  }
-  if (apiKey && !/^[!-~]{8,512}$/.test(apiKey)) {
-    return { error: "请检查 Key 格式。Key 不能包含空格，长度须为 8–512 位。" };
-  }
+  const validationError = voiceProviderCredentialError(workspace, apiKey);
+  if (validationError) return { error: validationError };
   const oldWorkspace = status.workspace_id ?? "";
   const scopeChanged = region !== status.region || workspace !== oldWorkspace;
   if (!apiKey && (!status.configured || scopeChanged)) {
@@ -34,6 +30,15 @@ export function voiceProviderPatch(
   if (region !== status.region) body.region = region;
   if (workspace !== oldWorkspace) body.workspace_id = workspace;
   return { body };
+}
+
+function voiceProviderCredentialError(workspace: string, apiKey: string): string | undefined {
+  if (workspace && !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(workspace)) {
+    return "Workspace ID 只能包含字母、数字和连字符，不能以连字符开头或结尾。";
+  }
+  if (apiKey && !/^[!-~]{8,512}$/.test(apiKey)) {
+    return "请检查 Key 格式。Key 不能包含空格，长度须为 8–512 位。";
+  }
 }
 
 export function voiceProviderStatusLabel(status: VoiceProviderStatus) {

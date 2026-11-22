@@ -50,6 +50,7 @@ function VoiceRow({ voice, busy, canGenerate, previewPrice, onPreview, onSave, o
   voice: VoiceProfile & { previewPending?: "pending" | "unknown" };
   busy: boolean;
   canGenerate: boolean;
+  previewPrice?: number | null;
   onPreview: (id: string) => Promise<boolean>;
   onSave: (id: string, name: string) => Promise<boolean>;
   onSelectRevoke: (voice: VoiceProfile) => void;

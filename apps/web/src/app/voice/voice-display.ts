@@ -1,3 +1,5 @@
+import type { SpeechJob } from "./voice-api";
+
 export function privateAudioPath(raw?: string | null): string | undefined {
   if (!raw || !/^\/(api\/)?(?:speech\/jobs\/[A-Za-z0-9_-]+\/audio|voices\/[A-Za-z0-9_-]+\/preview)$/.test(raw)) return undefined;
   return raw.startsWith("/api/") ? raw : `/api${raw}`;
@@ -12,6 +14,17 @@ export const isInProgress = (state: string) =>
 
 export const hasUnknownOutcome = (state: string) =>
   ["ambiguous", "uncertain", "outcome_unknown", "unknown", "needs_reconciliation"].includes(state);
+
+/** Unknown takes precedence over active to avoid duplicate preview submissions. */
+export function pendingPreviewStates(jobs: readonly Pick<SpeechJob, "kind" | "state" | "voice_id">[]) {
+  const states = new Map<string, "pending" | "unknown">();
+  for (const job of jobs) {
+    if (job.kind !== "preview") continue;
+    if (hasUnknownOutcome(job.state)) states.set(job.voice_id, "unknown");
+    else if (isInProgress(job.state) && !states.has(job.voice_id)) states.set(job.voice_id, "pending");
+  }
+  return states;
+}
 
 const LABELS: Record<string, string> = {
   pending: "排队中", queued: "排队中", validating: "正在检查录音", creating: "正在创建音色",
