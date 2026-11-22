@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button, Spinner, Textarea } from "@/components/ui/primitives";
+import { Button, Select, Spinner, Textarea } from "@/components/ui/primitives";
 import { DesktopTopNav, MobileTabBar } from "@/components/ui/shell";
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import { isPrivateIdentitySnapshotCurrent } from "@/lib/auth/privateIdentityEpoch";
@@ -212,6 +212,7 @@ function SpeechComposer({ voices, maxText, busy, identity, onCreate }: {
   identity: Identity;
   onCreate: (id: string, text: string, rate?: number) => Promise<boolean>;
 }) {
+  const voiceSelectId = useId();
   const [selection, setSelection] = useState("");
   const [text, setText] = useState("");
   const [rate, setRate] = useState(1);
@@ -234,13 +235,14 @@ function SpeechComposer({ voices, maxText, busy, identity, onCreate }: {
         <h2 className="type-section-title font-semibold">制作配音</h2>
         <p className="mt-1 type-body-sm text-[var(--fg-muted-aa)]">选一个已保存的音色，粘贴要说的内容。</p>
       </div>
-      <label className="grid gap-1 type-body-sm">音色
-        <select className="min-h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-[var(--fg-0)]"
-          value={voiceId} onChange={(event) => setSelection(event.target.value)} disabled={!voices.length || busy}>
+      <div className="grid gap-1 type-body-sm">
+        <label htmlFor={voiceSelectId}>音色</label>
+        <Select id={voiceSelectId} className="min-h-11"
+          value={voiceId} onChange={(event) => setSelection(event.currentTarget.value)} disabled={!voices.length || busy}>
           {voices.length === 0 && <option value="">先试听并保存一个音色</option>}
           {voices.map((voice) => <option key={voice.id} value={voice.id}>{voice.name}</option>)}
-        </select>
-      </label>
+        </Select>
+      </div>
       <label className="grid gap-1 type-body-sm">文稿
         <Textarea rows={7} maxLength={maxText} value={text} onChange={(event) => setText(event.target.value)} placeholder="在这里粘贴需要配音的文字…" />
       </label>

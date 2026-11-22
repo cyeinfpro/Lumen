@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AudioLines } from "lucide-react";
 
-import { Button } from "@/components/ui/primitives";
+import { Button, Select } from "@/components/ui/primitives";
 import { apiFetch } from "@/lib/api/http";
 import { USER_QUERY_SCOPE } from "@/lib/queries/userScope";
 import {
@@ -24,6 +24,7 @@ const fieldClass =
 
 export function VoiceProviderPanel() {
   const cache = useQueryClient();
+  const regionId = useId();
   const keyField = useRef<HTMLInputElement>(null);
   const writing = useRef(false);
   const [busy, setBusy] = useState(false);
@@ -140,17 +141,20 @@ export function VoiceProviderPanel() {
             <details className="rounded-[var(--radius-control)] border border-[var(--border-subtle)] p-3">
               <summary className="cursor-pointer type-control text-[var(--fg-1)]">地区与工作空间（可选）</summary>
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                <label className="block type-control text-[var(--fg-1)]">
-                  Key 所在地区
-                  <select
-                    className={fieldClass}
+                <div>
+                  <label htmlFor={regionId} className="block type-control text-[var(--fg-1)]">
+                    Key 所在地区
+                  </label>
+                  <Select
+                    id={regionId}
+                    wrapperClassName="mt-1"
                     value={draft.region ?? status.region}
-                    onChange={(event) => setDraft({ ...draft, region: event.target.value as VoiceRegion })}
+                    onChange={(event) => setDraft({ ...draft, region: event.currentTarget.value as VoiceRegion })}
                   >
                     <option value={BEIJING}>北京</option>
                     <option value={SINGAPORE}>新加坡</option>
-                  </select>
-                </label>
+                  </Select>
+                </div>
                 <label className="block type-control text-[var(--fg-1)]">
                   Workspace ID
                   <input

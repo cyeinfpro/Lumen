@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Button, Input } from "@/components/ui/primitives";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { Button, Input, Select } from "@/components/ui/primitives";
 import type { ConsentKind, VoiceSample } from "./voice-api";
 
 const MAX_SELECTION_SECONDS = 20;
@@ -21,6 +21,7 @@ export function VoiceCapture({ maxBytes, busy, submitting, onCreate }: {
   submitting: boolean;
   onCreate: (sample: VoiceSample) => Promise<boolean>;
 }) {
+  const channelId = useId();
   const [sample, setSample] = useState<ReadySample | null>(null);
   const [range, setRange] = useState<Range>({ start: 0, end: 0 });
   const [name, setName] = useState("");
@@ -157,18 +158,19 @@ export function VoiceCapture({ maxBytes, busy, submitting, onCreate }: {
             </p>
             {sample.warning && <p className="type-body-sm text-[var(--fg-muted-aa)]">{sample.warning}</p>}
             {sample.channels > 1 && (
-              <label className="grid gap-1 type-body-sm">选择人声所在声道
-                <select value={sample.channel} disabled={busy}
-                  className="min-h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-[var(--fg-0)]"
+              <div className="grid gap-1 type-body-sm">
+                <label htmlFor={channelId}>选择人声所在声道</label>
+                <Select id={channelId} value={sample.channel} disabled={busy}
+                  className="min-h-11"
                   onChange={(event) => {
                     stopClip();
                     setConfirmed(false);
-                    setSample(selectChannel(sample, event.target.value === "1" ? 1 : 0));
+                    setSample(selectChannel(sample, event.currentTarget.value === "1" ? 1 : 0));
                   }}>
                   <option value="0">第一声道（左）</option>
                   <option value="1">第二声道（右）</option>
-                </select>
-              </label>
+                </Select>
+              </div>
             )}
             <div className="grid grid-cols-2 gap-3">
               <label className="grid gap-1 type-body-sm">开始（秒）
