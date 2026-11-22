@@ -1,6 +1,6 @@
 {
   "name": "web",
-  "version": "1.2.195",
+  "version": "1.2.196",
   "private": true,
   "imports": {
     "#canvas-autosave": "./src/lib/canvas/autosave.ts",

@@ -9,6 +9,7 @@ import shutil
 import uuid
 import wave
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -187,6 +188,45 @@ def _read_sample(root: Path, key: str) -> bytes:
     return data
 
 
+@dataclass
+class _VoiceOutcome:
+    state: str = "unknown"
+    code: str | None = None
+    remote_id: str | None = None
+    drop_source: bool = False
+    delay: timedelta = _RECONCILE
+    provider_started: bool = False
+
+
+def _record_voice_status(voice: VoiceProfile, outcome: _VoiceOutcome, status: str) -> None:
+    if status == "OK":
+        outcome.state, outcome.drop_source = "ready", True
+    elif status == "DEPLOYING" and voice.attempts < _MAX_PENDING_ATTEMPTS:
+        outcome.state = "polling"
+    elif status in ("FAILED", "FAIL", "UNDEPLOYED"):
+        outcome.state, outcome.code = "failed", "voice_enrollment_failed"
+    else:
+        outcome.code, outcome.delay = "voice_provider_unconfirmed", timedelta(minutes=10)
+
+
+def _record_voice_error(
+    voice: VoiceProfile, action: str, outcome: _VoiceOutcome, exc: Exception,
+) -> None:
+    category = _category(exc)
+    outcome.code = "voice_provider_" + category
+    retryable = category in {"not_sent", "throttled", "rate_limited"}
+    definite = retryable or category in {"rejected", "not_found"}
+    if action == "revoking":
+        outcome.state, outcome.delay, outcome.drop_source = "revoking", timedelta(minutes=10), True
+    elif action == "queued" and (not outcome.provider_started or definite):
+        if outcome.provider_started and retryable and voice.attempts < _MAX_PENDING_ATTEMPTS:
+            outcome.state, outcome.delay = "queued", _retry(exc)
+        else:
+            outcome.state = "failed"
+    else:
+        outcome.state, outcome.delay = "unknown", timedelta(minutes=10)
+
+
 class VoicePipeline:
     def __init__(
         self, session_factory, client_for, media_root: Path, settle=None, *,
@@ -236,117 +276,122 @@ class VoicePipeline:
         if claim is None:
             return
         voice, token, action = claim
-        state, code, remote_id, drop_source = "unknown", None, None, False
-        delay = _RECONCILE
-        provider_started = False
+        outcome = _VoiceOutcome()
         try:
-            if action == "purge":
-                state, drop_source = voice.state, True
-            elif voice.model != MODEL:
-                raise ValueError("invalid_voice_model")
-            elif action == "revoking" and not voice.provider_voice_id and not voice.enrollment_sent:
-                state, drop_source = "revoked", True
-            else:
-                client = self._client_for(voice)
-                if action == "queued":
-                    if not voice.source_key:
-                        raise ValueError("sample_missing")
-                    wav = await asyncio.to_thread(_read_sample, self._root, voice.source_key)
-                    async with self._session() as db, db.begin():
-                        row = (
-                            await db.execute(_owned_voice(user_id, voice_id).with_for_update())
-                        ).scalar_one_or_none()
-                        if row is None or row.lease_token != token:
-                            return
-                        if row.revoked_at or not await self._owner_active(db, user_id):
-                            row.revoked_at = row.revoked_at or _now()
-                            row.state = "revoking"
-                            _unlock(row)
-                            return
-                        row.enrollment_sent = True
-                    provider_started = True
-                    remote_id = await client.create_voice(wav, voice.provider_prefix, "zh")
-                    state, delay = "polling", timedelta()
-                elif action == "revoking":
-                    remote_id = voice.provider_voice_id
-                    if not remote_id and voice.enrollment_sent:
-                        remote_id = await client.find_voice(voice.provider_prefix)
-                        if not remote_id:
-                            code = "voice_cleanup_unconfirmed"
-                    if remote_id:
-                        try:
-                            await client.delete_voice(remote_id)
-                        except Exception as exc:
-                            if _category(exc) != "not_found":
-                                raise
-                    state = "revoking" if code else "revoked"
-                    drop_source = True
-                elif voice.provider_voice_id:
-                    remote_id = voice.provider_voice_id
-                    raw = await client.query_voice(remote_id)
-                    if raw == "OK":
-                        state, drop_source = "ready", True
-                    elif raw == "DEPLOYING" and voice.attempts < _MAX_PENDING_ATTEMPTS:
-                        state = "polling"
-                    elif raw in ("FAILED", "FAIL", "UNDEPLOYED"):
-                        state, code = "failed", "voice_enrollment_failed"
-                    else:
-                        state, code, delay = "unknown", "voice_provider_unconfirmed", timedelta(minutes=10)
-                elif voice.enrollment_sent:
-                    remote_id = await client.find_voice(voice.provider_prefix)
-                    if remote_id:
-                        state, delay = "polling", timedelta()
-                    else:
-                        code, delay = "voice_enrollment_unconfirmed", timedelta(minutes=10)
-                else:
-                    # A crashed preflight has not marked any possible external send.
-                    state, delay = "queued", timedelta()
-        except Exception as exc:
-            category = _category(exc)
-            code = "voice_provider_" + category
-            if action == "revoking":
-                state, delay, drop_source = "revoking", timedelta(minutes=10), True
-            elif action == "queued" and (
-                not provider_started or category in {"rejected", "not_found", "not_sent", "throttled", "rate_limited"}
-            ):
-                if provider_started and voice.attempts < _MAX_PENDING_ATTEMPTS and category in {
-                    "not_sent", "throttled", "rate_limited",
-                }:
-                    state, delay = "queued", _retry(exc)
-                else:
-                    state = "failed"
-            else:
-                state, delay = "unknown", timedelta(minutes=10)
-        source_key = None
-        async with self._session() as db, db.begin():
-            row = (
-                await db.execute(_owned_voice(user_id, voice_id).with_for_update())
-            ).scalar_one_or_none()
-            if row is None or row.lease_token != token:
+            if not await self._run_voice_action(user_id, voice, token, action, outcome):
                 return
-            if remote_id:
-                row.provider_voice_id = remote_id
+        except Exception as exc:
+            _record_voice_error(voice, action, outcome, exc)
+
+        source_key = await self._persist_voice_outcome(user_id, voice_id, token, action, outcome)
+        if source_key:
+            await self._discard_reference(user_id, voice_id, source_key)
+
+    async def _run_voice_action(self, owner, voice, token, action, outcome) -> bool:
+        if action == "purge":
+            outcome.state, outcome.drop_source = voice.state, True
+            return True
+        if voice.model != MODEL:
+            raise ValueError("invalid_voice_model")
+        if action == "revoking" and not voice.provider_voice_id and not voice.enrollment_sent:
+            outcome.state, outcome.drop_source = "revoked", True
+            return True
+
+        client = self._client_for(voice)
+        if action == "queued":
+            return await self._dispatch_enrollment(owner, voice, token, client, outcome)
+        if action == "revoking":
+            await self._withdraw_voice(client, voice, outcome)
+        else:
+            await self._reconcile_enrollment(client, voice, outcome)
+        return True
+
+    async def _mark_enrollment_sent(self, owner, voice_id, token) -> bool:
+        async with self._session() as db, db.begin():
+            row = (await db.execute(
+                _owned_voice(owner, voice_id).with_for_update()
+            )).scalar_one_or_none()
+            if row is None or row.lease_token != token:
+                return False
+            if row.revoked_at or not await self._owner_active(db, owner):
+                row.revoked_at = row.revoked_at or _now()
+                row.state = "revoking"
+                _unlock(row)
+                return False
+            row.enrollment_sent = True
+        return True
+
+    async def _dispatch_enrollment(self, owner, voice, token, client, outcome) -> bool:
+        if not voice.source_key:
+            raise ValueError("sample_missing")
+        wav = await asyncio.to_thread(_read_sample, self._root, voice.source_key)
+        if not await self._mark_enrollment_sent(owner, voice.id, token):
+            return False
+        outcome.provider_started = True
+        outcome.remote_id = await client.create_voice(wav, voice.provider_prefix, "zh")
+        outcome.state, outcome.delay = "polling", timedelta()
+        return True
+
+    async def _withdraw_voice(self, client, voice, outcome) -> None:
+        outcome.remote_id = voice.provider_voice_id
+        if not outcome.remote_id and voice.enrollment_sent:
+            outcome.remote_id = await client.find_voice(voice.provider_prefix)
+            if not outcome.remote_id:
+                outcome.code = "voice_cleanup_unconfirmed"
+        if outcome.remote_id:
+            try:
+                await client.delete_voice(outcome.remote_id)
+            except Exception as exc:
+                if _category(exc) != "not_found":
+                    raise
+        outcome.state = "revoking" if outcome.code else "revoked"
+        outcome.drop_source = True
+
+    async def _reconcile_enrollment(self, client, voice, outcome) -> None:
+        if voice.provider_voice_id:
+            outcome.remote_id = voice.provider_voice_id
+            _record_voice_status(voice, outcome, await client.query_voice(outcome.remote_id))
+        elif voice.enrollment_sent:
+            outcome.remote_id = await client.find_voice(voice.provider_prefix)
+            if outcome.remote_id:
+                outcome.state, outcome.delay = "polling", timedelta()
+            else:
+                outcome.code, outcome.delay = "voice_enrollment_unconfirmed", timedelta(minutes=10)
+        else:
+            # A crashed preflight has not marked any possible external send.
+            outcome.state, outcome.delay = "queued", timedelta()
+
+    async def _persist_voice_outcome(self, owner, voice_id, token, action, outcome) -> str | None:
+        async with self._session() as db, db.begin():
+            row = (await db.execute(
+                _owned_voice(owner, voice_id).with_for_update()
+            )).scalar_one_or_none()
+            if row is None or row.lease_token != token:
+                return None
+            state = outcome.state
+            if outcome.remote_id:
+                row.provider_voice_id = outcome.remote_id
             if row.revoked_at is not None and state != "revoked":
                 state = "revoking"
             if state == "queued" or (action == "queued" and state == "failed"):
                 row.enrollment_sent = False
-            row.state, row.last_error_code = state, code
+            row.state, row.last_error_code = state, outcome.code
             if state == "revoked":
                 row.provider_voice_id = None
-            if drop_source:
-                source_key = row.source_key
-            _unlock(row, delay)
-        if source_key:
-            try:
-                await asyncio.to_thread(private_path(self._root, source_key).unlink, missing_ok=True)
-            except (OSError, ValueError):
-                return
-            async with self._session() as db, db.begin():
-                row = (
-                    await db.execute(_owned_voice(user_id, voice_id).with_for_update())
-                ).scalar_one_or_none()
-                if row is not None and row.source_key == source_key:
-                    row.source_key = None
+            _unlock(row, outcome.delay)
+            return row.source_key if outcome.drop_source else None
+
+    async def _discard_reference(self, owner, voice_id, source_key) -> None:
+        try:
+            await asyncio.to_thread(private_path(self._root, source_key).unlink, missing_ok=True)
+        except (OSError, ValueError):
+            return
+        async with self._session() as db, db.begin():
+            row = (await db.execute(
+                _owned_voice(owner, voice_id).with_for_update()
+            )).scalar_one_or_none()
+            if row is not None and row.source_key == source_key:
+                row.source_key = None
 
     async def revoke(self, user_id: str, voice_id: str) -> None:
         async with self._session() as db, db.begin():
@@ -451,88 +496,106 @@ class VoicePipeline:
         empty = (None, None, None, None, None)
         async with self._session() as db, db.begin():
             # Stable lock ordering: every speech mutation locks job first, then voice.
-            job = (
-                await db.execute(_owned_job(user_id, job_id).with_for_update())
-            ).scalar_one_or_none()
+            job = (await db.execute(
+                _owned_job(user_id, job_id).with_for_update()
+            )).scalar_one_or_none()
             if job is None or job.state not in _ACTIVE_JOB or not _eligible(job, _now()):
                 return empty
-            voice = (
-                await db.execute(_owned_voice(user_id, job.voice_id).with_for_update())
-            ).scalar_one_or_none()
+            voice = (await db.execute(
+                _owned_voice(user_id, job.voice_id).with_for_update()
+            )).scalar_one_or_none()
             # Do not lease or mutate older bindings when the admin switches scope.
             if voice is not None and not self._binding_matches(voice):
                 return empty
-            rows = (
-                await db.execute(
-                    select(SpeechSegment).where(SpeechSegment.job_id == job.id).order_by(
-                        SpeechSegment.segment_no, SpeechSegment.revision.desc()
-                    )
-                )
-            ).scalars().all()
-            latest = {}
-            for row in rows:
-                latest.setdefault(row.segment_no, row)
-            if not latest:
-                job.state, job.last_error_code = "failed", "speech_no_segments"
-                return empty
-            disabled = (
-                voice is None or not await self._owner_active(db, user_id)
-                or voice.revoked_at is not None or voice.state != "ready"
-                or not voice.provider_voice_id
-                or (job.kind == "speech" and voice.saved_at is None)
-                or (voice.saved_at is None and _utc(voice.draft_expires_at) <= _now())
+            latest = await self._latest_job_segments(db, job.id)
+            result = await self._plan_speech_step(db, user_id, job, voice, latest)
+            return result if result is not None else empty
+
+    async def _latest_job_segments(self, db, job_id):
+        rows = (await db.execute(
+            select(SpeechSegment).where(SpeechSegment.job_id == job_id).order_by(
+                SpeechSegment.segment_no, SpeechSegment.revision.desc()
             )
-            pending_receipt = next(
-                (row for row in latest.values() if row.state == "sending" and row.result_url),
-                None,
-            )
-            if pending_receipt is not None:
-                # A paid response already exists. Finish its local accounting
-                # before considering cancellation or any new upstream work.
-                token = str(uuid.uuid4())
-                job.state, job.lease_token, job.lease_until = "running", token, _now() + _LEASE
-                return token, "settle", job, pending_receipt, voice
-            interrupted = False
-            for row in latest.values():
-                if row.state == "sending":
-                    row.state, row.last_error_code = "unknown", "speech_result_unknown"
-                if row.state == "unknown":
-                    interrupted = True
-                if disabled and row.state == "queued":
-                    await self._settle(db, job, row, "release")
-                    row.state, row.last_error_code = "failed", "voice_unavailable"
-                if disabled and row.state == "download":
-                    row.state, row.last_error_code = "failed", "voice_unavailable"
-                    row.result_url = None
-            if interrupted:
-                # Do not retain holds for later segments that will never be sent.
-                for row in latest.values():
-                    if row.state == "queued":
-                        await self._settle(db, job, row, "release")
-                        row.state, row.last_error_code = "failed", "speech_paused_before_send"
-                job.state, job.last_error_code = "unknown", "speech_result_unknown"
-                _unlock(job)
-                return empty
-            if disabled:
-                job.state, job.last_error_code = "failed", "voice_unavailable"
-                _unlock(job)
-                return empty
-            selected = next(
-                (row for row in latest.values() if row.state in {"queued", "download"}), None
-            )
-            if selected is None and any(row.state != "ready" for row in latest.values()):
+        )).scalars().all()
+        latest = {}
+        for row in rows:
+            latest.setdefault(row.segment_no, row)
+        return tuple(latest.values())
+
+    async def _speech_voice_disabled(self, db, owner, kind, voice) -> bool:
+        return (
+            voice is None or not await self._owner_active(db, owner)
+            or voice.revoked_at is not None or voice.state != "ready"
+            or not voice.provider_voice_id
+            or (kind == "speech" and voice.saved_at is None)
+            or (voice.saved_at is None and _utc(voice.draft_expires_at) <= _now())
+        )
+
+    async def _mark_interrupted_segments(self, db, job, latest, disabled) -> bool:
+        interrupted = False
+        for row in latest:
+            if row.state == "sending":
+                row.state, row.last_error_code = "unknown", "speech_result_unknown"
+            if row.state == "unknown":
+                interrupted = True
+            if disabled and row.state == "queued":
+                await self._settle(db, job, row, "release")
+                row.state, row.last_error_code = "failed", "voice_unavailable"
+            if disabled and row.state == "download":
+                row.state, row.last_error_code = "failed", "voice_unavailable"
+                row.result_url = None
+        return interrupted
+
+    async def _pause_unsent_segments(self, db, job, latest) -> None:
+        # Do not retain holds for later segments that will never be sent.
+        for row in latest:
+            if row.state == "queued":
+                await self._settle(db, job, row, "release")
+                row.state, row.last_error_code = "failed", "speech_paused_before_send"
+        job.state, job.last_error_code = "unknown", "speech_result_unknown"
+        _unlock(job)
+
+    async def _plan_speech_step(self, db, owner, job, voice, latest):
+        if not latest:
+            job.state, job.last_error_code = "failed", "speech_no_segments"
+            return None
+        disabled = await self._speech_voice_disabled(db, owner, job.kind, voice)
+        pending_receipt = next(
+            (row for row in latest if row.state == "sending" and row.result_url),
+            None,
+        )
+        if pending_receipt is not None:
+            # A paid response already exists. Finish its local accounting
+            # before considering cancellation or any new upstream work.
+            return self._lease_speech_step(job, voice, "settle", pending_receipt)
+        if await self._mark_interrupted_segments(db, job, latest, disabled):
+            await self._pause_unsent_segments(db, job, latest)
+            return None
+        if disabled:
+            job.state, job.last_error_code = "failed", "voice_unavailable"
+            _unlock(job)
+            return None
+        return self._queue_speech_step(job, voice, latest)
+
+    def _queue_speech_step(self, job, voice, latest):
+        selected = next((row for row in latest if row.state in {"queued", "download"}), None)
+        if selected is None:
+            if any(row.state != "ready" for row in latest):
                 job.state, job.last_error_code = "failed", "speech_segment_failed"
                 _unlock(job)
-                return empty
-            token = str(uuid.uuid4())
-            job.state, job.lease_token, job.lease_until = "running", token, _now() + _LEASE
-            if selected is None:
-                return token, "join", job, [row.artifact_key for row in latest.values()], voice
-            action = "download" if selected.state == "download" else "send"
-            if action == "send":
-                selected.state = "sending"
-            selected.attempts += 1
-            return token, action, job, selected, voice
+                return None
+            return self._lease_speech_step(job, voice, "join", [row.artifact_key for row in latest])
+        action = "download" if selected.state == "download" else "send"
+        if action == "send":
+            selected.state = "sending"
+        selected.attempts += 1
+        return self._lease_speech_step(job, voice, action, selected)
+
+    @staticmethod
+    def _lease_speech_step(job, voice, action, value):
+        token = str(uuid.uuid4())
+        job.state, job.lease_token, job.lease_until = "running", token, _now() + _LEASE
+        return token, action, job, value, voice
 
     async def _finish(
         self, owner, job_id, token, action, segment, next_state, key, code, delay
