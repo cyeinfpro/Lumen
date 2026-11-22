@@ -35,6 +35,11 @@ x-app-runtime-env: &app-runtime-env
   AGENT_RUNTIME_MAX_REQUEST_BYTES: "${AGENT_RUNTIME_MAX_REQUEST_BYTES:-16777216}"
   AGENT_RUNTIME_MAX_LINE_BYTES: "${AGENT_RUNTIME_MAX_LINE_BYTES:-65536}"
 
+# Suppress legacy voice credentials inherited from env_file. Voice uses admin settings.
+x-non-worker-runtime-env: &non-worker-runtime-env
+  <<: *app-runtime-env
+  LUMEN_VOICE_API_KEY: ""
+
 services:
   postgres:
     <<: *service-hardening
@@ -145,7 +150,7 @@ services:
     ports:
       - "${API_BIND_HOST:-127.0.0.1}:${API_BIND_PORT:-8000}:8000"
     environment:
-      <<: *app-runtime-env
+      <<: *non-worker-runtime-env
       LUMEN_API_WORKERS: "${LUMEN_API_WORKERS:-2}"
       # 容器化部署下让 admin_update 走 path-unit 触发，跳过容器内 systemctl 探测。
       # 触发文件由 lumen-api 写到挂载的 backup 目录，宿主机 PID 1 监听并启动
@@ -215,6 +220,7 @@ services:
     env_file: ${LUMEN_COMPOSE_ENV_FILE:-.env}
     environment:
       <<: *app-runtime-env
+      LUMEN_VOICE_API_KEY: ""
       IMAGE_JOB_SIDECAR_TOKEN: "${IMAGE_JOB_SIDECAR_TOKEN:-}"
       LUMEN_WORKER_HEALTH_INTERVAL: "${LUMEN_WORKER_HEALTH_INTERVAL:-30}"
       LUMEN_WORKER_HEALTH_KEY_PREFIX: "${LUMEN_WORKER_HEALTH_KEY_PREFIX:-arq:queue:health-check}"
@@ -348,6 +354,7 @@ services:
       # tgbot 容器要走 docker network 调 lumen-api，不能用 config.py 里的
       # 127.0.0.1:8000 默认值（那指向 tgbot 容器自己的 loopback）。
       LUMEN_API_BASE: "http://api:8000"
+      LUMEN_VOICE_API_KEY: ""
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
       TELEGRAM_BOT_SHARED_SECRET: "${TELEGRAM_BOT_SHARED_SECRET:-}"
       TELEGRAM_PROXY_URL: "${TELEGRAM_PROXY_URL:-}"
@@ -384,7 +391,7 @@ services:
     working_dir: /app/apps/api
     command: ["alembic", "upgrade", "head"]
     environment:
-      <<: *app-runtime-env
+      <<: *non-worker-runtime-env
       APP_ENV: "${APP_ENV:-dev}"
       TELEGRAM_BOT_SHARED_SECRET: "${TELEGRAM_BOT_SHARED_SECRET:-}"
     restart: "no"
@@ -408,7 +415,7 @@ services:
         : "$${LUMEN_ADMIN_PASSWORD:?Set LUMEN_ADMIN_PASSWORD when running bootstrap profile}"
         exec python -m app.scripts.bootstrap "$${LUMEN_ADMIN_EMAIL}" --role admin
     environment:
-      <<: *app-runtime-env
+      <<: *non-worker-runtime-env
       APP_ENV: "${APP_ENV:-dev}"
       TELEGRAM_BOT_SHARED_SECRET: "${TELEGRAM_BOT_SHARED_SECRET:-}"
       LUMEN_ADMIN_EMAIL: "${LUMEN_ADMIN_EMAIL:-}"

@@ -8,17 +8,18 @@ PostgreSQL, while Redis provides dispatch, leases, counters, and event delivery.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from arq import func
 from arq.connections import RedisSettings
 from arq.cron import cron
 from redis.asyncio.retry import Retry
 from redis.backoff import ExponentialBackoff
-from redis.exceptions import BusyLoadingError
+from redis.exceptions import BusyLoadingError, RedisError
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from lumen_core.context_window import warm_tiktoken
@@ -73,6 +74,11 @@ from .upstream_parts.upstream_impl import (
     close_client,
     validate_effective_image_job_configuration,
 )
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from lumen_core.voice_models import SpeechJob, SpeechSegment, VoiceProfile
 
 _startup_logger = logging.getLogger(__name__)
 _PROVIDER_CRON_TIMEOUT_S = 30.0
@@ -133,6 +139,10 @@ async def _cleanup_resource(name: str, cleanup: Callable[[], Any]) -> None:
 
 
 async def _cleanup_resources(ctx: dict[str, Any]) -> None:
+    # Do not delete the Redis marker: another worker may still own a valid lease.
+    ctx.pop("voice_pipeline", None)
+    ctx.pop("voice_sweep_lock", None)
+    ctx.pop("voice_ready_binding", None)
     worker_runtime = ctx.pop("worker_runtime", None)
     if isinstance(worker_runtime, WorkerRuntime):
         for key, value in worker_runtime.context_values().items():
@@ -226,6 +236,7 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
             runtime=image_upstream_runtime,
         )
         storage.ensure_ready()
+        ctx["voice_sweep_lock"] = asyncio.Lock()
         configured_policy = settings.image_upload_capacity_degraded_policy.strip()
         degraded_policy = configured_policy or (
             "scaled_local"
@@ -326,6 +337,8 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
         ctx.update(worker_runtime.context_values())
         ctx.pop("_worker_runtime_lifecycle", None)
         worker_runtime.start(logger=_startup_logger)
+        await _configure_voice_pipeline(ctx)
+        await _refresh_voice_readiness(ctx)
     except Exception:
         _startup_logger.exception("worker startup failed; cleaning partial resources")
         await _cleanup_resources(ctx)
@@ -335,6 +348,132 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
 async def _on_shutdown(ctx: dict) -> None:  # type: ignore[type-arg]
     """arq WorkerSettings.on_shutdown 钩子：独立清理各项进程资源。"""
     await _cleanup_resources(ctx)
+
+
+_VOICE_WORKER_READY_TTL_SECONDS = 120
+_VOICE_SWEEP_TIMEOUT_SECONDS = 150
+_VOICE_MODEL = "qwen-audio-3.1-tts-plus"
+
+
+async def _settle_speech_segment(
+    session: AsyncSession, job: SpeechJob, segment: SpeechSegment, action: str,
+) -> None:
+    """Use the same transaction as the durable segment receipt transition."""
+    from lumen_core import billing as billing_core
+
+    user_id = str(job.user_id)
+    ref_id = str(segment.id)
+    if action == "release":
+        await billing_core.release(
+            session, user_id, ref_type="speech_segment", ref_id=ref_id,
+            idempotency_key=f"speech:release:{ref_id}",
+        )
+        return
+    if action != "settle":
+        raise ValueError("unknown voice settlement transition")
+
+    from lumen_core.voice_models import VoiceProfile
+
+    voice = await session.get(VoiceProfile, job.voice_id)
+    if voice is None or str(voice.user_id) != user_id:
+        raise ValueError("voice billing binding unavailable")
+    price = job.params.get("price_micro_per_char")
+    chars = segment.usage_chars
+    if (
+        not isinstance(price, int) or isinstance(price, bool) or price <= 0
+        or not isinstance(chars, int) or isinstance(chars, bool) or chars < 0
+    ):
+        raise ValueError("voice billing receipt unavailable")
+    await billing_core.settle(
+        session, user_id, ref_type="speech_segment", ref_id=ref_id,
+        actual_micro=price * chars,
+        idempotency_key=f"speech:settle:{ref_id}",
+        record_zero=True,
+    )
+
+
+async def _configure_voice_pipeline(ctx: dict[str, Any]) -> None:
+    """Reload the encrypted DB binding before each sweep without restarting."""
+    from pathlib import Path
+
+    from lumen_core.aliyun_speech import AliyunSpeechClient
+    from lumen_core.voice_config import load_voice_provider_config
+
+    from .db import SessionLocal
+    from .voice_pipeline import VoicePipeline
+
+    try:
+        async with SessionLocal() as db:
+            config = await asyncio.wait_for(
+                load_voice_provider_config(
+                    db, include_key=True, master_secret=settings.byok_api_key_master_secret,
+                ),
+                timeout=3,
+            )
+        if config is None or not config.api_key:
+            ctx.pop("voice_pipeline", None)
+            ctx.pop("voice_ready_binding", None)
+            return
+        if config.ready_marker == ctx.get("voice_ready_binding") and "voice_pipeline" in ctx:
+            return
+
+        region, workspace = config.region, config.workspace_id
+        client = AliyunSpeechClient(region, workspace, config.api_key)
+        media_root = Path(settings.storage_root).resolve(strict=True) / "private-voice"
+        if media_root.is_symlink():
+            raise ValueError("voice storage must not be a symlink")
+        media_root.mkdir(mode=0o700, exist_ok=True)
+        if not media_root.is_dir():
+            raise ValueError("voice storage is not a directory")
+    except Exception:
+        ctx.pop("voice_pipeline", None)
+        ctx.pop("voice_ready_binding", None)
+        # Do not log error text or provider parameters that may reveal a secret.
+        _startup_logger.warning("voice runtime disabled: configuration or storage unavailable")
+        return
+
+    def client_for(voice: VoiceProfile) -> AliyunSpeechClient:
+        if (voice.region, voice.workspace_id, voice.model) != (region, workspace, _VOICE_MODEL):
+            raise ValueError("voice is bound to a different workspace or model")
+        return client
+
+    ctx["voice_pipeline"] = VoicePipeline(
+        SessionLocal, client_for, media_root, settle=_settle_speech_segment,
+        binding=(region, workspace),
+    )
+    ctx["voice_ready_binding"] = config.ready_marker
+
+
+
+async def _refresh_voice_readiness(ctx: dict[str, Any]) -> None:
+    from lumen_core.voice_config import VOICE_WORKER_READY_KEY
+
+    binding = ctx.get("voice_ready_binding")
+    if not binding:
+        return
+    try:
+        await asyncio.wait_for(
+            ctx["redis"].set(
+                VOICE_WORKER_READY_KEY, binding, ex=_VOICE_WORKER_READY_TTL_SECONDS,
+            ),
+            timeout=2,
+        )
+    except (RedisError, TimeoutError):
+        # Marker fails closed via expiry; existing durable work may still drain.
+        _startup_logger.warning("voice worker readiness heartbeat unavailable")
+
+
+async def process_voice_work(ctx: dict[str, Any]) -> None:
+    """Wake durable voice work. DB claims defend across worker processes."""
+    lock = ctx["voice_sweep_lock"]
+    if lock.locked():
+        return
+    async with lock:
+        await _configure_voice_pipeline(ctx)
+        await _refresh_voice_readiness(ctx)
+        pipeline = ctx.get("voice_pipeline")
+        if pipeline is not None:
+            await pipeline.sweep()
 
 
 class WorkerSettings:
@@ -348,6 +487,7 @@ class WorkerSettings:
         video_generation_tasks.run_video_poll,
         storyboard_assembly_tasks.run_storyboard_assembly,
         completion_tasks.run_completion,
+        func(process_voice_work, timeout=_VOICE_SWEEP_TIMEOUT_SECONDS, max_tries=1),
         func(
             agent_run_tasks.run_agent,
             timeout=_PI_NATIVE_ARQ_TIMEOUT_SECONDS,
@@ -371,6 +511,12 @@ class WorkerSettings:
         + volcano_asset_recovery_tasks.cron_jobs
         + list(agent_run_tasks.cron_jobs)
         + [
+            cron(
+                process_voice_work,
+                second={10, 25, 40, 55},
+                run_at_startup=False,
+                timeout=_VOICE_SWEEP_TIMEOUT_SECONDS,
+            ),
             # provider probe 可能卡在 Redis、代理或上游 TCP；arq 的 cron timeout
             # 负责取消该 job，避免它占住 cron 槽位和 worker event loop。
             cron(

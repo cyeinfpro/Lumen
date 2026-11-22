@@ -2,9 +2,15 @@
 
 import { ProviderPanelView } from "./providers/panel";
 import { useProviderPanelState } from "./providers/useProviderPanelState";
+import { VoiceProviderPanel } from "./VoiceProviderPanel";
 
 export function ProvidersPanel() {
   const state = useProviderPanelState();
   const { serverProxies } = state;
-  return <ProviderPanelView state={state} proxies={serverProxies} />;
+  return (
+    <div className="space-y-5">
+      <VoiceProviderPanel />
+      <ProviderPanelView state={state} proxies={serverProxies} />
+    </div>
+  );
 }

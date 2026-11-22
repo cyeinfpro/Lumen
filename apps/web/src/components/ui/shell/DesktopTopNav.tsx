@@ -1,7 +1,7 @@
 "use client";
 
 // 桌面端顶部主导航：复用在 DesktopStudio / DesktopStream / DesktopMe。
-// 四 Tab 横向导航 + 左侧 Logo + 固定的全局操作区。
+// 横向导航 + 左侧 Logo + 固定的全局操作区。
 // 路由契约集中在 navigation.ts，桌面顶部与移动底栏共用同一套 IA。
 
 import { motion } from "framer-motion";
@@ -21,11 +21,11 @@ import { useUiStore } from "@/store/useUiStore";
 import { DesktopAccountMenu } from "./DesktopAccountMenu";
 import {
   getActiveNavKey,
-  getAppNavItems,
   getFirstVisibleNavRoute,
-  type AppNavItem,
+  isSameRoute,
   type AppNavKey,
 } from "./navigation";
+import { useShellNavItems, VOICE_NAV_ROUTE, type ShellNavItem } from "./useVoiceNav";
 
 export type DesktopNavTab = AppNavKey;
 
@@ -44,18 +44,15 @@ export function DesktopTopNav({
 }: DesktopTopNavProps) {
   const pathname = usePathname();
   const navVisibility = useUiStore((s) => s.navVisibility);
-  const navItems = useMemo(
-    () => getAppNavItems(navVisibility).filter((item) => item.key !== "me"),
-    [navVisibility],
-  );
+  const navItems = useShellNavItems().filter((item) => item.key !== "me");
   const homeHref = useMemo(
     () => getFirstVisibleNavRoute(navVisibility),
     [navVisibility],
   );
 
-  const currentActive: DesktopNavTab = useMemo(() => {
-    return getActiveNavKey(pathname, navVisibility) ?? active;
-  }, [pathname, active, navVisibility]);
+  const currentActive = isSameRoute(pathname, VOICE_NAV_ROUTE)
+    ? "voice"
+    : (getActiveNavKey(pathname, navVisibility) ?? active);
 
   return (
     <header
@@ -140,7 +137,7 @@ function DesktopNavLink({
   active,
   onNavigate,
 }: {
-  tab: AppNavItem;
+  tab: ShellNavItem;
   active: boolean;
   onNavigate?: () => void;
 }) {

@@ -833,7 +833,7 @@ async def readyz(
 
 # 路由挂载
 from .images.application import http_routes as images  # noqa: E402
-from .routes import conversations, events, messages, tasks, videos  # noqa: E402
+from .routes import conversations, events, messages, tasks, videos, voice  # noqa: E402
 from .routes import generations as generations_router  # noqa: E402
 from .routes import prompts as prompts_router  # noqa: E402
 from .routes import regenerate as regenerate_router  # noqa: E402
@@ -858,6 +858,7 @@ def _include_core_routers(target: FastAPI) -> None:
     target.include_router(tasks.router, tags=["tasks"])
     target.include_router(images.router, prefix="/images", tags=["images"])
     target.include_router(videos.router, prefix="/videos", tags=["videos"])
+    target.include_router(voice.router)
     target.include_router(events.router, tags=["events"])
     target.include_router(shares_router.router_authed)
     target.include_router(shares_router.router_public)
@@ -876,6 +877,7 @@ def _include_app_routers(target: FastAPI) -> None:
     from .routes import admin_storage as admin_storage_router  # noqa: E402
     from .routes import admin_telegram as admin_telegram_router  # noqa: E402
     from .routes import admin_update as admin_update_router  # noqa: E402
+    from .routes import admin_voice_provider  # noqa: E402
     from .routes import auth, storyboards, workflow_routes  # noqa: E402
     from .routes import agent_runs as agent_runs_router  # noqa: E402
     from .routes import agent_sessions as agent_sessions_router  # noqa: E402
@@ -903,6 +905,7 @@ def _include_app_routers(target: FastAPI) -> None:
     target.include_router(poster_styles_router.router)
     target.include_router(admin_router.router)
     target.include_router(admin_agent_health_router.router)
+    target.include_router(admin_voice_provider.router)
     target.include_router(admin_backups_router.router)
     target.include_router(admin_models_router.router)
     target.include_router(me_router.router)

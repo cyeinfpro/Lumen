@@ -7,6 +7,7 @@ import {
   FolderKanban,
   Images,
   User,
+  Mic,
   type LucideIcon,
 } from "lucide-react";
 import { useReducedMotion } from "framer-motion";
@@ -18,21 +19,20 @@ import { useKeyboardInset } from "@/hooks/useKeyboardInset";
 import { Pressable } from "@/components/ui/primitives/mobile/Pressable";
 import {
   getActiveNavKey,
-  getAppNavItems,
   isSameRoute,
-  type AppNavItem,
-  type AppNavKey,
 } from "./navigation";
+import { useShellNavItems, VOICE_NAV_ROUTE, type ShellNavItem } from "./useVoiceNav";
 
-type TabDef = AppNavItem & { Icon: LucideIcon };
+type TabDef = ShellNavItem & { Icon: LucideIcon };
 
-const TAB_ICONS: Record<AppNavKey, LucideIcon> = {
+const TAB_ICONS: Record<ShellNavItem["key"], LucideIcon> = {
   studio: Camera,
   agent: Bot,
   video: Clapperboard,
   projects: FolderKanban,
   assets: Images,
   me: User,
+  voice: Mic,
 };
 
 export function MobileTabBar() {
@@ -44,16 +44,16 @@ export function MobileTabBar() {
   const lightboxOpen = useUiStore((s) => s.lightbox.open);
   const navVisibility = useUiStore((s) => s.navVisibility);
   const { isKeyboardOpen } = useKeyboardInset();
+  const navItems = useShellNavItems();
   const tabs = useMemo(
-    () =>
-      getAppNavItems(navVisibility).map((item) => ({
-        ...item,
-        Icon: TAB_ICONS[item.key],
-      })),
-    [navVisibility],
+    () => navItems.map((item) => ({ ...item, Icon: TAB_ICONS[item.key] })),
+    [navItems],
   );
 
   const activeIndex = useMemo(() => {
+    if (isSameRoute(pathname, VOICE_NAV_ROUTE)) {
+      return tabs.findIndex((tab) => tab.key === "voice");
+    }
     const activeKey = getActiveNavKey(pathname, navVisibility) ?? "studio";
     const index = tabs.findIndex((tab) => tab.key === activeKey);
     return index >= 0 ? index : 0;

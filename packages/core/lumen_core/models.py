@@ -64,6 +64,7 @@ from .model_entities import (  # noqa: F401 - compatibility re-exports
 )
 
 from . import canvas_models as _canvas_models  # noqa: F401
+from . import voice_models as _voice_models  # noqa: F401
 from .model_entities import control_operations as _control_operations  # noqa: F401
 
 __all__ = [
