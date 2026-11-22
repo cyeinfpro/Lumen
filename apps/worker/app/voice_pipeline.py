@@ -17,7 +17,7 @@ from typing import Any
 from sqlalchemy import or_, select
 
 from lumen_core.aliyun_speech import SpeechReceipt
-from lumen_core.models import User
+from lumen_core.model_entities.accounts import User
 from lumen_core.voice_domain import (
     MAX_OUTPUT_BYTES,
     MAX_SAMPLE_BYTES,

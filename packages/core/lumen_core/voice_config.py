@@ -16,7 +16,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .byok import ByokCryptoError, decrypt_api_key, encrypt_api_key
-from .models import SystemSetting
+from .model_entities.billing_operations import SystemSetting
 
 # Intentionally not a supported general system setting: its ciphertext must not
 # appear in the generic configuration or audit APIs.

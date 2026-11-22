@@ -10,16 +10,17 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import MappingProxyType
 from typing import Annotated, Literal, NoReturn
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core import billing
-from lumen_core.models import User
+import lumen_core.billing as billing
+from lumen_core.model_entities.accounts import User
 from lumen_core.voice_config import VOICE_WORKER_READY_KEY, load_voice_provider_config
 from lumen_core.voice_domain import billable_chars, private_path, split_text
 from lumen_core.voice_models import SpeechJob, SpeechSegment, VoiceProfile
@@ -34,16 +35,15 @@ from ..voice_input import MAX_SOURCE_BYTES, VoiceInputError, normalize_voice_sam
 router = APIRouter(tags=["voice"])
 log = logging.getLogger(__name__)
 MODEL = "qwen-audio-3.1-tts-plus"
-PRICE_MICRO = {"cn-beijing": 140, "ap-southeast-1": 219}
+PRICE_MICRO = MappingProxyType({"cn-beijing": 140, "ap-southeast-1": 219})
 MAX_UPLOAD = MAX_SOURCE_BYTES
 MAX_TEXT = 10_000
 MAX_PRICE_UNITS_DAY = 60_000
 MAX_VOICES_PER_DAY = 5
 MAX_UNSAVED = 4
 PREVIEW_TEXT = "清晨，第一缕阳光照进城市。让我们从这里出发。"
-ACTIVE_WORK = {"queued", "running", "unknown"}
-_CAPTURE_CAPACITY = asyncio.Semaphore(2)
-WRITE = [Depends(verify_csrf)]
+ACTIVE_WORK = frozenset({"queued", "running", "unknown"})
+WRITE = (Depends(verify_csrf),)
 DB = Annotated[AsyncSession, Depends(get_db)]
 Key = Annotated[str, Header(alias="Idempotency-Key", min_length=8, max_length=128)]
 
@@ -265,6 +265,7 @@ def _write_sample(path: Path, data: bytes):
 
 @router.post("/voices", status_code=202, dependencies=WRITE)
 async def enroll(
+    request: Request,
     user: CurrentUser, db: DB, key: Key,
     file: Annotated[UploadFile, File()],
     name: Annotated[str, Form(min_length=1, max_length=80)],
@@ -292,7 +293,10 @@ async def enroll(
         return _voice_out(existing)
     try:
         await _require_worker(config, config.region, config.workspace_id)
-        async with _CAPTURE_CAPACITY:
+        capture_capacity = getattr(request.app.state, "voice_capture_capacity", None)
+        if capture_capacity is None:
+            _failure("VOICE_WORKER_UNAVAILABLE", 503, "声音服务暂不可用，请稍后重试")
+        async with capture_capacity:
             normalized, quality = await normalize_voice_sample(sample, start_ms, end_ms, channel=channel)
     except VoiceInputError:
         _failure("VOICE_SAMPLE_INVALID", 422, "无法使用这段录音，请检查文件和选段后重试")

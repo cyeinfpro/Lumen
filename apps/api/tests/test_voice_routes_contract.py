@@ -185,3 +185,50 @@ def test_retry_holds_job_before_voice_like_worker(monkeypatch):
     monkeypatch.setattr(voice, "_job_out", status)
     assert asyncio.run(voice.retry("job", 0, None, None, "request-1")) == {"id": "job"}
     assert calls == ["user", "job", "voice", "status"]
+
+
+def test_enroll_uses_lifespan_capture_gate(monkeypatch):
+    state = {"entered": False, "calls": 0}
+
+    class CaptureGate:
+        async def __aenter__(self):
+            state["entered"] = True
+
+        async def __aexit__(self, *_exc):
+            state["entered"] = False
+
+    class NoExistingProfile:
+        def first(self):
+            return None
+
+    class DB:
+        async def scalars(self, _statement):
+            return NoExistingProfile()
+
+    async def normalize(*_args, **_kwargs):
+        assert state["entered"]
+        state["calls"] += 1
+        raise voice.VoiceInputError("fake-invalid")
+
+    monkeypatch.setattr(voice, "normalize_voice_sample", normalize)
+    with _client(monkeypatch) as client:
+        client.app.dependency_overrides[voice.get_db] = DB
+
+        def upload():
+            return client.post(
+                "/voices", headers={"Idempotency-Key": "test-gate"},
+                data={"name": "Fake", "start_ms": "0", "end_ms": "4000",
+                      "consent_kind": "self", "consent_confirmed": "true"},
+                files={"file": ("test.wav", b"fake-audio", "audio/wav")},
+            )
+
+        unavailable = upload()
+        assert unavailable.status_code == 503
+        assert unavailable.json()["detail"]["error"]["code"] == "VOICE_WORKER_UNAVAILABLE"
+        assert state["calls"] == 0
+
+        client.app.state.voice_capture_capacity = CaptureGate()
+        invalid = upload()
+        assert invalid.status_code == 422
+        assert invalid.json()["detail"]["error"]["code"] == "VOICE_SAMPLE_INVALID"
+        assert state == {"entered": False, "calls": 1}

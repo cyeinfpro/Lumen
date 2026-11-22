@@ -644,6 +644,12 @@ async def lifespan(app: FastAPI):
             _process_state=process_state,
         )
         app.state.runtime = runtime
+        # FFmpeg admission belongs to this app's event loop and lifespan.
+        app.state.voice_capture_capacity = asyncio.Semaphore(2)
+        lifecycle.own(
+            "voice_capture_capacity",
+            lambda: delattr(app.state, "voice_capture_capacity"),
+        )
         runtime.start(logger=logger)
 
         # The image carries the hash-verified vocabulary. Allow bounded startup

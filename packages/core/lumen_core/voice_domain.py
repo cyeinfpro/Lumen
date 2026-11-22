@@ -7,9 +7,10 @@ import json
 import re
 import unicodedata
 from pathlib import Path
+from types import MappingProxyType
 
 MODEL = "qwen-audio-3.1-tts-plus"
-PRICE_MICRO_PER_10K = {"cn-beijing": 1_400_000, "ap-southeast-1": 2_190_000}
+PRICE_MICRO_PER_10K = MappingProxyType({"cn-beijing": 1_400_000, "ap-southeast-1": 2_190_000})
 MAX_JOB_CHARS = 20_000
 TARGET_SEGMENT_CHARS = 400
 MAX_SEGMENTS = 100

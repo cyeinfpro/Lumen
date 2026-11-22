@@ -14,23 +14,24 @@ import wave
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from types import MappingProxyType
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
 MODEL = "qwen-audio-3.1-tts-plus"
-REGIONS = {
+REGIONS = MappingProxyType({
     "beijing": "cn-beijing",
     "cn-beijing": "cn-beijing",
     "singapore": "ap-southeast-1",
     "ap-southeast-1": "ap-southeast-1",
-}
+})
 # Fixed native DashScope hosts for the default workspace. Named workspaces
 # use their MAAS hostname; callers cannot choose a hostname or custom URL.
-DEFAULT_REGIONAL_HOSTS = {
+DEFAULT_REGIONAL_HOSTS = MappingProxyType({
     "cn-beijing": "dashscope.aliyuncs.com",
     "ap-southeast-1": "dashscope-intl.aliyuncs.com",
-}
+})
 OUTPUT_HOST = re.compile(
     r"dashscope-result(?:-[a-z0-9-]{1,30})?\.oss-(?:cn-beijing|ap-southeast-1)"
     r"\.aliyuncs\.com\Z"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import MappingProxyType
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -26,9 +27,9 @@ from ..redis_client import get_redis
 
 router = APIRouter(prefix="/admin/voice-provider", tags=["admin-voice-provider"])
 DB = Annotated[AsyncSession, Depends(get_db)]
-_NO_STORE = {"Cache-Control": "no-store"}
+_NO_STORE = MappingProxyType({"Cache-Control": "no-store"})
 _MAX_SETTINGS_REQUEST_BYTES = 4096
-_ERRORS = {
+_ERRORS = MappingProxyType({
     "VOICE_PROVIDER_INVALID_REQUEST": (422, "请检查声音服务设置"),
     "VOICE_PROVIDER_INVALID_REGION": (422, "请选择有效的百炼地域"),
     "VOICE_PROVIDER_INVALID_WORKSPACE": (422, "工作空间 ID 格式不正确"),
@@ -36,7 +37,7 @@ _ERRORS = {
     "VOICE_PROVIDER_KEY_REQUIRED": (422, "修改地域或工作空间时，请同时输入匹配的百炼 API Key"),
     "VOICE_PROVIDER_CONFIG_INVALID": (503, "声音服务设置暂不可用"),
     "VOICE_PROVIDER_CRYPTO_UNAVAILABLE": (503, "声音服务密钥暂无法安全保存"),
-}
+})
 
 
 def _http(exc: VoiceProviderConfigurationError) -> HTTPException:
